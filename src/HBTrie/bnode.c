@@ -149,9 +149,37 @@ int bnode_is_empty(bnode_t* node) {
   return node == NULL || node->entries.length == 0;
 }
 
+size_t bnode_size(bnode_t* node, uint8_t chunk_size) {
+  if (node == NULL) return 0;
+
+  // Base size: struct overhead + entries vector
+  size_t size = sizeof(bnode_t);
+
+  // Each entry: struct + chunk buffer
+  for (int i = 0; i < node->entries.length; i++) {
+    bnode_entry_t* entry = &node->entries.data[i];
+    size += sizeof(bnode_entry_t);
+    // Chunk: struct + buffer data
+    if (entry->key != NULL && entry->key->data != NULL) {
+      size += sizeof(chunk_t) + chunk_size;
+    }
+  }
+
+  return size;
+}
+
+int bnode_needs_split(bnode_t* node, uint8_t chunk_size) {
+  if (node == NULL) return 0;
+  return bnode_size(node, chunk_size) > node->node_size && node->entries.length > 1;
+}
+
 int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
   if (node == NULL || right_out == NULL || split_key == NULL) {
     return -1;
+  }
+
+  if (node->entries.length < 2) {
+    return -1;  // Can't split with less than 2 entries
   }
 
   // Split at midpoint
@@ -161,18 +189,20 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
   bnode_t* right = bnode_create(node->node_size);
   if (right == NULL) return -1;
 
-  // Get the split key (key at midpoint)
+  // Get the split key (key at midpoint - this will be promoted)
+  // In B+tree, the key at mid goes to parent, and right node starts at mid
   bnode_entry_t* mid_entry = &node->entries.data[mid];
   *split_key = mid_entry->key;
 
-  // Move entries from midpoint+1 to end to right node
-  for (int i = (int)mid + 1; i < node->entries.length; i++) {
+  // Move entries from mid to end to right node
+  for (int i = (int)mid; i < node->entries.length; i++) {
     bnode_entry_t entry = node->entries.data[i];
+    // Share the key (don't take ownership - parent will manage it)
     bnode_insert(right, &entry);
   }
 
-  // Remove moved entries from left node
-  node->entries.length = (int)mid + 1;
+  // Truncate left node to entries before mid
+  node->entries.length = (int)mid;
 
   *right_out = right;
   return 0;

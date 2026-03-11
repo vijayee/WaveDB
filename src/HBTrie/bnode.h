@@ -126,6 +126,24 @@ size_t bnode_count(bnode_t* node);
 int bnode_is_empty(bnode_t* node);
 
 /**
+ * Calculate the approximate size of a node in bytes.
+ *
+ * @param node  Node to measure
+ * @param chunk_size  Size of each chunk in bytes
+ * @return Approximate size in bytes
+ */
+size_t bnode_size(bnode_t* node, uint8_t chunk_size);
+
+/**
+ * Check if node needs to be split (exceeds size limit).
+ *
+ * @param node  Node to check
+ * @param chunk_size  Size of each chunk in bytes
+ * @return 1 if needs split, 0 otherwise
+ */
+int bnode_needs_split(bnode_t* node, uint8_t chunk_size);
+
+/**
  * Split a node into two when it exceeds max size.
  *
  * @param node      Node to split
