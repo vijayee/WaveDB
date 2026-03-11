@@ -1,0 +1,9 @@
+[submodule "deps/xxhash"]
+	path = deps/xxhash
+	url = https://github.com/Cyan4973/xxHash.git
+[submodule "deps/googletest"]
+	path = deps/googletest
+	url = https://github.com/google/googletest.git
+[submodule "deps/hashmap"]
+	path = deps/hashmap
+	url = https://github.com/DavidLeeds/hashmap

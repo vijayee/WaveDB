@@ -1,0 +1,122 @@
+//
+// Created by victor on 3/11/26.
+//
+
+#ifndef WAVEDB_IDENTIFIER_H
+#define WAVEDB_IDENTIFIER_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include "../RefCounter/refcounter.h"
+#include "../Util/vec.h"
+#include "chunk.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * identifier_t - Variable-length sequence of chunks.
+ *
+ * An identifier represents both keys (path components) and values
+ * in the HBTrie structure. Data is split into fixed-size chunks
+ * for hierarchical trie traversal.
+ *
+ * Number of chunks: nchunk = (length - 1) / chunk_size + 1
+ * Last chunk size:  length - (nchunk - 1) * chunk_size
+ */
+typedef struct {
+    refcounter_t refcounter;     // MUST be first member
+    vec_t(chunk_t*) chunks;      // Variable number of chunks
+    size_t length;               // Original data length in bytes
+    size_t chunk_size;           // Chunk size used for this identifier
+} identifier_t;
+
+/**
+ * Calculate number of chunks needed for a given length.
+ *
+ * @param length      Data length in bytes
+ * @param chunk_size  Size of each chunk
+ * @return Number of chunks required
+ */
+static inline size_t identifier_calc_nchunk(size_t length, size_t chunk_size) {
+    if (length == 0) return 1;
+    return (length - 1) / chunk_size + 1;
+}
+
+/**
+ * Calculate last chunk size for a given length.
+ *
+ * @param length      Data length in bytes
+ * @param chunk_size  Size of each chunk
+ * @return Size of the last chunk (may be less than chunk_size)
+ */
+static inline size_t identifier_calc_last_chunk_size(size_t length, size_t chunk_size) {
+    if (length == 0) return chunk_size;
+    size_t remainder = length % chunk_size;
+    return remainder == 0 ? chunk_size : remainder;
+}
+
+/**
+ * Create an identifier from a buffer.
+ *
+ * @param buf        Source buffer (takes ownership of buffer data)
+ * @param chunk_size Size of each chunk (use DEFAULT_CHUNK_SIZE if 0)
+ * @return New identifier_t or NULL on failure
+ */
+identifier_t* identifier_create(buffer_t* buf, size_t chunk_size);
+
+/**
+ * Create an empty identifier.
+ *
+ * @param chunk_size Size of each chunk (use DEFAULT_CHUNK_SIZE if 0)
+ * @return New empty identifier_t or NULL on failure
+ */
+identifier_t* identifier_create_empty(size_t chunk_size);
+
+/**
+ * Destroy an identifier.
+ *
+ * @param id  Identifier to destroy
+ */
+void identifier_destroy(identifier_t* id);
+
+/**
+ * Compare two identifiers chunk by chunk.
+ *
+ * @param a   First identifier
+ * @param b   Second identifier
+ * @return <0 if a < b, 0 if a == b, >0 if a > b
+ */
+int identifier_compare(identifier_t* a, identifier_t* b);
+
+/**
+ * Get a specific chunk from an identifier.
+ *
+ * @param id    Identifier to get chunk from
+ * @param index Chunk index (0-based)
+ * @return Chunk pointer or NULL if out of bounds
+ */
+chunk_t* identifier_get_chunk(identifier_t* id, size_t index);
+
+/**
+ * Get the number of chunks in an identifier.
+ *
+ * @param id  Identifier
+ * @return Number of chunks
+ */
+size_t identifier_chunk_count(identifier_t* id);
+
+/**
+ * Reconstruct original data from identifier into a buffer.
+ *
+ * @param id  Identifier to reconstruct
+ * @return New buffer containing original data, or NULL on failure
+ */
+buffer_t* identifier_to_buffer(identifier_t* id);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // WAVEDB_IDENTIFIER_H

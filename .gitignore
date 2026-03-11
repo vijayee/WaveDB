@@ -1,0 +1,8 @@
+# Build directories
+build/
+
+# IDE
+.idea/
+
+# Reference materials
+reference/
