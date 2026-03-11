@@ -39,6 +39,18 @@ void chunk_destroy(chunk_t* chunk) {
   free(chunk);
 }
 
+chunk_t* chunk_share(chunk_t* chunk) {
+  if (chunk == NULL) return NULL;
+
+  chunk_t* new_chunk = get_clear_memory(sizeof(chunk_t));
+  if (new_chunk == NULL) return NULL;
+
+  // Share the buffer reference (buffer is reference-counted)
+  new_chunk->data = (buffer_t*)refcounter_reference((refcounter_t*)chunk->data);
+
+  return new_chunk;
+}
+
 int chunk_compare(chunk_t* a, chunk_t* b) {
   if (a == NULL && b == NULL) return 0;
   if (a == NULL) return -1;

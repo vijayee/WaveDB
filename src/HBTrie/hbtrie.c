@@ -67,20 +67,38 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
 
   refcounter_dereference((refcounter_t*)node);
   if (refcounter_count((refcounter_t*)node) == 0) {
-    // First, recursively destroy all child nodes
-    if (node->btree != NULL) {
-      for (size_t i = 0; i < bnode_count(node->btree); i++) {
-        bnode_entry_t* entry = bnode_get(node->btree, i);
-        if (entry != NULL && !entry->has_value && entry->child != NULL) {
-          hbtrie_node_destroy(entry->child);
+    // Iterative destroy: collect all nodes first, then destroy bottom-up
+    vec_t(hbtrie_node_t*) nodes;
+    vec_init(&nodes);
+
+    // Push root node
+    vec_push(&nodes, node);
+
+    // Collect all child nodes iteratively
+    for (int i = 0; i < nodes.length; i++) {
+      hbtrie_node_t* current = nodes.data[i];
+      if (current->btree != NULL) {
+        for (size_t j = 0; j < bnode_count(current->btree); j++) {
+          bnode_entry_t* entry = bnode_get(current->btree, j);
+          if (entry != NULL && !entry->has_value && entry->child != NULL) {
+            vec_push(&nodes, entry->child);
+          }
         }
       }
-      // Now destroy the bnode (which destroys keys and values)
-      bnode_destroy(node->btree);
     }
-    platform_lock_destroy(&node->lock);
-    refcounter_destroy_lock((refcounter_t*)node);
-    free(node);
+
+    // Destroy nodes in reverse order (bottom-up: children before parents)
+    for (int i = nodes.length - 1; i >= 0; i--) {
+      hbtrie_node_t* current = nodes.data[i];
+      if (current->btree != NULL) {
+        bnode_destroy(current->btree);
+      }
+      platform_lock_destroy(&current->lock);
+      refcounter_destroy_lock((refcounter_t*)current);
+      free(current);
+    }
+
+    vec_deinit(&nodes);
   }
 }
 
@@ -500,4 +518,115 @@ chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor) {
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
   if (cursor == NULL) return NULL;
   return cursor->current;
+}
+
+hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
+  if (node == NULL) return NULL;
+
+  // Iterative copy using a dynamic work stack
+  typedef struct {
+    hbtrie_node_t* src;
+    hbtrie_node_t* dst;
+  } copy_work_t;
+
+  vec_t(copy_work_t) stack;
+  vec_init(&stack);
+
+  // Create root copy
+  hbtrie_node_t* root_copy = hbtrie_node_create(node->btree->node_size);
+  if (root_copy == NULL) {
+    vec_deinit(&stack);
+    return NULL;
+  }
+
+  // Push initial work
+  copy_work_t initial = {node, root_copy};
+  if (vec_push(&stack, initial) != 0) {
+    hbtrie_node_destroy(root_copy);
+    vec_deinit(&stack);
+    return NULL;
+  }
+
+  // Process all nodes iteratively
+  while (stack.length > 0) {
+    copy_work_t work = stack.data[--stack.length];
+    hbtrie_node_t* src = work.src;
+    hbtrie_node_t* dst = work.dst;
+
+    // Copy all entries from source btree to destination btree
+    for (int i = 0; i < src->btree->entries.length; i++) {
+      bnode_entry_t* src_entry = &src->btree->entries.data[i];
+      bnode_entry_t dst_entry = {0};
+
+      // Share the chunk key by reference (chunks are immutable)
+      dst_entry.key = chunk_share(src_entry->key);
+      if (dst_entry.key == NULL && src_entry->key != NULL) {
+        hbtrie_node_destroy(root_copy);
+        vec_deinit(&stack);
+        return NULL;
+      }
+
+      dst_entry.has_value = src_entry->has_value;
+
+      if (src_entry->has_value) {
+        // Share identifier value by reference
+        if (src_entry->value != NULL) {
+          dst_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)src_entry->value);
+        }
+      } else {
+        // Copy child node
+        if (src_entry->child != NULL) {
+          hbtrie_node_t* child_copy = hbtrie_node_create(src->btree->node_size);
+          if (child_copy == NULL) {
+            hbtrie_node_destroy(root_copy);
+            vec_deinit(&stack);
+            return NULL;
+          }
+          dst_entry.child = child_copy;
+
+          // Push child work onto stack
+          copy_work_t child_work = {src_entry->child, child_copy};
+          if (vec_push(&stack, child_work) != 0) {
+            hbtrie_node_destroy(child_copy);
+            hbtrie_node_destroy(root_copy);
+            vec_deinit(&stack);
+            return NULL;
+          }
+        }
+      }
+
+      // Insert into destination btree
+      if (vec_push(&dst->btree->entries, dst_entry) != 0) {
+        chunk_destroy(dst_entry.key);
+        hbtrie_node_destroy(root_copy);
+        vec_deinit(&stack);
+        return NULL;
+      }
+    }
+  }
+
+  vec_deinit(&stack);
+  return root_copy;
+}
+
+hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
+  if (trie == NULL) return NULL;
+
+  hbtrie_t* copy = hbtrie_create(trie->chunk_size, trie->btree_node_size);
+  if (copy == NULL) return NULL;
+
+  // Copy the root node iteratively
+  if (trie->root != NULL) {
+    hbtrie_node_t* root_copy = hbtrie_node_copy(trie->root);
+    if (root_copy == NULL) {
+      hbtrie_destroy(copy);
+      return NULL;
+    }
+
+    // Replace the root in the copy
+    hbtrie_node_destroy(copy->root);
+    copy->root = root_copy;
+  }
+
+  return copy;
 }

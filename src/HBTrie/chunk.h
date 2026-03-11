@@ -65,6 +65,17 @@ chunk_t* chunk_create_empty(size_t chunk_size);
 void chunk_destroy(chunk_t* chunk);
 
 /**
+ * Create a chunk that shares the buffer with another chunk.
+ *
+ * The returned chunk references the same underlying buffer data.
+ * Useful for sharing immutable chunks between data structures.
+ *
+ * @param chunk  Chunk to share buffer with
+ * @return New chunk_t sharing the same buffer, or NULL on failure
+ */
+chunk_t* chunk_share(chunk_t* chunk);
+
+/**
  * Compare two chunks.
  *
  * @param a   First chunk

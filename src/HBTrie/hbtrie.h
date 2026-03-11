@@ -75,6 +75,40 @@ hbtrie_t* hbtrie_create(uint8_t chunk_size, uint32_t btree_node_size);
 void hbtrie_destroy(hbtrie_t* trie);
 
 /**
+ * Copy an HBTrie.
+ *
+ * Creates a deep copy of the trie structure. Chunks are shared by reference
+ * (treated as immutable). Identifiers (values) are also shared by reference.
+ *
+ * @param trie  HBTrie to copy
+ * @return New HBTrie copy or NULL on failure
+ */
+hbtrie_t* hbtrie_copy(hbtrie_t* trie);
+
+/**
+ * Copy an HBTrie.
+ *
+ * Creates a deep copy of the HBTrie structure. Chunks are shared by reference
+ * (treated as immutable). Identifiers (values) are also shared by reference.
+ *
+ * @param trie  HBTrie to copy
+ * @return New HBTrie copy or NULL on failure
+ */
+hbtrie_t* hbtrie_copy(hbtrie_t* trie);
+
+/**
+ * Create a deep copy of an HBTrie.
+ *
+ * Creates a new HBTrie with the same structure and data.
+ * Chunks are shared by reference (immutable).
+ * Identifiers (values) are shared by reference.
+ *
+ * @param trie  HBTrie to copy
+ * @return New HBTrie copy, or NULL on failure
+ */
+hbtrie_t* hbtrie_copy(hbtrie_t* trie);
+
+/**
  * Create an HBTrie node.
  *
  * @param btree_node_size  Max B+tree node size in bytes
@@ -88,6 +122,17 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size);
  * @param node  Node to destroy
  */
 void hbtrie_node_destroy(hbtrie_node_t* node);
+
+/**
+ * Copy an HBTrie node recursively.
+ *
+ * Creates a deep copy of the node structure. Chunks are shared by reference
+ * (treated as immutable). Identifiers (values) are also shared by reference.
+ *
+ * @param node  Node to copy
+ * @return New node copy or NULL on failure
+ */
+hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node);
 
 /**
  * Insert a value into the HBTrie at the given path.
