@@ -6,6 +6,7 @@
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
+#include "../Util/log.h"
 #include "../Buffer/buffer.h"
 #include "../Time/debouncer.h"
 #include <cbor.h>
@@ -314,6 +315,10 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
     // Initialize locks
     platform_lock_init(&db->write_lock);
     platform_rw_lock_init(&db->read_lock);
+    platform_lock_init(&db->callback_lock);
+    platform_condition_init(&db->callback_done);
+    db->callback_in_progress = 0;
+    db->destroy_requested = 0;
 
     // Load or create write_trie
     db->write_trie = load_index(location, db->chunk_size, db->btree_node_size);
@@ -354,6 +359,15 @@ void database_destroy(database_t* db) {
 
     refcounter_dereference((refcounter_t*)db);
     if (refcounter_count((refcounter_t*)db) == 0) {
+        // Signal that destroy is requested to prevent new callbacks
+        platform_lock(&db->callback_lock);
+        db->destroy_requested = 1;
+        // Wait for any in-progress callback to complete
+        while (db->callback_in_progress) {
+            platform_condition_wait(&db->callback_lock, &db->callback_done);
+        }
+        platform_unlock(&db->callback_lock);
+
         // Flush any pending writes
         if (db->debouncer) {
             debouncer_flush(db->debouncer);
@@ -367,6 +381,8 @@ void database_destroy(database_t* db) {
 
         platform_lock_destroy(&db->write_lock);
         platform_rw_lock_destroy(&db->read_lock);
+        platform_lock_destroy(&db->callback_lock);
+        platform_condition_destroy(&db->callback_done);
         refcounter_destroy_lock((refcounter_t*)db);
 
         free(db->location);
@@ -376,6 +392,15 @@ void database_destroy(database_t* db) {
 
 static void database_snapshot_callback(void* ctx) {
     database_t* db = (database_t*)ctx;
+
+    // Check if destroy is in progress
+    platform_lock(&db->callback_lock);
+    if (db->destroy_requested) {
+        platform_unlock(&db->callback_lock);
+        return;
+    }
+    db->callback_in_progress = 1;
+    platform_unlock(&db->callback_lock);
 
     // Acquire write lock
     platform_lock(&db->write_lock);
@@ -399,6 +424,12 @@ static void database_snapshot_callback(void* ctx) {
     if (old_read_trie) {
         hbtrie_destroy(old_read_trie);
     }
+
+    // Signal that callback is complete
+    platform_lock(&db->callback_lock);
+    db->callback_in_progress = 0;
+    platform_signal_condition(&db->callback_done);
+    platform_unlock(&db->callback_lock);
 }
 
 static void _database_put(database_put_ctx_t* ctx) {
@@ -416,6 +447,14 @@ static void _database_put(database_put_ctx_t* ctx) {
 
     // Acquire write lock
     platform_lock(&db->write_lock);
+
+    // Check write_trie
+    if (db->write_trie == NULL) {
+        platform_unlock(&db->write_lock);
+        promise_resolve(promise, NULL);
+        free(ctx);
+        return;
+    }
 
     // Apply to write_trie
     hbtrie_insert(db->write_trie, path, value);
@@ -442,7 +481,6 @@ static void _database_put(database_put_ctx_t* ctx) {
     free(ctx);
 
     promise_resolve(promise, NULL);
-    promise_destroy(promise);
 }
 
 static void _database_get(database_get_ctx_t* ctx) {
@@ -456,7 +494,6 @@ static void _database_get(database_get_ctx_t* ctx) {
         path_destroy(path);
         free(ctx);
         promise_resolve(promise, CONSUME(value, identifier_t));
-        promise_destroy(promise);
         return;
     }
 
@@ -480,7 +517,6 @@ static void _database_get(database_get_ctx_t* ctx) {
     free(ctx);
 
     promise_resolve(promise, value ? CONSUME(value, identifier_t) : NULL);
-    promise_destroy(promise);
 }
 
 static void _database_delete(database_delete_ctx_t* ctx) {
@@ -520,7 +556,6 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     }
 
     promise_resolve(promise, NULL);
-    promise_destroy(promise);
 }
 
 void database_put(database_t* db, priority_t priority, path_t* path,
@@ -530,7 +565,6 @@ void database_put(database_t* db, priority_t priority, path_t* path,
         if (value) identifier_destroy(value);
         if (promise) {
             promise_resolve(promise, NULL);
-            promise_destroy(promise);
         }
         return;
     }
@@ -540,7 +574,6 @@ void database_put(database_t* db, priority_t priority, path_t* path,
         path_destroy(path);
         identifier_destroy(value);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -557,7 +590,6 @@ void database_put(database_t* db, priority_t priority, path_t* path,
         path_destroy(path);
         identifier_destroy(value);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -568,7 +600,6 @@ void database_get(database_t* db, priority_t priority, path_t* path, promise_t* 
     if (db == NULL || path == NULL || promise == NULL) {
         if (path) path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -576,7 +607,6 @@ void database_get(database_t* db, priority_t priority, path_t* path, promise_t* 
     if (ctx == NULL) {
         path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -591,7 +621,6 @@ void database_get(database_t* db, priority_t priority, path_t* path, promise_t* 
         free(ctx);
         path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -602,7 +631,6 @@ void database_delete(database_t* db, priority_t priority, path_t* path, promise_
     if (db == NULL || path == NULL || promise == NULL) {
         if (path) path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -610,7 +638,6 @@ void database_delete(database_t* db, priority_t priority, path_t* path, promise_
     if (ctx == NULL) {
         path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 
@@ -625,7 +652,6 @@ void database_delete(database_t* db, priority_t priority, path_t* path, promise_
         free(ctx);
         path_destroy(path);
         promise_resolve(promise, NULL);
-        promise_destroy(promise);
         return;
     }
 

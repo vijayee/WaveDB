@@ -99,7 +99,7 @@ int platform_self() {
 void platform_lock(pthread_mutex_t* lock) {
   int result = pthread_mutex_lock(lock);
   if (result) {
-    log_trace("Failed to acquire lock");
+    log_trace("Failed to acquire lock at %p: error=%d (%s)", (void*)lock, result, strerror(result));
     abort();
   }
 }
@@ -147,7 +147,7 @@ void platform_rw_unlock_w(pthread_rwlock_t* lock) {
 void platform_lock_init(pthread_mutex_t* lock) {
   int result = pthread_mutex_init(lock, NULL);
   if (result) {
-    log_trace("Failed to initialize lock");
+    log_trace("Failed to initialize lock at %p: error=%d (%s)", (void*)lock, result, strerror(result));
     abort();
   }
 }

@@ -33,6 +33,10 @@ typedef struct {
     refcounter_t refcounter;
     PLATFORMLOCKTYPE(write_lock);       // Single-writer lock
     PLATFORMRWLOCKTYPE(read_lock);      // Multiple-reader lock for read_trie
+    PLATFORMLOCKTYPE(callback_lock);    // Protects callback_in_progress
+    PLATFORMCONDITIONTYPE(callback_done); // Signal when callback completes
+    int callback_in_progress;           // Flag: snapshot callback is running
+    int destroy_requested;               // Flag: destroy in progress
     hbtrie_t* write_trie;               // Mutable trie (single writer)
     hbtrie_t* read_trie;                // Read-only snapshot (multiple readers)
     database_lru_cache_t* lru;          // In-memory LRU cache
