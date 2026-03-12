@@ -13,6 +13,7 @@
 #include "identifier.h"
 #include "path.h"
 #include "bnode.h"
+#include <cbor.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -82,29 +83,6 @@ void hbtrie_destroy(hbtrie_t* trie);
  *
  * @param trie  HBTrie to copy
  * @return New HBTrie copy or NULL on failure
- */
-hbtrie_t* hbtrie_copy(hbtrie_t* trie);
-
-/**
- * Copy an HBTrie.
- *
- * Creates a deep copy of the HBTrie structure. Chunks are shared by reference
- * (treated as immutable). Identifiers (values) are also shared by reference.
- *
- * @param trie  HBTrie to copy
- * @return New HBTrie copy or NULL on failure
- */
-hbtrie_t* hbtrie_copy(hbtrie_t* trie);
-
-/**
- * Create a deep copy of an HBTrie.
- *
- * Creates a new HBTrie with the same structure and data.
- * Chunks are shared by reference (immutable).
- * Identifiers (values) are shared by reference.
- *
- * @param trie  HBTrie to copy
- * @return New HBTrie copy, or NULL on failure
  */
 hbtrie_t* hbtrie_copy(hbtrie_t* trie);
 
@@ -205,6 +183,58 @@ chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor);
  * @return Current node, or NULL if none
  */
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor);
+
+/**
+ * Serialize an HBTrie to CBOR.
+ *
+ * Format: map with keys:
+ *   - "chunk_size": uint
+ *   - "btree_node_size": uint
+ *   - "root": serialized root node (or null)
+ *
+ * @param trie  HBTrie to serialize
+ * @return CBOR item or NULL on failure
+ */
+cbor_item_t* hbtrie_to_cbor(hbtrie_t* trie);
+
+/**
+ * Deserialize an HBTrie from CBOR.
+ *
+ * @param item  CBOR item (map with trie data)
+ * @return New HBTrie or NULL on failure
+ */
+hbtrie_t* cbor_to_hbtrie(cbor_item_t* item);
+
+/**
+ * Compute CRC32/XXH32 hash of HBTrie serialized form.
+ *
+ * Used for index file checksums.
+ *
+ * @param trie  HBTrie to hash
+ * @return 32-bit hash value
+ */
+uint32_t hbtrie_compute_hash(hbtrie_t* trie);
+
+/**
+ * Serialize an HBTrie to a binary buffer.
+ *
+ * @param trie  HBTrie to serialize
+ * @param buf   Output buffer (allocated by function, caller must free)
+ * @param len   Output length
+ * @return 0 on success, -1 on failure
+ */
+int hbtrie_serialize(hbtrie_t* trie, uint8_t** buf, size_t* len);
+
+/**
+ * Deserialize an HBTrie from a binary buffer.
+ *
+ * @param buf            Binary buffer
+ * @param len            Buffer length
+ * @param chunk_size     HBTrie chunk size
+ * @param btree_node_size B+tree node size
+ * @return New HBTrie or NULL on failure
+ */
+hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint32_t btree_node_size);
 
 #ifdef __cplusplus
 }

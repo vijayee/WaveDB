@@ -10,6 +10,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Util/vec.h"
 #include "chunk.h"
+#include <cbor.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -114,6 +115,26 @@ size_t identifier_chunk_count(identifier_t* id);
  * @return New buffer containing original data, or NULL on failure
  */
 buffer_t* identifier_to_buffer(identifier_t* id);
+
+/**
+ * Serialize an identifier to CBOR.
+ *
+ * Format: array of byte strings, one per chunk
+ * [bstr(chunk0), bstr(chunk1), ...]
+ *
+ * @param id  Identifier to serialize
+ * @return CBOR item or NULL on failure
+ */
+cbor_item_t* identifier_to_cbor(identifier_t* id);
+
+/**
+ * Deserialize an identifier from CBOR.
+ *
+ * @param item  CBOR item (array of byte strings)
+ * @param chunk_size  Chunk size to use
+ * @return New identifier or NULL on failure
+ */
+identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size);
 
 #ifdef __cplusplus
 }

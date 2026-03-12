@@ -10,6 +10,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Util/vec.h"
 #include "identifier.h"
+#include <cbor.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,6 +100,26 @@ path_t* path_copy(path_t* path);
  * @return <0 if a < b, 0 if a == b, >0 if a > b
  */
 int path_compare(path_t* a, path_t* b);
+
+/**
+ * Serialize a path to CBOR.
+ *
+ * Format: array of identifier arrays
+ * [[chunk0, chunk1, ...], [chunk0, chunk1, ...], ...]
+ *
+ * @param path  Path to serialize
+ * @return CBOR item or NULL on failure
+ */
+cbor_item_t* path_to_cbor(path_t* path);
+
+/**
+ * Deserialize a path from CBOR.
+ *
+ * @param item        CBOR item (array of arrays)
+ * @param chunk_size  Chunk size to use for identifiers
+ * @return New path or NULL on failure
+ */
+path_t* cbor_to_path(cbor_item_t* item, size_t chunk_size);
 
 #ifdef __cplusplus
 }

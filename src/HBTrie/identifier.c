@@ -4,6 +4,7 @@
 
 #include "identifier.h"
 #include "../Util/allocator.h"
+#include <cbor.h>
 #include <string.h>
 
 identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
@@ -121,4 +122,101 @@ buffer_t* identifier_to_buffer(identifier_t* id) {
   }
 
   return buf;
+}
+
+cbor_item_t* identifier_to_cbor(identifier_t* id) {
+  if (id == NULL) return NULL;
+
+  // Create array with one entry per chunk
+  cbor_item_t* array = cbor_new_definite_array((size_t)id->chunks.length);
+  if (array == NULL) return NULL;
+
+  for (int i = 0; i < id->chunks.length; i++) {
+    chunk_t* chunk = id->chunks.data[i];
+    cbor_item_t* bstr = cbor_build_bytestring(chunk->data->data, chunk->data->size);
+    if (bstr == NULL) {
+      cbor_decref(&array);
+      return NULL;
+    }
+    if (!cbor_array_push(array, bstr)) {
+      cbor_decref(&bstr);
+      cbor_decref(&array);
+      return NULL;
+    }
+    cbor_decref(&bstr);
+  }
+
+  return array;
+}
+
+identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size) {
+  if (item == NULL) return NULL;
+
+  if (!cbor_isa_array(item)) {
+    return NULL;
+  }
+
+  size_t num_chunks = cbor_array_size(item);
+  if (num_chunks == 0) {
+    return identifier_create_empty(chunk_size);
+  }
+
+  // Create identifier and calculate total length
+  identifier_t* id = get_clear_memory(sizeof(identifier_t));
+  if (id == NULL) return NULL;
+
+  id->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
+  vec_init(&id->chunks);
+  vec_reserve(&id->chunks, (int)num_chunks);
+
+  // Calculate total length from all chunks
+  size_t total_length = 0;
+  for (size_t i = 0; i < num_chunks; i++) {
+    cbor_item_t* chunk_item = cbor_array_get(item, i);
+    if (!cbor_isa_bytestring(chunk_item)) {
+      cbor_decref(&chunk_item);
+      // Clean up
+      for (int j = 0; j < id->chunks.length; j++) {
+        chunk_destroy(id->chunks.data[j]);
+      }
+      vec_deinit(&id->chunks);
+      free(id);
+      return NULL;
+    }
+    size_t chunk_len = cbor_bytestring_length(chunk_item);
+    if (i == num_chunks - 1) {
+      // Last chunk: actual length
+      total_length += chunk_len;
+    } else {
+      // Non-last chunk: should be full chunk_size
+      total_length += id->chunk_size;
+    }
+    cbor_decref(&chunk_item);
+  }
+
+  id->length = total_length;
+
+  // Create chunks from CBOR data
+  for (size_t i = 0; i < num_chunks; i++) {
+    cbor_item_t* chunk_item = cbor_array_get(item, i);
+    size_t chunk_len = cbor_bytestring_length(chunk_item);
+    cbor_data chunk_data = cbor_bytestring_handle(chunk_item);
+
+    chunk_t* chunk = chunk_create(chunk_data, chunk_len);
+    if (chunk == NULL) {
+      cbor_decref(&chunk_item);
+      // Clean up
+      for (int j = 0; j < id->chunks.length; j++) {
+        chunk_destroy(id->chunks.data[j]);
+      }
+      vec_deinit(&id->chunks);
+      free(id);
+      return NULL;
+    }
+    vec_push(&id->chunks, chunk);
+    cbor_decref(&chunk_item);
+  }
+
+  refcounter_init((refcounter_t*)id);
+  return id;
 }

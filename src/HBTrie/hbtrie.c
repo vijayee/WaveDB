@@ -4,6 +4,7 @@
 
 #include "hbtrie.h"
 #include "../Util/allocator.h"
+#include <cbor.h>
 #include <string.h>
 
 // Default: enough space for ~64 entries per node
@@ -604,4 +605,297 @@ chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor) {
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
   if (cursor == NULL) return NULL;
   return cursor->current;
+}
+
+// Forward declaration for recursive serialization
+static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node);
+static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node_size);
+
+static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
+  if (node == NULL) {
+    return cbor_new_null();
+  }
+
+  // Create array of entries
+  cbor_item_t* entries = cbor_new_definite_array((size_t)node->btree->entries.length);
+  if (entries == NULL) return NULL;
+
+  for (int i = 0; i < node->btree->entries.length; i++) {
+    bnode_entry_t* entry = &node->btree->entries.data[i];
+    cbor_item_t* entry_item = cbor_new_definite_array(4); // [key_bstr, has_value, value_or_child]
+    if (entry_item == NULL) {
+      cbor_decref(&entries);
+      return NULL;
+    }
+
+    // Key as byte string
+    cbor_item_t* key_bstr = cbor_build_bytestring(
+        chunk_data_const(entry->key), entry->key->data->size);
+    cbor_array_push(entry_item, key_bstr);
+    cbor_decref(&key_bstr);
+
+    // has_value flag
+    cbor_item_t* has_value = entry->has_value ? cbor_build_bool(true) : cbor_build_bool(false);
+    cbor_array_push(entry_item, has_value);
+    cbor_decref(&has_value);
+
+    // Value or child
+    if (entry->has_value) {
+      cbor_item_t* value_cbor = identifier_to_cbor(entry->value);
+      cbor_array_push(entry_item, value_cbor);
+      cbor_decref(&value_cbor);
+    } else {
+      cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->child);
+      cbor_array_push(entry_item, child_cbor);
+      cbor_decref(&child_cbor);
+    }
+
+    cbor_array_push(entries, entry_item);
+    cbor_decref(&entry_item);
+  }
+
+  return entries;
+}
+
+// Helper function to find a value by key in a CBOR map
+static cbor_item_t* map_get_value(cbor_item_t* map, const char* key) {
+  if (!cbor_isa_map(map)) return NULL;
+
+  struct cbor_pair* pairs = cbor_map_handle(map);
+  size_t map_size = cbor_map_size(map);
+
+  for (size_t i = 0; i < map_size; i++) {
+    if (cbor_isa_string(pairs[i].key)) {
+      size_t key_len = cbor_string_length(pairs[i].key);
+      const char* key_str = (const char*)cbor_string_handle(pairs[i].key);
+      if (key_len == strlen(key) && memcmp(key_str, key, key_len) == 0) {
+        return pairs[i].value;
+      }
+    }
+  }
+  return NULL;
+}
+
+static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node_size) {
+  if (item == NULL || cbor_is_null(item)) {
+    return NULL;
+  }
+
+  if (!cbor_isa_array(item)) {
+    return NULL;
+  }
+
+  hbtrie_node_t* node = hbtrie_node_create(btree_node_size);
+  if (node == NULL) return NULL;
+
+  size_t num_entries = cbor_array_size(item);
+  for (size_t i = 0; i < num_entries; i++) {
+    cbor_item_t* entry_item = cbor_array_get(item, i);
+    if (!cbor_isa_array(entry_item) || cbor_array_size(entry_item) != 3) {
+      cbor_decref(&entry_item);
+      hbtrie_node_destroy(node);
+      return NULL;
+    }
+
+    bnode_entry_t entry = {0};
+
+    // Key
+    cbor_item_t* key_item = cbor_array_get(entry_item, 0);
+    if (!cbor_isa_bytestring(key_item)) {
+      cbor_decref(&key_item);
+      cbor_decref(&entry_item);
+      hbtrie_node_destroy(node);
+      return NULL;
+    }
+    entry.key = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
+    cbor_decref(&key_item);
+    if (entry.key == NULL) {
+      cbor_decref(&entry_item);
+      hbtrie_node_destroy(node);
+      return NULL;
+    }
+
+    // has_value
+    cbor_item_t* has_value_item = cbor_array_get(entry_item, 1);
+    entry.has_value = cbor_is_bool(has_value_item) && cbor_get_bool(has_value_item);
+    cbor_decref(&has_value_item);
+
+    // Value or child
+    cbor_item_t* value_or_child = cbor_array_get(entry_item, 2);
+    if (entry.has_value) {
+      entry.value = cbor_to_identifier(value_or_child, DEFAULT_CHUNK_SIZE); // TODO: pass chunk_size
+    } else {
+      entry.child = cbor_to_hbtrie_node(value_or_child, btree_node_size);
+    }
+    cbor_decref(&value_or_child);
+
+    bnode_insert(node->btree, &entry);
+    cbor_decref(&entry_item);
+  }
+
+  return node;
+}
+
+cbor_item_t* hbtrie_to_cbor(hbtrie_t* trie) {
+  if (trie == NULL) return NULL;
+
+  cbor_item_t* root = cbor_new_definite_map(3);
+  if (root == NULL) return NULL;
+
+  // chunk_size
+  cbor_item_t* chunk_size = cbor_build_uint8(trie->chunk_size);
+  cbor_map_add(root, (struct cbor_pair){
+      .key = cbor_build_string("chunk_size"),
+      .value = chunk_size
+  });
+  cbor_decref(&chunk_size);
+
+  // btree_node_size
+  cbor_item_t* btree_size = cbor_build_uint32(trie->btree_node_size);
+  cbor_map_add(root, (struct cbor_pair){
+      .key = cbor_build_string("btree_node_size"),
+      .value = btree_size
+  });
+  cbor_decref(&btree_size);
+
+  // root node
+  cbor_item_t* root_node = hbtrie_node_to_cbor(trie->root);
+  cbor_map_add(root, (struct cbor_pair){
+      .key = cbor_build_string("root"),
+      .value = root_node
+  });
+  cbor_decref(&root_node);
+
+  return root;
+}
+
+// Helper function to find a string key in a CBOR map
+static cbor_item_t* cbor_map_find_key(cbor_item_t* map, const char* key) {
+  if (!cbor_isa_map(map)) return NULL;
+
+  size_t map_size = cbor_map_size(map);
+  struct cbor_pair* pairs = cbor_map_handle(map);
+
+  for (size_t i = 0; i < map_size; i++) {
+    cbor_item_t* map_key = pairs[i].key;
+    if (cbor_isa_string(map_key)) {
+      size_t key_len = cbor_string_length(map_key);
+      const char* key_data = (const char*)cbor_string_handle(map_key);
+      if (key_len == strlen(key) && memcmp(key_data, key, key_len) == 0) {
+        return pairs[i].value;
+      }
+    }
+  }
+  return NULL;
+}
+
+hbtrie_t* cbor_to_hbtrie(cbor_item_t* item) {
+  if (item == NULL || !cbor_isa_map(item)) {
+    return NULL;
+  }
+
+  // Get chunk_size
+  cbor_item_t* chunk_size_item = cbor_map_find_key(item, "chunk_size");
+  if (chunk_size_item == NULL || !cbor_isa_uint(chunk_size_item)) {
+    return NULL;
+  }
+  uint8_t chunk_size = (uint8_t)cbor_get_uint32(chunk_size_item);
+
+  // Get btree_node_size
+  cbor_item_t* btree_size_item = cbor_map_find_key(item, "btree_node_size");
+  if (btree_size_item == NULL || !cbor_isa_uint(btree_size_item)) {
+    return NULL;
+  }
+  uint32_t btree_node_size = cbor_get_uint32(btree_size_item);
+
+  hbtrie_t* trie = hbtrie_create(chunk_size, btree_node_size);
+  if (trie == NULL) return NULL;
+
+  // Get root node
+  cbor_item_t* root_item = cbor_map_find_key(item, "root");
+  if (root_item != NULL && !cbor_is_null(root_item)) {
+    hbtrie_node_t* root_node = cbor_to_hbtrie_node(root_item, btree_node_size);
+    if (root_node == NULL) {
+      hbtrie_destroy(trie);
+      return NULL;
+    }
+    hbtrie_node_destroy(trie->root);
+    trie->root = root_node;
+  }
+
+  return trie;
+}
+
+uint32_t hbtrie_compute_hash(hbtrie_t* trie) {
+  if (trie == NULL) return 0;
+
+  // Serialize to CBOR, then compute hash
+  cbor_item_t* cbor = hbtrie_to_cbor(trie);
+  if (cbor == NULL) return 0;
+
+  unsigned char* buffer = NULL;
+  size_t buffer_size = 0;
+  cbor_serialize_alloc(cbor, &buffer, &buffer_size);
+  cbor_decref(&cbor);
+
+  if (buffer == NULL) return 0;
+
+  // Simple CRC32 hash
+  uint32_t hash = 0xFFFFFFFF;
+  for (size_t i = 0; i < buffer_size; i++) {
+    hash ^= buffer[i];
+    for (int j = 0; j < 8; j++) {
+      if (hash & 1) {
+        hash = (hash >> 1) ^ 0xEDB88320;
+      } else {
+        hash >>= 1;
+      }
+    }
+  }
+  hash ^= 0xFFFFFFFF;
+
+  free(buffer);
+  return hash;
+}
+
+int hbtrie_serialize(hbtrie_t* trie, uint8_t** buf, size_t* len) {
+  if (trie == NULL || buf == NULL || len == NULL) {
+    return -1;
+  }
+
+  cbor_item_t* cbor = hbtrie_to_cbor(trie);
+  if (cbor == NULL) {
+    return -1;
+  }
+
+  unsigned char* buffer = NULL;
+  size_t buffer_size = 0;
+  cbor_serialize_alloc(cbor, &buffer, &buffer_size);
+  cbor_decref(&cbor);
+
+  if (buffer == NULL) {
+    return -1;
+  }
+
+  *buf = buffer;
+  *len = buffer_size;
+  return 0;
+}
+
+hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint32_t btree_node_size) {
+  if (buf == NULL || len == 0) {
+    return NULL;
+  }
+
+  struct cbor_load_result result;
+  cbor_item_t* cbor = cbor_load(buf, len, &result);
+  if (cbor == NULL || result.error.code != CBOR_ERR_NONE) {
+    if (cbor) cbor_decref(&cbor);
+    return NULL;
+  }
+
+  hbtrie_t* trie = cbor_to_hbtrie(cbor);
+  cbor_decref(&cbor);
+
+  return trie;
 }

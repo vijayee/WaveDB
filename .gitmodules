@@ -7,3 +7,6 @@
 [submodule "deps/hashmap"]
 	path = deps/hashmap
 	url = https://github.com/DavidLeeds/hashmap
+[submodule "deps/libcbor"]
+	path = deps/libcbor
+	url = https://github.com/PJK/libcbor.git

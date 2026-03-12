@@ -8,6 +8,10 @@
 #include "../RefCounter/refcounter.h"
 #include "queue.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct {
   refcounter_t refcounter;
   PLATFORMLOCKTYPE(lock);
@@ -33,4 +37,9 @@ void work_pool_shutdown(work_pool_t* pool);
 void work_pool_wait_for_shutdown_signal(work_pool_t* pool);
 void work_pool_wait_for_idle_signal(work_pool_t* pool);
 void work_pool_join_all(work_pool_t* pool);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif //WAVEDB_POOL_H

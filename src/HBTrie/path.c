@@ -4,6 +4,7 @@
 
 #include "path.h"
 #include "../Util/allocator.h"
+#include <cbor.h>
 #include <string.h>
 
 path_t* path_create(void) {
@@ -105,4 +106,56 @@ int path_compare(path_t* a, path_t* b) {
   if (a->identifiers.length < b->identifiers.length) return -1;
   if (a->identifiers.length > b->identifiers.length) return 1;
   return 0;
+}
+
+cbor_item_t* path_to_cbor(path_t* path) {
+  if (path == NULL) return NULL;
+
+  // Create outer array with one entry per identifier
+  cbor_item_t* array = cbor_new_definite_array((size_t)path->identifiers.length);
+  if (array == NULL) return NULL;
+
+  for (int i = 0; i < path->identifiers.length; i++) {
+    identifier_t* id = path->identifiers.data[i];
+    cbor_item_t* id_cbor = identifier_to_cbor(id);
+    if (id_cbor == NULL) {
+      cbor_decref(&array);
+      return NULL;
+    }
+    if (!cbor_array_push(array, id_cbor)) {
+      cbor_decref(&id_cbor);
+      cbor_decref(&array);
+      return NULL;
+    }
+    cbor_decref(&id_cbor);
+  }
+
+  return array;
+}
+
+path_t* cbor_to_path(cbor_item_t* item, size_t chunk_size) {
+  if (item == NULL) return NULL;
+
+  if (!cbor_isa_array(item)) {
+    return NULL;
+  }
+
+  path_t* path = path_create();
+  if (path == NULL) return NULL;
+
+  size_t num_ids = cbor_array_size(item);
+  for (size_t i = 0; i < num_ids; i++) {
+    cbor_item_t* id_item = cbor_array_get(item, i);
+    identifier_t* id = cbor_to_identifier(id_item, chunk_size);
+    cbor_decref(&id_item);
+
+    if (id == NULL) {
+      path_destroy(path);
+      return NULL;
+    }
+
+    vec_push(&path->identifiers, id);
+  }
+
+  return path;
 }

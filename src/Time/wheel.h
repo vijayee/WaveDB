@@ -11,6 +11,7 @@
 #include "../Workers/pool.h"
 #include "../Util/threadding.h"
 #include <stdint.h>
+
 #ifdef _WIN32
 #define Time_Milliseconds 1
 #else
@@ -20,6 +21,10 @@
 #define Time_Minutes 60
 #define Time_Hours 60
 #define Time_Days 24
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef struct timing_wheel_t timing_wheel_t;
 
@@ -116,5 +121,9 @@ void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer);
 void timing_wheel_stop(timing_wheel_t* wheel);
 void timing_wheel_run(timing_wheel_t* wheel);
 void hierarchical_timing_wheel_wait_for_idle_signal(hierarchical_timing_wheel_t* wheel);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //WAVEDB_WHEEL_H
