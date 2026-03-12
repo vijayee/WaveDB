@@ -86,4 +86,3 @@ void refcounter_destroy_lock(refcounter_t* refcounter) {
   platform_lock_destroy(&refcounter->lock);
 #endif
 }
-
