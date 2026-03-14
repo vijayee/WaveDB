@@ -9,6 +9,8 @@
 #include "../Util/log.h"
 #include "../Buffer/buffer.h"
 #include "../Time/debouncer.h"
+#include "../Storage/sections.h"
+#include "../Storage/node_serializer.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>

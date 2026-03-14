@@ -28,6 +28,10 @@ extern "C" {
  * - Multiple readers access read_trie (snapshot)
  * - Debouncer triggers periodic snapshots
  * - WAL provides durability for writes
+ *
+ * Storage modes:
+ * - In-memory only: storage = NULL, no persistence
+ * - Section-based: storage != NULL, incremental persistence
  */
 typedef struct {
     refcounter_t refcounter;
@@ -50,6 +54,11 @@ typedef struct {
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
+
+    // Section-based storage (NULL for in-memory only)
+    struct sections_t* storage;          // Section pool for persistent storage
+    size_t storage_cache_size;           // LRU cache size for sections
+    size_t storage_max_tuple;            // Max open sections
 } database_t;
 
 /**
@@ -66,18 +75,21 @@ typedef struct {
  * Creates or loads a database from the specified location.
  * If existing data is found, replays WAL to recover state.
  *
- * @param location       Directory path for database files
- * @param lru_size       Max LRU cache entries (0 for default)
- * @param wal_max_size   Max WAL file size before rotation (0 for default)
- * @param chunk_size     HBTrie chunk size (0 for default)
- * @param btree_node_size B+tree node size (0 for default)
- * @param pool           Work pool for async operations
- * @param wheel          Timing wheel for debouncer
- * @param error_code     Output error code (0 on success)
+ * @param location          Directory path for database files
+ * @param lru_size          Max LRU cache entries (0 for default)
+ * @param wal_max_size      Max WAL file size before rotation (0 for default)
+ * @param chunk_size        HBTrie chunk size (0 for default)
+ * @param btree_node_size   B+tree node size (0 for default)
+ * @param enable_persist   Enable persistent storage (0 = in-memory only, 1 = persistent)
+ * @param storage_cache_size Section LRU cache size (0 for default, ignored if in-memory)
+ * @param pool              Work pool for async operations
+ * @param wheel             Timing wheel for debouncer
+ * @param error_code        Output error code (0 on success)
  * @return New database or NULL on failure
  */
 database_t* database_create(const char* location, size_t lru_size, size_t wal_max_size,
                             uint8_t chunk_size, uint32_t btree_node_size,
+                            uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
                             int* error_code);
 
