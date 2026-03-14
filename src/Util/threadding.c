@@ -4,6 +4,7 @@
 #include "threadding.h"
 #include "log.h"
 #include <stdlib.h>
+#include <string.h>
 #if _WIN32
 #include <windows.h>
 #else

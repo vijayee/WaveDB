@@ -20,6 +20,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src/HBTrie)
 include_directories(${CMAKE_SOURCE_DIR}/src/Database)
 include_directories(${CMAKE_SOURCE_DIR}/src/Time)
 include_directories(${CMAKE_SOURCE_DIR}/src/Workers)
+include_directories(${CMAKE_SOURCE_DIR}/src/Storage)
 include_directories(${CMAKE_SOURCE_DIR}/deps/xxhash)
 include_directories(${CMAKE_SOURCE_DIR}/deps/hashmap/include)
 include_directories(${CMAKE_SOURCE_DIR}/deps/libcbor/src)
@@ -93,6 +94,11 @@ set(WAVEDB_SOURCES
     src/Workers/promise.c
     src/Workers/queue.c
     src/Workers/pool.c
+
+    # Storage
+    src/Storage/section.c
+    src/Storage/sections.c
+    src/Storage/node_serializer.c
 
     # Database
     src/Database/wal.c
