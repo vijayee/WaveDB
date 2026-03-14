@@ -6,5 +6,7 @@ build/
 
 # Reference materials
 reference/old_session.md
+reference/
 Testing/
 tests/test_database_fixed.cpp
+reference/
