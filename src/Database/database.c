@@ -280,6 +280,7 @@ static int replay_wal(database_t* db) {
 
 database_t* database_create(const char* location, size_t lru_size, size_t wal_max_size,
                             uint8_t chunk_size, uint32_t btree_node_size,
+                            uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
                             int* error_code) {
     if (error_code) *error_code = 0;
@@ -322,16 +323,66 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
     db->callback_in_progress = 0;
     db->destroy_requested = 0;
 
+    // Initialize storage if persistence is enabled
+    if (enable_persist) {
+        // Create data and meta directories for sections
+        char* data_path = path_join(location, "data");
+        char* meta_path = path_join(location, "meta");
+        mkdir_p(data_path);
+        mkdir_p(meta_path);
+
+        // Determine storage parameters
+        size_t cache_size = (storage_cache_size == 0) ? 64 : storage_cache_size;  // Default: 64 sections in cache
+        size_t max_tuple = 8;  // Keep 8 sections open at once
+        size_t sections_size = 1024;  // 1024 blocks per section
+        block_size_e block_type = BLOCK_SIZE_MEDIUM;  // Use 4KB blocks by default
+
+        db->storage = sections_create(location, sections_size, cache_size, max_tuple,
+                                      block_type, wheel,
+                                      DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
+
+        free(data_path);
+        free(meta_path);
+
+        if (db->storage == NULL) {
+            // Storage initialization failed, continue in-memory only
+            log_warn("Failed to initialize persistent storage, continuing in-memory only");
+        } else {
+            db->storage_cache_size = cache_size;
+            db->storage_max_tuple = max_tuple;
+
+            // Attach storage to write_trie
+            db->write_trie->root->storage = db->storage;
+        }
+    } else {
+        db->storage = NULL;
+    }
+
     // Load or create write_trie
     db->write_trie = load_index(location, db->chunk_size, db->btree_node_size);
     if (db->write_trie == NULL) {
         db->write_trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // Create read_trie copy
-    db->read_trie = hbtrie_copy(db->write_trie);
+    // If using storage, attach it to write_trie
+    if (db->storage != NULL && db->write_trie->root != NULL) {
+        db->write_trie->root->storage = db->storage;
+    }
+
+    // Create read_trie copy (or share for in-memory only)
+    if (enable_persist && db->storage != NULL) {
+        // With persistent storage, read_trie shares the same root
+        // (lazy loading will handle on-demand loading)
+        db->read_trie = db->write_trie;  // TODO: Implement proper read/write separation
+        refcounter_reference((refcounter_t*)db->read_trie);
+    } else {
+        // In-memory only: create copy for read lock
+        db->read_trie = hbtrie_copy(db->write_trie);
+    }
+
     if (db->read_trie == NULL) {
         hbtrie_destroy(db->write_trie);
+        if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
         platform_lock_destroy(&db->write_lock);
         free(db->location);
@@ -377,6 +428,35 @@ void database_destroy(database_t* db) {
         }
 
         if (db->wal) wal_destroy(db->wal);
+
+        // Destroy tries
+        if (db->read_trie != db->write_trie) {
+            // Separate read and write tries (in-memory mode)
+            hbtrie_destroy(db->read_trie);
+            hbtrie_destroy(db->write_trie);
+        } else {
+            // Shared trie (persistent mode, only destroy once)
+            hbtrie_destroy(db->write_trie);
+        }
+
+        // Destroy storage if present
+        if (db->storage) {
+            sections_destroy(db->storage);
+        }
+
+        if (db->lru) database_lru_cache_destroy(db->lru);
+
+        // Destroy locks
+        platform_lock_destroy(&db->write_lock);
+        platform_rw_lock_destroy(&db->read_lock);
+        platform_lock_destroy(&db->callback_lock);
+        platform_condition_destroy(&db->callback_done);
+
+        free(db->location);
+        refcounter_destroy_lock((refcounter_t*)db);
+        free(db);
+    }
+}
         if (db->read_trie) hbtrie_destroy(db->read_trie);
         if (db->write_trie) hbtrie_destroy(db->write_trie);
         if (db->lru) database_lru_cache_destroy(db->lru);
