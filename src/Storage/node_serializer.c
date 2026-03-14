@@ -82,9 +82,70 @@ static void read_bytes(uint8_t** buf, uint8_t* data, size_t len) {
     *buf += len;
 }
 
+// Identifier serialization - serialize to a flat buffer
+int identifier_serialize(identifier_t* ident, uint8_t** buf, size_t* len) {
+    if (ident == NULL || buf == NULL || len == NULL) {
+        return -1;
+    }
+
+    // Reconstruct identifier as a single buffer first
+    buffer_t* data_buf = identifier_to_buffer(ident);
+    if (data_buf == NULL) {
+        return -1;
+    }
+
+    // Total size: length (4 bytes) + data
+    size_t total_len = sizeof(uint32_t) + data_buf->size;
+    *buf = get_memory(total_len);
+    *len = total_len;
+
+    uint8_t* ptr = *buf;
+
+    // Write length
+    write_uint32(&ptr, (uint32_t)data_buf->size);
+
+    // Write data
+    if (data_buf->size > 0) {
+        write_bytes(&ptr, data_buf->data, data_buf->size);
+    }
+
+    buffer_destroy(data_buf);
+    return 0;
+}
+
+// Identifier deserialization - deserialize from a flat buffer
+identifier_t* identifier_deserialize(uint8_t* buf, size_t len, size_t chunk_size) {
+    if (buf == NULL || len < sizeof(uint32_t)) {
+        return NULL;
+    }
+
+    uint8_t* ptr = buf;
+
+    // Read length
+    uint32_t length = read_uint32(&ptr);
+
+    if (sizeof(uint32_t) + length != len) {
+        return NULL;  // Malformed data
+    }
+
+    // Create buffer from remaining data
+    buffer_t* data_buf = buffer_create(length);
+    if (data_buf == NULL) {
+        return NULL;
+    }
+
+    if (length > 0) {
+        memcpy(data_buf->data, ptr, length);
+    }
+
+    // Create identifier from buffer
+    identifier_t* ident = identifier_create(data_buf, chunk_size);
+    return ident;
+}
+
 // Chunk serialization
 int chunk_serialize(chunk_t* chunk, uint8_t chunk_size, uint8_t** buf) {
-    if (chunk == NULL || chunk->data == NULL) {
+    if (chunk == NULL || chunk->data == NULL || buf == NULL) {
         return -1;
     }
 
@@ -99,76 +160,21 @@ chunk_t* chunk_deserialize(uint8_t* buf, uint8_t chunk_size) {
         return NULL;
     }
 
-    // Create chunk from existing memory (takes ownership)
-    buffer_t* data = buffer_create_from_existing_memory(buf, chunk_size);
-    if (data == NULL) {
+    // Create buffer from existing memory (takes ownership)
+    uint8_t* data_copy = get_memory(chunk_size);
+    memcpy(data_copy, buf, chunk_size);
+
+    buffer_t* data_buf = buffer_create_from_existing_memory(data_copy, chunk_size);
+    if (data_buf == NULL) {
+        free(data_copy);
         return NULL;
     }
 
-    // Create chunk (takes ownership of buffer)
+    // Create chunk (shares buffer reference)
     chunk_t* chunk = get_clear_memory(sizeof(chunk_t));
-    chunk->data = data;
-    // Note: chunk doesn't have refcounter, it's a simple struct
+    chunk->data = data_buf;
 
     return chunk;
-}
-
-// Identifier serialization
-int identifier_serialize(identifier_t* ident, uint8_t** buf, size_t* len) {
-    if (ident == NULL || buf == NULL || len == NULL) {
-        return -1;
-    }
-
-    // Calculate total size: length (4 bytes) + data
-    size_t total_len = sizeof(uint32_t) + ident->length;
-    *buf = get_memory(total_len);
-    *len = total_len;
-
-    uint8_t* ptr = *buf;
-
-    // Write length
-    write_uint32(&ptr, (uint32_t)ident->length);
-
-    // Write data (copy from identifier's buffer)
-    if (ident->length > 0 && ident->data != NULL) {
-        memcpy(ptr, ident->data->data, ident->length);
-    }
-
-    return 0;
-}
-
-// Identifier deserialization
-identifier_t* identifier_deserialize(uint8_t* buf, size_t len) {
-    if (buf == NULL || len < sizeof(uint32_t)) {
-        return NULL;
-    }
-
-    uint8_t* ptr = buf;
-
-    // Read length
-    uint32_t length = read_uint32(&ptr);
-
-    if (sizeof(uint32_t) + length != len) {
-        return NULL;  // Malformed data
-    }
-
-    // Allocate identifier
-    identifier_t* ident = get_clear_memory(sizeof(identifier_t));
-    refcounter_init((refcounter_t*) ident);
-
-    ident->length = length;
-
-    // Create buffer and copy data
-    if (length > 0) {
-        ident->data = buffer_create(length);
-        if (ident->data == NULL) {
-            free_memory(ident);
-            return NULL;
-        }
-        memcpy(ident->data->data, ptr, length);
-    }
-
-    return ident;
 }
 
 // B+tree node serialization
@@ -180,7 +186,7 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
     // Calculate total size needed
     size_t total_size = sizeof(uint16_t);  // Number of entries
 
-    for (size_t i = 0; i < node->entries.length; i++) {
+    for (int i = 0; i < node->entries.length; i++) {
         bnode_entry_t* entry = &node->entries.data[i];
 
         // Chunk data
@@ -190,17 +196,20 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
         total_size += sizeof(uint8_t);
 
         if (entry->has_value) {
-            // Identifier length + data
+            // Identifier size placeholder (we'll need to serialize the identifier)
             identifier_t* ident = entry->value;
-            total_size += sizeof(uint32_t);
-            if (ident != NULL && ident->length > 0) {
-                total_size += ident->length;
+            if (ident != NULL) {
+                buffer_t* ident_buf = identifier_to_buffer(ident);
+                if (ident_buf != NULL) {
+                    total_size += sizeof(uint32_t) + ident_buf->size;
+                    buffer_destroy(ident_buf);
+                }
+            } else {
+                total_size += sizeof(uint32_t);  // Just length field
             }
         } else {
-            // Child location (will be filled in during traversal)
-            // For now, we serialize child nodes recursively
-            // This will be changed to location tuples in Phase 2
-            total_size += sizeof(uint64_t) * 2;  // section_id + block_index
+            // Child location (section_id + block_index)
+            total_size += sizeof(uint64_t) * 2;
         }
     }
 
@@ -213,13 +222,12 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
     write_uint16(&ptr, (uint16_t)node->entries.length);
 
     // Write each entry
-    for (size_t i = 0; i < node->entries.length; i++) {
+    for (int i = 0; i < node->entries.length; i++) {
         bnode_entry_t* entry = &node->entries.data[i];
 
         // Write chunk
         if (entry->key != NULL && entry->key->data != NULL) {
-            memcpy(ptr, entry->key->data->data, chunk_size);
-            ptr += chunk_size;
+            write_bytes(&ptr, entry->key->data->data, chunk_size);
         } else {
             // Write zeros for null chunk
             memset(ptr, 0, chunk_size);
@@ -233,19 +241,24 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
             // Serialize identifier
             identifier_t* ident = entry->value;
             if (ident != NULL) {
-                write_uint32(&ptr, (uint32_t)ident->length);
-                if (ident->length > 0 && ident->data != NULL) {
-                    memcpy(ptr, ident->data->data, ident->length);
-                    ptr += ident->length;
+                buffer_t* ident_buf = identifier_to_buffer(ident);
+                if (ident_buf != NULL) {
+                    write_uint32(&ptr, (uint32_t)ident_buf->size);
+                    if (ident_buf->size > 0) {
+                        write_bytes(&ptr, ident_buf->data, ident_buf->size);
+                    }
+                    buffer_destroy(ident_buf);
+                } else {
+                    write_uint32(&ptr, 0);
                 }
             } else {
                 write_uint32(&ptr, 0);
             }
         } else {
-            // Write placeholder for child location
-            // Phase 2 will replace this with actual section_id and block_index
-            write_uint64(&ptr, 0);  // section_id
-            write_uint64(&ptr, 0);  // block_index
+            // Write child location (placeholders for now - Phase 2 will fill these)
+            // Phase 2 will serialize actual section_id and block_index
+            write_uint64(&ptr, entry->child_section_id);
+            write_uint64(&ptr, entry->child_block_index);
         }
     }
 
@@ -272,26 +285,25 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
     // Create node
     bnode_t* node = bnode_create(btree_node_size);
     if (node == NULL) {
-        free_memory(*locations);
+        free(*locations);
         *locations = NULL;
         *num_locations = 0;
         return NULL;
     }
 
     // Read each entry
-    for (size_t i = 0; i < num_entries; i++) {
+    for (uint16_t i = 0; i < num_entries; i++) {
         bnode_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
 
         // Read chunk
         uint8_t* chunk_buf = get_memory(chunk_size);
-        memcpy(chunk_buf, ptr, chunk_size);
+        read_bytes(&ptr, chunk_buf, chunk_size);
         entry.key = chunk_deserialize(chunk_buf, chunk_size);
-        ptr += chunk_size;
-
         if (entry.key == NULL) {
-            free_memory(chunk_buf);
+            free(chunk_buf);
             bnode_destroy(node);
-            free_memory(*locations);
+            free(*locations);
             *locations = NULL;
             *num_locations = 0;
             return NULL;
@@ -301,37 +313,48 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
         entry.has_value = read_uint8(&ptr);
 
         if (entry.has_value) {
-            // Read identifier
+            // Read identifier length
             uint32_t ident_len = read_uint32(&ptr);
             if (ident_len > 0) {
-                identifier_t* ident = get_clear_memory(sizeof(identifier_t));
-                refcounter_init((refcounter_t*) ident);
-                ident->length = ident_len;
-                ident->data = buffer_create(ident_len);
-                if (ident->data == NULL) {
-                    free_memory(ident);
+                // Read identifier data
+                uint8_t* ident_buf = get_memory(ident_len);
+                read_bytes(&ptr, ident_buf, ident_len);
+
+                buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
+                if (data_buf == NULL) {
+                    free(ident_buf);
                     chunk_destroy(entry.key);
                     bnode_destroy(node);
-                    free_memory(*locations);
+                    free(*locations);
                     *locations = NULL;
                     *num_locations = 0;
                     return NULL;
                 }
-                memcpy(ident->data->data, ptr, ident_len);
-                ptr += ident_len;
-                entry.value = ident;
+
+                entry.value = identifier_create(data_buf, chunk_size);
+                if (entry.value == NULL) {
+                    buffer_destroy(data_buf);
+                    chunk_destroy(entry.key);
+                    bnode_destroy(node);
+                    free(*locations);
+                    *locations = NULL;
+                    *num_locations = 0;
+                    return NULL;
+                }
+
+                // Location not applicable for values
+                (*locations)[i].section_id = 0;
+                (*locations)[i].block_index = 0;
             } else {
                 entry.value = NULL;
+                (*locations)[i].section_id = 0;
+                (*locations)[i].block_index = 0;
             }
-
-            // Location not applicable for values
-            (*locations)[i].section_id = 0;
-            (*locations)[i].block_index = 0;
         } else {
             // Read child location
             (*locations)[i].section_id = read_uint64(&ptr);
             (*locations)[i].block_index = read_uint64(&ptr);
-            entry.child = NULL;  // Will be loaded lazily
+            entry.child = NULL;  // Will be loaded lazily in Phase 2
         }
 
         // Insert entry

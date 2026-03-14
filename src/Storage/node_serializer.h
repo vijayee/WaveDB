@@ -82,11 +82,12 @@ int identifier_serialize(identifier_t* ident, uint8_t** buf, size_t* len);
 /**
  * Deserialize an identifier from a binary buffer.
  *
- * @param buf    Binary buffer
- * @param len    Buffer length
+ * @param buf        Binary buffer
+ * @param len        Buffer length
+ * @param chunk_size Size of each chunk in bytes
  * @return New identifier or NULL on failure
  */
-identifier_t* identifier_deserialize(uint8_t* buf, size_t len);
+identifier_t* identifier_deserialize(uint8_t* buf, size_t len, size_t chunk_size);
 
 /**
  * Serialize a chunk to a binary buffer.

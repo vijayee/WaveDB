@@ -32,6 +32,13 @@ typedef struct hbtrie_node_t {
     PLATFORMLOCKTYPE(lock);           // Node-level lock
 
     bnode_t* btree;                   // B+tree comparing chunks at this level
+
+    // Storage location tracking for incremental persistence
+    struct sections_t* storage;       // Storage system (NULL if in-memory only)
+    size_t section_id;                // Section where this node is stored
+    size_t block_index;               // Block index within section
+    uint8_t is_loaded;                // 1 if in memory, 0 if on-disk stub
+    uint8_t is_dirty;                 // 1 if modified since last save
 } hbtrie_node_t;
 
 /**

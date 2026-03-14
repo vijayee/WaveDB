@@ -72,6 +72,11 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
     return NULL;
   }
 
+  // Initialize storage tracking (in-memory by default)
+  node->storage = NULL;          // NULL = in-memory only
+  node->is_loaded = 1;           // Newly created nodes are in memory
+  node->is_dirty = 0;            // Not modified yet
+
   refcounter_init((refcounter_t*)node);
   platform_lock_init(&node->lock);
 

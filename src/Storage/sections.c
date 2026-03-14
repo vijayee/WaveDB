@@ -8,6 +8,7 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/get_dir.h"
+#include "../Util/hash.h"
 #include <cbor.h>
 
 #ifdef _WIN32
@@ -32,7 +33,7 @@ sections_lru_cache_t* sections_lru_cache_create(size_t size) {
     lru->first = NULL;
     lru->last = NULL;
     hashmap_init(&lru->cache, (void*) hash_size_t, (void*) compare_size_t);
-    hashmap_set_key_alloc_funcs(&lru->cache, duplicate_size_t, (void*) free_memory);
+    hashmap_set_key_alloc_funcs(&lru->cache, duplicate_size_t, (void*) free);
     return lru;
 }
 
@@ -86,7 +87,7 @@ void sections_lru_cache_delete(sections_lru_cache_t* lru, size_t section_id) {
         }
         hashmap_remove(&lru->cache, &section_id);
         section_destroy(node->value);
-        free_memory(node);
+        free(node);
     }
 }
 
@@ -119,7 +120,7 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
             }
             hashmap_remove(&lru->cache, &last_node->value->id);
             section_destroy(last_node->value);
-            free_memory(last_node);
+            free(last_node);
         }
     }
 
@@ -196,16 +197,16 @@ round_robin_t* round_robin_create(char* robin_path, hierarchical_timing_wheel_t*
 void round_robin_destroy(round_robin_t* robin) {
     debouncer_flush(robin->debouncer);
     debouncer_destroy(robin->debouncer);
-    free_memory(robin->path);
+    free(robin->path);
     platform_lock_destroy(&robin->lock);
 
     round_robin_node_t* current = robin->first;
     while (current != NULL) {
         round_robin_node_t* next = current->next;
-        free_memory(current);
+        free(current);
         current = next;
     }
-    free_memory(robin);
+    free(robin);
 }
 
 void round_robin_add(round_robin_t* robin, size_t id) {
@@ -280,7 +281,7 @@ void round_robin_remove(round_robin_t* robin, size_t id) {
             if (current->next != NULL) {
                 current->next->previous = current->previous;
             }
-            free_memory(current);
+            free(current);
             debouncer_debounce(robin->debouncer);
             robin->size--;
             platform_unlock(&robin->lock);
@@ -379,7 +380,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     char* robin_folder = path_join(path, "robin");
     mkdir_p(robin_folder);
     char* robin_path = path_join(robin_folder, ".robin");
-    free_memory(robin_folder);
+    free(robin_folder);
 
     sections_t* sections = get_clear_memory(sizeof(sections_t));
     sections->wheel = (hierarchical_timing_wheel_t*) refcounter_reference((refcounter_t*) wheel);
@@ -392,7 +393,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
     platform_lock_init(&sections->lock);
     platform_lock_init(&sections->checkout.lock);
     hashmap_init(&sections->checkout.sections, (void*) hash_size_t, (void*) compare_size_t);
-    hashmap_set_key_alloc_funcs(&sections->checkout.sections, duplicate_size_t, (void*) free_memory);
+    hashmap_set_key_alloc_funcs(&sections->checkout.sections, duplicate_size_t, (void*) free);
 
     if (access(robin_path, F_OK) == 0) {
         // Existing round-robin file
@@ -409,13 +410,13 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t m
 
         if (file_size != read_size) {
             log_error("Failed to read round robin file");
-            free_memory(buffer);
+            free(buffer);
             abort();
         }
 
         struct cbor_load_result result;
         cbor_item_t* cbor = cbor_load(buffer, file_size, &result);
-        free_memory(buffer);
+        free(buffer);
 
         if (result.error.code != CBOR_ERR_NONE) {
             log_error("Failed to parse round robin file");
@@ -552,7 +553,7 @@ void sections_checkin(sections_t* sections, section_t* section) {
         checkout->count--;
         if (checkout->count == 0) {
             hashmap_remove(&sections->checkout.sections, &section->id);
-            free_memory(checkout);
+            free(checkout);
             section_destroy(section);
         }
     }

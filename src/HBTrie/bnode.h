@@ -32,6 +32,11 @@ typedef struct bnode_entry_t {
         identifier_t* value;            // Leaf value (if has_value == 1)
     };
     uint8_t has_value;                  // 0 = child node, 1 = value
+
+    // Storage location for lazy-loaded children
+    // Valid only when has_value == 0 and child pointer is loaded from disk
+    size_t child_section_id;           // Section where child is stored
+    size_t child_block_index;           // Block index within section
 } bnode_entry_t;
 
 /**
