@@ -27,6 +27,11 @@ static void sections_full(sections_t* sections, size_t section_id);
 static size_t sections_get_next_id(sections_t* sections);
 static void sections_free(sections_t* sections, size_t section_id);
 
+// Helper: Get shard index for section_id
+static inline size_t get_shard(size_t section_id) {
+    return section_id % CHECKOUT_LOCK_SHARDS;
+}
+
 // LRU cache functions
 sections_lru_cache_t* sections_lru_cache_create(size_t size) {
     sections_lru_cache_t* lru = get_clear_memory(sizeof(sections_lru_cache_t));
@@ -333,9 +338,13 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
     sections->range_path = path_join(path, ".range");
 
     platform_lock_init(&sections->lock);
-    platform_lock_init(&sections->checkout.lock);
-    hashmap_init(&sections->checkout.sections, (void*) hash_size_t, (void*) compare_size_t);
-    hashmap_set_key_alloc_funcs(&sections->checkout.sections, duplicate_size_t, (void*) free);
+
+    // Initialize sharded checkout locks
+    for (size_t i = 0; i < CHECKOUT_LOCK_SHARDS; i++) {
+        platform_lock_init(&sections->checkout_shards[i].lock);
+        hashmap_init(&sections->checkout_shards[i].sections, (void*) hash_size_t, (void*) compare_size_t);
+        hashmap_set_key_alloc_funcs(&sections->checkout_shards[i].sections, duplicate_size_t, (void*) free);
+    }
 
     if (access(robin_path, F_OK) == 0) {
         // Existing round-robin file
@@ -414,8 +423,12 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
 }
 
 void sections_destroy(sections_t* sections) {
-    platform_lock_destroy(&sections->checkout.lock);
-    hashmap_cleanup(&sections->checkout.sections);
+    // Cleanup sharded checkout locks
+    for (size_t i = 0; i < CHECKOUT_LOCK_SHARDS; i++) {
+        platform_lock_destroy(&sections->checkout_shards[i].lock);
+        hashmap_cleanup(&sections->checkout_shards[i].sections);
+    }
+
     sections_lru_cache_destroy(sections->lru);
     round_robin_destroy(sections->robin);
     hierarchical_timing_wheel_destroy(sections->wheel);
@@ -486,33 +499,41 @@ section_t* sections_checkout(sections_t* sections, size_t section_id) {
         }
     }
 
-    platform_lock(&sections->checkout.lock);
-    checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section_id);
+    // Use sharded lock for better concurrency
+    size_t shard_idx = get_shard(section_id);
+    platform_lock(&sections->checkout_shards[shard_idx].lock);
+
+    checkout_t* checkout = hashmap_get(&sections->checkout_shards[shard_idx].sections, &section_id);
     if (checkout == NULL) {
         checkout = get_clear_memory(sizeof(checkout_t));
         checkout->section = (section_t*) refcounter_reference((refcounter_t*) section);
         checkout->count = 1;
-        hashmap_put(&sections->checkout.sections, &section_id, checkout);
+        hashmap_put(&sections->checkout_shards[shard_idx].sections, &section_id, checkout);
     } else {
         checkout->count++;
     }
-    platform_unlock(&sections->checkout.lock);
+
+    platform_unlock(&sections->checkout_shards[shard_idx].lock);
 
     return (section_t*) refcounter_reference((refcounter_t*) section);
 }
 
 void sections_checkin(sections_t* sections, section_t* section) {
-    platform_lock(&sections->checkout.lock);
-    checkout_t* checkout = hashmap_get(&sections->checkout.sections, &section->id);
+    // Use sharded lock for better concurrency
+    size_t shard_idx = get_shard(section->id);
+    platform_lock(&sections->checkout_shards[shard_idx].lock);
+
+    checkout_t* checkout = hashmap_get(&sections->checkout_shards[shard_idx].sections, &section->id);
     if (checkout != NULL) {
         checkout->count--;
         if (checkout->count == 0) {
-            hashmap_remove(&sections->checkout.sections, &section->id);
+            hashmap_remove(&sections->checkout_shards[shard_idx].sections, &section->id);
             free(checkout);
             section_destroy(section);
         }
     }
-    platform_unlock(&sections->checkout.lock);
+
+    platform_unlock(&sections->checkout_shards[shard_idx].lock);
     section_destroy(section);
 }
 

@@ -11,6 +11,7 @@
 #include "../Buffer/buffer.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
+#include "../Time/debouncer.h"  // For debouncer_t and timing wheel
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,15 @@ typedef struct {
 } wal_entry_header_t;
 
 /**
+ * WAL sync modes
+ */
+typedef enum {
+    WAL_SYNC_IMMEDIATE = 0,  // fsync after every write (default, safest)
+    WAL_SYNC_DEBOUNCED = 1,  // debounced fsync (configurable wait, good balance)
+    WAL_SYNC_ASYNC = 2       // no fsync (fastest, less durable)
+} wal_sync_mode_e;
+
+/**
  * WAL state
  */
 typedef struct {
@@ -47,6 +57,12 @@ typedef struct {
     size_t max_size;         // Max size before rotation
     transaction_id_t oldest_txn_id;  // Oldest transaction since last compaction
     transaction_id_t newest_txn_id;   // Newest transaction written to disk
+
+    // Fsync batching support
+    wal_sync_mode_e sync_mode;     // Sync mode (immediate/debounced/async)
+    debouncer_t* fsync_debouncer;   // Debouncer for batched fsync
+    uint64_t pending_writes;         // Count of writes since last fsync
+    hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
 } wal_t;
 
 /**
@@ -67,6 +83,23 @@ typedef struct {
 wal_t* wal_create(char* location, size_t max_size, int* error_code);
 
 /**
+ * Create a new WAL with configurable sync mode.
+ *
+ * Creates the WAL directory if needed and opens a new WAL file.
+ * Allows configuration of fsync behavior for performance optimization.
+ *
+ * @param location   Directory path for WAL files
+ * @param max_size    Maximum file size before rotation (0 for default)
+ * @param sync_mode   Sync mode (IMMEDIATE/DEBOUNCED/ASYNC)
+ * @param wheel       Timing wheel for debounced fsync (required if DEBOUNCED)
+ * @param debounce_ms Debounce wait time in milliseconds (0 for default 100ms)
+ * @param error_code  Output parameter for error code (0 on success)
+ * @return New WAL or NULL on failure
+ */
+wal_t* wal_create_with_sync(char* location, size_t max_size, wal_sync_mode_e sync_mode,
+                             hierarchical_timing_wheel_t* wheel, uint64_t debounce_ms, int* error_code);
+
+/**
  * Load existing WAL from directory.
  *
  * Finds the most recent WAL file and opens it for reading.
@@ -82,9 +115,22 @@ wal_t* wal_load(char* location, size_t max_size, int* error_code);
 /**
  * Destroy a WAL.
  *
+ * Flushes any pending fsync operations and frees resources.
+ *
  * @param wal  WAL to destroy
  */
 void wal_destroy(wal_t* wal);
+
+/**
+ * Flush pending fsync operations.
+ *
+ * For DEBOUNCED mode, immediately flushes all pending writes.
+ * For IMMEDIATE and ASYNC modes, this is a no-op.
+ *
+ * @param wal  WAL to flush
+ * @return 0 on success, -1 on error
+ */
+int wal_flush(wal_t* wal);
 
 /**
  * Write an entry to the WAL.

@@ -6,6 +6,7 @@
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
+#include "../Time/debouncer.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,6 +15,18 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <dirent.h>
+
+// Default debounce wait time for fsync (100ms)
+#define WAL_DEFAULT_DEBOUNCE_MS 100
+
+// Fsync callback for debounced fsync
+static void wal_fsync_callback(void* ctx) {
+    wal_t* wal = (wal_t*)ctx;
+    if (wal && wal->fd >= 0) {
+        fsync(wal->fd);
+        wal->pending_writes = 0;
+    }
+}
 
 // CRC32 lookup table
 static const uint32_t crc32_table[256] = {
@@ -176,6 +189,12 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code) {
     wal->oldest_txn_id = (transaction_id_t){0, 0, 0};
     wal->newest_txn_id = (transaction_id_t){0, 0, 0};
 
+    // Initialize sync mode to immediate (safest default)
+    wal->sync_mode = WAL_SYNC_IMMEDIATE;
+    wal->fsync_debouncer = NULL;
+    wal->pending_writes = 0;
+    wal->wheel = NULL;
+
     // Open new file for writing
     if (wal_open_file(wal, wal->current_file, 1) != 0) {
         free(wal->location);
@@ -187,6 +206,50 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code) {
 
     platform_lock_init(&wal->lock);
     refcounter_init((refcounter_t*)wal);
+
+    // Initialize sync mode to immediate (safest default)
+    wal->sync_mode = WAL_SYNC_IMMEDIATE;
+    wal->fsync_debouncer = NULL;
+    wal->pending_writes = 0;
+    wal->wheel = NULL;
+
+    return wal;
+}
+
+wal_t* wal_create_with_sync(char* location, size_t max_size, wal_sync_mode_e sync_mode,
+                             hierarchical_timing_wheel_t* wheel, uint64_t debounce_ms, int* error_code) {
+    // Create WAL with default settings
+    wal_t* wal = wal_create(location, max_size, error_code);
+    if (wal == NULL) {
+        return NULL;
+    }
+
+    // Configure sync mode
+    wal->sync_mode = sync_mode;
+    wal->wheel = wheel;
+
+    // Create debouncer if needed
+    if (sync_mode == WAL_SYNC_DEBOUNCED) {
+        if (wheel == NULL) {
+            // Debounced mode requires a timing wheel
+            if (error_code) *error_code = EINVAL;
+            wal_destroy(wal);
+            return NULL;
+        }
+
+        // Use default debounce time if not specified
+        if (debounce_ms == 0) {
+            debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
+        }
+
+        // Create debouncer with reference to this WAL
+        wal->fsync_debouncer = debouncer_create(wheel, wal, wal_fsync_callback, NULL, debounce_ms, debounce_ms);
+        if (wal->fsync_debouncer == NULL) {
+            if (error_code) *error_code = ENOMEM;
+            wal_destroy(wal);
+            return NULL;
+        }
+    }
 
     return wal;
 }
@@ -250,6 +313,18 @@ void wal_destroy(wal_t* wal) {
 
     refcounter_dereference((refcounter_t*)wal);
     if (refcounter_count((refcounter_t*)wal) == 0) {
+        // Flush any pending writes before destroying
+        if (wal->fd >= 0 && wal->sync_mode == WAL_SYNC_DEBOUNCED && wal->pending_writes > 0) {
+            fsync(wal->fd);
+            wal->pending_writes = 0;
+        }
+
+        // Destroy debouncer if present
+        if (wal->fsync_debouncer != NULL) {
+            debouncer_destroy(wal->fsync_debouncer);
+            wal->fsync_debouncer = NULL;
+        }
+
         if (wal->fd >= 0) {
             close(wal->fd);
         }
@@ -259,6 +334,25 @@ void wal_destroy(wal_t* wal) {
         refcounter_destroy_lock((refcounter_t*)wal);
         free(wal);
     }
+}
+
+int wal_flush(wal_t* wal) {
+    if (wal == NULL) {
+        return -1;
+    }
+
+    platform_lock(&wal->lock);
+
+    // Flush any pending fsync operations
+    if (wal->sync_mode == WAL_SYNC_DEBOUNCED && wal->fsync_debouncer != NULL) {
+        debouncer_flush(wal->fsync_debouncer);
+    } else if (wal->sync_mode == WAL_SYNC_IMMEDIATE && wal->fd >= 0) {
+        // For immediate mode, just fsync directly
+        fsync(wal->fd);
+    }
+
+    platform_unlock(&wal->lock);
+    return 0;
 }
 
 int wal_write(wal_t* wal, transaction_id_t txn_id, wal_type_e type, buffer_t* data) {
@@ -304,8 +398,17 @@ int wal_write(wal_t* wal, transaction_id_t txn_id, wal_type_e type, buffer_t* da
         return -1;
     }
 
-    // Sync to disk
-    fsync(wal->fd);
+    // Sync to disk based on sync mode
+    wal->pending_writes++;
+    if (wal->sync_mode == WAL_SYNC_IMMEDIATE) {
+        // Immediate fsync (safest, but slower)
+        fsync(wal->fd);
+        wal->pending_writes = 0;
+    } else if (wal->sync_mode == WAL_SYNC_DEBOUNCED && wal->fsync_debouncer != NULL) {
+        // Debounced fsync (high performance)
+        debouncer_debounce(wal->fsync_debouncer);
+    }
+    // WAL_SYNC_ASYNC: No fsync (fastest, least durable)
 
     // Update transaction tracking
     if (wal->oldest_txn_id.time == 0 && wal->oldest_txn_id.nanos == 0 && wal->oldest_txn_id.count == 0) {

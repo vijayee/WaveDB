@@ -71,3 +71,32 @@ void get_time(timeval_t* tv) {
   gettimeofday(tv, NULL);
  #endif
 }
+
+// High-resolution benchmark timer implementation
+void benchmark_start(benchmark_timer_t* timer) {
+#if _WIN32
+    QueryPerformanceCounter(&timer->start);
+#else
+    clock_gettime(CLOCK_MONOTONIC, &timer->start);
+#endif
+}
+
+uint64_t benchmark_end(benchmark_timer_t* timer) {
+#if _WIN32
+    QueryPerformanceCounter(&timer->end);
+
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+
+    // Convert to nanoseconds
+    uint64_t elapsed = timer->end.QuadPart - timer->start.QuadPart;
+    uint64_t elapsed_ns = (elapsed * 1000000000ULL) / frequency.QuadPart;
+    return elapsed_ns;
+#else
+    clock_gettime(CLOCK_MONOTONIC, &timer->end);
+
+    uint64_t elapsed_ns = (timer->end.tv_sec - timer->start.tv_sec) * 1000000000ULL;
+    elapsed_ns += (timer->end.tv_nsec - timer->start.tv_nsec);
+    return elapsed_ns;
+#endif
+}

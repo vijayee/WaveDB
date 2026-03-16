@@ -68,6 +68,7 @@ set(WAVEDB_SOURCES
     src/Util/mkdir_p.c
     src/Util/path_join.c
     src/Util/get_dir.c
+    src/Util/perf_counters.c
 
     # Buffer
     src/Buffer/buffer.c
@@ -171,6 +172,61 @@ if(BUILD_TESTS)
     add_executable(test_section_variable tests/test_section_variable.cpp)
     target_link_libraries(test_section_variable wavedb gtest gtest_main)
     add_test(NAME test_section_variable COMMAND test_section_variable)
+
+    # Stress tests
+    option(BUILD_STRESS_TESTS "Build stress tests" OFF)
+    if(BUILD_STRESS_TESTS)
+        # Concurrent sections stress test
+        add_executable(test_stress_concurrent tests/stress/test_concurrent_sections.cpp)
+        target_link_libraries(test_stress_concurrent wavedb gtest gtest_main Threads::Threads)
+        add_test(NAME test_stress_concurrent COMMAND test_stress_concurrent)
+
+        # Resource limits stress test
+        add_executable(test_stress_resources tests/stress/test_resource_limits.cpp)
+        target_link_libraries(test_stress_resources wavedb gtest gtest_main Threads::Threads)
+        add_test(NAME test_stress_resources COMMAND test_stress_resources)
+
+        # Long-running stability test
+        add_executable(test_stress_longrun tests/stress/test_long_running.cpp)
+        target_link_libraries(test_stress_longrun wavedb gtest gtest_main Threads::Threads)
+        add_test(NAME test_stress_longrun COMMAND test_stress_longrun)
+    endif()
+endif()
+
+# Benchmarks
+option(BUILD_BENCHMARKS "Build benchmarks" OFF)
+if(BUILD_BENCHMARKS)
+    # Benchmark base library
+    add_library(benchmark_base STATIC tests/benchmark/benchmark_base.c)
+    target_link_libraries(benchmark_base wavedb Threads::Threads)
+
+    # WAL benchmarks
+    add_executable(benchmark_wal tests/benchmark/benchmark_wal.cpp)
+    target_link_libraries(benchmark_wal benchmark_base wavedb Threads::Threads)
+
+    # Section benchmarks
+    add_executable(benchmark_sections tests/benchmark/benchmark_sections.cpp)
+    target_link_libraries(benchmark_sections benchmark_base wavedb Threads::Threads)
+
+    # Database benchmarks
+    add_executable(benchmark_database tests/benchmark/benchmark_database.cpp)
+    target_link_libraries(benchmark_database benchmark_base wavedb Threads::Threads)
+endif()
+
+# Stress tests
+option(BUILD_STRESS_TESTS "Build stress tests" OFF)
+if(BUILD_STRESS_TESTS)
+    # Stress test for concurrent sections
+    add_executable(test_concurrent_sections tests/stress/test_concurrent_sections.cpp)
+    target_link_libraries(test_concurrent_sections wavedb gtest gtest_main Threads::Threads)
+
+    # Stress test for resource limits
+    add_executable(test_resource_limits tests/stress/test_resource_limits.cpp)
+    target_link_libraries(test_resource_limits wavedb gtest gtest_main Threads::Threads)
+
+    # Stress test for long-running stability
+    add_executable(test_long_running tests/stress/test_long_running.cpp)
+    target_link_libraries(test_long_running wavedb gtest gtest_main Threads::Threads)
 endif()
 
 # Optional: Build examples

@@ -151,6 +151,19 @@ typedef struct {
 typedef HASHMAP(size_t, checkout_t) section_checkout_t;
 
 /**
+ * Number of shards for checkout locks (reduces contention)
+ */
+#define CHECKOUT_LOCK_SHARDS 16
+
+/**
+ * checkout_shard_t - Per-shard checkout tracking with lock.
+ */
+typedef struct {
+    PLATFORMLOCKTYPE(lock);
+    section_checkout_t sections;
+} checkout_shard_t;
+
+/**
  * sections_t - Pool of sections with LRU cache and checkout management.
  *
  * Manages multiple section files for storing variable-size records.
@@ -163,10 +176,7 @@ typedef struct sections_t {
     sections_lru_cache_t* lru;       // LRU cache for hot sections
     round_robin_t* robin;           // Round-robin for write distribution
 
-    struct {
-        PLATFORMLOCKTYPE(lock);
-        section_checkout_t sections; // Checkout tracking
-    } checkout;
+    checkout_shard_t checkout_shards[CHECKOUT_LOCK_SHARDS]; // Sharded checkout tracking
 
     size_t section_concurrency;      // Max sections to keep open
     size_t next_id;                  // Next section ID to allocate

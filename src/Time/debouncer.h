@@ -35,4 +35,21 @@ void debouncer_debounce(debouncer_t* bouncer);
 void debouncer_flush(debouncer_t* bouncer);
 uint64_t elapsed_time(timeval_t start, timeval_t end);
 void get_time(timeval_t* tv);
+
+// High-resolution benchmark timers (nanosecond precision)
+#if _WIN32
+typedef struct {
+    LARGE_INTEGER start;
+    LARGE_INTEGER end;
+} benchmark_timer_t;
+#else
+typedef struct {
+    struct timespec start;
+    struct timespec end;
+} benchmark_timer_t;
+#endif
+
+void benchmark_start(benchmark_timer_t* timer);
+uint64_t benchmark_end(benchmark_timer_t* timer);  // Returns nanoseconds
+
 #endif //WAVEDB_DEBOUNCER_H

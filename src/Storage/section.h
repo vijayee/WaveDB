@@ -11,6 +11,7 @@
 #include "../Util/threadding.h"
 #include "../Buffer/buffer.h"
 #include "../Workers/transaction_id.h"
+#include "../Time/debouncer.h"
 #include <cbor.h>
 
 #ifdef __cplusplus
@@ -54,32 +55,16 @@ cbor_item_t* fragment_to_cbor(fragment_t* fragment);
 fragment_t* cbor_to_fragment(cbor_item_t* cbor);
 
 /**
- * fragment_list_node_t - Node in the doubly-linked fragment list.
- */
-typedef struct fragment_list_node_t fragment_list_node_t;
-
-struct fragment_list_node_t {
-    fragment_t* fragment;
-    fragment_list_node_t* next;
-    fragment_list_node_t* previous;
-};
-
-/**
- * Create a fragment list node.
- */
-fragment_list_node_t* fragment_list_node_create(fragment_t* fragment,
-                                                  fragment_list_node_t* next,
-                                                  fragment_list_node_t* previous);
-
-/**
- * fragment_list_t - Doubly-linked list of free fragments.
+ * fragment_list_t - Sorted array of free fragments (by size, ascending).
  *
- * Tracks available space within a section.
+ * Tracks available space within a section for O(log n) binary search.
+ * Replaces linked list for better performance.
  */
 typedef struct {
-    fragment_list_node_t* first;
-    fragment_list_node_t* last;
-    size_t count;
+    fragment_t* fragments;      // Sorted array of fragments (by size)
+    size_t count;               // Number of fragments
+    size_t capacity;            // Array capacity
+    size_t total_free_space;    // Total free space (for quick rejection)
 } fragment_list_t;
 
 /**
@@ -93,19 +78,16 @@ fragment_list_t* fragment_list_create(void);
 void fragment_list_destroy(fragment_list_t* list);
 
 /**
- * Add fragment to end of list.
+ * Add fragment to list (maintains sorted order by size).
  */
-void fragment_list_enqueue(fragment_list_t* list, fragment_t* fragment);
+void fragment_list_insert(fragment_list_t* list, fragment_t* fragment);
 
 /**
- * Remove and return first fragment.
+ * Find and remove first fragment that fits (binary search by size).
+ * Returns the offset and removes/updates the fragment.
+ * Returns 0 on success, 1 if no fragment found.
  */
-fragment_t* fragment_list_dequeue(fragment_list_t* list);
-
-/**
- * Remove specific node from list.
- */
-fragment_t* fragment_list_remove(fragment_list_t* list, fragment_list_node_t* node);
+int fragment_list_find_fit(fragment_list_t* list, size_t size, size_t* offset);
 
 /**
  * Serialize fragment list to CBOR.
@@ -137,6 +119,9 @@ typedef struct {
     char* path;                      // Path to data file
     fragment_list_t* fragments;      // Free space tracking (byte offsets)
     size_t size;                     // Max section size in bytes
+
+    // Debounced metadata save
+    uint8_t meta_dirty;              // Flag: metadata needs saving
 } section_t;
 
 /**
@@ -191,12 +176,31 @@ int section_read(section_t* section, size_t offset, transaction_id_t* txn_id, bu
 int section_deallocate(section_t* section, size_t offset, size_t data_size);
 
 /**
+ * Flush dirty metadata to disk if needed.
+ *
+ * Saves fragment list to CBOR file if meta_dirty flag is set.
+ *
+ * @param section  Section to flush
+ */
+void section_flush_metadata(section_t* section);
+
+/**
  * Check if section is full.
  *
  * @param section  Section to check
  * @return 1 if full, 0 otherwise
  */
 uint8_t section_full(section_t* section);
+
+/**
+ * Flush dirty metadata to disk if needed.
+ *
+ * Debounced metadata save: only flushes if metadata is dirty.
+ * Call this when section is being checked in or closed.
+ *
+ * @param section  Section to flush
+ */
+void section_flush_metadata(section_t* section);
 
 #ifdef __cplusplus
 }

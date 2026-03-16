@@ -10,3 +10,13 @@ reference/
 Testing/
 tests/test_database_fixed.cpp
 reference/
+
+# Benchmark results
+.benchmarks/*_current.json
+.benchmarks/performance_report.json
+
+# Benchmark results
+.benchmarks/
+*.json
+!.github/
+!CMakeLists.txt
