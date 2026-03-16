@@ -153,11 +153,11 @@ typedef HASHMAP(size_t, checkout_t) section_checkout_t;
 /**
  * sections_t - Pool of sections with LRU cache and checkout management.
  *
- * Manages multiple section files for storing fixed-size blocks.
+ * Manages multiple section files for storing variable-size records.
  * Uses round-robin to distribute writes, LRU cache for hot sections,
- * and checkout/checkin for reference counting.
+ * and checkout/checkin for reference tracking.
  */
-typedef struct {
+typedef struct sections_t {
     PLATFORMLOCKTYPE(lock);
 
     sections_lru_cache_t* lru;       // LRU cache for hot sections
@@ -168,35 +168,36 @@ typedef struct {
         section_checkout_t sections; // Checkout tracking
     } checkout;
 
-    size_t max_tuple_size;          // Max number of sections to keep open
-    size_t next_id;                 // Next section ID to allocate
-    size_t size;                    // Blocks per section
-    block_size_e type;              // Block size type
-    size_t wait;                    // Debounce wait time
-    size_t max_wait;                // Max debounce wait time
+    size_t section_concurrency;      // Max sections to keep open
+    size_t next_id;                  // Next section ID to allocate
+    size_t size;                     // Max section size in bytes
+    size_t wait;                     // Debounce wait time
+    size_t max_wait;                 // Max debounce wait time
     hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
 
-    char* data_path;                // Path to data directory
-    char* meta_path;                // Path to metadata directory
-    char* robin_path;               // Path to round-robin file
+    transaction_id_t oldest_txn_id; // Oldest transaction since last compaction
+    transaction_id_t newest_txn_id; // Newest transaction written to disk
+    char* range_path;                // Path to .range file
+
+    char* data_path;                 // Path to data directory
+    char* meta_path;                 // Path to metadata directory
+    char* robin_path;                // Path to round-robin file
 } sections_t;
 
 /**
  * Create a sections pool.
  *
- * @param path          Directory path for section files
- * @param size          Number of blocks per section
- * @param cache_size    Max sections to keep in cache
- * @param max_tuple_size Max sections to keep open
- * @param type          Block size type
- * @param wheel         Timing wheel for debouncer
- * @param wait          Debounce wait time (ms)
- * @param max_wait      Max debounce wait time (ms)
+ * @param path               Directory path for section files
+ * @param size               Max section size in bytes
+ * @param cache_size         Max sections to keep in cache
+ * @param section_concurrency Max sections to keep open
+ * @param wheel              Timing wheel for debouncer
+ * @param wait               Debounce wait time (ms)
+ * @param max_wait           Max debounce wait time (ms)
  * @return New sections pool or NULL on failure
  */
-sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t max_tuple_size,
-                            block_size_e type, hierarchical_timing_wheel_t* wheel,
-                            size_t wait, size_t max_wait);
+sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t section_concurrency,
+                            hierarchical_timing_wheel_t* wheel, size_t wait, size_t max_wait);
 
 /**
  * Destroy a sections pool.
@@ -207,32 +208,61 @@ void sections_destroy(sections_t* sections);
  * Write data to a section.
  *
  * @param sections     Sections pool
- * @param data         Buffer to write (must match block_size)
+ * @param txn_id       Transaction ID for this write
+ * @param data         Buffer to write
  * @param section_id   Output: section ID where written
- * @param section_index Output: block index within section
+ * @param offset       Output: byte offset within section
  * @return 0 on success, error code on failure
  */
-int sections_write(sections_t* sections, buffer_t* data, size_t* section_id, size_t* section_index);
+int sections_write(sections_t* sections, transaction_id_t txn_id, buffer_t* data, size_t* section_id, size_t* offset);
 
 /**
  * Read data from a section.
  *
  * @param sections    Sections pool
  * @param section_id  Section ID to read from
- * @param section_index Block index to read
- * @return Buffer with data, or NULL on failure
+ * @param offset      Byte offset to read
+ * @param txn_id      Output: transaction ID of this record
+ * @param data        Output: buffer with data (caller must destroy)
+ * @return 0 on success, error code on failure
  */
-buffer_t* sections_read(sections_t* sections, size_t section_id, size_t section_index);
+int sections_read(sections_t* sections, size_t section_id, size_t offset, transaction_id_t* txn_id, buffer_t** data);
 
 /**
- * Deallocate a block from a section.
+ * Deallocate a record from a section.
  *
  * @param sections    Sections pool
  * @param section_id  Section ID
- * @param section_index Block index to free
+ * @param offset      Byte offset to free
+ * @param data_size   Size of data to free
  * @return 0 on success, error code on failure
  */
-int sections_deallocate(sections_t* sections, size_t section_id, size_t section_index);
+int sections_deallocate(sections_t* sections, size_t section_id, size_t offset, size_t data_size);
+
+/**
+ * Update transaction range tracking.
+ *
+ * Called after each write to track oldest and newest transactions.
+ *
+ * @param sections  Sections pool
+ * @param txn_id    Transaction ID that was just written
+ */
+void sections_update_txn_range(sections_t* sections, transaction_id_t txn_id);
+
+/**
+ * Save transaction range to disk.
+ *
+ * @param sections  Sections pool
+ */
+void sections_save_txn_range(sections_t* sections);
+
+/**
+ * Load transaction range from disk.
+ *
+ * @param sections  Sections pool
+ * @return 0 on success, error code on failure
+ */
+int sections_load_txn_range(sections_t* sections);
 
 /**
  * Checkout a section (increment reference count).

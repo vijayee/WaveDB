@@ -229,9 +229,10 @@ static int replay_wal(database_t* db) {
 
         uint64_t cursor = 0;
         while (1) {
+            transaction_id_t txn_id;
             wal_type_e type;
             buffer_t* data = NULL;
-            int result = wal_read(db->wal, &type, &data, &cursor);
+            int result = wal_read(db->wal, &txn_id, &type, &data, &cursor);
             if (result != 0) break;  // EOF or error
 
             // Decode and apply
@@ -291,6 +292,13 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
         return NULL;
     }
 
+    // Initialize transaction ID generator (call once)
+    static int txn_id_initialized = 0;
+    if (!txn_id_initialized) {
+        transaction_id_init();
+        txn_id_initialized = 1;
+    }
+
     database_t* db = get_clear_memory(sizeof(database_t));
     if (db == NULL) {
         if (error_code) *error_code = ENOMEM;
@@ -333,13 +341,11 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
 
         // Determine storage parameters
         size_t cache_size = (storage_cache_size == 0) ? 64 : storage_cache_size;  // Default: 64 sections in cache
-        size_t max_tuple = 8;  // Keep 8 sections open at once
-        size_t sections_size = 1024;  // 1024 blocks per section
-        block_size_e block_type = BLOCK_SIZE_MEDIUM;  // Use 4KB blocks by default
+        size_t section_concurrency = 8;  // Keep 8 sections open at once
+        size_t sections_size = 1024 * 1024;  // 1MB per section
 
-        db->storage = sections_create(location, sections_size, cache_size, max_tuple,
-                                      block_type, wheel,
-                                      DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
+        db->storage = sections_create(location, sections_size, cache_size, section_concurrency,
+                                      wheel, DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
 
         free(data_path);
         free(meta_path);
@@ -349,7 +355,7 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
             log_warn("Failed to initialize persistent storage, continuing in-memory only");
         } else {
             db->storage_cache_size = cache_size;
-            db->storage_max_tuple = max_tuple;
+            db->storage_max_tuple = section_concurrency;
 
             // Attach storage to write_trie
             db->write_trie->root->storage = db->storage;
@@ -457,20 +463,6 @@ void database_destroy(database_t* db) {
         free(db);
     }
 }
-        if (db->read_trie) hbtrie_destroy(db->read_trie);
-        if (db->write_trie) hbtrie_destroy(db->write_trie);
-        if (db->lru) database_lru_cache_destroy(db->lru);
-
-        platform_lock_destroy(&db->write_lock);
-        platform_rw_lock_destroy(&db->read_lock);
-        platform_lock_destroy(&db->callback_lock);
-        platform_condition_destroy(&db->callback_done);
-        refcounter_destroy_lock((refcounter_t*)db);
-
-        free(db->location);
-        free(db);
-    }
-}
 
 static void database_snapshot_callback(void* ctx) {
     database_t* db = (database_t*)ctx;
@@ -520,10 +512,13 @@ static void _database_put(database_put_ctx_t* ctx) {
     identifier_t* value = ctx->value;
     promise_t* promise = ctx->promise;
 
+    // Generate transaction ID
+    transaction_id_t txn_id = transaction_id_get_next();
+
     // Write to WAL first (durability)
     buffer_t* entry = encode_put_entry(path, value);
     if (entry != NULL) {
-        wal_write(db->wal, WAL_PUT, entry);
+        wal_write(db->wal, txn_id, WAL_PUT, entry);
         buffer_destroy(entry);
     }
 
@@ -606,10 +601,13 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     path_t* path = ctx->path;
     promise_t* promise = ctx->promise;
 
+    // Generate transaction ID
+    transaction_id_t txn_id = transaction_id_get_next();
+
     // Write to WAL
     buffer_t* entry = encode_delete_entry(path);
     if (entry != NULL) {
-        wal_write(db->wal, WAL_DELETE, entry);
+        wal_write(db->wal, txn_id, WAL_DELETE, entry);
         buffer_destroy(entry);
     }
 

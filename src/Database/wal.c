@@ -173,6 +173,8 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code) {
     wal->max_size = (max_size == 0) ? WAL_DEFAULT_MAX_SIZE : max_size;
     wal->sequence = 0;
     wal->current_file = wal_current_path(location);
+    wal->oldest_txn_id = (transaction_id_t){0, 0, 0};
+    wal->newest_txn_id = (transaction_id_t){0, 0, 0};
 
     // Open new file for writing
     if (wal_open_file(wal, wal->current_file, 1) != 0) {
@@ -209,6 +211,8 @@ wal_t* wal_load(char* location, size_t max_size, int* error_code) {
     wal->max_size = (max_size == 0) ? WAL_DEFAULT_MAX_SIZE : max_size;
     wal->sequence = seq;
     wal->current_file = wal_current_path(location);
+    wal->oldest_txn_id = (transaction_id_t){0, 0, 0};
+    wal->newest_txn_id = (transaction_id_t){0, 0, 0};
 
     // Check if current.wal exists
     struct stat st;
@@ -257,15 +261,15 @@ void wal_destroy(wal_t* wal) {
     }
 }
 
-int wal_write(wal_t* wal, wal_type_e type, buffer_t* data) {
+int wal_write(wal_t* wal, transaction_id_t txn_id, wal_type_e type, buffer_t* data) {
     if (wal == NULL || data == NULL) {
         return -1;
     }
 
     platform_lock(&wal->lock);
 
-    // Entry size: 1 byte type + 4 bytes CRC + 4 bytes len + data
-    size_t entry_size = 1 + 4 + 4 + data->size;
+    // Entry size: 1 byte type + 24 bytes txn_id + 4 bytes CRC + 4 bytes len + data
+    size_t entry_size = 1 + 24 + 4 + 4 + data->size;
 
     // Check if we need to rotate
     int rotated = 0;
@@ -280,14 +284,15 @@ int wal_write(wal_t* wal, wal_type_e type, buffer_t* data) {
     // Compute CRC
     uint32_t crc = wal_crc32(data->data, data->size);
 
-    // Write header
-    uint8_t header[9];
+    // Write header: type (1) + txn_id (24) + CRC (4) + length (4) = 33 bytes
+    uint8_t header[33];
     header[0] = (uint8_t)type;
-    write_uint32_be(header + 1, crc);
-    write_uint32_be(header + 5, (uint32_t)data->size);
+    transaction_id_serialize(&txn_id, header + 1);
+    write_uint32_be(header + 25, crc);
+    write_uint32_be(header + 29, (uint32_t)data->size);
 
-    ssize_t written = write(wal->fd, header, 9);
-    if (written != 9) {
+    ssize_t written = write(wal->fd, header, 33);
+    if (written != 33) {
         platform_unlock(&wal->lock);
         return -1;
     }
@@ -302,14 +307,20 @@ int wal_write(wal_t* wal, wal_type_e type, buffer_t* data) {
     // Sync to disk
     fsync(wal->fd);
 
+    // Update transaction tracking
+    if (wal->oldest_txn_id.time == 0 && wal->oldest_txn_id.nanos == 0 && wal->oldest_txn_id.count == 0) {
+        wal->oldest_txn_id = txn_id;
+    }
+    wal->newest_txn_id = txn_id;
+
     wal->current_size += entry_size;
     platform_unlock(&wal->lock);
 
     return rotated ? 1 : 0;
 }
 
-int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor) {
-    if (wal == NULL || type == NULL || data == NULL || cursor == NULL) {
+int wal_read(wal_t* wal, transaction_id_t* txn_id, wal_type_e* type, buffer_t** data, uint64_t* cursor) {
+    if (wal == NULL || txn_id == NULL || type == NULL || data == NULL || cursor == NULL) {
         return -1;
     }
 
@@ -321,23 +332,24 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor) {
         return -1;
     }
 
-    // Read header
-    uint8_t header[9];
-    ssize_t bytes_read = read(wal->fd, header, 9);
+    // Read header: type (1) + txn_id (24) + CRC (4) + length (4) = 33 bytes
+    uint8_t header[33];
+    ssize_t bytes_read = read(wal->fd, header, 33);
     if (bytes_read == 0) {
         // EOF
         platform_unlock(&wal->lock);
         return 1;
     }
-    if (bytes_read != 9) {
+    if (bytes_read != 33) {
         platform_unlock(&wal->lock);
         return -1;
     }
 
     // Parse header
     *type = (wal_type_e)header[0];
-    uint32_t expected_crc = read_uint32_be(header + 1);
-    uint32_t data_len = read_uint32_be(header + 5);
+    transaction_id_deserialize(txn_id, header + 1);
+    uint32_t expected_crc = read_uint32_be(header + 25);
+    uint32_t data_len = read_uint32_be(header + 29);
 
     // Read data
     buffer_t* buf = buffer_create(data_len);
@@ -362,7 +374,7 @@ int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor) {
     }
 
     *data = buf;
-    *cursor += 9 + data_len;
+    *cursor += 33 + data_len;
 
     platform_unlock(&wal->lock);
     return 0;

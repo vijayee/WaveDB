@@ -10,6 +10,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Buffer/buffer.h"
 #include "../Util/threadding.h"
+#include "../Workers/transaction_id.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,7 +44,9 @@ typedef struct {
     char* current_file;      // Path to current WAL file
     uint64_t sequence;       // Current sequence number
     size_t current_size;     // Current file size
-    size_t max_size;        // Max size before rotation
+    size_t max_size;         // Max size before rotation
+    transaction_id_t oldest_txn_id;  // Oldest transaction since last compaction
+    transaction_id_t newest_txn_id;   // Newest transaction written to disk
 } wal_t;
 
 /**
@@ -86,14 +89,15 @@ void wal_destroy(wal_t* wal);
 /**
  * Write an entry to the WAL.
  *
- * Writes type + CRC32 + CBOR data. May trigger rotation if max_size exceeded.
+ * Writes type + txn_id + CRC32 + CBOR data. May trigger rotation if max_size exceeded.
  *
  * @param wal   WAL to write to
+ * @param txn_id Transaction ID for this entry
  * @param type  Entry type
  * @param data  CBOR-encoded data buffer
  * @return 0 on success, -1 on error, 1 if WAL was rotated
  */
-int wal_write(wal_t* wal, wal_type_e type, buffer_t* data);
+int wal_write(wal_t* wal, transaction_id_t txn_id, wal_type_e type, buffer_t* data);
 
 /**
  * Read the next entry from the WAL.
@@ -101,12 +105,13 @@ int wal_write(wal_t* wal, wal_type_e type, buffer_t* data);
  * Used during recovery to replay entries.
  *
  * @param wal    WAL to read from
+ * @param txn_id Output parameter for transaction ID
  * @param type   Output parameter for entry type
  * @param data   Output parameter for CBOR data (caller must destroy)
  * @param cursor Position to read from (updated after read)
  * @return 0 on success, -1 on error, 1 on EOF
  */
-int wal_read(wal_t* wal, wal_type_e* type, buffer_t** data, uint64_t* cursor);
+int wal_read(wal_t* wal, transaction_id_t* txn_id, wal_type_e* type, buffer_t** data, uint64_t* cursor);
 
 /**
  * Swap current WAL for a new file.

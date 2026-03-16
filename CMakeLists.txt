@@ -67,6 +67,7 @@ set(WAVEDB_SOURCES
     src/Util/threadding.c
     src/Util/mkdir_p.c
     src/Util/path_join.c
+    src/Util/get_dir.c
 
     # Buffer
     src/Buffer/buffer.c
@@ -90,6 +91,7 @@ set(WAVEDB_SOURCES
     # Workers
     src/Workers/error.c
     src/Workers/priority.c
+    src/Workers/transaction_id.c
     src/Workers/work.c
     src/Workers/promise.c
     src/Workers/queue.c
@@ -159,6 +161,16 @@ if(BUILD_TESTS)
     add_executable(test_database tests/test_database.cpp)
     target_link_libraries(test_database wavedb gtest gtest_main)
     add_test(NAME test_database COMMAND test_database)
+
+    # Test for transaction_id
+    add_executable(test_transaction_id tests/test_transaction_id.cpp)
+    target_link_libraries(test_transaction_id wavedb gtest gtest_main)
+    add_test(NAME test_transaction_id COMMAND test_transaction_id)
+
+    # Test for section variable-size storage
+    add_executable(test_section_variable tests/test_section_variable.cpp)
+    target_link_libraries(test_section_variable wavedb gtest gtest_main)
+    add_test(NAME test_section_variable COMMAND test_section_variable)
 endif()
 
 # Optional: Build examples

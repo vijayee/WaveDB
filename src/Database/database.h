@@ -13,6 +13,7 @@
 #include "../Time/debouncer.h"
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
+#include "../Storage/sections.h"
 #include "database_lru.h"
 #include "wal.h"
 
@@ -56,9 +57,9 @@ typedef struct {
     uint8_t is_rebuilding;               // Flag for recovery mode
 
     // Section-based storage (NULL for in-memory only)
-    struct sections_t* storage;          // Section pool for persistent storage
-    size_t storage_cache_size;           // LRU cache size for sections
-    size_t storage_max_tuple;            // Max open sections
+    sections_t* storage;              // Section pool for persistent storage
+    size_t storage_cache_size;         // LRU cache size for sections
+    size_t storage_max_tuple;          // Max open sections
 } database_t;
 
 /**
