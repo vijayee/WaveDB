@@ -69,6 +69,8 @@ set(WAVEDB_SOURCES
     src/Util/path_join.c
     src/Util/get_dir.c
     src/Util/perf_counters.c
+    src/Util/memory_pool.c
+    src/Util/memory_pool.c
 
     # Buffer
     src/Buffer/buffer.c

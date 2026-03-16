@@ -7,6 +7,7 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
+#include "../Util/memory_pool.h"
 #include <cbor.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -45,14 +46,16 @@ static int _section_deallocate(section_t* section, size_t offset, size_t total_b
 
 // Fragment functions
 fragment_t* fragment_create(size_t start, size_t end) {
-    fragment_t* fragment = get_memory(sizeof(fragment_t));
-    fragment->start = start;
-    fragment->end = end;
+    fragment_t* fragment = (fragment_t*)memory_pool_alloc(sizeof(fragment_t));
+    if (fragment) {
+        fragment->start = start;
+        fragment->end = end;
+    }
     return fragment;
 }
 
 void fragment_destroy(fragment_t* fragment) {
-    free(fragment);
+    memory_pool_free(fragment, sizeof(fragment_t));
 }
 
 cbor_item_t* fragment_to_cbor(fragment_t* fragment) {
