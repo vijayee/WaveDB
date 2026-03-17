@@ -175,6 +175,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_section_variable wavedb gtest gtest_main)
     add_test(NAME test_section_variable COMMAND test_section_variable)
 
+    # Test for memory pool
+    add_executable(test_memory_pool tests/test_memory_pool.cpp)
+    target_link_libraries(test_memory_pool wavedb gtest gtest_main)
+    add_test(NAME test_memory_pool COMMAND test_memory_pool)
+
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
     if(BUILD_STRESS_TESTS)
