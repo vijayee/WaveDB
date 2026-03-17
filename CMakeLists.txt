@@ -31,31 +31,12 @@ add_library(xxhash STATIC
 )
 target_include_directories(xxhash PUBLIC ${CMAKE_SOURCE_DIR}/deps/xxhash)
 
-# libcbor library
-add_library(cbor STATIC
-    deps/libcbor/src/cbor.c
-    deps/libcbor/src/allocators.c
-    deps/libcbor/src/cbor/arrays.c
-    deps/libcbor/src/cbor/bytestrings.c
-    deps/libcbor/src/cbor/callbacks.c
-    deps/libcbor/src/cbor/common.c
-    deps/libcbor/src/cbor/encoding.c
-    deps/libcbor/src/cbor/floats_ctrls.c
-    deps/libcbor/src/cbor/ints.c
-    deps/libcbor/src/cbor/maps.c
-    deps/libcbor/src/cbor/strings.c
-    deps/libcbor/src/cbor/tags.c
-    deps/libcbor/src/cbor/streaming.c
-    deps/libcbor/src/cbor/serialization.c
-    deps/libcbor/src/cbor/internal/builder_callbacks.c
-    deps/libcbor/src/cbor/internal/encoders.c
-    deps/libcbor/src/cbor/internal/loaders.c
-    deps/libcbor/src/cbor/internal/memory_utils.c
-    deps/libcbor/src/cbor/internal/stack.c
-    deps/libcbor/src/cbor/internal/unicode.c
-)
-target_include_directories(cbor PUBLIC ${CMAKE_SOURCE_DIR}/deps/libcbor/src)
-target_compile_definitions(cbor PRIVATE CBOR_PRETTY_PRINTER=ON)
+# libcbor library - use libcbor's CMake build system
+set(CBOR_PRETTY_PRINTER ON CACHE BOOL "Include a pretty-printing routine" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build as a shared library" FORCE)
+set(WITH_TESTS OFF CACHE BOOL "Build unit tests" FORCE)
+set(WITH_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
+add_subdirectory(deps/libcbor)
 
 # WaveDB library sources
 set(WAVEDB_SOURCES
