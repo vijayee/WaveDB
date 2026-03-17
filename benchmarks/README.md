@@ -4,18 +4,39 @@ This directory contains performance benchmarks and regression detection tools fo
 
 ## Quick Start
 
-### Run Benchmarks
+### Build Benchmarks
 
 ```bash
-# Build benchmarks
+# Configure with benchmarks enabled
 cmake .. -DBUILD_BENCHMARKS=ON
-make benchmark
 
-# Run all benchmarks
-./scripts/run_benchmarks.sh
+# Build all benchmarks
+make benchmark_wal benchmark_sections benchmark_database
+
+# Or build all at once
+make
 ```
 
-### Check for Regressions
+### Run Benchmarks via CMake (Recommended)
+
+```bash
+# Run individual benchmarks
+make run_benchmark_wal
+make run_benchmark_sections
+make run_benchmark_database
+
+# Run all benchmarks at once
+make run_benchmarks
+
+# Results are displayed in terminal
+```
+
+### Run Benchmarks via Script (Alternative)
+
+```bash
+# Run all benchmarks with baseline comparison
+./scripts/run_benchmarks.sh
+```
 
 ```bash
 # Run performance regression checks (fails if >10% degradation)

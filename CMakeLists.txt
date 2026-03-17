@@ -213,6 +213,67 @@ if(BUILD_BENCHMARKS)
     # Database benchmarks
     add_executable(benchmark_database tests/benchmark/benchmark_database.cpp)
     target_link_libraries(benchmark_database benchmark_base wavedb Threads::Threads)
+
+    # Create benchmark output directory
+    add_custom_target(benchmark_output_dir
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
+        COMMENT "Creating benchmark output directory"
+    )
+
+    # Run individual benchmarks
+    add_custom_target(run_benchmark_wal
+        COMMAND benchmark_wal
+        DEPENDS benchmark_wal benchmark_output_dir
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running WAL benchmarks"
+    )
+
+    add_custom_target(run_benchmark_sections
+        COMMAND benchmark_sections
+        DEPENDS benchmark_sections benchmark_output_dir
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running Section benchmarks"
+    )
+
+    add_custom_target(run_benchmark_database
+        COMMAND benchmark_database
+        DEPENDS benchmark_database benchmark_output_dir
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running Database benchmarks (note: may have lock errors when run sequentially)"
+    )
+
+    # Run all benchmarks
+    add_custom_target(run_benchmarks
+        COMMAND echo "=========================================="
+        COMMAND echo "Running All Benchmarks"
+        COMMAND echo "=========================================="
+        COMMAND echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "WAL Benchmarks:"
+        COMMAND benchmark_wal
+        COMMAND echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Section Benchmarks:"
+        COMMAND benchmark_sections
+        COMMAND echo ""
+        COMMAND ${CMAKE_COMMAND} -E echo "Database Benchmarks:"
+        COMMAND benchmark_database
+        DEPENDS benchmark_wal benchmark_sections benchmark_database benchmark_output_dir
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running all benchmarks (WAL, Sections, Database)"
+    )
+
+    # Alias for convenience
+    add_custom_target(benchmark DEPENDS run_benchmarks)
+
+    # Run benchmarks with JSON output
+    add_custom_target(run_benchmarks_json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
+        COMMAND benchmark_wal > ${CMAKE_SOURCE_DIR}/.benchmarks/wal_results.txt 2>&1
+        COMMAND benchmark_sections > ${CMAKE_SOURCE_DIR}/.benchmarks/sections_results.txt 2>&1
+        COMMAND benchmark_database > ${CMAKE_SOURCE_DIR}/.benchmarks/database_results.txt 2>&1
+        DEPENDS benchmark_wal benchmark_sections benchmark_database
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Running benchmarks and saving results to .benchmarks/"
+    )
 endif()
 
 # Stress tests
