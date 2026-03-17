@@ -33,20 +33,25 @@ python3 scripts/generate_perf_report.py .benchmarks performance_report.json
 
 ### Available Benchmarks
 
-1. **benchmark_wal** - WAL write performance
+1. **benchmark_wal** - WAL write performance ✓
    - Single write latency
    - Batch write throughput
    - WAL rotation overhead
+   - Status: **Working**
 
-2. **benchmark_sections** - Section pool performance
+2. **benchmark_sections** - Section pool performance ✓
    - Fragment allocation/deallocation
    - Concurrent write throughput
    - Lock contention analysis
+   - Status: **Working**
 
-3. **benchmark_database** - End-to-end database performance
+3. **benchmark_database** - End-to-end database performance ⚠️
    - Put/Get/Delete latency
    - Concurrent workload throughput
    - Mixed workload performance
+   - Status: **Known Issue** - Lock initialization errors when running multiple
+     benchmarks in sequence. Individual benchmarks work correctly.
+   - **Workaround**: Run benchmarks separately or use `test_database` for validation
 
 ### Stress Tests
 
