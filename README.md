@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="wave_fuji.svg" alt="WaveDB Logo" width="200">
+</div>
+
 # WaveDB
 
 A C implementation of an HBTrie (Hierarchical B+Tree) data structure for efficient hierarchical key-value storage.
