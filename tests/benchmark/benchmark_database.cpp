@@ -10,6 +10,7 @@
 #include <future>
 #include <vector>
 #include <thread>
+#include <unistd.h>  // for getpid()
 extern "C" {
 #include "Database/database.h"
 #include "Time/wheel.h"
@@ -25,6 +26,14 @@ extern "C" {
 // Test configuration
 #define DATABASE_BENCH_ITERATIONS 100
 #define DATABASE_BENCH_BATCH_SIZE 1000
+
+// Global context for benchmark
+typedef struct {
+    work_pool_t* pool;
+    hierarchical_timing_wheel_t* wheel;
+    database_t* db;
+    char test_dir[256];
+} bench_context_t;
 
 // Context for async callbacks
 typedef struct {
@@ -76,16 +85,18 @@ static identifier_t* make_value(const char* data) {
 }
 
 // Setup helper
-static void setup_database(work_pool_t** pool, hierarchical_timing_wheel_t** wheel,
-                          database_t** db, const char* test_dir) {
-    *pool = work_pool_create(platform_core_count());
-    work_pool_launch(*pool);
+static void setup_database(bench_context_t* ctx) {
+    ctx->pool = work_pool_create(platform_core_count());
+    work_pool_launch(ctx->pool);
 
-    *wheel = hierarchical_timing_wheel_create(8, *pool);
-    hierarchical_timing_wheel_run(*wheel);
+    ctx->wheel = hierarchical_timing_wheel_create(8, ctx->pool);
+    hierarchical_timing_wheel_run(ctx->wheel);
+
+    // Create temporary test directory
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
 
     int error = 0;
-    *db = database_create(test_dir, 1000, 128 * 1024, 4, 4096, 0, 0, *pool, *wheel, &error);
+    ctx->db = database_create(ctx->test_dir, 1000, 128 * 1024, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
     if (error != 0) {
         fprintf(stderr, "Failed to create database: %d\n", error);
         exit(1);
@@ -93,30 +104,65 @@ static void setup_database(work_pool_t** pool, hierarchical_timing_wheel_t** whe
 }
 
 // Teardown helper
-static void teardown_database(work_pool_t* pool, hierarchical_timing_wheel_t* wheel, database_t* db) {
-    if (db) {
-        database_destroy(db);
+static void teardown_database(bench_context_t* ctx) {
+    if (ctx->db) {
+        database_destroy(ctx->db);
     }
 
-    if (wheel) {
-        hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-        hierarchical_timing_wheel_stop(wheel);
+    if (ctx->wheel) {
+        hierarchical_timing_wheel_wait_for_idle_signal(ctx->wheel);
+        hierarchical_timing_wheel_stop(ctx->wheel);
     }
 
-    if (pool) {
-        work_pool_shutdown(pool);
-        work_pool_join_all(pool);
-        work_pool_destroy(pool);
+    if (ctx->pool) {
+        work_pool_shutdown(ctx->pool);
+        work_pool_join_all(ctx->pool);
     }
 
-    if (wheel) {
-        hierarchical_timing_wheel_destroy(wheel);
+    if (ctx->pool) {
+        work_pool_destroy(ctx->pool);
+    }
+
+    if (ctx->wheel) {
+        hierarchical_timing_wheel_destroy(ctx->wheel);
+    }
+
+    // Cleanup test directory
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", ctx->test_dir);
+    system(cmd);
+}
+
+// Pre-populate database with test data
+static void populate_database(database_t* db, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        char key[32], value[32];
+        snprintf(key, sizeof(key), "key_%lu", i);
+        snprintf(value, sizeof(value), "value_%lu", i);
+
+        path_t* path = make_path(key);
+        identifier_t* val = make_value(value);
+
+        std::promise<void> promise;
+        bench_ctx* ctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+        ctx->promise = &promise;
+        promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
+
+        // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
+        database_put(db, priority, path, val, prom);
+        promise.get_future().get();
+
+        promise_destroy(prom);
+        path_destroy(path);
+        identifier_destroy(val);
     }
 }
 
 // Benchmark: Single Put operation
 static void benchmark_database_put(void* user_data, uint64_t iterations) {
-    database_t* db = (database_t*)user_data;
+    bench_context_t* bctx = (bench_context_t*)user_data;
+    database_t* db = bctx->db;
 
     for (uint64_t i = 0; i < iterations; i++) {
         char key[32], value[32];
@@ -131,7 +177,8 @@ static void benchmark_database_put(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        priority_t priority = {0, 0};  // Default priority for benchmarks
+        // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
         database_put(db, priority, path, val, prom);
         promise.get_future().get();
 
@@ -143,7 +190,8 @@ static void benchmark_database_put(void* user_data, uint64_t iterations) {
 
 // Benchmark: Single Get operation (requires pre-populated data)
 static void benchmark_database_get(void* user_data, uint64_t iterations) {
-    database_t* db = (database_t*)user_data;
+    bench_context_t* bctx = (bench_context_t*)user_data;
+    database_t* db = bctx->db;
 
     for (uint64_t i = 0; i < iterations; i++) {
         char key[32];
@@ -156,7 +204,8 @@ static void benchmark_database_get(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_get_callback, bench_error_callback, ctx);
 
-        priority_t priority = {1, 1}; // Static priority for benchmarks
+        // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
         database_get(db, priority, path, prom);
         promise.get_future().get();
 
@@ -167,7 +216,8 @@ static void benchmark_database_get(void* user_data, uint64_t iterations) {
 
 // Benchmark: Single Delete operation
 static void benchmark_database_delete(void* user_data, uint64_t iterations) {
-    database_t* db = (database_t*)user_data;
+    bench_context_t* bctx = (bench_context_t*)user_data;
+    database_t* db = bctx->db;
 
     for (uint64_t i = 0; i < iterations; i++) {
         char key[32];
@@ -180,7 +230,8 @@ static void benchmark_database_delete(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        priority_t priority = {1, 1}; // Static priority for benchmarks
+        // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
         database_delete(db, priority, path, prom);
         promise.get_future().get();
 
@@ -191,7 +242,8 @@ static void benchmark_database_delete(void* user_data, uint64_t iterations) {
 
 // Benchmark: Batch Put operations
 static void benchmark_database_batch_put(void* user_data, uint64_t iterations) {
-    database_t* db = (database_t*)user_data;
+    bench_context_t* bctx = (bench_context_t*)user_data;
+    database_t* db = bctx->db;
 
     for (uint64_t i = 0; i < iterations; i++) {
         char key[32], value[32];
@@ -206,7 +258,8 @@ static void benchmark_database_batch_put(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        priority_t priority = {0, 0};  // Default priority for benchmarks
+        // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
         database_put(db, priority, path, val, prom);
         promise.get_future().get();
 
@@ -218,7 +271,8 @@ static void benchmark_database_batch_put(void* user_data, uint64_t iterations) {
 
 // Benchmark: Mixed workload (70% read, 20% write, 10% delete)
 static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
-    database_t* db = (database_t*)user_data;
+    bench_context_t* bctx = (bench_context_t*)user_data;
+    database_t* db = bctx->db;
 
     for (uint64_t i = 0; i < iterations; i++) {
         int op = rand() % 100;
@@ -235,7 +289,8 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_get_callback, bench_error_callback, ctx);
 
-            priority_t priority = {1, 1}; // Static priority for benchmarks
+            // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
             database_get(db, priority, path, prom);
             promise.get_future().get();
 
@@ -255,7 +310,8 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-            priority_t priority = {1, 1}; // Static priority for benchmarks
+            // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
             database_put(db, priority, path, val, prom);
             promise.get_future().get();
 
@@ -274,7 +330,8 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-            priority_t priority = {1, 1}; // Static priority for benchmarks
+            // Use static priority for benchmarks (avoids linking priority.c)
+        priority_t priority = {1, 1};
             database_delete(db, priority, path, prom);
             promise.get_future().get();
 
@@ -284,51 +341,20 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
     }
 }
 
-// Pre-populate database with test data
-static void populate_database(database_t* db, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        char key[32], value[32];
-        snprintf(key, sizeof(key), "key_%lu", i);
-        snprintf(value, sizeof(value), "value_%lu", i);
-
-        path_t* path = make_path(key);
-        identifier_t* val = make_value(value);
-
-        std::promise<void> promise;
-        bench_ctx* ctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        ctx->promise = &promise;
-        promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
-
-        priority_t priority = {0, 0};  // Default priority for benchmarks
-        database_put(db, priority, path, val, prom);
-        promise.get_future().get();
-
-        promise_destroy(prom);
-        path_destroy(path);
-        identifier_destroy(val);
-    }
-}
-
 void run_database_benchmarks(void) {
     printf("========================================\n");
     printf("Database Integration Benchmarks\n");
     printf("========================================\n\n");
 
-    // Create temporary test directory
-    char test_dir[] = "/tmp/wavedb_bench_XXXXXX";
-    mkdtemp(test_dir);
-
     // Setup
-    work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
-    database_t* db = nullptr;
-    setup_database(&pool, &wheel, &db, test_dir);
+    bench_context_t ctx;
+    setup_database(&ctx);
 
     printf("Setup complete. Running benchmarks...\n\n");
 
     // Pre-populate for read benchmarks
     printf("Pre-populating database with %d entries...\n", DATABASE_BENCH_BATCH_SIZE);
-    populate_database(db, DATABASE_BENCH_BATCH_SIZE);
+    populate_database(ctx.db, DATABASE_BENCH_BATCH_SIZE);
     printf("Pre-population complete.\n\n");
 
     // Benchmark 1: Single Put operation
@@ -336,7 +362,7 @@ void run_database_benchmarks(void) {
     benchmark_metrics_t put_metrics = benchmark_run(
         "Database Put (single)",
         benchmark_database_put,
-        db,
+        &ctx,
         DATABASE_BENCH_ITERATIONS,
         DATABASE_BENCH_ITERATIONS
     );
@@ -348,7 +374,7 @@ void run_database_benchmarks(void) {
     benchmark_metrics_t get_metrics = benchmark_run(
         "Database Get (single)",
         benchmark_database_get,
-        db,
+        &ctx,
         DATABASE_BENCH_ITERATIONS,
         DATABASE_BENCH_ITERATIONS
     );
@@ -360,7 +386,7 @@ void run_database_benchmarks(void) {
     benchmark_metrics_t batch_metrics = benchmark_run(
         "Database Put (batch)",
         benchmark_database_batch_put,
-        db,
+        &ctx,
         DATABASE_BENCH_ITERATIONS,
         DATABASE_BENCH_BATCH_SIZE
     );
@@ -372,7 +398,7 @@ void run_database_benchmarks(void) {
     benchmark_metrics_t mixed_metrics = benchmark_run(
         "Database Mixed",
         benchmark_database_mixed,
-        db,
+        &ctx,
         DATABASE_BENCH_ITERATIONS,
         DATABASE_BENCH_BATCH_SIZE
     );
@@ -384,7 +410,7 @@ void run_database_benchmarks(void) {
     benchmark_metrics_t delete_metrics = benchmark_run(
         "Database Delete (single)",
         benchmark_database_delete,
-        db,
+        &ctx,
         DATABASE_BENCH_ITERATIONS,
         DATABASE_BENCH_ITERATIONS
     );
@@ -392,12 +418,7 @@ void run_database_benchmarks(void) {
     printf("\n");
 
     // Teardown
-    teardown_database(pool, wheel, db);
-
-    // Cleanup test directory
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    system(cmd);
+    teardown_database(&ctx);
 
     printf("========================================\n");
     printf("Database Benchmarks Complete\n");
