@@ -66,6 +66,7 @@ set(WAVEDB_SOURCES
     src/HBTrie/hbtrie.c
     src/HBTrie/bs_array.c
     src/HBTrie/bnode.c
+    src/HBTrie/mvcc.c
 
     # Time
     src/Time/ticker.c
@@ -160,6 +161,12 @@ if(BUILD_TESTS)
     add_executable(test_memory_pool tests/test_memory_pool.cpp)
     target_link_libraries(test_memory_pool wavedb gtest gtest_main)
     add_test(NAME test_memory_pool COMMAND test_memory_pool)
+
+    # Test for MVCC
+    add_executable(test_mvcc tests/test_mvcc.cpp)
+    target_link_libraries(test_mvcc wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_mvcc COMMAND test_mvcc)
+
 
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)

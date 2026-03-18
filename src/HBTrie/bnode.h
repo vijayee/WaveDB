@@ -10,6 +10,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../Util/vec.h"
 #include "../Util/threadding.h"
+#include "../Workers/transaction_id.h"
 #include "chunk.h"
 #include "identifier.h"
 
@@ -21,6 +22,21 @@ extern "C" {
 struct hbtrie_node_t;
 
 /**
+ * version_entry_t - Version metadata for MVCC.
+ *
+ * Each entry stores multiple versions as a doubly-linked list.
+ * Newest versions are at the front of the chain.
+ */
+typedef struct version_entry_t {
+    refcounter_t refcounter;           // MUST be first member
+    transaction_id_t txn_id;            // Transaction that created this version
+    identifier_t* value;                // Value for this version (or NULL if deleted)
+    uint8_t is_deleted;                 // Tombstone marker (1 if deleted)
+    struct version_entry_t* next;       // Newer version (NULL if newest)
+    struct version_entry_t* prev;      // Older version (NULL if oldest)
+} version_entry_t;
+
+/**
  * bnode_entry_t - Entry in a B+tree node.
  *
  * Each entry maps a single chunk to either a child HBTrie node or a leaf value.
@@ -29,9 +45,14 @@ typedef struct bnode_entry_t {
     chunk_t* key;                      // Single chunk for comparison
     union {
         struct hbtrie_node_t* child;   // Next HBTrie node (if has_value == 0)
-        identifier_t* value;            // Leaf value (if has_value == 1)
+        identifier_t* value;            // Leaf value (if has_value == 1 and has_versions == 0)
+        version_entry_t* versions;      // Version chain (if has_value == 1 and has_versions == 1)
     };
-    uint8_t has_value;                  // 0 = child node, 1 = value
+    uint8_t has_value;                  // 0 = child node, 1 = value or versions
+    uint8_t has_versions;               // 1 if version chain present, 0 for legacy single value
+
+    // Transaction ID for legacy mode (valid when has_value == 1 and has_versions == 0)
+    transaction_id_t value_txn_id;
 
     // Storage location for lazy-loaded children
     // Valid only when has_value == 0 and child pointer is loaded from disk
@@ -166,6 +187,71 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key);
  * @return <0 if a < b, 0 if a == b, >0 if a > b
  */
 int bnode_entry_compare(bnode_entry_t* a, chunk_t* key);
+
+// ============================================================================
+// MVCC Version Chain Functions
+// ============================================================================
+
+/**
+ * Create a version entry (refcounted).
+ *
+ * @param txn_id      Transaction ID for this version
+ * @param value       Value for this version (takes ownership of reference)
+ * @param is_deleted  1 if this is a tombstone (deletion marker), 0 otherwise
+ * @return New version entry or NULL on failure
+ */
+version_entry_t* version_entry_create(transaction_id_t txn_id,
+                                       identifier_t* value,
+                                       uint8_t is_deleted);
+
+/**
+ * Destroy a version entry (dereference).
+ *
+ * @param entry  Version entry to destroy
+ */
+void version_entry_destroy(version_entry_t* entry);
+
+/**
+ * Find the visible version for a transaction.
+ *
+ * Walks the version chain to find the newest version that is visible
+ * to the given transaction (txn_id <= read_txn_id and not deleted before read).
+ *
+ * @param versions      Version chain head
+ * @param read_txn_id   Transaction ID for visibility check
+ * @return Visible version entry, or NULL if not visible/deleted
+ */
+version_entry_t* version_entry_find_visible(version_entry_t* versions,
+                                             transaction_id_t read_txn_id);
+
+/**
+ * Add a new version to the chain.
+ *
+ * Creates a new version entry and inserts it at the front of the chain.
+ * The chain is ordered newest-first for O(1) access to recent versions.
+ *
+ * @param versions      Pointer to version chain head (updated to new head)
+ * @param txn_id        Transaction ID for the new version
+ * @param value         Value for the new version (takes ownership of reference)
+ * @param is_deleted    1 if this is a tombstone, 0 otherwise
+ * @return 0 on success, -1 on failure
+ */
+int version_entry_add(version_entry_t** versions,
+                      transaction_id_t txn_id,
+                      identifier_t* value,
+                      uint8_t is_deleted);
+
+/**
+ * Garbage collect old versions from a version chain.
+ *
+ * Removes versions older than min_active_txn_id.
+ * Always keeps at least one version (newest committed).
+ *
+ * @param versions           Pointer to version chain head
+ * @param min_active_txn_id  Oldest transaction ID that may still be active
+ * @return Number of versions removed
+ */
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id);
 
 #ifdef __cplusplus
 }

@@ -7,8 +7,6 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
-#include "../Buffer/buffer.h"
-#include "../Time/debouncer.h"
 #include "../Storage/sections.h"
 #include "../Storage/node_serializer.h"
 #include <cbor.h>
@@ -41,7 +39,6 @@ typedef struct {
 } database_delete_ctx_t;
 
 // Forward declarations
-static void database_snapshot_callback(void* ctx);
 static void _database_put(database_put_ctx_t* ctx);
 static void _database_get(database_get_ctx_t* ctx);
 static void _database_delete(database_delete_ctx_t* ctx);
@@ -111,14 +108,14 @@ static char* create_index_path(const char* location, uint64_t id, uint32_t crc) 
 
 // Save HBTrie to disk
 static int save_index(database_t* db) {
-    uint32_t crc = hbtrie_compute_hash(db->write_trie);
+    uint32_t crc = hbtrie_compute_hash(db->trie);
 
     char* index_file = create_index_path(db->location, 0, crc);  // TODO: use incrementing ID
     if (index_file == NULL) return -1;
 
     uint8_t* buf = NULL;
     size_t len = 0;
-    if (hbtrie_serialize(db->write_trie, &buf, &len) != 0) {
+    if (hbtrie_serialize(db->trie, &buf, &len) != 0) {
         free(index_file);
         return -1;
     }
@@ -250,7 +247,7 @@ static int replay_wal(database_t* db) {
                 path_t* path = cbor_to_path(path_cbor, db->chunk_size);
                 identifier_t* value = cbor_to_identifier(value_cbor, db->chunk_size);
                 if (path && value) {
-                    hbtrie_insert(db->write_trie, path, value);
+                    hbtrie_insert(db->trie, path, value);
                     identifier_destroy(value);
                     path_destroy(path);
                 }
@@ -260,7 +257,7 @@ static int replay_wal(database_t* db) {
                 cbor_item_t* path_cbor = cbor_array_get(item, 0);
                 path_t* path = cbor_to_path(path_cbor, db->chunk_size);
                 if (path) {
-                    identifier_t* removed = hbtrie_remove(db->write_trie, path);
+                    identifier_t* removed = hbtrie_remove(db->trie, path);
                     if (removed) identifier_destroy(removed);
                     path_destroy(path);
                 }
@@ -325,11 +322,6 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
 
     // Initialize locks
     platform_lock_init(&db->write_lock);
-    platform_rw_lock_init(&db->read_lock);
-    platform_lock_init(&db->callback_lock);
-    platform_condition_init(&db->callback_done);
-    db->callback_in_progress = 0;
-    db->destroy_requested = 0;
 
     // Initialize storage if persistence is enabled
     if (enable_persist) {
@@ -357,37 +349,38 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
             db->storage_cache_size = cache_size;
             db->storage_max_tuple = section_concurrency;
 
-            // Attach storage to write_trie
-            db->write_trie->root->storage = db->storage;
+            // Attach storage to trie
+            db->trie->root->storage = db->storage;
         }
     } else {
         db->storage = NULL;
     }
 
-    // Load or create write_trie
-    db->write_trie = load_index(location, db->chunk_size, db->btree_node_size);
-    if (db->write_trie == NULL) {
-        db->write_trie = hbtrie_create(db->chunk_size, db->btree_node_size);
+    // Load or create trie
+    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
+    if (db->trie == NULL) {
+        db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // If using storage, attach it to write_trie
-    if (db->storage != NULL && db->write_trie->root != NULL) {
-        db->write_trie->root->storage = db->storage;
+    // If using storage, attach it to trie
+    if (db->storage != NULL && db->trie->root != NULL) {
+        db->trie->root->storage = db->storage;
     }
 
-    // Create read_trie copy (or share for in-memory only)
-    if (enable_persist && db->storage != NULL) {
-        // With persistent storage, read_trie shares the same root
-        // (lazy loading will handle on-demand loading)
-        db->read_trie = db->write_trie;  // TODO: Implement proper read/write separation
-        refcounter_reference((refcounter_t*)db->read_trie);
-    } else {
-        // In-memory only: create copy for read lock
-        db->read_trie = hbtrie_copy(db->write_trie);
+    if (db->trie == NULL) {
+        if (db->storage) sections_destroy(db->storage);
+        database_lru_cache_destroy(db->lru);
+        platform_lock_destroy(&db->write_lock);
+        free(db->location);
+        free(db);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
     }
 
-    if (db->read_trie == NULL) {
-        hbtrie_destroy(db->write_trie);
+    // Create transaction manager for MVCC
+    db->tx_manager = tx_manager_create(db->trie, pool, wheel, 100);  // 100ms GC interval
+    if (db->tx_manager == NULL) {
+        hbtrie_destroy(db->trie);
         if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
         platform_lock_destroy(&db->write_lock);
@@ -405,9 +398,6 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
     replay_wal(db);
     db->is_rebuilding = 0;
 
-    // Create debouncer
-    db->debouncer = debouncer_create(wheel, db, database_snapshot_callback, NULL,
-                                      DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
 
     refcounter_init((refcounter_t*)db);
     return db;
@@ -418,32 +408,13 @@ void database_destroy(database_t* db) {
 
     refcounter_dereference((refcounter_t*)db);
     if (refcounter_count((refcounter_t*)db) == 0) {
-        // Signal that destroy is requested to prevent new callbacks
-        platform_lock(&db->callback_lock);
-        db->destroy_requested = 1;
-        // Wait for any in-progress callback to complete
-        while (db->callback_in_progress) {
-            platform_condition_wait(&db->callback_lock, &db->callback_done);
-        }
-        platform_unlock(&db->callback_lock);
-
-        // Flush any pending writes
-        if (db->debouncer) {
-            debouncer_flush(db->debouncer);
-            debouncer_destroy(db->debouncer);
-        }
-
         if (db->wal) wal_destroy(db->wal);
 
-        // Destroy tries
-        if (db->read_trie != db->write_trie) {
-            // Separate read and write tries (in-memory mode)
-            hbtrie_destroy(db->read_trie);
-            hbtrie_destroy(db->write_trie);
-        } else {
-            // Shared trie (persistent mode, only destroy once)
-            hbtrie_destroy(db->write_trie);
-        }
+        // Destroy trie
+        if (db->trie) hbtrie_destroy(db->trie);
+
+        // Destroy transaction manager
+        if (db->tx_manager) tx_manager_destroy(db->tx_manager);
 
         // Destroy storage if present
         if (db->storage) {
@@ -454,9 +425,6 @@ void database_destroy(database_t* db) {
 
         // Destroy locks
         platform_lock_destroy(&db->write_lock);
-        platform_rw_lock_destroy(&db->read_lock);
-        platform_lock_destroy(&db->callback_lock);
-        platform_condition_destroy(&db->callback_done);
 
         free(db->location);
         refcounter_destroy_lock((refcounter_t*)db);
@@ -464,47 +432,7 @@ void database_destroy(database_t* db) {
     }
 }
 
-static void database_snapshot_callback(void* ctx) {
-    database_t* db = (database_t*)ctx;
 
-    // Check if destroy is in progress
-    platform_lock(&db->callback_lock);
-    if (db->destroy_requested) {
-        platform_unlock(&db->callback_lock);
-        return;
-    }
-    db->callback_in_progress = 1;
-    platform_unlock(&db->callback_lock);
-
-    // Acquire write lock
-    platform_lock(&db->write_lock);
-
-    // Save write_trie to disk
-    save_index(db);
-
-    // Copy write_trie to new read_trie
-    hbtrie_t* new_read_trie = hbtrie_copy(db->write_trie);
-
-    // Swap read_trie pointer
-    platform_rw_lock_w(&db->read_lock);
-    hbtrie_t* old_read_trie = db->read_trie;
-    db->read_trie = new_read_trie;
-    platform_rw_unlock_w(&db->read_lock);
-
-    // Release write lock
-    platform_unlock(&db->write_lock);
-
-    // Destroy old read_trie
-    if (old_read_trie) {
-        hbtrie_destroy(old_read_trie);
-    }
-
-    // Signal that callback is complete
-    platform_lock(&db->callback_lock);
-    db->callback_in_progress = 0;
-    platform_signal_condition(&db->callback_done);
-    platform_unlock(&db->callback_lock);
-}
 
 static void _database_put(database_put_ctx_t* ctx) {
     database_t* db = ctx->db;
@@ -512,32 +440,34 @@ static void _database_put(database_put_ctx_t* ctx) {
     identifier_t* value = ctx->value;
     promise_t* promise = ctx->promise;
 
-    // Generate transaction ID
-    transaction_id_t txn_id = transaction_id_get_next();
+    // Begin MVCC transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        path_destroy(path);
+        identifier_destroy(value);
+        free(ctx);
+        promise_resolve(promise, NULL);
+        return;
+    }
 
     // Write to WAL first (durability)
     buffer_t* entry = encode_put_entry(path, value);
     if (entry != NULL) {
-        wal_write(db->wal, txn_id, WAL_PUT, entry);
+        wal_write(db->wal, txn->txn_id, WAL_PUT, entry);
         buffer_destroy(entry);
     }
 
-    // Acquire write lock
+    // Acquire write lock (serializes writers)
     platform_lock(&db->write_lock);
 
-    // Check write_trie
-    if (db->write_trie == NULL) {
-        platform_unlock(&db->write_lock);
-        promise_resolve(promise, NULL);
-        free(ctx);
-        return;
-    }
-
-    // Apply to write_trie
-    hbtrie_insert(db->write_trie, path, value);
+    // Apply to trie with MVCC
+    hbtrie_insert_mvcc(db->trie, path, value, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_lock);
+
+    // Commit transaction
+    tx_manager_commit(db->tx_manager, txn);
 
     // Update LRU cache
     path_t* copied_path = path_copy(path);
@@ -547,14 +477,10 @@ static void _database_put(database_put_ctx_t* ctx) {
         identifier_destroy(ejected);
     }
 
-    // Trigger debounce
-    if (!db->is_rebuilding) {
-        debouncer_debounce(db->debouncer);
-    }
-
     // Clean up
     path_destroy(path);
     identifier_destroy(value);
+    txn_desc_destroy(txn);
     free(ctx);
 
     promise_resolve(promise, NULL);
@@ -574,14 +500,11 @@ static void _database_get(database_get_ctx_t* ctx) {
         return;
     }
 
-    // Acquire read lock on read_trie
-    platform_rw_lock_r(&db->read_lock);
+    // Get last committed transaction ID (lock-free read)
+    transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
 
-    // Look up in read_trie
-    value = hbtrie_find(db->read_trie, path);
-
-    // Release read lock
-    platform_rw_unlock_r(&db->read_lock);
+    // Look up in trie with MVCC (lock-free!)
+    value = hbtrie_find_mvcc(db->trie, path, read_txn_id);
 
     // Add to LRU cache if found
     if (value != NULL) {
@@ -601,32 +524,37 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     path_t* path = ctx->path;
     promise_t* promise = ctx->promise;
 
-    // Generate transaction ID
-    transaction_id_t txn_id = transaction_id_get_next();
+    // Begin transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        path_destroy(path);
+        promise_resolve(promise, NULL);
+        free(ctx);
+        return;
+    }
 
     // Write to WAL
     buffer_t* entry = encode_delete_entry(path);
     if (entry != NULL) {
-        wal_write(db->wal, txn_id, WAL_DELETE, entry);
+        wal_write(db->wal, txn->txn_id, WAL_DELETE, entry);
         buffer_destroy(entry);
     }
 
-    // Acquire write lock
+    // Acquire write lock (serialize writers)
     platform_lock(&db->write_lock);
 
-    // Remove from write_trie
-    identifier_t* removed = hbtrie_remove(db->write_trie, path);
+    // Remove from trie with MVCC (creates tombstone)
+    identifier_t* removed = hbtrie_delete_mvcc(db->trie, path, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_lock);
 
+    // Commit transaction
+    tx_manager_commit(db->tx_manager, txn);
+    txn_desc_destroy(txn);
+
     // Remove from LRU cache
     database_lru_cache_delete(db->lru, path);
-
-    // Trigger debounce
-    if (!db->is_rebuilding) {
-        debouncer_debounce(db->debouncer);
-    }
 
     path_destroy(path);
     free(ctx);
@@ -741,8 +669,11 @@ void database_delete(database_t* db, priority_t priority, path_t* path, promise_
 int database_snapshot(database_t* db) {
     if (db == NULL) return -1;
 
-    database_snapshot_callback(db);
-    return 0;
+    // MVCC: Trigger GC to clean up old versions
+    tx_manager_gc(db->tx_manager);
+
+    // Save index to disk
+    return save_index(db);
 }
 
 size_t database_count(database_t* db) {

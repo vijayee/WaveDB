@@ -3,7 +3,10 @@
 //
 
 #include "hbtrie.h"
+#include "mvcc.h"
+#include "bnode.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -77,8 +80,8 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
   node->is_loaded = 1;           // Newly created nodes are in memory
   node->is_dirty = 0;            // Not modified yet
 
-  refcounter_init((refcounter_t*)node);
   platform_lock_init(&node->lock);
+  refcounter_init((refcounter_t*)node);
 
   return node;
 }
@@ -903,4 +906,299 @@ hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint3
   cbor_decref(&cbor);
 
   return trie;
+}
+
+// ============================================================================
+// MVCC Operations
+// ============================================================================
+
+identifier_t* hbtrie_find_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t read_txn_id) {
+  if (trie == NULL || path == NULL) {
+    return NULL;
+  }
+
+  // No lock needed for MVCC reads - lock-free!
+  hbtrie_node_t* current = trie->root;
+  size_t path_len_ids = path_length(path);
+
+  if (path_len_ids == 0) {
+    return NULL;
+  }
+
+  // Traverse through each identifier in the path
+  for (size_t i = 0; i < path_len_ids; i++) {
+    identifier_t* identifier = path_get(path, i);
+    if (identifier == NULL) {
+      return NULL;
+    }
+
+    size_t nchunk = identifier_chunk_count(identifier);
+
+    // Traverse through chunks of this identifier
+    for (size_t j = 0; j < nchunk; j++) {
+      chunk_t* chunk = identifier_get_chunk(identifier, j);
+      if (chunk == NULL) {
+        return NULL;
+      }
+
+      size_t index;
+      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+
+      int is_last_chunk = (j == nchunk - 1);
+      int is_last_identifier = (i == path_len_ids - 1);
+
+      if (is_last_chunk && is_last_identifier) {
+        // Final position - check version chain for visible version
+        if (entry == NULL || !entry->has_value) {
+          return NULL;  // No entry or no value
+        }
+
+        if (entry->has_versions) {
+          // MVCC: Find visible version
+          version_entry_t* visible = version_entry_find_visible(entry->versions, read_txn_id);
+          if (visible == NULL || visible->value == NULL) {
+            return NULL;  // Deleted or not visible
+          }
+          return (identifier_t*)refcounter_reference((refcounter_t*)visible->value);
+        } else {
+          // Legacy: single value
+          if (entry->value == NULL) {
+            return NULL;
+          }
+          return (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+        }
+      } else if (is_last_chunk) {
+        // End of this identifier, move to next HBTrie level
+        if (entry == NULL || entry->has_value || entry->child == NULL) {
+          return NULL;
+        }
+        current = entry->child;
+      } else {
+        // Intermediate chunk within this identifier
+        if (entry == NULL || entry->has_value || entry->child == NULL) {
+          return NULL;
+        }
+        current = entry->child;
+      }
+    }
+  }
+
+  return NULL;
+}
+
+identifier_t* hbtrie_find_with_txn(hbtrie_t* trie, path_t* path, txn_desc_t* txn) {
+  if (txn == NULL) return NULL;
+  return hbtrie_find_mvcc(trie, path, txn->txn_id);
+}
+
+int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transaction_id_t txn_id) {
+  if (trie == NULL || path == NULL || value == NULL) {
+    return -1;
+  }
+
+  // Acquire write lock (serializes writers)
+  platform_lock(&trie->lock);
+
+  hbtrie_node_t* current = trie->root;
+  size_t path_len_ids = path_length(path);
+
+  if (path_len_ids == 0) {
+    platform_unlock(&trie->lock);
+    return -1;
+  }
+
+  // Track path for node creation
+  vec_t(struct { hbtrie_node_t* node; size_t chunk_index; }) path_stack;
+  vec_init(&path_stack);
+
+  // Traverse/create path
+  for (size_t i = 0; i < path_len_ids; i++) {
+    identifier_t* identifier = path_get(path, i);
+    if (identifier == NULL) {
+      vec_deinit(&path_stack);
+      platform_unlock(&trie->lock);
+      return -1;
+    }
+
+    size_t nchunk = identifier_chunk_count(identifier);
+
+    for (size_t j = 0; j < nchunk; j++) {
+      chunk_t* chunk = identifier_get_chunk(identifier, j);
+      if (chunk == NULL) {
+        vec_deinit(&path_stack);
+        platform_unlock(&trie->lock);
+        return -1;
+      }
+
+      size_t index;
+      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+
+      int is_last_chunk = (j == nchunk - 1);
+      int is_last_identifier = (i == path_len_ids - 1);
+
+      if (is_last_chunk && is_last_identifier) {
+        // Final position - insert value with version chain
+        if (entry == NULL) {
+          // Create new entry
+          bnode_entry_t new_entry = {0};
+          new_entry.key = chunk_share(chunk);
+          new_entry.has_value = 1;
+          new_entry.has_versions = 0;  // Legacy mode for first value
+          new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)value);
+          new_entry.value_txn_id = txn_id;  // Store transaction ID
+
+          if (bnode_insert(current->btree, &new_entry) != 0) {
+            chunk_destroy(new_entry.key);
+            vec_deinit(&path_stack);
+            platform_unlock(&trie->lock);
+            return -1;
+          }
+        } else {
+          // Entry exists - upgrade to version chain or add version
+          if (!entry->has_value) {
+            // Entry exists but no value - set first value (legacy mode)
+            entry->has_value = 1;
+            entry->has_versions = 0;
+            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
+            entry->value_txn_id = txn_id;  // Store transaction ID
+          } else if (entry->has_versions) {
+            // Already has version chain - add new version
+            if (version_entry_add(&entry->versions, txn_id,
+                                 (identifier_t*)refcounter_reference((refcounter_t*)value), 0) != 0) {
+              vec_deinit(&path_stack);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+          } else {
+            // Legacy single value - upgrade to version chain
+            // Save the value pointer before upgrading (union will be reused)
+            identifier_t* old_value = entry->value;
+
+            version_entry_t* old_version = version_entry_create(
+                entry->value_txn_id,  // Use stored txn_id
+                old_value,
+                0
+            );
+            if (old_version == NULL) {
+              vec_deinit(&path_stack);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+
+            entry->versions = old_version;
+            entry->has_versions = 1;
+            // entry->value is now in the union with versions, so we don't need to set it
+
+            // Add new version
+            if (version_entry_add(&entry->versions, txn_id,
+                                 (identifier_t*)refcounter_reference((refcounter_t*)value), 0) != 0) {
+              version_entry_destroy(old_version);
+              entry->has_versions = 0;
+              entry->versions = NULL;
+              vec_deinit(&path_stack);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+          }
+        }
+      } else if (is_last_chunk) {
+        // End of identifier - move to next HBTrie level
+        if (entry == NULL) {
+          // Create child node
+          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+          if (child == NULL) {
+            vec_deinit(&path_stack);
+            platform_unlock(&trie->lock);
+            return -1;
+          }
+
+          bnode_entry_t new_entry = {0};
+          new_entry.key = chunk_share(chunk);
+          new_entry.has_value = 0;
+          new_entry.child = child;
+
+          if (bnode_insert(current->btree, &new_entry) != 0) {
+            chunk_destroy(new_entry.key);
+            hbtrie_node_destroy(child);
+            vec_deinit(&path_stack);
+            platform_unlock(&trie->lock);
+            return -1;
+          }
+
+          current = child;
+        } else if (entry->has_value) {
+          // Entry exists but has value instead of child
+          vec_deinit(&path_stack);
+          platform_unlock(&trie->lock);
+          return -1;
+        } else {
+          current = entry->child;
+        }
+      } else {
+        // Intermediate chunk - move deeper
+        if (entry == NULL) {
+          // Create child node
+          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+          if (child == NULL) {
+            vec_deinit(&path_stack);
+            platform_unlock(&trie->lock);
+            return -1;
+          }
+
+          bnode_entry_t new_entry = {0};
+          new_entry.key = chunk_share(chunk);
+          new_entry.has_value = 0;
+          new_entry.child = child;
+
+          if (bnode_insert(current->btree, &new_entry) != 0) {
+            chunk_destroy(new_entry.key);
+            hbtrie_node_destroy(child);
+            vec_deinit(&path_stack);
+            platform_unlock(&trie->lock);
+            return -1;
+          }
+
+          current = child;
+        } else if (entry->has_value) {
+          vec_deinit(&path_stack);
+          platform_unlock(&trie->lock);
+          return -1;
+        } else {
+          current = entry->child;
+        }
+      }
+    }
+  }
+
+  vec_deinit(&path_stack);
+  platform_unlock(&trie->lock);
+  return 0;
+}
+
+identifier_t* hbtrie_delete_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t txn_id) {
+  // TODO: Implement delete as tombstone
+  // For proof-of-concept, we'll use a simplified approach
+  // Production would create a tombstone version
+
+  if (trie == NULL || path == NULL) {
+    return NULL;
+  }
+
+  platform_lock(&trie->lock);
+
+  // For now, just find the value and create a tombstone version
+  identifier_t* existing = hbtrie_find_mvcc(trie, path, txn_id);
+
+  // TODO: Create tombstone version
+  // For proof-of-concept, this is a placeholder
+
+  platform_unlock(&trie->lock);
+  return existing;
+}
+
+size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
+  // TODO: Implement full trie traversal for GC
+  // Proof-of-concept: This is a placeholder
+  // Production would traverse all nodes and call version_entry_gc on each entry
+  return 0;
 }

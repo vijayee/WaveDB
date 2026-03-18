@@ -7,6 +7,7 @@
 #include "chunk.h"
 #include "identifier.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include <string.h>
 
 #define DEFAULT_NODE_SIZE 4096
@@ -39,9 +40,20 @@ void bnode_destroy(bnode_t* node) {
       if (entry->key != NULL) {
         chunk_destroy(entry->key);
       }
-      if (entry->has_value && entry->value != NULL) {
-        identifier_destroy(entry->value);
-      } else if (!entry->has_value && entry->child != NULL) {
+      if (entry->has_value) {
+        if (entry->has_versions && entry->versions != NULL) {
+          // MVCC: destroy version chain
+          version_entry_t* current = entry->versions;
+          while (current != NULL) {
+            version_entry_t* next = current->next;
+            version_entry_destroy(current);
+            current = next;
+          }
+        } else if (entry->value != NULL) {
+          // Legacy: single value
+          identifier_destroy(entry->value);
+        }
+      } else if (entry->child != NULL) {
         // Child node should be destroyed separately
         // (reference counting handles this)
       }
@@ -213,4 +225,126 @@ int bnode_entry_compare(bnode_entry_t* a, chunk_t* key) {
   if (a == NULL) return -1;
   if (key == NULL) return 1;
   return chunk_compare(a->key, key);
+}
+
+// ============================================================================
+// MVCC Version Chain Functions
+// ============================================================================
+
+version_entry_t* version_entry_create(transaction_id_t txn_id,
+                                       identifier_t* value,
+                                       uint8_t is_deleted) {
+  version_entry_t* entry = get_clear_memory(sizeof(version_entry_t));
+  if (entry == NULL) return NULL;
+
+  entry->txn_id = txn_id;
+  entry->value = value;  // Takes ownership of reference
+  entry->is_deleted = is_deleted;
+  entry->next = NULL;
+  entry->prev = NULL;
+
+  refcounter_init((refcounter_t*)entry);
+  return entry;
+}
+
+void version_entry_destroy(version_entry_t* entry) {
+  if (entry == NULL) return;
+
+  refcounter_dereference((refcounter_t*)entry);
+  if (refcounter_count((refcounter_t*)entry) == 0) {
+    // Free value if present
+    if (entry->value != NULL) {
+      identifier_destroy(entry->value);
+    }
+
+    // Detach from chain
+    if (entry->next != NULL) {
+      entry->next->prev = entry->prev;
+    }
+    if (entry->prev != NULL) {
+      entry->prev->next = entry->next;
+    }
+
+    free(entry);
+  }
+}
+
+version_entry_t* version_entry_find_visible(version_entry_t* versions,
+                                             transaction_id_t read_txn_id) {
+  version_entry_t* current = versions;
+
+  // Walk the chain (newest first)
+  while (current != NULL) {
+    // Check if this version is visible
+    if (transaction_id_compare(&current->txn_id, &read_txn_id) <= 0) {
+      // txn_id <= read_txn_id, so this version is visible
+      if (!current->is_deleted) {
+        return current;  // Found a visible, non-deleted version
+      }
+      // Deleted version - no visible version exists
+      return NULL;
+    }
+    current = current->next;  // Try older version
+  }
+
+  // No visible version found
+  return NULL;
+}
+
+int version_entry_add(version_entry_t** versions,
+                      transaction_id_t txn_id,
+                      identifier_t* value,
+                      uint8_t is_deleted) {
+  if (versions == NULL) return -1;
+
+  // Create new version
+  version_entry_t* new_version = version_entry_create(txn_id, value, is_deleted);
+  if (new_version == NULL) return -1;
+
+  // Insert at front of chain (newest first)
+  if (*versions != NULL) {
+    new_version->next = *versions;
+    (*versions)->prev = new_version;
+  }
+
+  *versions = new_version;
+  return 0;
+}
+
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id) {
+  if (versions == NULL || *versions == NULL) return 0;
+
+  size_t removed_count = 0;
+  version_entry_t* current = *versions;
+
+  // Find the newest version (head of chain)
+  // We always keep the newest committed version
+  while (current->next != NULL) {
+    current = current->next;
+  }
+
+  // Now current is the oldest version
+  // Remove old versions starting from oldest
+  while (current != NULL && current != *versions) {
+    // Check if this version is older than min_active_txn_id
+    if (transaction_id_compare(&current->txn_id, &min_active_txn_id) < 0) {
+      version_entry_t* to_remove = current;
+      current = current->prev;
+
+      // Detach from chain
+      if (to_remove->prev != NULL) {
+        to_remove->prev->next = to_remove->next;
+      }
+      if (to_remove->next != NULL) {
+        to_remove->next->prev = to_remove->prev;
+      }
+
+      version_entry_destroy(to_remove);
+      removed_count++;
+    } else {
+      break;  // Versions are newest-first, so stop when we hit a visible one
+    }
+  }
+
+  return removed_count;
 }

@@ -19,6 +19,14 @@
 extern "C" {
 #endif
 
+// Forward declarations (for circular dependency with mvcc.h)
+struct txn_desc_t;
+typedef struct txn_desc_t txn_desc_t;
+typedef struct txn_desc_t txn_desc_t;
+
+// Note: mvcc.h is NOT included here to avoid circular dependency
+// mvcc.h includes this file (hbtrie.h)
+
 /**
  * hbtrie_node_t - HBTrie node containing a B+tree for chunk comparison.
  *
@@ -242,6 +250,67 @@ int hbtrie_serialize(hbtrie_t* trie, uint8_t** buf, size_t* len);
  * @return New HBTrie or NULL on failure
  */
 hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint32_t btree_node_size);
+
+/**
+ * Find a value in the HBTrie using MVCC visibility rules.
+ *
+ * Traverses the path and returns the version visible to the given transaction ID.
+ * This is a lock-free read operation - no locks are acquired.
+ *
+ * @param trie          HBTrie to search
+ * @param path          Path key to find
+ * @param read_txn_id   Transaction ID for visibility check
+ * @return Value if found and visible, NULL if not found or deleted
+ */
+identifier_t* hbtrie_find_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t read_txn_id);
+
+/**
+ * Find a value using a transaction descriptor.
+ *
+ * Convenience wrapper that uses the transaction's ID.
+ *
+ * @param trie  HBTrie to search
+ * @param path  Path key to find
+ * @param txn   Transaction descriptor
+ * @return Value if found and visible, NULL if not found or deleted
+ */
+identifier_t* hbtrie_find_with_txn(hbtrie_t* trie, path_t* path, txn_desc_t* txn);
+
+/**
+ * Insert a value into the HBTrie using MVCC.
+ *
+ * Creates a new version for the given transaction ID.
+ *
+ * @param trie    HBTrie to insert into
+ * @param path    Path key (sequence of identifiers)
+ * @param value   Value to store (takes ownership of reference)
+ * @param txn_id  Transaction ID for this write
+ * @return 0 on success, -1 on failure
+ */
+int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transaction_id_t txn_id);
+
+/**
+ * Delete a value from the HBTrie using MVCC.
+ *
+ * Creates a tombstone version for the given transaction ID.
+ *
+ * @param trie    HBTrie to remove from
+ * @param path    Path key to remove
+ * @param txn_id  Transaction ID for this delete
+ * @return Removed value (last visible), or NULL if not found
+ */
+identifier_t* hbtrie_delete_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t txn_id);
+
+/**
+ * Garbage collect old versions in the trie.
+ *
+ * Removes versions older than min_active_txn_id from all entries.
+ *
+ * @param trie               HBTrie to clean
+ * @param min_active_txn_id  Oldest transaction ID that may still be active
+ * @return Total number of versions removed
+ */
+size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id);
 
 #ifdef __cplusplus
 }

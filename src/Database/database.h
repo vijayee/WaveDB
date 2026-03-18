@@ -9,8 +9,8 @@
 #include <stddef.h>
 #include "../RefCounter/refcounter.h"
 #include "../HBTrie/hbtrie.h"
+#include "../HBTrie/mvcc.h"
 #include "../Time/wheel.h"
-#include "../Time/debouncer.h"
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
 #include "../Storage/sections.h"
@@ -22,12 +22,13 @@ extern "C" {
 #endif
 
 /**
- * database_t - Async key-value storage with HBTrie backend.
+ * database_t - Async key-value storage with MVCC.
  *
- * Uses copy-on-write pattern for concurrent access:
- * - Single writer thread modifies write_trie
- * - Multiple readers access read_trie (snapshot)
- * - Debouncer triggers periodic snapshots
+ * Uses MVCC (Multi-Version Concurrency Control) for concurrent access:
+ * - Single trie with version chains
+ * - Transaction manager tracks active transactions
+ * - Lock-free reads (no read lock needed)
+ * - Single writer (write lock serializes writers)
  * - WAL provides durability for writes
  *
  * Storage modes:
@@ -37,18 +38,12 @@ extern "C" {
 typedef struct {
     refcounter_t refcounter;
     PLATFORMLOCKTYPE(write_lock);       // Single-writer lock
-    PLATFORMRWLOCKTYPE(read_lock);      // Multiple-reader lock for read_trie
-    PLATFORMLOCKTYPE(callback_lock);    // Protects callback_in_progress
-    PLATFORMCONDITIONTYPE(callback_done); // Signal when callback completes
-    int callback_in_progress;           // Flag: snapshot callback is running
-    int destroy_requested;               // Flag: destroy in progress
-    hbtrie_t* write_trie;               // Mutable trie (single writer)
-    hbtrie_t* read_trie;                // Read-only snapshot (multiple readers)
+    hbtrie_t* trie;                      // Single trie with MVCC (renamed from write_trie)
+    tx_manager_t* tx_manager;           // Transaction manager for MVCC
     database_lru_cache_t* lru;          // In-memory LRU cache
     wal_t* wal;                         // Write-ahead log
-    debouncer_t* debouncer;             // Timed save debouncer
     work_pool_t* pool;                  // Thread pool for async ops
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
+    hierarchical_timing_wheel_t* wheel; // Timing wheel
     char* location;                      // Storage directory
     size_t lru_size;                     // LRU cache max size
     size_t wal_max_size;                 // WAL max size before rotation
