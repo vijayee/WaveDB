@@ -1176,29 +1176,170 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
 }
 
 identifier_t* hbtrie_delete_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t txn_id) {
-  // TODO: Implement delete as tombstone
-  // For proof-of-concept, we'll use a simplified approach
-  // Production would create a tombstone version
-
   if (trie == NULL || path == NULL) {
     return NULL;
   }
 
   platform_lock(&trie->lock);
 
-  // For now, just find the value and create a tombstone version
-  identifier_t* existing = hbtrie_find_mvcc(trie, path, txn_id);
+  // Traverse to find the entry
+  hbtrie_node_t* current = trie->root;
+  size_t path_len_ids = path_length(path);
 
-  // TODO: Create tombstone version
-  // For proof-of-concept, this is a placeholder
+  if (path_len_ids == 0) {
+    platform_unlock(&trie->lock);
+    return NULL;
+  }
+
+  // Navigate to the final position
+  for (size_t i = 0; i < path_len_ids; i++) {
+    identifier_t* identifier = path_get(path, i);
+    if (identifier == NULL) {
+      platform_unlock(&trie->lock);
+      return NULL;
+    }
+
+    size_t nchunk = identifier_chunk_count(identifier);
+
+    for (size_t j = 0; j < nchunk; j++) {
+      chunk_t* chunk = identifier_get_chunk(identifier, j);
+      if (chunk == NULL) {
+        platform_unlock(&trie->lock);
+        return NULL;
+      }
+
+      size_t index;
+      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+
+      int is_last_chunk = (j == nchunk - 1);
+      int is_last_identifier = (i == path_len_ids - 1);
+
+      if (is_last_chunk && is_last_identifier) {
+        // Final position - create tombstone version
+        if (entry == NULL || !entry->has_value) {
+          // No entry or no value to delete
+          platform_unlock(&trie->lock);
+          return NULL;
+        }
+
+        identifier_t* last_visible = NULL;
+
+        if (entry->has_versions) {
+          // Has version chain - find last visible version to return
+          version_entry_t* visible = version_entry_find_visible(entry->versions, txn_id);
+          if (visible != NULL && !visible->is_deleted) {
+            last_visible = (identifier_t*)refcounter_reference((refcounter_t*)visible->value);
+          }
+
+          // Add tombstone version
+          if (version_entry_add(&entry->versions, txn_id, NULL, 1) != 0) {
+            if (last_visible) identifier_destroy(last_visible);
+            platform_unlock(&trie->lock);
+            return NULL;
+          }
+        } else {
+          // Legacy single value - upgrade to version chain with tombstone
+          if (entry->value != NULL) {
+            last_visible = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+
+            // Create version chain with old value and tombstone
+            version_entry_t* old_version = version_entry_create(
+                entry->value_txn_id,
+                entry->value,
+                0
+            );
+            if (old_version == NULL) {
+              if (last_visible) identifier_destroy(last_visible);
+              platform_unlock(&trie->lock);
+              return NULL;
+            }
+
+            entry->versions = old_version;
+            entry->has_versions = 1;
+            entry->value = NULL;
+
+            // Add tombstone version
+            if (version_entry_add(&entry->versions, txn_id, NULL, 1) != 0) {
+              version_entry_destroy(old_version);
+              entry->has_versions = 0;
+              entry->versions = NULL;
+              if (last_visible) identifier_destroy(last_visible);
+              platform_unlock(&trie->lock);
+              return NULL;
+            }
+          }
+        }
+
+        platform_unlock(&trie->lock);
+        return last_visible;
+      } else if (is_last_chunk) {
+        // End of identifier - move to next HBTrie level
+        if (entry == NULL || entry->has_value || entry->child == NULL) {
+          platform_unlock(&trie->lock);
+          return NULL;
+        }
+        current = entry->child;
+      } else {
+        // Intermediate chunk
+        if (entry == NULL || entry->has_value || entry->child == NULL) {
+          platform_unlock(&trie->lock);
+          return NULL;
+        }
+        current = entry->child;
+      }
+    }
+  }
 
   platform_unlock(&trie->lock);
-  return existing;
+  return NULL;
 }
 
 size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
-  // TODO: Implement full trie traversal for GC
-  // Proof-of-concept: This is a placeholder
-  // Production would traverse all nodes and call version_entry_gc on each entry
-  return 0;
+  if (trie == NULL || trie->root == NULL) {
+    return 0;
+  }
+
+  // Traverse all nodes and clean up version chains
+  size_t total_removed = 0;
+
+  // Use a stack for iterative traversal
+  vec_t(hbtrie_node_t*) stack;
+  vec_init(&stack);
+  vec_push(&stack, trie->root);
+
+  while (stack.length > 0) {
+    hbtrie_node_t* node = vec_pop(&stack);
+    if (node == NULL) continue;
+
+    // Process all entries in this node
+    for (size_t i = 0; i < node->btree->entries.length; i++) {
+      bnode_entry_t* entry = &node->btree->entries.data[i];
+
+      if (entry->has_value && entry->has_versions) {
+        // Clean up old versions
+        size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
+        total_removed += removed;
+
+        // If only one version remains and it's not deleted, downgrade to legacy mode
+        if (entry->versions != NULL &&
+            entry->versions->next == NULL &&
+            !entry->versions->is_deleted) {
+          // Single non-deleted version - convert to legacy
+          entry->value = entry->versions->value;
+          entry->value_txn_id = entry->versions->txn_id;
+          version_entry_destroy(entry->versions);
+          entry->versions = NULL;
+          entry->has_versions = 0;
+        }
+      }
+
+      // Add child nodes to stack for traversal
+      if (!entry->has_value && entry->child != NULL) {
+        vec_push(&stack, entry->child);
+      }
+    }
+  }
+
+  vec_deinit(&stack);
+  return total_removed;
 }

@@ -50,6 +50,7 @@ typedef struct {
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
+    uint64_t next_index_id;              // Incrementing ID for index files
 
     // Section-based storage (NULL for in-memory only)
     sections_t* storage;              // Section pool for persistent storage

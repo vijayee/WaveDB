@@ -109,8 +109,9 @@ static char* create_index_path(const char* location, uint64_t id, uint32_t crc) 
 // Save HBTrie to disk
 static int save_index(database_t* db) {
     uint32_t crc = hbtrie_compute_hash(db->trie);
+    uint64_t index_id = db->next_index_id++;
 
-    char* index_file = create_index_path(db->location, 0, crc);  // TODO: use incrementing ID
+    char* index_file = create_index_path(db->location, index_id, crc);
     if (index_file == NULL) return -1;
 
     uint8_t* buf = NULL;

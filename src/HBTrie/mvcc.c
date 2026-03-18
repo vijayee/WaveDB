@@ -217,19 +217,11 @@ static void tx_manager_gc_callback(void* arg) {
 size_t tx_manager_gc(tx_manager_t* manager) {
     if (manager == NULL || manager->trie == NULL) return 0;
 
-    // Get minimum active transaction ID
-    (void)manager; // TODO: GC implementation
+    // Get minimum active transaction ID (GC cutoff)
+    transaction_id_t min_active = tx_manager_get_min_active(manager);
 
     // Traverse trie and clean version chains
-    // Note: This is a proof-of-concept implementation using full traversal.
-    // Production would use an efficient version index.
-    size_t total_removed = 0;
-
-    if (manager->trie->root != NULL) {
-        // TODO: Implement trie traversal for GC
-        // For now, this is a placeholder
-        // gc_traverse_node(manager->trie->root, min_active);
-    }
+    size_t total_removed = hbtrie_gc(manager->trie, min_active);
 
     return total_removed;
 }
