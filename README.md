@@ -56,16 +56,123 @@ make -j4
 make test
 ```
 
+## Installation
+
+### From Source
+
+```bash
+# Build and install
+mkdir build && cd build
+cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
+make
+sudo make install
+```
+
+This installs:
+- Headers: `/usr/local/include/HBTrie/*.h`, `/usr/local/include/Buffer/*.h`, etc.
+- Libraries: `/usr/local/lib/libwavedb.a`, `/usr/local/lib/libxxhash.a`, `/usr/local/lib/libhashmap.a`
+- CMake config: `/usr/local/lib/cmake/WaveDB/WaveDBConfig.cmake`
+
+### Using as a CMake Dependency
+
+**Method 1: find_package (installed)**
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(myapp C)
+
+find_package(WaveDB REQUIRED)
+
+add_executable(myapp main.c)
+target_link_libraries(myapp WaveDB::wavedb)
+```
+
+**Method 2: add_subdirectory (embedded)**
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(myapp C)
+
+add_subdirectory(path/to/WaveDB)
+
+add_executable(myapp main.c)
+target_link_libraries(myapp WaveDB::wavedb)
+```
+
 ### Dependencies
 
-- C11 compiler
-- CMake 3.14+
-- pthreads (POSIX) or Windows threads
+WaveDB bundles the following dependencies:
+- **xxhash** - Fast hashing library
+- **hashmap** - Hash map implementation
+- **libcbor** - CBOR serialization
 
-Submodules:
-- [googletest](https://github.com/google/googletest) - Testing framework
-- [xxhash](https://github.com/Cyan4973/xxHash) - Hashing library
-- [hashmap](https://github.com/DavidLeeds/hashmap) - Hash map implementation
+These are installed alongside WaveDB and require no additional setup.
+
+## Installation
+
+### From Source
+
+```bash
+# Clone with submodules
+git clone --recursive https://github.com/vijayee/WaveDB.git
+cd WaveDB
+
+# Build and install
+mkdir build && cd build
+cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
+make
+make install
+```
+
+This installs:
+- Libraries: `libwavedb.a`, `libxxhash.a`, `libhashmap.a` in `/usr/local/lib`
+- Headers: All headers in `/usr/local/include/` (preserving directory structure)
+- CMake config: `/usr/local/lib/cmake/WaveDB/WaveDBConfig.cmake`
+
+### Using as CMake Dependency
+
+#### Method 1: find_package (installed)
+
+After installing WaveDB system-wide or to a custom prefix:
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(myapp C)
+
+find_package(WaveDB REQUIRED)
+
+add_executable(myapp main.c)
+target_link_libraries(myapp WaveDB::wavedb)
+```
+
+Build with:
+```bash
+cmake -DCMAKE_PREFIX_PATH=/usr/local ..
+make
+```
+
+#### Method 2: add_subdirectory (embedded)
+
+For embedding WaveDB in your project:
+
+```cmake
+cmake_minimum_required(VERSION 3.14)
+project(myapp C)
+
+add_subdirectory(path/to/WaveDB)
+
+add_executable(myapp main.c)
+target_link_libraries(myapp WaveDB::wavedb)
+```
+
+### Dependencies
+
+WaveDB bundles the following dependencies:
+- **xxhash** - Fast hash algorithm
+- **hashmap** - Hash map implementation
+- **libcbor** - CBOR encoding/decoding
+
+These are installed alongside WaveDB and require no additional setup.
 
 ## Usage
 

@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Find threads dependency
+find_dependency(Threads REQUIRED)
+
+# libcbor is installed alongside WaveDB - include its config
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/../libcbor/libcborConfig.cmake")
+    include("${CMAKE_CURRENT_LIST_DIR}/../libcbor/libcborConfig.cmake")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/WaveDBTargets.cmake")
+
+# Check that all required components are found
+check_required_components(WaveDB)

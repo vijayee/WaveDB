@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(WaveDB C CXX)
+project(WaveDB VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -11,25 +11,19 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror=return-type")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0")
 set(CMAKE_C_FLAGS_RELEASE "-O3")
 
-# Include directories
-include_directories(${CMAKE_SOURCE_DIR}/src)
-include_directories(${CMAKE_SOURCE_DIR}/src/Util)
-include_directories(${CMAKE_SOURCE_DIR}/src/Buffer)
-include_directories(${CMAKE_SOURCE_DIR}/src/RefCounter)
-include_directories(${CMAKE_SOURCE_DIR}/src/HBTrie)
-include_directories(${CMAKE_SOURCE_DIR}/src/Database)
-include_directories(${CMAKE_SOURCE_DIR}/src/Time)
-include_directories(${CMAKE_SOURCE_DIR}/src/Workers)
-include_directories(${CMAKE_SOURCE_DIR}/src/Storage)
-include_directories(${CMAKE_SOURCE_DIR}/deps/xxhash)
-include_directories(${CMAKE_SOURCE_DIR}/deps/hashmap/include)
-include_directories(${CMAKE_SOURCE_DIR}/deps/libcbor/src)
+# Installation support
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 # xxHash library
 add_library(xxhash STATIC
     deps/xxhash/xxhash.c
 )
-target_include_directories(xxhash PUBLIC ${CMAKE_SOURCE_DIR}/deps/xxhash)
+target_include_directories(xxhash
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 
 # libcbor library - use libcbor's CMake build system
 set(CBOR_PRETTY_PRINTER ON CACHE BOOL "Include a pretty-printing routine" FORCE)
@@ -95,13 +89,32 @@ set(WAVEDB_SOURCES
 
 # Create WaveDB library
 add_library(wavedb STATIC ${WAVEDB_SOURCES})
+
+# Modern CMake: Use target-specific include directories
+target_include_directories(wavedb
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcbor/src
+)
+
 target_link_libraries(wavedb PUBLIC xxhash cbor)
+
+# Create namespaced alias for consumers
+add_library(WaveDB::wavedb ALIAS wavedb)
 
 # Hashmap library
 add_library(hashmap STATIC
     deps/hashmap/src/hashmap.c
 )
-target_include_directories(hashmap PUBLIC ${CMAKE_SOURCE_DIR}/deps/hashmap/include)
+target_include_directories(hashmap
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+)
 
 # Link hashmap to wavedb
 target_link_libraries(wavedb PUBLIC hashmap)
@@ -290,3 +303,56 @@ option(BUILD_EXAMPLES "Build examples" OFF)
 if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
+
+# Installation and packaging
+# Install libraries and export targets
+install(TARGETS wavedb xxhash hashmap
+    EXPORT WaveDBTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Install headers (preserving directory structure)
+install(DIRECTORY src/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h"
+)
+
+# Install dependency headers
+install(FILES
+    deps/xxhash/xxhash.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+install(FILES
+    deps/hashmap/include/hashmap.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Generate package config file
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/WaveDBConfig.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/WaveDBConfig.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/WaveDB
+)
+
+# Generate version file
+write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/WaveDBConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+# Install package config files
+install(FILES
+    ${CMAKE_CURRENT_BINARY_DIR}/WaveDBConfig.cmake
+    ${CMAKE_CURRENT_BINARY_DIR}/WaveDBConfigVersion.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/WaveDB
+)
+
+# Export targets for installation
+install(EXPORT WaveDBTargets
+    FILE WaveDBTargets.cmake
+    NAMESPACE WaveDB::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/WaveDB
+)
