@@ -172,6 +172,8 @@ static identifier_t* lru_evict(database_lru_cache_t* lru) {
     }
     lru->last = node->previous;
 
+    // Update memory tracking
+    lru->current_memory -= node->memory_size;
     lru->entry_count--;
 
     // Get value to return (caller must destroy)
@@ -270,17 +272,25 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
         // Update existing entry
         identifier_t* old_value = existing->value;
         existing->value = value;
+
+        // Update memory tracking
+        size_t old_memory = existing->memory_size;
+        existing->memory_size = calculate_entry_memory(path, value);
+        lru->current_memory += (existing->memory_size - old_memory);
+
         path_destroy(path); // We don't need the new path, keep the old one
         lru_move_to_front(lru, existing);
         platform_unlock(&lru->lock);
         return old_value; // Caller must destroy old value
     }
 
-    // Check if we need to evict
-    // Phase 1: Keep existing logic unchanged
-    // The eviction logic will be updated in Phase 3
-    if (lru->max_memory > 0 && lru->entry_count >= 1000) {
-        ejected = lru_evict(lru);
+    // Check if we need to evict (memory-based)
+    size_t entry_memory = calculate_entry_memory(path, value);
+    while (lru->current_memory + entry_memory > lru->max_memory && lru->last != NULL) {
+        identifier_t* evicted = lru_evict(lru);
+        if (evicted != NULL) {
+            identifier_destroy(evicted);
+        }
     }
 
     // Create new node
@@ -308,6 +318,8 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
         lru->last = node;
     }
 
+    // Update memory tracking
+    lru->current_memory += node->memory_size;
     lru->entry_count++;
 
     platform_unlock(&lru->lock);
@@ -344,6 +356,8 @@ void database_lru_cache_delete(database_lru_cache_t* lru, path_t* path) {
         lru->last = node->previous;
     }
 
+    // Update memory tracking
+    lru->current_memory -= node->memory_size;
     lru->entry_count--;
 
     // Free node
