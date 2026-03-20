@@ -55,6 +55,46 @@ static void free_path(path_t* path) {
     }
 }
 
+// Calculate approximate memory usage for a cache entry
+static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
+    size_t total = sizeof(database_lru_node_t);  // Node overhead
+
+    // Path memory
+    if (path != NULL) {
+        total += sizeof(path_t);
+        total += (size_t)path->identifiers.capacity * sizeof(identifier_t*);
+        for (int i = 0; i < path->identifiers.length; i++) {
+            identifier_t* id = path->identifiers.data[i];
+            if (id != NULL) {
+                total += sizeof(identifier_t);
+                total += (size_t)id->chunks.capacity * sizeof(chunk_t*);
+                for (int j = 0; j < id->chunks.length; j++) {
+                    chunk_t* chunk = id->chunks.data[j];
+                    if (chunk != NULL && chunk->data != NULL) {
+                        total += sizeof(chunk_t);
+                        total += chunk->data->size;
+                    }
+                }
+            }
+        }
+    }
+
+    // Value memory (similar calculation)
+    if (value != NULL) {
+        total += sizeof(identifier_t);
+        total += (size_t)value->chunks.capacity * sizeof(chunk_t*);
+        for (int j = 0; j < value->chunks.length; j++) {
+            chunk_t* chunk = value->chunks.data[j];
+            if (chunk != NULL && chunk->data != NULL) {
+                total += sizeof(chunk_t);
+                total += chunk->data->size;
+            }
+        }
+    }
+
+    return total;
+}
+
 // Create a new LRU node
 static database_lru_node_t* lru_node_create(path_t* path, identifier_t* value) {
     database_lru_node_t* node = get_clear_memory(sizeof(database_lru_node_t));
@@ -62,7 +102,7 @@ static database_lru_node_t* lru_node_create(path_t* path, identifier_t* value) {
 
     node->path = path;
     node->value = value;
-    node->memory_size = 0;  // Initialize to 0 (will be calculated in Phase 2)
+    node->memory_size = calculate_entry_memory(path, value);  // Calculate memory usage
     node->next = NULL;
     node->previous = NULL;
 
