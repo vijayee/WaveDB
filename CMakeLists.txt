@@ -166,6 +166,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_database wavedb gtest gtest_main)
     add_test(NAME test_database COMMAND test_database)
 
+    # Test for LRU memory-based eviction
+    add_executable(test_lru_memory tests/test_lru_memory.cpp)
+    target_link_libraries(test_lru_memory wavedb gtest gtest_main)
+    add_test(NAME test_lru_memory COMMAND test_lru_memory)
+
     # Test for transaction_id
     add_executable(test_transaction_id tests/test_transaction_id.cpp)
     target_link_libraries(test_transaction_id wavedb gtest gtest_main)

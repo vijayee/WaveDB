@@ -3,6 +3,7 @@
 //
 
 #include "database_lru.h"
+#include "database.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
 #include <stdlib.h>
@@ -199,7 +200,9 @@ database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes) {
     lru->first = NULL;
     lru->last = NULL;
     lru->current_memory = 0;
-    lru->max_memory = max_memory_bytes;
+    lru->max_memory = (max_memory_bytes == 0) ?
+        DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024 :
+        max_memory_bytes;
     lru->entry_count = 0;
 
     platform_lock_init(&lru->lock);
