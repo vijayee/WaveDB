@@ -61,7 +61,8 @@ typedef struct {
 /**
  * Default sizes
  */
-#define DATABASE_DEFAULT_LRU_SIZE 1000
+#define DATABASE_DEFAULT_LRU_SIZE 1000          // DEPRECATED: Use DATABASE_DEFAULT_LRU_MEMORY_MB
+#define DATABASE_DEFAULT_LRU_MEMORY_MB 50       // NEW: 50 MB default
 #define DATABASE_DEFAULT_WAL_MAX_SIZE (128 * 1024)  // 128KB
 #define DATABASE_DEBOUNCE_WAIT_MS 100                // Wait 100ms before save
 #define DATABASE_DEBOUNCE_MAX_WAIT_MS 1000           // Force save after 1 second
@@ -73,7 +74,7 @@ typedef struct {
  * If existing data is found, replays WAL to recover state.
  *
  * @param location          Directory path for database files
- * @param lru_size          Max LRU cache entries (0 for default)
+ * @param lru_memory_mb     LRU cache memory budget in MB (0 for default 50 MB)
  * @param wal_max_size      Max WAL file size before rotation (0 for default)
  * @param chunk_size        HBTrie chunk size (0 for default)
  * @param btree_node_size   B+tree node size (0 for default)
@@ -84,7 +85,7 @@ typedef struct {
  * @param error_code        Output error code (0 on success)
  * @return New database or NULL on failure
  */
-database_t* database_create(const char* location, size_t lru_size, size_t wal_max_size,
+database_t* database_create(const char* location, size_t lru_memory_mb, size_t wal_max_size,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
