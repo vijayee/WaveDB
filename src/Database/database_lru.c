@@ -62,6 +62,7 @@ static database_lru_node_t* lru_node_create(path_t* path, identifier_t* value) {
 
     node->path = path;
     node->value = value;
+    node->memory_size = 0;  // Initialize to 0 (will be calculated in Phase 2)
     node->next = NULL;
     node->previous = NULL;
 
@@ -131,7 +132,7 @@ static identifier_t* lru_evict(database_lru_cache_t* lru) {
     }
     lru->last = node->previous;
 
-    lru->size--;
+    lru->entry_count--;
 
     // Get value to return (caller must destroy)
     identifier_t* value = node->value;
@@ -144,7 +145,7 @@ static identifier_t* lru_evict(database_lru_cache_t* lru) {
     return value;
 }
 
-database_lru_cache_t* database_lru_cache_create(size_t max_size) {
+database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes) {
     database_lru_cache_t* lru = get_clear_memory(sizeof(database_lru_cache_t));
     if (lru == NULL) return NULL;
 
@@ -155,8 +156,9 @@ database_lru_cache_t* database_lru_cache_create(size_t max_size) {
 
     lru->first = NULL;
     lru->last = NULL;
-    lru->size = 0;
-    lru->max_size = max_size;
+    lru->current_memory = 0;
+    lru->max_memory = max_memory_bytes;
+    lru->entry_count = 0;
 
     platform_lock_init(&lru->lock);
 
@@ -235,7 +237,9 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
     }
 
     // Check if we need to evict
-    if (lru->max_size > 0 && lru->size >= lru->max_size) {
+    // Phase 1: Keep existing logic unchanged
+    // The eviction logic will be updated in Phase 3
+    if (lru->max_memory > 0 && lru->entry_count >= 1000) {
         ejected = lru_evict(lru);
     }
 
@@ -264,7 +268,7 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
         lru->last = node;
     }
 
-    lru->size++;
+    lru->entry_count++;
 
     platform_unlock(&lru->lock);
     return ejected;
@@ -300,7 +304,7 @@ void database_lru_cache_delete(database_lru_cache_t* lru, path_t* path) {
         lru->last = node->previous;
     }
 
-    lru->size--;
+    lru->entry_count--;
 
     // Free node
     lru_node_destroy(node);
@@ -344,7 +348,8 @@ void database_lru_cache_clear(database_lru_cache_t* lru) {
 
     lru->first = NULL;
     lru->last = NULL;
-    lru->size = 0;
+    lru->current_memory = 0;
+    lru->entry_count = 0;
 
     platform_unlock(&lru->lock);
 }
@@ -353,7 +358,7 @@ size_t database_lru_cache_size(database_lru_cache_t* lru) {
     if (lru == NULL) return 0;
 
     platform_lock(&lru->lock);
-    size_t size = lru->size;
+    size_t size = lru->entry_count;
     platform_unlock(&lru->lock);
 
     return size;

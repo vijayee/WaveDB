@@ -26,6 +26,7 @@ typedef struct database_lru_node_t database_lru_node_t;
 struct database_lru_node_t {
     path_t* path;                   // Key (owned by node)
     identifier_t* value;            // Value (reference counted)
+    size_t memory_size;             // Approximate memory for this entry
     database_lru_node_t* next;      // Next in LRU list (more recently used)
     database_lru_node_t* previous;  // Previous in LRU list (less recently used)
 };
@@ -40,18 +41,19 @@ typedef struct {
     PLATFORMLOCKTYPE(lock);
     HASHMAP(path_t, database_lru_node_t) cache;  // Path -> node mapping
     database_lru_node_t* first;     // Most recently used
-    database_lru_node_t* last;       // Least recently used
-    size_t size;                     // Current number of entries
-    size_t max_size;                 // Maximum entries before eviction
+    database_lru_node_t* last;      // Least recently used
+    size_t current_memory;          // Current memory usage in bytes
+    size_t max_memory;              // Maximum memory budget in bytes
+    size_t entry_count;             // Current number of entries
 } database_lru_cache_t;
 
 /**
  * Create an LRU cache.
  *
- * @param max_size Maximum number of entries before eviction (0 for unlimited)
+ * @param max_memory_bytes Maximum memory budget in bytes (0 for unlimited)
  * @return New cache or NULL on failure
  */
-database_lru_cache_t* database_lru_cache_create(size_t max_size);
+database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes);
 
 /**
  * Destroy an LRU cache.
