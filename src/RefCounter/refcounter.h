@@ -7,6 +7,14 @@
 #include <stdint.h>
 #include "../Util/threadding.h"
 
+#ifdef REFCOUNTER_ATOMIC
+  #ifdef __cplusplus
+    #include <atomic>
+  #else
+    #include <stdatomic.h>
+  #endif
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,8 +27,13 @@ extern "C" {
 
 typedef struct refcounter_t {
 #ifdef REFCOUNTER_ATOMIC
-  _Atomic uint16_t count;
-  _Atomic uint8_t yield;
+  #ifdef __cplusplus
+    ::std::atomic<uint_fast16_t> count;
+    ::std::atomic<uint_fast8_t> yield;
+  #else
+    atomic_uint_fast16_t count;
+    atomic_uint_fast8_t yield;
+  #endif
 #else
   uint16_t count;
   uint8_t yield;

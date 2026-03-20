@@ -90,6 +90,9 @@ set(WAVEDB_SOURCES
 # Create WaveDB library
 add_library(wavedb STATIC ${WAVEDB_SOURCES})
 
+# Use atomic operations for reference counting (eliminates lock overhead)
+target_compile_definitions(wavedb PUBLIC REFCOUNTER_ATOMIC)
+
 # Modern CMake: Use target-specific include directories
 target_include_directories(wavedb
     PUBLIC
@@ -102,6 +105,9 @@ target_include_directories(wavedb
 )
 
 target_link_libraries(wavedb PUBLIC xxhash cbor)
+
+# Enable atomic reference counting for better performance and thread safety
+target_compile_definitions(wavedb PRIVATE REFCOUNTER_ATOMIC)
 
 # Create namespaced alias for consumers
 add_library(WaveDB::wavedb ALIAS wavedb)
@@ -356,3 +362,6 @@ install(EXPORT WaveDBTargets
     NAMESPACE WaveDB::
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/WaveDB
 )
+# Test for threading fix
+add_executable(test_threading_fix tests/test_threading_fix.cpp)
+target_link_libraries(test_threading_fix wavedb Threads::Threads gtest gtest_main)

@@ -168,8 +168,7 @@ static void populate_database(database_t* db, size_t count) {
         promise.get_future().get();
 
         promise_destroy(prom);
-        path_destroy(path);
-        identifier_destroy(val);
+        // database_put takes ownership of path and val, so we don't destroy them here
     }
 }
 
@@ -197,8 +196,7 @@ static void benchmark_database_put(void* user_data, uint64_t iterations) {
         promise.get_future().get();
 
         promise_destroy(prom);
-        path_destroy(path);
-        identifier_destroy(val);
+        // database_put takes ownership of path and val
     }
 }
 
@@ -224,7 +222,7 @@ static void benchmark_database_get(void* user_data, uint64_t iterations) {
         promise.get_future().get();
 
         promise_destroy(prom);
-        path_destroy(path);
+        // database_put takes ownership of path
     }
 }
 
@@ -250,7 +248,7 @@ static void benchmark_database_delete(void* user_data, uint64_t iterations) {
         promise.get_future().get();
 
         promise_destroy(prom);
-        path_destroy(path);
+        // database_put takes ownership of path
     }
 }
 
@@ -278,8 +276,7 @@ static void benchmark_database_batch_put(void* user_data, uint64_t iterations) {
         promise.get_future().get();
 
         promise_destroy(prom);
-        path_destroy(path);
-        identifier_destroy(val);
+        // database_put takes ownership of path and val
     }
 }
 
@@ -309,7 +306,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             promise.get_future().get();
 
             promise_destroy(prom);
-            path_destroy(path);
+            // database_put takes ownership of path
         } else if (op < 90) {
             // Write operation (20%)
             char key[32], value[32];
@@ -330,8 +327,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             promise.get_future().get();
 
             promise_destroy(prom);
-            path_destroy(path);
-            identifier_destroy(val);
+            // database_put takes ownership of path
         } else {
             // Delete operation (10%)
             char key[32];
@@ -350,7 +346,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             promise.get_future().get();
 
             promise_destroy(prom);
-            path_destroy(path);
+            // database_put takes ownership of path
         }
     }
 }

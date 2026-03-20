@@ -26,9 +26,25 @@ static transaction_id_t g_current_txn_id = {0, 0, 0};
 // Thread-local pool
 static __thread txn_id_pool_t thread_pool = {0};
 
-// Initialize global transaction ID generator
-void transaction_id_init(void) {
+// One-time initialization control
+#if _WIN32
+static INIT_ONCE g_init_once = INIT_ONCE_STATIC_INIT;
+#else
+static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
+#endif
+
+// Actual initialization function (called once)
+static void transaction_id_do_init(void) {
     platform_lock_init(&g_txn_id_lock);
+}
+
+// Initialize global transaction ID generator (safe to call multiple times)
+void transaction_id_init(void) {
+#if _WIN32
+    InitOnceExecuteOnce(&g_init_once, transaction_id_do_init, NULL, NULL);
+#else
+    pthread_once(&g_init_once, transaction_id_do_init);
+#endif
 }
 
 // Allocate a new batch of transaction IDs from global pool

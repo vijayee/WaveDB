@@ -290,12 +290,8 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
         return NULL;
     }
 
-    // Initialize transaction ID generator (call once)
-    static int txn_id_initialized = 0;
-    if (!txn_id_initialized) {
-        transaction_id_init();
-        txn_id_initialized = 1;
-    }
+    // Initialize transaction ID generator (call once per process)
+    transaction_id_init();
 
     database_t* db = get_clear_memory(sizeof(database_t));
     if (db == NULL) {
