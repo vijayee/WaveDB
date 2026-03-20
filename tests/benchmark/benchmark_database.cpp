@@ -54,6 +54,21 @@ typedef struct {
     std::promise<void>* promise;
 } bench_ctx;
 
+// Cache metrics tracking
+typedef struct {
+    size_t current_memory;
+    size_t entry_count;
+    size_t max_memory;
+} CacheMetrics;
+
+static CacheMetrics get_cache_metrics(database_t* db) {
+    CacheMetrics metrics;
+    metrics.current_memory = db->lru->current_memory;
+    metrics.entry_count = db->lru->entry_count;
+    metrics.max_memory = db->lru->max_memory;
+    return metrics;
+}
+
 // Callback wrappers
 extern "C" void bench_callback(void* ctx, void* payload) {
     auto bctx = static_cast<bench_ctx*>(ctx);
@@ -98,6 +113,7 @@ static identifier_t* make_value(const char* data) {
     return id;
 }
 
+
 // Setup helper
 static void setup_database(bench_context_t* ctx) {
     ctx->pool = work_pool_create(platform_core_count());
@@ -110,7 +126,7 @@ static void setup_database(bench_context_t* ctx) {
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
 
     int error = 0;
-    ctx->db = database_create(ctx->test_dir, 1000, 128 * 1024, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
+    ctx->db = database_create(ctx->test_dir, 50, 128 * 1024, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
     if (error != 0) {
         fprintf(stderr, "Failed to create database: %d\n", error);
         exit(1);
@@ -431,6 +447,9 @@ void run_database_benchmarks(void) {
     benchmark_print_results(&delete_metrics);
     printf("\n");
 
+    // Collect cache metrics before teardown
+    CacheMetrics cache_metrics = get_cache_metrics(ctx.db);
+
     // Teardown
     teardown_database(&ctx);
 
@@ -450,6 +469,18 @@ void run_database_benchmarks(void) {
            mixed_metrics.operations_per_second, mixed_metrics.avg_latency_ns);
     printf("  Delete: %.0f ops/sec (avg: %.0f ns)\n",
            delete_metrics.operations_per_second, delete_metrics.avg_latency_ns);
+    printf("\n");
+
+    // Print cache metrics
+    printf("Cache Metrics:\n");
+    printf("  Max Memory Budget: %.2f MB\n", cache_metrics.max_memory / (1024.0 * 1024.0));
+    printf("  Current Memory: %.2f MB (%zu bytes)\n",
+           cache_metrics.current_memory / (1024.0 * 1024.0), cache_metrics.current_memory);
+    printf("  Entry Count: %zu\n", cache_metrics.entry_count);
+    if (cache_metrics.entry_count > 0) {
+        printf("  Avg Entry Size: %.0f bytes\n",
+               cache_metrics.current_memory / (double)cache_metrics.entry_count);
+    }
     printf("\n");
 }
 
