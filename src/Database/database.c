@@ -277,7 +277,7 @@ static int replay_wal(database_t* db) {
     return 0;
 }
 
-database_t* database_create(const char* location, size_t lru_size, size_t wal_max_size,
+database_t* database_create(const char* location, size_t lru_memory_mb, size_t wal_max_size,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
@@ -300,7 +300,7 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
     }
 
     db->location = strdup(location);
-    db->lru_size = (lru_size == 0) ? DATABASE_DEFAULT_LRU_SIZE : lru_size;
+    db->lru_size = (lru_memory_mb == 0) ? DATABASE_DEFAULT_LRU_MEMORY_MB : lru_memory_mb;
     db->wal_max_size = (wal_max_size == 0) ? DATABASE_DEFAULT_WAL_MAX_SIZE : wal_max_size;
     db->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
     db->btree_node_size = btree_node_size;
@@ -308,8 +308,13 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
     db->wheel = wheel;
     db->is_rebuilding = 0;
 
-    // Create LRU cache
-    db->lru = database_lru_cache_create(db->lru_size);
+    // Convert MB to bytes
+    size_t lru_memory_bytes = (lru_memory_mb == 0) ?
+        DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024 :
+        lru_memory_mb * 1024 * 1024;
+
+    // Create LRU cache with memory budget
+    db->lru = database_lru_cache_create(lru_memory_bytes);
     if (db->lru == NULL) {
         free(db->location);
         free(db);
@@ -387,8 +392,29 @@ database_t* database_create(const char* location, size_t lru_size, size_t wal_ma
         return NULL;
     }
 
-    // Create WAL
-    db->wal = wal_create(db->location, db->wal_max_size, error_code);
+    // Create WAL with debounced fsync for better performance
+    // Use environment variable to control sync mode (default: debounced)
+    wal_sync_mode_e sync_mode = WAL_SYNC_DEBOUNCED;  // Default to debounced for production
+    char* sync_env = getenv("WAVEDB_WAL_SYNC");
+    if (sync_env != NULL) {
+        if (strcmp(sync_env, "immediate") == 0) {
+            sync_mode = WAL_SYNC_IMMEDIATE;
+        } else if (strcmp(sync_env, "async") == 0) {
+            sync_mode = WAL_SYNC_ASYNC;
+        }
+        // else: use default (debounced)
+    }
+
+    // Create WAL with chosen sync mode
+    if (sync_mode == WAL_SYNC_DEBOUNCED) {
+        // Debounced mode requires timing wheel
+        db->wal = wal_create_with_sync(db->location, db->wal_max_size,
+                                        sync_mode, wheel, 100, error_code);
+    } else {
+        // Immediate or async mode
+        db->wal = wal_create_with_sync(db->location, db->wal_max_size,
+                                        sync_mode, NULL, 0, error_code);
+    }
 
     // Replay WAL for recovery
     db->is_rebuilding = 1;
