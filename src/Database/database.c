@@ -779,3 +779,48 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
 
     return 0;
 }
+
+int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
+    // Initialize output
+    if (result == NULL) {
+        if (path) path_destroy(path);
+        return -1;
+    }
+    *result = NULL;
+
+    // Validation
+    if (db == NULL || path == NULL) {
+        if (path) path_destroy(path);
+        return -1;
+    }
+
+    // Check LRU cache first
+    identifier_t* value = database_lru_cache_get(db->lru, path);
+    if (value != NULL) {
+        path_destroy(path);
+        *result = value;
+        return 0;
+    }
+
+    // Get last committed transaction ID (lock-free read)
+    transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
+
+    // Look up in trie with MVCC (lock-free!)
+    value = hbtrie_find_mvcc(db->trie, path, read_txn_id);
+
+    // Add to LRU cache if found
+    if (value != NULL) {
+        path_t* copied_path = path_copy(path);
+        identifier_t* cached = REFERENCE(value, identifier_t);
+        database_lru_cache_put(db->lru, copied_path, cached);
+    }
+
+    path_destroy(path);
+
+    if (value != NULL) {
+        *result = value;
+        return 0;
+    } else {
+        return -2;  // Not found
+    }
+}
