@@ -342,8 +342,84 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
 
 int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
                      wal_type_e type, buffer_t* data) {
-    // TODO: Implement
-    return -1;
+    if (twal == NULL || data == NULL) {
+        return -1;
+    }
+
+    // Acquire lock for thread safety
+    platform_lock(&twal->lock);
+
+    // Check file size limit (TODO: file rotation not implemented yet)
+    if (twal->current_size >= twal->max_size) {
+        platform_unlock(&twal->lock);
+        return -1;  // File full, needs rotation
+    }
+
+    // Prepare entry header
+    wal_entry_header_t header;
+    header.type = type;
+    header.crc32 = wal_crc32(data->data, data->size);
+    header.data_len = (uint32_t)data->size;
+
+    // Serialize header to big-endian buffer
+    uint8_t header_buf[9];  // type(1) + crc32(4) + data_len(4)
+    header_buf[0] = (uint8_t)header.type;
+    write_uint32_be(&header_buf[1], header.crc32);
+    write_uint32_be(&header_buf[5], header.data_len);
+
+    // Write header atomically with O_APPEND
+    ssize_t bytes_written = write(twal->fd, header_buf, sizeof(header_buf));
+    if (bytes_written != sizeof(header_buf)) {
+        platform_unlock(&twal->lock);
+        return -1;
+    }
+
+    // Write data
+    bytes_written = write(twal->fd, data->data, data->size);
+    if (bytes_written != (ssize_t)data->size) {
+        platform_unlock(&twal->lock);
+        return -1;
+    }
+
+    // Update file size
+    twal->current_size += sizeof(header_buf) + data->size;
+
+    // Update transaction ID tracking
+    if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
+        twal->oldest_txn_id = txn_id;
+    }
+    twal->newest_txn_id = txn_id;
+
+    // Handle sync modes
+    int result = 0;
+    switch (twal->sync_mode) {
+        case WAL_SYNC_IMMEDIATE:
+            // Fsync immediately
+            if (fsync(twal->fd) != 0) {
+                result = -1;
+            }
+            break;
+
+        case WAL_SYNC_DEBOUNCED:
+            // Debounce fsync
+            if (twal->fsync_debouncer != NULL) {
+                twal->pending_writes++;
+                debouncer_debounce(twal->fsync_debouncer);
+            }
+            break;
+
+        case WAL_SYNC_ASYNC:
+            // No fsync, rely on OS page cache
+            twal->pending_writes++;
+            break;
+
+        default:
+            result = -1;
+            break;
+    }
+
+    platform_unlock(&twal->lock);
+    return result;
 }
 
 int thread_wal_seal(thread_wal_t* twal) {

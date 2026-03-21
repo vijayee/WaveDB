@@ -91,3 +91,26 @@ TEST_F(WalManagerTest, MultipleThreadWals) {
     ASSERT_NE(twal2, nullptr);
     EXPECT_EQ(twal1, twal2);
 }
+
+TEST_F(WalManagerTest, WriteToThreadWal) {
+    int error = 0;
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    thread_wal_t* twal = get_thread_wal(manager);
+    ASSERT_NE(twal, nullptr);
+
+    // Create test data
+    const char* test_data = "Hello, WAL!";
+    buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)test_data, strlen(test_data));
+    ASSERT_NE(data, nullptr);
+
+    // Generate transaction ID
+    transaction_id_t txn_id = transaction_id_get_next();
+
+    // Write to thread-local WAL
+    int result = thread_wal_write(twal, txn_id, WAL_PUT, data);
+    EXPECT_EQ(result, 0);
+
+    buffer_destroy(data);
+}
