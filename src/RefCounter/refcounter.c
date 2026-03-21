@@ -46,8 +46,17 @@ void* refcounter_reference(refcounter_t* refcounter) {
   }
   platform_unlock(&refcounter->lock);
 #else
-  // With atomics, we don't use the yield optimization
-  // Just atomically increment the count
+  // With atomics, we need to handle yield optimization correctly
+  // Try to consume a yield first, then fall back to incrementing count
+  uint8_t expected_yield = atomic_load(&refcounter->yield);
+  while (expected_yield > 0) {
+    if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, expected_yield - 1)) {
+      // Successfully consumed a yield, don't increment count
+      return refcounter;
+    }
+    // CAS failed, expected_yield was updated with current value, retry
+  }
+  // No yield to consume, increment count normally
   atomic_fetch_add(&refcounter->count, 1);
 #endif
   return refcounter;
@@ -61,9 +70,15 @@ void refcounter_dereference(refcounter_t* refcounter) {
   }
   platform_unlock(&refcounter->lock);
 #else
-  // With atomics, we don't use the yield optimization
-  // Just atomically decrement the count
-  atomic_fetch_sub(&refcounter->count, 1);
+  // With atomics, we need to respect yield optimization
+  // Only decrement count if yield == 0 and count > 0
+  uint8_t yield_val = atomic_load(&refcounter->yield);
+  if (yield_val == 0) {
+    uint16_t count_val = atomic_load(&refcounter->count);
+    if (count_val > 0) {
+      atomic_fetch_sub(&refcounter->count, 1);
+    }
+  }
 #endif
 }
 

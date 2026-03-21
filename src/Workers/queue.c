@@ -81,6 +81,16 @@ work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
 
 void sharded_work_queue_destroy(sharded_work_queue_t* sq) {
   for (size_t i = 0; i < QUEUE_SHARDS; i++) {
+    // Drain and abort remaining work items in this shard
+    platform_lock(&sq->locks[i]);
+    work_t* work;
+    while ((work = work_dequeue(&sq->queues[i])) != NULL) {
+      // Consume yield from original enqueue and abort the work
+      refcounter_reference((refcounter_t*) work);
+      work_abort(work);
+      work_destroy(work);
+    }
+    platform_unlock(&sq->locks[i]);
     platform_lock_destroy(&sq->locks[i]);
   }
 }
