@@ -343,12 +343,15 @@ Create `tests/test_wal_manager.cpp`:
 
 class WalManagerTest : public ::testing::Test {
 protected:
-    char* temp_dir;
+    char temp_dir[256];
     wal_manager_t* manager;
     wal_config_t config;
 
     void SetUp() override {
-        temp_dir = create_temp_directory();
+        // Create temporary directory using mkdtemp
+        strcpy(temp_dir, "/tmp/wal_test_XXXXXX");
+        ASSERT_NE(mkdtemp(temp_dir), nullptr) << "Failed to create temp dir";
+
         init_default_config(&config);
         config.sync_mode = WAL_SYNC_IMMEDIATE;
         manager = nullptr;
@@ -358,7 +361,10 @@ protected:
         if (manager) {
             wal_manager_destroy(manager);
         }
-        remove_temp_directory(temp_dir);
+        // Remove temporary directory
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+        system(cmd);
     }
 };
 
@@ -862,6 +868,8 @@ git commit -m "feat: implement manifest reading with checksums
 - Modify: `tests/test_wal_manager.cpp`
 
 ### Step 5.1: Write recovery test
+
+Note: Tests use mkdtemp() to create temporary directories. This follows the pattern used in existing tests.
 
 ```cpp
 TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
