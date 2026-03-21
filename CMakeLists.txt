@@ -69,7 +69,6 @@ set(WAVEDB_SOURCES
 
     # Workers
     src/Workers/error.c
-    src/Workers/priority.c
     src/Workers/transaction_id.c
     src/Workers/work.c
     src/Workers/promise.c
@@ -92,6 +91,9 @@ add_library(wavedb STATIC ${WAVEDB_SOURCES})
 
 # Use atomic operations for reference counting (eliminates lock overhead)
 target_compile_definitions(wavedb PUBLIC REFCOUNTER_ATOMIC)
+
+# Link with atomic library for C11 atomics
+target_link_libraries(wavedb PUBLIC atomic)
 
 # Modern CMake: Use target-specific include directories
 target_include_directories(wavedb
