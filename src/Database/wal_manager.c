@@ -442,8 +442,8 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
 
     // Create debouncer if needed
     if (twal->sync_mode == WAL_SYNC_DEBOUNCED && manager->config.debounce_ms > 0) {
-        twal->wheel = NULL;  // Will be set by caller if needed
-        twal->fsync_debouncer = debouncer_create(NULL, twal,
+        twal->wheel = manager->wheel;  // Use manager's timing wheel
+        twal->fsync_debouncer = debouncer_create(manager->wheel, twal,
                                                   thread_wal_fsync_callback,
                                                   NULL,
                                                   manager->config.debounce_ms,
@@ -469,7 +469,8 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
 }
 
 // Skeleton implementations (to be filled in next tasks)
-wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, int* error_code) {
+wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
+                                   hierarchical_timing_wheel_t* wheel, int* error_code) {
     if (error_code) *error_code = 0;
 
     // Create directory if needed
@@ -498,6 +499,8 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, in
     manager->threads = NULL;
     manager->thread_count = 0;
     manager->thread_capacity = 0;
+    manager->wheel = wheel;  // Store timing wheel for debouncer
+    manager->wheel = wheel;  // Store timing wheel for debouncer
 
     // Create manifest file
     manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -535,7 +538,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
                                           wal_recovery_options_t* options,
                                           int* error_code) {
     // 1. Create manager
-    wal_manager_t* manager = wal_manager_create(location, config, error_code);
+    wal_manager_t* manager = wal_manager_create(location, config, NULL, error_code);
     if (manager == NULL) {
         return NULL;
     }
@@ -714,7 +717,7 @@ wal_manager_t* wal_manager_load_with_options(const char* location, wal_config_t*
     }
 
     // No migration needed, create or load normally
-    return wal_manager_create(location, config, error_code);
+    return wal_manager_create(location, config, NULL, error_code);
 }
 
 void wal_manager_destroy(wal_manager_t* manager) {

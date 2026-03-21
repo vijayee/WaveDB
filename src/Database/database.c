@@ -352,9 +352,9 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
         default_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
         default_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
         default_config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
-        db->wal_manager = wal_manager_create(db->location, &default_config, error_code);
+        db->wal_manager = wal_manager_create(db->location, &default_config, db->wheel, error_code);
     } else {
-        db->wal_manager = wal_manager_create(db->location, wal_config, error_code);
+        db->wal_manager = wal_manager_create(db->location, wal_config, db->wheel, error_code);
     }
 
     if (db->wal_manager == NULL) {

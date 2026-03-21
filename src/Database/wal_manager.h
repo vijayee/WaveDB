@@ -105,6 +105,7 @@ struct wal_manager {
     size_t thread_count;                 // Number of threads
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
+    hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
 };
 
 /**
@@ -126,7 +127,7 @@ typedef struct {
 /**
  * Create WAL manager
  */
-wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, int* error_code);
+wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, hierarchical_timing_wheel_t* wheel, int* error_code);
 
 /**
  * Load or create WAL manager with recovery options

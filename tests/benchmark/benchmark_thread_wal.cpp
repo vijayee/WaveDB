@@ -39,7 +39,7 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
 
     int error_code = 0;
-    ctx->manager = wal_manager_create(ctx->test_dir, &config, &error_code);
+    ctx->manager = wal_manager_create(ctx->test_dir, &config, NULL, &error_code);
     ctx->counter = 0;
 
     if (error_code != 0 || ctx->manager == NULL) {
