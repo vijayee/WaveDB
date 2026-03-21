@@ -123,8 +123,8 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
             lru->first->previous = node;
             lru->first = node;
         }
-        size_t* key = duplicate_size_t(&section->id);
-        hashmap_put(&lru->cache, key, node);
+        // Hashmap will duplicate the key via duplicate_size_t alloc func
+        hashmap_put(&lru->cache, &section->id, node);
 
         // Remove least recently used if cache is full
         size_t count = hashmap_size(&lru->cache);

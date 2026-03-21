@@ -1,12 +1,12 @@
 {
   "name": "Sync Get",
   "operations_count": 10000,
-  "total_time_ns": 4731566,
-  "min_time_ns": 416,
-  "max_time_ns": 13631,
-  "p50_time_ns": 458,
-  "p95_time_ns": 519,
-  "p99_time_ns": 625,
-  "operations_per_second": 2113465.18,
-  "avg_latency_ns": 473.16
+  "total_time_ns": 5063959,
+  "min_time_ns": 473,
+  "max_time_ns": 16177,
+  "p50_time_ns": 494,
+  "p95_time_ns": 559,
+  "p99_time_ns": 682,
+  "operations_per_second": 1974739.53,
+  "avg_latency_ns": 506.40
 }
