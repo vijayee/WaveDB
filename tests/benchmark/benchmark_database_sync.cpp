@@ -159,8 +159,9 @@ static void benchmark_sync_mixed(void* user_data, uint64_t iterations) {
             }
         } else if (op_type < 9) {
             // Write operation (20%)
-            path_t* path = generate_test_path(key_counter++);
-            identifier_t* value = generate_test_value(key_counter);
+            int current_key = key_counter++;
+            path_t* path = generate_test_path(current_key);
+            identifier_t* value = generate_test_value(current_key);
             database_put_sync(ctx->db, path, value);
         } else {
             // Delete operation (10%)
@@ -286,6 +287,9 @@ static void run_sync_benchmarks() {
 }
 
 int main(int argc, char** argv) {
+    // Ensure benchmark output directory exists
+    system("mkdir -p .benchmarks");
+
     printf("Starting synchronous database benchmarks...\n\n");
     run_sync_benchmarks();
     return 0;
