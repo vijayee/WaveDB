@@ -1,5 +1,6 @@
 # Build directories
 build/
+build-*/
 
 # IDE
 .idea/
@@ -14,6 +15,7 @@ reference/
 # Benchmark results
 .benchmarks/*_current.json
 .benchmarks/performance_report.json
+benchmark_*.txt
 
 # Benchmark results
 .benchmarks/
