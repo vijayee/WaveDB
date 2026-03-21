@@ -184,6 +184,73 @@ static void concurrent_read_worker(concurrent_bench_ctx_t* ctx) {
     ctx->total_latency_ns->fetch_add(duration_ns);
 }
 
+static void concurrent_mixed_worker(concurrent_bench_ctx_t* ctx) {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < ctx->ops_per_thread; i++) {
+        int op = rand() % 100;
+
+        if (op < 70) {
+            // Read operation (70%)
+            char key[64];
+            snprintf(key, sizeof(key), "mixedkey_%d", rand() % ctx->key_range_end);
+
+            path_t* path = make_path(key);
+
+            std::promise<void> promise;
+            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+            bctx->promise = &promise;
+            promise_t* prom = promise_create(bench_get_callback, bench_error_callback, bctx);
+
+            database_get(ctx->db, path, prom);
+            promise.get_future().get();
+            promise_destroy(prom);
+
+            ctx->total_ops->fetch_add(1);
+        } else if (op < 90) {
+            // Write operation (20%)
+            char key[64], val[64];
+            snprintf(key, sizeof(key), "mixedkey_%d", rand() % ctx->key_range_end);
+            snprintf(val, sizeof(val), "mixed_value_%d_%d", ctx->thread_id, i);
+
+            path_t* path = make_path(key);
+            identifier_t* value = make_value(val);
+
+            std::promise<void> promise;
+            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+            bctx->promise = &promise;
+            promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
+
+            database_put(ctx->db, path, value, prom);
+            promise.get_future().get();
+            promise_destroy(prom);
+
+            ctx->total_ops->fetch_add(1);
+        } else {
+            // Delete operation (10%)
+            char key[64];
+            snprintf(key, sizeof(key), "mixedkey_%d", rand() % ctx->key_range_end);
+
+            path_t* path = make_path(key);
+
+            std::promise<void> promise;
+            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+            bctx->promise = &promise;
+            promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
+
+            database_delete(ctx->db, path, prom);
+            promise.get_future().get();
+            promise_destroy(prom);
+
+            ctx->total_ops->fetch_add(1);
+        }
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    ctx->total_latency_ns->fetch_add(duration_ns);
+}
+
 static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
                                            hierarchical_timing_wheel_t* wheel,
                                            int thread_count, int ops_per_thread) {
