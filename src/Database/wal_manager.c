@@ -2,6 +2,8 @@
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
+#include "../Time/debouncer.h"
+#include "../Time/debouncer.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -10,7 +12,6 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
-#include <dirent.h>
 #include <dirent.h>
 
 // Error codes
@@ -546,18 +547,46 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     memset(&header, 0, sizeof(header));
     header.version = MANIFEST_VERSION;
     header.migration_state = MIGRATION_IN_PROGRESS;
-    // Note: migration_timestamp would require a time utility function
-    // For now, we'll skip timestamp
+
+    // Get current timestamp in milliseconds
+    timeval_t now;
+    get_time(&now);
+    header.migration_timestamp = (now.tv_sec * 1000) + (now.tv_usec / 1000);
 
     // Seek to beginning and write header
-    lseek(manager->manifest_fd, 0, SEEK_SET);
+    if (lseek(manager->manifest_fd, 0, SEEK_SET) < 0) {
+        platform_unlock(&manager->manifest_lock);
+        wal_manager_destroy(manager);
+        if (error_code) *error_code = errno;
+        return NULL;
+    }
+
     ssize_t bytes_written = write(manager->manifest_fd, &header, sizeof(header));
-    (void)bytes_written;  // Suppress unused variable warning
+    if (bytes_written != sizeof(header)) {
+        platform_unlock(&manager->manifest_lock);
+        wal_manager_destroy(manager);
+        if (error_code) *error_code = EIO;
+        return NULL;
+    }
     fsync(manager->manifest_fd);
 
     // 3. Backup legacy WAL
     char* legacy_wal = path_join(location, "current.wal");
+    if (legacy_wal == NULL) {
+        platform_unlock(&manager->manifest_lock);
+        wal_manager_destroy(manager);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
+    }
+
     char* backup_wal = path_join(location, "current.wal.backup");
+    if (backup_wal == NULL) {
+        free(legacy_wal);
+        platform_unlock(&manager->manifest_lock);
+        wal_manager_destroy(manager);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
+    }
 
     int rename_result = rename(legacy_wal, backup_wal);
     if (rename_result != 0) {
@@ -573,9 +602,27 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     strncpy(header.backup_file, backup_wal, sizeof(header.backup_file) - 1);
 
     // Seek to beginning and update header with backup path
-    lseek(manager->manifest_fd, 0, SEEK_SET);
+    if (lseek(manager->manifest_fd, 0, SEEK_SET) < 0) {
+        platform_unlock(&manager->manifest_lock);
+        rename(backup_wal, legacy_wal);
+        wal_manager_destroy(manager);
+        free(legacy_wal);
+        free(backup_wal);
+        if (error_code) *error_code = errno;
+        return NULL;
+    }
+
     bytes_written = write(manager->manifest_fd, &header, sizeof(header));
-    (void)bytes_written;
+    if (bytes_written != sizeof(header)) {
+        platform_unlock(&manager->manifest_lock);
+        rename(backup_wal, legacy_wal);
+        wal_manager_destroy(manager);
+        free(legacy_wal);
+        free(backup_wal);
+        if (error_code) *error_code = EIO;
+        return NULL;
+    }
+
     fsync(manager->manifest_fd);
 
     // Release lock before calling get_thread_wal (which also acquires manifest_lock)
@@ -589,6 +636,8 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     // Create a thread WAL for migration
     thread_wal_t* twal = get_thread_wal(manager);
     if (twal == NULL) {
+        // Release lock before cleanup
+        // (Note: lock already released before calling get_thread_wal)
         // Rollback: restore backup
         rename(backup_wal, legacy_wal);
         wal_manager_destroy(manager);
@@ -601,9 +650,28 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     // 5. Mark migration complete
     platform_lock(&manager->manifest_lock);
     header.migration_state = MIGRATION_COMPLETE;
-    lseek(manager->manifest_fd, 0, SEEK_SET);
+
+    if (lseek(manager->manifest_fd, 0, SEEK_SET) < 0) {
+        platform_unlock(&manager->manifest_lock);
+        rename(backup_wal, legacy_wal);
+        wal_manager_destroy(manager);
+        free(legacy_wal);
+        free(backup_wal);
+        if (error_code) *error_code = errno;
+        return NULL;
+    }
+
     bytes_written = write(manager->manifest_fd, &header, sizeof(header));
-    (void)bytes_written;
+    if (bytes_written != sizeof(header)) {
+        platform_unlock(&manager->manifest_lock);
+        rename(backup_wal, legacy_wal);
+        wal_manager_destroy(manager);
+        free(legacy_wal);
+        free(backup_wal);
+        if (error_code) *error_code = EIO;
+        return NULL;
+    }
+
     fsync(manager->manifest_fd);
 
     platform_unlock(&manager->manifest_lock);
