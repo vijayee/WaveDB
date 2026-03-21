@@ -506,6 +506,109 @@ protected:
 };
 ```
 
+## Debouncer Lifecycle
+
+### Always Flush Debouncers Before Destroying
+
+**CRITICAL RULE:** When destroying objects that hold debouncers, you **MUST** call `debouncer_flush()` before `debouncer_destroy()`. The debouncer schedules asynchronous operations on the timing wheel, and if you destroy it without flushing, those operations will still be queued and may try to access destroyed resources.
+
+**Correct Pattern:**
+```c
+void my_object_destroy(my_object_t* obj) {
+    if (obj == NULL) return;
+
+    refcounter_dereference((refcounter_t*) obj);
+    if (refcounter_count((refcounter_t*) obj) == 0) {
+        // Flush debouncer BEFORE destroying
+        if (obj->debouncer != NULL) {
+            debouncer_flush(obj->debouncer);     // Execute pending operations synchronously
+            debouncer_destroy(obj->debouncer);   // Now safe to destroy
+            obj->debouncer = NULL;
+        }
+
+        // Destroy other resources
+        free(obj->data);
+        refcounter_destroy_lock(&obj->refcounter);
+        free(obj);
+    }
+}
+```
+
+**Why This Matters:**
+
+1. **Debouncers hold timing wheel references**: A debouncer schedules callbacks to run later on the timing wheel
+2. **Timing wheel executes asynchronously**: Even after you call `my_object_destroy()`, the timing wheel still has pending work items
+3. **Use-after-free risk**: Those work items hold pointers to your object, which is now destroyed
+4. **Race conditions**: Sequential test runs fail because pending callbacks from test N crash during test N+1
+
+**Real Bug Example:**
+```c
+// WRONG: Debouncer destroyed without flushing
+void wal_manager_destroy(wal_manager_t* manager) {
+    if (twal->fsync_debouncer != NULL) {
+        debouncer_destroy(twal->fsync_debouncer);  // Bug: Pending fsync still queued!
+    }
+    // Result: Timing wheel tries to call fsync callback on destroyed WAL
+}
+
+// CORRECT: Flush first, then destroy
+void wal_manager_destroy(wal_manager_t* manager) {
+    if (twal->fsync_debouncer != NULL) {
+        debouncer_flush(twal->fsync_debouncer);    // Execute pending fsync now
+        debouncer_destroy(twal->fsync_debouncer);  // Safe to destroy
+    }
+}
+```
+
+**When to Flush:**
+
+- **Object destruction**: Always flush before destroying objects with debouncers (WAL, database, etc.)
+- **Before resource cleanup**: If your object has pending operations, flush them before freeing dependent resources
+- **Test teardown**: Flush debouncers in TearDown() before destroying timing wheels or work pools
+
+**Debouncer Flush Guarantees:**
+
+- `debouncer_flush()` executes pending callbacks **synchronously**
+- All queued operations complete before `debouncer_flush()` returns
+- After flush, no more callbacks will fire from this debouncer
+- Safe to call on NULL (returns immediately)
+- Idempotent (calling flush multiple times is safe)
+
+### Testing with Debouncers
+
+When testing code that uses debouncers with timing wheels:
+
+```c
+class MyTest : public ::testing::Test {
+protected:
+    void TearDown() override {
+        // Destroy objects with debouncers FIRST (they'll flush internally)
+        if (database) {
+            database_destroy(database);  // Internally flushes debouncers
+            database = nullptr;
+        }
+
+        // Now safe to stop timing wheel
+        if (wheel) {
+            hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+            hierarchical_timing_wheel_stop(wheel);
+            hierarchical_timing_wheel_destroy(wheel);
+            wheel = nullptr;
+        }
+
+        // Finally, destroy work pool
+        if (pool) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+            work_pool_destroy(pool);
+            pool = nullptr;
+        }
+    }
+};
+```
+
+**Key Insight:** The destruction order matters. Objects with debouncers must be destroyed **before** stopping the timing wheel, because they flush their debouncers during destruction. If you stop the wheel first, flush can't execute the pending operations.
+
 ## Summary Checklist
 
 - [ ] `refcounter_t` is first member of reference-counted structs
@@ -520,6 +623,7 @@ protected:
 - [ ] `hierarchical_timing_wheel_wait_for_idle_signal()` called before `stop()`
 - [ ] `work_pool_shutdown()` + `work_pool_join_all()` before `work_pool_destroy()`
 - [ ] Use `platform_core_count()` for pool size, not hardcoded values
+- [ ] **Debouncers: ALWAYS call `debouncer_flush()` before `debouncer_destroy()`**
 
 ## Work Pool and Timing Wheel Lifecycle
 
