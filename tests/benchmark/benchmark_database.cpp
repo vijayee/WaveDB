@@ -765,6 +765,49 @@ void run_database_benchmarks(void) {
     benchmark_print_results(&delete_metrics);
     printf("\n");
 
+    printf("========================================\n");
+    printf("Concurrent Throughput Benchmarks\n");
+    printf("========================================\n\n");
+
+    // Test thread counts
+    int thread_counts[] = {1, 2, 4, 8, 16};
+    int num_configs = sizeof(thread_counts) / sizeof(thread_counts[0]);
+    int ops_per_thread = 1000;  // Operations per thread
+    int prepopulate_count = 10000;  // Keys to pre-populate for read/mixed tests
+
+    // Arrays to store results for summary
+    uint64_t write_ops[num_configs];
+    uint64_t read_ops[num_configs];
+    uint64_t mixed_ops[num_configs];
+
+    // Run concurrent write benchmark for each thread count
+    printf("--- Concurrent Write Benchmark ---\n");
+    for (int i = 0; i < num_configs; i++) {
+        run_concurrent_write_benchmark(ctx.db, ctx.pool, ctx.wheel,
+                                       thread_counts[i], ops_per_thread);
+        // Store result (extracted from output parsing or passed back)
+        // For now, results are printed inline
+    }
+    printf("\n");
+
+    // Run concurrent read benchmark for each thread count
+    printf("--- Concurrent Read Benchmark ---\n");
+    for (int i = 0; i < num_configs; i++) {
+        run_concurrent_read_benchmark(ctx.db, ctx.pool, ctx.wheel,
+                                      thread_counts[i], ops_per_thread,
+                                      prepopulate_count);
+    }
+    printf("\n");
+
+    // Run concurrent mixed benchmark for each thread count
+    printf("--- Concurrent Mixed Benchmark ---\n");
+    for (int i = 0; i < num_configs; i++) {
+        run_concurrent_mixed_benchmark(ctx.db, ctx.pool, ctx.wheel,
+                                       thread_counts[i], ops_per_thread,
+                                       prepopulate_count);
+    }
+    printf("\n");
+
     // Collect cache metrics before teardown
     CacheMetrics cache_metrics = get_cache_metrics(ctx.db);
 
