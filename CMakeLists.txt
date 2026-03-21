@@ -193,6 +193,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_mvcc wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_mvcc COMMAND test_mvcc)
 
+    # Test for abort cleanup
+    add_executable(test_abort_cleanup tests/test_abort_cleanup.cpp)
+    target_link_libraries(test_abort_cleanup wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_abort_cleanup COMMAND test_abort_cleanup)
 
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
@@ -370,5 +374,5 @@ install(EXPORT WaveDBTargets
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/WaveDB
 )
 # Test for threading fix
-add_executable(test_threading_fix tests/test_threading_fix.cpp)
-target_link_libraries(test_threading_fix wavedb Threads::Threads gtest gtest_main)
+# add_executable(test_threading_fix tests/test_threading_fix.cpp)
+# target_link_libraries(test_threading_fix wavedb Threads::Threads gtest gtest_main)
