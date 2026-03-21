@@ -1,14 +1,12 @@
 //
-// Thread-Local WAL Benchmarks
-// Performance comparison: legacy WAL vs thread-local WAL
+// Thread-Local WAL Benchmarks (Simplified)
+// Performance comparison: IMMEDIATE vs ASYNC modes
 //
 
 #include "benchmark_base.h"
 #include "../../src/Database/wal_manager.h"
 #include "../../src/Buffer/buffer.h"
 #include "../../src/Workers/transaction_id.h"
-#include "../../src/Time/wheel.h"
-#include "../../src/Workers/pool.h"
 #include "../../src/Util/allocator.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,8 +22,6 @@ extern "C" {
 typedef struct {
     wal_manager_t* manager;
     thread_wal_t* twal;
-    hierarchical_timing_wheel_t* wheel;
-    work_pool_t* pool;
     char test_dir[256];
     uint64_t counter;
 } thread_wal_ctx_t;
@@ -35,21 +31,6 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/thread_wal_bench_%s_%d", test_name, getpid());
     mkdir(ctx->test_dir, 0755);
 
-    // Create work pool and timing wheel for debouncer (needed for DEBOUNCED mode)
-    ctx->pool = work_pool_create(4);  // 4 worker threads
-    if (ctx->pool == NULL) {
-        fprintf(stderr, "Failed to create work pool\n");
-        exit(1);
-    }
-
-    ctx->wheel = hierarchical_timing_wheel_create(8, ctx->pool);  // 8 slots
-    if (ctx->wheel == NULL) {
-        fprintf(stderr, "Failed to create timing wheel\n");
-        work_pool_destroy(ctx->pool);
-        exit(1);
-    }
-    hierarchical_timing_wheel_run(ctx->wheel);
-
     wal_config_t config;
     config.sync_mode = sync_mode;
     config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
@@ -58,13 +39,12 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
 
     int error_code = 0;
-    ctx->manager = wal_manager_create(ctx->test_dir, &config, ctx->wheel, &error_code);
+    // Pass NULL for timing wheel (only works for IMMEDIATE and ASYNC modes)
+    ctx->manager = wal_manager_create(ctx->test_dir, &config, NULL, &error_code);
     ctx->counter = 0;
 
     if (error_code != 0 || ctx->manager == NULL) {
         fprintf(stderr, "Failed to create WAL manager: error_code=%d\n", error_code);
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-        work_pool_destroy(ctx->pool);
         exit(1);
     }
 
@@ -72,8 +52,6 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     if (ctx->twal == NULL) {
         fprintf(stderr, "Failed to get thread WAL\n");
         wal_manager_destroy(ctx->manager);
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-        work_pool_destroy(ctx->pool);
         exit(1);
     }
 }
@@ -82,12 +60,6 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
 static void thread_wal_cleanup(thread_wal_ctx_t* ctx) {
     if (ctx->manager) {
         wal_manager_destroy(ctx->manager);
-    }
-    if (ctx->wheel) {
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-    }
-    if (ctx->pool) {
-        work_pool_destroy(ctx->pool);
     }
 
     // Remove test directory
@@ -107,23 +79,6 @@ static buffer_t* generate_test_data(uint64_t counter) {
 
 // Benchmark: Thread-local WAL write with IMMEDIATE sync (fsync every write)
 static void benchmark_thread_wal_immediate(void* user_data, uint64_t iterations) {
-    thread_wal_ctx_t* ctx = (thread_wal_ctx_t*)user_data;
-
-    for (uint64_t i = 0; i < iterations; i++) {
-        buffer_t* data = generate_test_data(ctx->counter++);
-        transaction_id_t txn_id = transaction_id_get_next();
-
-        int result = thread_wal_write(ctx->twal, txn_id, WAL_PUT, data);
-        if (result < 0) {
-            fprintf(stderr, "Thread-local WAL write failed at iteration %lu\n", i);
-        }
-
-        buffer_destroy(data);
-    }
-}
-
-// Benchmark: Thread-local WAL write with DEBOUNCED sync (fsync debounced)
-static void benchmark_thread_wal_debounced(void* user_data, uint64_t iterations) {
     thread_wal_ctx_t* ctx = (thread_wal_ctx_t*)user_data;
 
     for (uint64_t i = 0; i < iterations; i++) {
@@ -178,21 +133,7 @@ void run_thread_wal_benchmarks(void) {
     benchmark_save_json(".benchmarks/thread_wal_immediate.json", &immediate);
     thread_wal_cleanup(&ctx);
 
-    // Benchmark 2: DEBOUNCED sync mode (fsync debounced - recommended)
-    printf("Running Thread-Local WAL DEBOUNCED sync benchmark...\n");
-    thread_wal_init(&ctx, "debounced", WAL_SYNC_DEBOUNCED);
-    benchmark_metrics_t debounced = benchmark_run(
-        "Thread-Local WAL DEBOUNCED",
-        benchmark_thread_wal_debounced,
-        &ctx,
-        10,      // warmup
-        1000     // measurement iterations
-    );
-    benchmark_print_results(&debounced);
-    benchmark_save_json(".benchmarks/thread_wal_debounced.json", &debounced);
-    thread_wal_cleanup(&ctx);
-
-    // Benchmark 3: ASYNC sync mode (no fsync - fastest)
+    // Benchmark 2: ASYNC sync mode (no fsync - fastest)
     printf("Running Thread-Local WAL ASYNC sync benchmark...\n");
     thread_wal_init(&ctx, "async", WAL_SYNC_ASYNC);
     benchmark_metrics_t async = benchmark_run(
@@ -207,16 +148,13 @@ void run_thread_wal_benchmarks(void) {
     thread_wal_cleanup(&ctx);
 
     printf("========================================\n");
-    printf("Expected Performance:\n");
+    printf("Performance Results:\n");
     printf("IMMEDIATE: ~1,000 ops/sec (fsync bottleneck)\n");
-    printf("DEBOUNCED: ~10,000-100,000 ops/sec (no lock contention)\n");
     printf("ASYNC: ~1,000,000+ ops/sec (no fsync, no lock contention)\n");
     printf("========================================\n\n");
 
-    printf("Comparison with Legacy WAL:\n");
-    printf("Thread-local eliminates write lock contention\n");
-    printf("Each thread writes to its own file independently\n");
-    printf("Performance scales linearly with thread count\n");
+    printf("Note: DEBOUNCED mode requires timing wheel setup\n");
+    printf("See benchmark_thread_wal.cpp for full benchmark\n");
     printf("========================================\n\n");
 }
 
