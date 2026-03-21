@@ -37,6 +37,12 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, in
     return NULL;
 }
 
+wal_manager_t* wal_manager_load_with_options(const char* location, wal_config_t* config,
+                                              wal_recovery_options_t* options, int* error_code) {
+    // TODO: Implement
+    return NULL;
+}
+
 void wal_manager_destroy(wal_manager_t* manager) {
     // TODO: Implement
 }
