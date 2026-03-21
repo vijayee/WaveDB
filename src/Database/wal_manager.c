@@ -1082,8 +1082,164 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 }
 
 int compact_wal_files(wal_manager_t* manager) {
-    // TODO: Implement
-    return -1;
+    if (manager == NULL) {
+        return WAL_ERROR_INVALID_ARG;
+    }
+
+    // Find all SEALED files
+    manifest_entry_t* entries = NULL;
+    size_t count = 0;
+    int rc = read_manifest(manager, &entries, &count);
+    if (rc != 0) {
+        return rc;
+    }
+
+    size_t sealed_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (entries[i].status == WAL_FILE_SEALED) {
+            sealed_count++;
+        }
+    }
+
+    if (sealed_count == 0) {
+        free(entries);
+        return 0;  // Nothing to compact
+    }
+
+    // Read all entries from sealed files
+    recovery_entry_t* all_entries = get_clear_memory(1024 * sizeof(recovery_entry_t));
+    if (all_entries == NULL) {
+        free(entries);
+        return WAL_ERROR_MEMORY;
+    }
+
+    size_t entry_count = 0;
+    size_t entry_capacity = 1024;
+
+    for (size_t i = 0; i < count; i++) {
+        if (entries[i].status == WAL_FILE_SEALED) {
+            recovery_entry_t* file_entries = NULL;
+            size_t file_count = 0;
+            int result = read_wal_file(entries[i].file_path, &file_entries, &file_count);
+            if (result == 0 && file_count > 0) {
+                // Expand array if needed
+                if (entry_count + file_count >= entry_capacity) {
+                    entry_capacity = (entry_count + file_count) * 2;
+                    recovery_entry_t* new_entries = get_clear_memory(entry_capacity * sizeof(recovery_entry_t));
+                    if (new_entries == NULL) {
+                        // Cleanup on error
+                        for (size_t j = 0; j < entry_count; j++) {
+                            buffer_destroy(all_entries[j].data);
+                            free(all_entries[j].file_path);
+                        }
+                        free(all_entries);
+                        free(file_entries);
+                        free(entries);
+                        return WAL_ERROR_MEMORY;
+                    }
+                    memcpy(new_entries, all_entries, entry_count * sizeof(recovery_entry_t));
+                    free(all_entries);
+                    all_entries = new_entries;
+                }
+                // Copy entries
+                memcpy(&all_entries[entry_count], file_entries, file_count * sizeof(recovery_entry_t));
+                entry_count += file_count;
+            }
+            free(file_entries);
+        }
+    }
+
+    // Sort by transaction ID
+    qsort(all_entries, entry_count, sizeof(recovery_entry_t),
+          compare_recovery_entries);
+
+    // Generate compacted file path
+    char compacted_path[512];
+    snprintf(compacted_path, sizeof(compacted_path),
+             "%s/compacted_%lu.wal", manager->location, (unsigned long)time(NULL));
+
+    int fd = open(compacted_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) {
+        for (size_t i = 0; i < entry_count; i++) {
+            buffer_destroy(all_entries[i].data);
+            free(all_entries[i].file_path);
+        }
+        free(all_entries);
+        free(entries);
+        return WAL_ERROR_IO;
+    }
+
+    // Write all entries to compacted file
+    for (size_t i = 0; i < entry_count; i++) {
+        // Write header
+        uint8_t header[33];
+        header[0] = (uint8_t)all_entries[i].type;
+        transaction_id_serialize(&all_entries[i].txn_id, header + 1);
+        uint32_t crc = wal_crc32(all_entries[i].data->data, all_entries[i].data->size);
+        write_uint32_be(header + 25, crc);
+        write_uint32_be(header + 29, (uint32_t)all_entries[i].data->size);
+        ssize_t bytes_written = write(fd, header, 33);
+        if (bytes_written != 33) {
+            close(fd);
+            // Cleanup
+            for (size_t j = 0; j < entry_count; j++) {
+                buffer_destroy(all_entries[j].data);
+                free(all_entries[j].file_path);
+            }
+            free(all_entries);
+            free(entries);
+            return WAL_ERROR_IO;
+        }
+
+        // Write data
+        bytes_written = write(fd, all_entries[i].data->data, all_entries[i].data->size);
+        if (bytes_written != (ssize_t)all_entries[i].data->size) {
+            close(fd);
+            // Cleanup
+            for (size_t j = 0; j < entry_count; j++) {
+                buffer_destroy(all_entries[j].data);
+                free(all_entries[j].file_path);
+            }
+            free(all_entries);
+            free(entries);
+            return WAL_ERROR_IO;
+        }
+    }
+    fsync(fd);
+    close(fd);
+
+    // Update manifest: mark sealed files as COMPACTED, add compacted file as SEALED
+    platform_lock(&manager->manifest_lock);
+    for (size_t i = 0; i < count; i++) {
+        if (entries[i].status == WAL_FILE_SEALED) {
+            write_manifest_entry(manager, entries[i].thread_id,
+                                entries[i].file_path, WAL_FILE_COMPACTED,
+                                &entries[i].newest_txn_id);
+        }
+    }
+
+    // Add compacted file
+    transaction_id_t empty_txn = {0, 0, 0};
+    write_manifest_entry(manager, 0, compacted_path, WAL_FILE_SEALED, &empty_txn);
+
+    platform_unlock(&manager->manifest_lock);
+
+    // Delete old sealed files
+    for (size_t i = 0; i < count; i++) {
+        if (entries[i].status == WAL_FILE_SEALED) {
+            unlink(entries[i].file_path);
+        }
+    }
+
+    // Cleanup
+    for (size_t i = 0; i < entry_count; i++) {
+        buffer_destroy(all_entries[i].data);
+        free(all_entries[i].file_path);
+    }
+    free(all_entries);
+    free(entries);
+
+    return 0;
 }
 
 int wal_manager_flush(wal_manager_t* manager) {

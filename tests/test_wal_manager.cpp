@@ -12,6 +12,7 @@
 #include <fcntl.h>
 #include <cstring>
 #include <sys/stat.h>
+#include <dirent.h>
 
 class WalManagerTest : public ::testing::Test {
 protected:
@@ -224,4 +225,43 @@ TEST_F(WalManagerTest, MigrateFromLegacyWal) {
     // Verify thread WAL was created
     thread_wal_t* twal = get_thread_wal(manager);
     ASSERT_NE(twal, nullptr);
+}
+
+TEST_F(WalManagerTest, Compaction) {
+    int error = 0;
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    // Write entries
+    thread_wal_t* twal = get_thread_wal(manager);
+    for (int i = 0; i < 100; i++) {
+        buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)"test", 4);
+        ASSERT_NE(data, nullptr);
+        transaction_id_t txn_id = transaction_id_get_next();
+        thread_wal_write(twal, txn_id, WAL_PUT, data);
+        buffer_destroy(data);
+    }
+
+    // Seal file
+    thread_wal_seal(twal);
+
+    // Compact
+    int result = compact_wal_files(manager);
+    EXPECT_EQ(result, 0);
+
+    // Verify compacted file exists
+    DIR* dir = opendir(temp_dir);
+    ASSERT_NE(dir, nullptr);
+
+    int found_compacted = 0;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strncmp(entry->d_name, "compacted_", 10) == 0) {
+            found_compacted = 1;
+            break;
+        }
+    }
+    closedir(dir);
+
+    EXPECT_EQ(found_compacted, 1);
 }

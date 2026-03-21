@@ -83,6 +83,7 @@ set(WAVEDB_SOURCES
     # Database
     src/Database/wal.c
     src/Database/wal_manager.c
+    src/Database/wal_compactor.c
     src/Database/database_lru.c
     src/Database/database.c
 )
