@@ -640,6 +640,7 @@ void database_put(database_t* db, path_t* path,
         return;
     }
 
+    refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(db->pool, work);
 }
 
@@ -672,6 +673,7 @@ void database_get(database_t* db, path_t* path, promise_t* promise) {
         return;
     }
 
+    refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(db->pool, work);
 }
 
@@ -704,6 +706,7 @@ void database_delete(database_t* db, path_t* path, promise_t* promise) {
         return;
     }
 
+    refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(db->pool, work);
 }
 
