@@ -1579,9 +1579,30 @@ int compact_wal_files(wal_manager_t* manager) {
     }
 
     // Read all entries from sealed files
-    recovery_entry_t* all_entries = NULL;
+    recovery_entry_t* all_entries = malloc(1024 * sizeof(recovery_entry_t));
     size_t entry_count = 0;
-    // ... (reuse recovery code to read entries) ...
+    size_t entry_capacity = 1024;
+
+    for (size_t i = 0; i < count; i++) {
+        if (entries[i].status == WAL_FILE_SEALED) {
+            recovery_entry_t* file_entries = NULL;
+            size_t file_count = 0;
+            int result = read_wal_file(entries[i].file_path, &file_entries, &file_count);
+            if (result == 0 && file_count > 0) {
+                // Expand array if needed
+                if (entry_count + file_count >= entry_capacity) {
+                    entry_capacity = (entry_count + file_count) * 2;
+                    all_entries = realloc(all_entries, entry_capacity * sizeof(recovery_entry_t));
+                }
+                // Copy entries
+                for (size_t j = 0; j < file_count; j++) {
+                    all_entries[entry_count + j] = file_entries[j];
+                }
+                entry_count += file_count;
+            }
+            free(file_entries);
+        }
+    }
 
     platform_unlock(&manager->manifest_lock);
 
@@ -1595,7 +1616,28 @@ int compact_wal_files(wal_manager_t* manager) {
              "%s/compacted_%lu.wal", manager->location, (unsigned long)time(NULL));
 
     int fd = open(compacted_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    // ... (write entries) ...
+    if (fd < 0) {
+        free(all_entries);
+        free(entries);
+        return -1;
+    }
+
+    // Write all entries to compacted file
+    for (size_t i = 0; i < entry_count; i++) {
+        // Write header
+        uint8_t header[33];
+        header[0] = (uint8_t)all_entries[i].type;
+        transaction_id_serialize(&all_entries[i].txn_id, header + 1);
+        uint32_t crc = wal_crc32(all_entries[i].data->data, all_entries[i].data->size);
+        write_uint32_be(header + 25, crc);
+        write_uint32_be(header + 29, (uint32_t)all_entries[i].data->size);
+        write(fd, header, 33);
+
+        // Write data
+        write(fd, all_entries[i].data->data, all_entries[i].data->size);
+    }
+    fsync(fd);
+    close(fd);
 
     // Update manifest: mark sealed files as COMPACTED, add compacted file as SEALED
     platform_lock(&manager->manifest_lock);
@@ -1620,9 +1662,12 @@ int compact_wal_files(wal_manager_t* manager) {
     }
 
     // Cleanup
-    free(entries);
+    for (size_t i = 0; i < entry_count; i++) {
+        buffer_destroy(all_entries[i].data);
+        free(all_entries[i].file_path);
+    }
     free(all_entries);
-    close(fd);
+    free(entries);
 
     return 0;
 }
@@ -1968,6 +2013,15 @@ This plan implements thread-local WAL in 12 tasks:
 12. **Integration Testing**: Final verification
 
 Each task follows TDD: write test, verify failure, implement, verify pass, commit.
+
+**Implementation Notes:**
+
+- **Error handling**: Follow existing codebase patterns (check return values, clean up resources on error, set errno)
+- **Memory management**: Use `get_clear_memory()` for allocations, match create/destroy patterns
+- **Lock ordering**: Always acquire `manifest_lock` before `threads_lock` if both needed
+- **Recovery integration**: The `wal_manager_recover()` function takes a `void* db` parameter that should be cast to `database_t*` and entries applied using existing database apply logic
+- **Migration compatibility**: The legacy `wal_read()` function from `src/Database/wal.c` can read existing WAL format entries
+- **Threading safety**: Compaction holds `manifest_lock` while scanning but releases it during file I/O. New files sealed during this window will be picked up in next compaction cycle.
 
 **Estimated time**: 8-12 hours for experienced developer familiar with C and the codebase.
 
