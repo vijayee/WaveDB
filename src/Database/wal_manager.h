@@ -134,6 +134,11 @@ void wal_manager_destroy(wal_manager_t* manager);
 thread_wal_t* get_thread_wal(wal_manager_t* manager);
 
 /**
+ * Create thread-local WAL for a specific thread ID (for testing)
+ */
+thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id);
+
+/**
  * Write to thread-local WAL
  */
 int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,

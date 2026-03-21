@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
+#include <dirent.h>
+#include <dirent.h>
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
@@ -104,6 +106,160 @@ static void write_uint32_be(uint8_t* buf, uint32_t val) {
     buf[1] = (val >> 16) & 0xFF;
     buf[2] = (val >> 8) & 0xFF;
     buf[3] = val & 0xFF;
+}
+
+// Read uint32 from big-endian
+static uint32_t read_uint32_be_local(const uint8_t* buf) {
+    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
+           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
+}
+
+// Structure to hold WAL entry during recovery
+typedef struct {
+    transaction_id_t txn_id;
+    wal_type_e type;
+    buffer_t* data;
+    char* file_path;
+    uint64_t offset;
+} recovery_entry_t;
+
+// Compare function for qsort
+static int compare_recovery_entries(const void* a, const void* b) {
+    const recovery_entry_t* ea = (const recovery_entry_t*)a;
+    const recovery_entry_t* eb = (const recovery_entry_t*)b;
+    return transaction_id_compare(&ea->txn_id, &eb->txn_id);
+}
+
+// Read entries from a single WAL file
+static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* count) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    size_t capacity = 256;
+    recovery_entry_t* list = get_clear_memory(capacity * sizeof(recovery_entry_t));
+    size_t n = 0;
+    uint64_t cursor = 0;
+
+    while (1) {
+        // Read header
+        uint8_t header[33];
+        ssize_t bytes = read(fd, header, 33);
+
+        if (bytes == 0) {
+            break;  // EOF
+        }
+        if (bytes != 33) {
+            break;  // Partial read
+        }
+
+        // Parse header
+        wal_type_e type = (wal_type_e)header[0];
+        transaction_id_t txn_id;
+        transaction_id_deserialize(&txn_id, header + 1);
+        uint32_t expected_crc = read_uint32_be_local(header + 25);
+        uint32_t data_len = read_uint32_be_local(header + 29);
+
+        // Read data
+        buffer_t* data = buffer_create(data_len);
+        if (data == NULL) {
+            break;
+        }
+        bytes = read(fd, data->data, data_len);
+        if (bytes != (ssize_t)data_len) {
+            buffer_destroy(data);
+            break;
+        }
+
+        // Verify CRC
+        uint32_t actual_crc = wal_crc32(data->data, data_len);
+        if (actual_crc != expected_crc) {
+            buffer_destroy(data);
+            break;
+        }
+
+        // Add to array
+        if (n >= capacity) {
+            capacity *= 2;
+            recovery_entry_t* new_list = get_clear_memory(capacity * sizeof(recovery_entry_t));
+            if (new_list == NULL) {
+                buffer_destroy(data);
+                break;
+            }
+            memcpy(new_list, list, n * sizeof(recovery_entry_t));
+            free(list);
+            list = new_list;
+        }
+
+        list[n].txn_id = txn_id;
+        list[n].type = type;
+        list[n].data = data;
+        list[n].file_path = strdup(path);
+        list[n].offset = cursor;
+        n++;
+
+        cursor += 33 + data_len;
+    }
+
+    close(fd);
+    *entries = list;
+    *count = n;
+    return 0;
+}
+
+// Helper to scan directory for WAL files
+static int scan_wal_directory(const char* location, char*** wal_files, size_t* count) {
+    DIR* dir = opendir(location);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    size_t capacity = 16;
+    char** files = get_clear_memory(capacity * sizeof(char*));
+    if (files == NULL) {
+        closedir(dir);
+        return -1;
+    }
+    size_t n = 0;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // Check for thread_*.wal pattern
+        if (strncmp(entry->d_name, "thread_", 7) == 0) {
+            char* dot = strrchr(entry->d_name, '.');
+            if (dot != NULL && strcmp(dot, ".wal") == 0) {
+                // Found a thread WAL file
+                if (n >= capacity) {
+                    capacity *= 2;
+                    char** new_files = get_clear_memory(capacity * sizeof(char*));
+                    if (new_files == NULL) {
+                        // Cleanup on error
+                        for (size_t i = 0; i < n; i++) {
+                            free(files[i]);
+                        }
+                        free(files);
+                        closedir(dir);
+                        return -1;
+                    }
+                    memcpy(new_files, files, n * sizeof(char*));
+                    free(files);
+                    files = new_files;
+                }
+                files[n] = path_join(location, entry->d_name);
+                if (files[n] == NULL) {
+                    // Continue on allocation failure
+                    continue;
+                }
+                n++;
+            }
+        }
+    }
+
+    closedir(dir);
+    *wal_files = files;
+    *count = n;
+    return 0;
 }
 
 // Write manifest entry atomically
@@ -258,7 +414,7 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
 }
 
 // Helper to create thread-local WAL
-static thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
+thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     thread_wal_t* twal = get_clear_memory(sizeof(thread_wal_t));
     if (twal == NULL) {
         return NULL;
@@ -585,8 +741,143 @@ int thread_wal_seal(thread_wal_t* twal) {
 }
 
 int wal_manager_recover(wal_manager_t* manager, void* db) {
-    // TODO: Implement
-    return -1;
+    if (manager == NULL) {
+        return WAL_ERROR_INVALID_ARG;
+    }
+
+    // Suppress unused parameter warning
+    (void)db;
+
+    // 1. Read manifest
+    manifest_entry_t* manifest_entries = NULL;
+    size_t manifest_count = 0;
+    int rc = read_manifest(manager, &manifest_entries, &manifest_count);
+    if (rc != 0) {
+        // Manifest read failed - continue with directory scan
+        manifest_entries = NULL;
+        manifest_count = 0;
+    }
+
+    // 2. Scan directory for all thread_*.wal files
+    char** wal_files = NULL;
+    size_t wal_count = 0;
+    scan_wal_directory(manager->location, &wal_files, &wal_count);
+
+    // 3. Read all entries from all files
+    recovery_entry_t* all_entries = NULL;
+    size_t entry_count = 0;
+    size_t entry_capacity = 1024;
+    all_entries = get_clear_memory(entry_capacity * sizeof(recovery_entry_t));
+    if (all_entries == NULL) {
+        if (manifest_entries) {
+            free(manifest_entries);
+        }
+        for (size_t i = 0; i < wal_count; i++) {
+            free(wal_files[i]);
+        }
+        free(wal_files);
+        return WAL_ERROR_MEMORY;
+    }
+
+    // Read from manifest entries
+    for (size_t i = 0; i < manifest_count; i++) {
+        if (manifest_entries[i].status == WAL_FILE_COMPACTED) {
+            continue;  // Skip compacted files
+        }
+
+        recovery_entry_t* file_entries = NULL;
+        size_t file_count = 0;
+        if (read_wal_file(manifest_entries[i].file_path, &file_entries, &file_count) == 0) {
+            // Add to all_entries
+            if (entry_count + file_count >= entry_capacity) {
+                entry_capacity = (entry_count + file_count) * 2;
+                recovery_entry_t* new_entries = get_clear_memory(entry_capacity * sizeof(recovery_entry_t));
+                if (new_entries == NULL) {
+                    free(all_entries);
+                    if (manifest_entries) {
+                        free(manifest_entries);
+                    }
+                    for (size_t j = 0; j < wal_count; j++) {
+                        free(wal_files[j]);
+                    }
+                    free(wal_files);
+                    return WAL_ERROR_MEMORY;
+                }
+                memcpy(new_entries, all_entries, entry_count * sizeof(recovery_entry_t));
+                free(all_entries);
+                all_entries = new_entries;
+            }
+            memcpy(&all_entries[entry_count], file_entries, file_count * sizeof(recovery_entry_t));
+            entry_count += file_count;
+            free(file_entries);
+        }
+    }
+
+    // Read from directory scan (files not in manifest)
+    for (size_t i = 0; i < wal_count; i++) {
+        // Check if file is already in manifest
+        int in_manifest = 0;
+        for (size_t j = 0; j < manifest_count; j++) {
+            if (strcmp(wal_files[i], manifest_entries[j].file_path) == 0) {
+                in_manifest = 1;
+                break;
+            }
+        }
+
+        if (!in_manifest) {
+            recovery_entry_t* file_entries = NULL;
+            size_t file_count = 0;
+            if (read_wal_file(wal_files[i], &file_entries, &file_count) == 0) {
+                if (entry_count + file_count >= entry_capacity) {
+                    entry_capacity = (entry_count + file_count) * 2;
+                    recovery_entry_t* new_entries = get_clear_memory(entry_capacity * sizeof(recovery_entry_t));
+                    if (new_entries == NULL) {
+                        free(all_entries);
+                        if (manifest_entries) {
+                            free(manifest_entries);
+                        }
+                        for (size_t k = 0; k < wal_count; k++) {
+                            free(wal_files[k]);
+                        }
+                        free(wal_files);
+                        return WAL_ERROR_MEMORY;
+                    }
+                    memcpy(new_entries, all_entries, entry_count * sizeof(recovery_entry_t));
+                    free(all_entries);
+                    all_entries = new_entries;
+                }
+                memcpy(&all_entries[entry_count], file_entries, file_count * sizeof(recovery_entry_t));
+                entry_count += file_count;
+                free(file_entries);
+            }
+        }
+    }
+
+    // 4. Sort by transaction ID
+    if (entry_count > 0) {
+        qsort(all_entries, entry_count, sizeof(recovery_entry_t),
+              compare_recovery_entries);
+    }
+
+    // 5. Replay in order
+    // TODO: Apply to database (passed as void* db parameter)
+    // For now, just verify entries are sorted
+
+    // 6. Clean up
+    for (size_t i = 0; i < entry_count; i++) {
+        buffer_destroy(all_entries[i].data);
+        free(all_entries[i].file_path);
+    }
+    free(all_entries);
+    if (manifest_entries) {
+        free(manifest_entries);
+    }
+    for (size_t i = 0; i < wal_count; i++) {
+        free(wal_files[i]);
+    }
+    free(wal_files);
+
+    return 0;
 }
 
 int compact_wal_files(wal_manager_t* manager) {

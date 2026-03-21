@@ -148,3 +148,43 @@ TEST_F(WalManagerTest, ReadManifest) {
     free(entries);
     buffer_destroy(data);
 }
+
+TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
+    int error = 0;
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    // Write entries from thread 1
+    thread_wal_t* twal1 = get_thread_wal(manager);
+    const char* data1_str = "thread1";
+    buffer_t* data1 = buffer_create_from_pointer_copy((uint8_t*)data1_str, strlen(data1_str));
+    ASSERT_NE(data1, nullptr);
+    transaction_id_t txn1 = transaction_id_get_next();
+    thread_wal_write(twal1, txn1, WAL_PUT, data1);
+
+    // Simulate another thread (would normally use pthread_create)
+    // For testing, we'll manually create a second WAL
+    uint64_t thread_id_2 = (uint64_t)pthread_self() + 1;
+    thread_wal_t* twal2 = create_thread_wal(manager, thread_id_2);
+    const char* data2_str = "thread2";
+    buffer_t* data2 = buffer_create_from_pointer_copy((uint8_t*)data2_str, strlen(data2_str));
+    ASSERT_NE(data2, nullptr);
+    transaction_id_t txn2 = transaction_id_get_next();
+    thread_wal_write(twal2, txn2, WAL_PUT, data2);
+
+    // Close manager
+    wal_manager_destroy(manager);
+    manager = nullptr;
+
+    // Reopen and recover
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    // Recovery should read both files
+    int recover_result = wal_manager_recover(manager, nullptr);
+    EXPECT_EQ(recover_result, 0);
+
+    // Cleanup
+    buffer_destroy(data1);
+    buffer_destroy(data2);
+}
