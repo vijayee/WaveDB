@@ -126,6 +126,35 @@ static identifier_t* make_value(const char* data) {
     return id;
 }
 
+// Worker thread function for concurrent write benchmark
+static void concurrent_write_worker(concurrent_bench_ctx_t* ctx) {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < ctx->ops_per_thread; i++) {
+        // Each thread writes to unique keys: key_{thread_id}_{op_id}
+        char key[64];
+        snprintf(key, sizeof(key), "key_%d_%d", ctx->thread_id, i);
+
+        path_t* path = make_path(key);
+        identifier_t* val = make_value("concurrent_value");
+
+        std::promise<void> promise;
+        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+        bctx->promise = &promise;
+        promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
+
+        database_put(ctx->db, path, val, prom);
+        promise.get_future().get();
+
+        promise_destroy(prom);
+
+        ctx->total_ops->fetch_add(1);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    ctx->total_latency_ns->fetch_add(duration_ns);
+}
 
 // Setup helper
 static void setup_database(bench_context_t* ctx) {
