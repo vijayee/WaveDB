@@ -259,10 +259,8 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     // Free file path
                     free(twal->file_path);
 
-                    // Clear thread-local storage if this is the current thread's WAL
-                    if (thread_local_wal == twal) {
-                        thread_local_wal = NULL;
-                    }
+                    // Destroy lock
+                    platform_lock_destroy(&twal->lock);
 
                     free(twal);
                 }
@@ -315,6 +313,21 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
         thread_wal_t** new_threads = realloc(manager->threads,
                                               new_capacity * sizeof(thread_wal_t*));
         if (new_threads == NULL) {
+            // Cleanup the created thread WAL on realloc failure
+            if (thread_local_wal != NULL) {
+                if (thread_local_wal->fd >= 0) {
+                    close(thread_local_wal->fd);
+                }
+                if (thread_local_wal->file_path != NULL) {
+                    free(thread_local_wal->file_path);
+                }
+                if (thread_local_wal->fsync_debouncer != NULL) {
+                    debouncer_destroy(thread_local_wal->fsync_debouncer);
+                }
+                platform_lock_destroy(&thread_local_wal->lock);
+                free(thread_local_wal);
+                thread_local_wal = NULL;
+            }
             platform_unlock(&manager->threads_lock);
             return NULL;
         }
