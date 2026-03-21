@@ -235,6 +235,7 @@ static void run_sync_benchmarks() {
         10000    // 10000 measurement iterations
     );
     benchmark_print_results(&put_metrics);
+    benchmark_save_json(".benchmarks/sync_put.json", &put_metrics);
     printf("\n");
 
     // Benchmark 2: Get operations
@@ -247,6 +248,7 @@ static void run_sync_benchmarks() {
         10000    // 10000 measurement iterations
     );
     benchmark_print_results(&get_metrics);
+    benchmark_save_json(".benchmarks/sync_get.json", &get_metrics);
     printf("\n");
 
     // Benchmark 3: Mixed workload
@@ -259,6 +261,7 @@ static void run_sync_benchmarks() {
         10000    // 10000 measurement iterations
     );
     benchmark_print_results(&mixed_metrics);
+    benchmark_save_json(".benchmarks/sync_mixed.json", &mixed_metrics);
     printf("\n");
 
     // Benchmark 4: Delete operations
@@ -271,6 +274,7 @@ static void run_sync_benchmarks() {
         10000    // 10000 measurement iterations
     );
     benchmark_print_results(&delete_metrics);
+    benchmark_save_json(".benchmarks/sync_delete.json", &delete_metrics);
     printf("\n");
 
     // Cleanup
