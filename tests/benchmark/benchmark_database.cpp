@@ -425,6 +425,29 @@ static void run_concurrent_mixed_benchmark(database_t* db, work_pool_t* pool,
     printf("\n");
 }
 
+static void print_concurrent_summary(const char* scenario,
+                                     double* ops_per_sec_per_thread,
+                                     int* thread_counts,
+                                     int num_configs) {
+    printf("========================================\n");
+    printf("%s Throughput Summary\n", scenario);
+    printf("========================================\n\n");
+
+    double baseline = ops_per_sec_per_thread[0];
+
+    for (int i = 0; i < num_configs; i++) {
+        double scaling = ops_per_sec_per_thread[i] / baseline;
+        printf("  %2d thread(s): %8.0f ops/sec", thread_counts[i], ops_per_sec_per_thread[i]);
+
+        if (i == 0) {
+            printf(" (baseline)\n");
+        } else {
+            printf(" (%.2fx)\n", scaling);
+        }
+    }
+    printf("\n");
+}
+
 // Setup helper
 static void setup_database(bench_context_t* ctx) {
     ctx->pool = work_pool_create(platform_core_count());
