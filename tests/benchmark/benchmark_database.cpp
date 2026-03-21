@@ -30,6 +30,7 @@ extern "C" {
 #include "Time/wheel.h"
 #include "Workers/pool.h"
 #include "Workers/promise.h"
+#include "Workers/transaction_id.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
@@ -459,10 +460,18 @@ static void setup_database(bench_context_t* ctx) {
     // Create temporary test directory
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
 
+    // Create custom WAL config with larger file size for benchmarks
+    wal_config_t wal_config;
+    wal_config.sync_mode = WAL_SYNC_DEBOUNCED;
+    wal_config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
+    wal_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
+    wal_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
+    wal_config.max_file_size = 100 * 1024 * 1024;  // 100MB for benchmarks
+
     int error = 0;
-    ctx->db = database_create(ctx->test_dir, 50, NULL, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
-    if (error != 0) {
-        fprintf(stderr, "Failed to create database: %d\n", error);
+    ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
+    if (error != 0 || ctx->db == NULL) {
+        fprintf(stderr, "Failed to create database: error=%d\n", error);
         exit(1);
     }
 }
@@ -902,6 +911,9 @@ void run_database_benchmarks(void) {
 }
 
 int main(int argc, char** argv) {
+    // Initialize transaction ID system (required for WAL)
+    transaction_id_init();
+
     // Create benchmark directory if it doesn't exist
     system("mkdir -p .benchmarks");
 

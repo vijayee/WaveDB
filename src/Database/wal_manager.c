@@ -1,8 +1,9 @@
 #include "wal_manager.h"
 #include "../Util/allocator.h"
+#include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
-#include "../Time/debouncer.h"
+#include "../Util/log.h"
 #include "../Time/debouncer.h"
 #include <string.h>
 #include <stdlib.h>
@@ -13,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <dirent.h>
+#include "../Util/log.h"  // For log_warn
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
