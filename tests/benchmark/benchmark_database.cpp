@@ -156,6 +156,34 @@ static void concurrent_write_worker(concurrent_bench_ctx_t* ctx) {
     ctx->total_latency_ns->fetch_add(duration_ns);
 }
 
+static void concurrent_read_worker(concurrent_bench_ctx_t* ctx) {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < ctx->ops_per_thread; i++) {
+        // Read from pre-populated shared key space
+        char key[64];
+        snprintf(key, sizeof(key), "readkey_%d", i % ctx->key_range_end);
+
+        path_t* path = make_path(key);
+
+        std::promise<void> promise;
+        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
+        bctx->promise = &promise;
+        promise_t* prom = promise_create(bench_get_callback, bench_error_callback, bctx);
+
+        database_get(ctx->db, path, prom);
+        promise.get_future().get();
+
+        promise_destroy(prom);
+
+        ctx->total_ops->fetch_add(1);
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+    ctx->total_latency_ns->fetch_add(duration_ns);
+}
+
 static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
                                            hierarchical_timing_wheel_t* wheel,
                                            int thread_count, int ops_per_thread) {
