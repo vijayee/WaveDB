@@ -9,6 +9,8 @@
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include <string.h>
+#include <stdatomic.h>
+#include <stdatomic.h>
 
 #define DEFAULT_GC_INTERVAL_MS 100
 
@@ -32,8 +34,10 @@ tx_manager_t* tx_manager_create(hbtrie_t* trie,
     manager->last_gc_time = 0;
 
     vec_init(&manager->active_txns);
-    memset(&manager->min_active_txn_id, 0, sizeof(transaction_id_t));
-    memset(&manager->last_committed_txn_id, 0, sizeof(transaction_id_t));
+    transaction_id_t min_active_init = {0, 0, 0};
+    transaction_id_t last_committed_init = {0, 0, 0};
+    atomic_init(&manager->min_active_txn_id, min_active_init);
+    atomic_init(&manager->last_committed_txn_id, last_committed_init);
 
     platform_lock_init(&manager->lock);
     refcounter_init((refcounter_t*)manager);
@@ -83,9 +87,10 @@ txn_desc_t* tx_manager_begin(tx_manager_t* manager) {
     vec_push(&manager->active_txns, txn);
 
     // Update min_active if needed
+    transaction_id_t current_min = atomic_load(&manager->min_active_txn_id);
     if (manager->active_txns.length == 1 ||
-        transaction_id_compare(&txn->txn_id, &manager->min_active_txn_id) < 0) {
-        manager->min_active_txn_id = txn->txn_id;
+        transaction_id_compare(&txn->txn_id, &current_min) < 0) {
+        atomic_store(&manager->min_active_txn_id, txn->txn_id);
     }
 
     platform_unlock(&manager->lock);
@@ -108,8 +113,9 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
     txn->state = TXN_COMMITTED;
 
     // Update last_committed
-    if (transaction_id_compare(&txn->txn_id, &manager->last_committed_txn_id) > 0) {
-        manager->last_committed_txn_id = txn->txn_id;
+    transaction_id_t current_last_committed = atomic_load(&manager->last_committed_txn_id);
+    if (transaction_id_compare(&txn->txn_id, &current_last_committed) > 0) {
+        atomic_store(&manager->last_committed_txn_id, txn->txn_id);
     }
 
     // Remove from active list
@@ -122,16 +128,18 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
 
     // Update min_active
     if (manager->active_txns.length > 0) {
-        manager->min_active_txn_id = manager->active_txns.data[0]->txn_id;
+        transaction_id_t new_min = manager->active_txns.data[0]->txn_id;
         for (int i = 1; i < manager->active_txns.length; i++) {
-            if (transaction_id_compare(&manager->active_txns.data[i]->txn_id,
-                                      &manager->min_active_txn_id) < 0) {
-                manager->min_active_txn_id = manager->active_txns.data[i]->txn_id;
+            if (transaction_id_compare(&manager->active_txns.data[i]->txn_id, &new_min) < 0) {
+                new_min = manager->active_txns.data[i]->txn_id;
             }
         }
+        atomic_store(&manager->min_active_txn_id, new_min);
     } else {
         // No active transactions - min_active = last_committed
-        manager->min_active_txn_id = manager->last_committed_txn_id;
+        // Reload last_committed as it may have been updated above
+        transaction_id_t final_last_committed = atomic_load(&manager->last_committed_txn_id);
+        atomic_store(&manager->min_active_txn_id, final_last_committed);
     }
 
     platform_unlock(&txn->lock);
@@ -164,15 +172,16 @@ int tx_manager_abort(tx_manager_t* manager, txn_desc_t* txn) {
 
     // Update min_active (same logic as commit)
     if (manager->active_txns.length > 0) {
-        manager->min_active_txn_id = manager->active_txns.data[0]->txn_id;
+        transaction_id_t new_min = manager->active_txns.data[0]->txn_id;
         for (int i = 1; i < manager->active_txns.length; i++) {
-            if (transaction_id_compare(&manager->active_txns.data[i]->txn_id,
-                                      &manager->min_active_txn_id) < 0) {
-                manager->min_active_txn_id = manager->active_txns.data[i]->txn_id;
+            if (transaction_id_compare(&manager->active_txns.data[i]->txn_id, &new_min) < 0) {
+                new_min = manager->active_txns.data[i]->txn_id;
             }
         }
+        atomic_store(&manager->min_active_txn_id, new_min);
     } else {
-        manager->min_active_txn_id = manager->last_committed_txn_id;
+        transaction_id_t last = atomic_load(&manager->last_committed_txn_id);
+        atomic_store(&manager->min_active_txn_id, last);
     }
 
     platform_unlock(&txn->lock);
@@ -188,11 +197,8 @@ transaction_id_t tx_manager_get_min_active(tx_manager_t* manager) {
         return empty;
     }
 
-    platform_lock(&manager->lock);
-    transaction_id_t result = manager->min_active_txn_id;
-    platform_unlock(&manager->lock);
-
-    return result;
+    // Atomic load - no lock needed
+    return atomic_load(&manager->min_active_txn_id);
 }
 
 transaction_id_t tx_manager_get_last_committed(tx_manager_t* manager) {
@@ -202,11 +208,8 @@ transaction_id_t tx_manager_get_last_committed(tx_manager_t* manager) {
         return empty;
     }
 
-    platform_lock(&manager->lock);
-    transaction_id_t result = manager->last_committed_txn_id;
-    platform_unlock(&manager->lock);
-
-    return result;
+    // Atomic load - no lock needed
+    return atomic_load(&manager->last_committed_txn_id);
 }
 
 static void tx_manager_gc_callback(void* arg) {

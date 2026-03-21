@@ -54,11 +54,11 @@ typedef struct txn_desc_t {
  */
 typedef struct tx_manager_t {
     refcounter_t refcounter;           // MUST be first member
-    PLATFORMLOCKTYPE(lock);              // Manager lock
+    PLATFORMLOCKTYPE(lock);              // Manager lock for active_txns list
 
     vec_t(txn_desc_t*) active_txns;      // Active transactions
-    transaction_id_t min_active_txn_id;  // Oldest active transaction (GC cutoff)
-    transaction_id_t last_committed_txn_id;  // Last committed transaction
+    _Atomic transaction_id_t min_active_txn_id;  // Oldest active transaction (GC cutoff) - atomic for lock-free reads
+    _Atomic transaction_id_t last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
 
     hbtrie_t* trie;                      // Reference to trie
     work_pool_t* pool;                   // Work pool for async GC

@@ -30,7 +30,6 @@ extern "C" {
 #include "Time/wheel.h"
 #include "Workers/pool.h"
 #include "Workers/promise.h"
-#include "Workers/priority.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
@@ -178,9 +177,7 @@ static void populate_database(database_t* db, size_t count) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-        database_put(db, priority, path, val, prom);
+        database_put(db, path, val, prom);
         promise.get_future().get();
 
         promise_destroy(prom);
@@ -206,9 +203,7 @@ static void benchmark_database_put(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-        database_put(db, priority, path, val, prom);
+        database_put(db, path, val, prom);
         promise.get_future().get();
 
         promise_destroy(prom);
@@ -232,9 +227,7 @@ static void benchmark_database_get(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_get_callback, bench_error_callback, ctx);
 
-        // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-        database_get(db, priority, path, prom);
+        database_get(db, path, prom);
         promise.get_future().get();
 
         promise_destroy(prom);
@@ -258,9 +251,7 @@ static void benchmark_database_delete(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-        database_delete(db, priority, path, prom);
+        database_delete(db, path, prom);
         promise.get_future().get();
 
         promise_destroy(prom);
@@ -286,9 +277,7 @@ static void benchmark_database_batch_put(void* user_data, uint64_t iterations) {
         ctx->promise = &promise;
         promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-        // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-        database_put(db, priority, path, val, prom);
+        database_put(db, path, val, prom);
         promise.get_future().get();
 
         promise_destroy(prom);
@@ -316,9 +305,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_get_callback, bench_error_callback, ctx);
 
-            // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-            database_get(db, priority, path, prom);
+            database_get(db, path, prom);
             promise.get_future().get();
 
             promise_destroy(prom);
@@ -337,9 +324,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-            // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-            database_put(db, priority, path, val, prom);
+            database_put(db, path, val, prom);
             promise.get_future().get();
 
             promise_destroy(prom);
@@ -356,9 +341,7 @@ static void benchmark_database_mixed(void* user_data, uint64_t iterations) {
             ctx->promise = &promise;
             promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
 
-            // Use static priority for benchmarks (avoids linking priority.c)
-        priority_t priority = {1, 1};
-            database_delete(db, priority, path, prom);
+            database_delete(db, path, prom);
             promise.get_future().get();
 
             promise_destroy(prom);

@@ -10,7 +10,6 @@ extern "C" {
 #include "Database/database.h"
 #include "Time/wheel.h"
 #include "Workers/pool.h"
-#include "Workers/priority.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
@@ -198,8 +197,7 @@ TEST_F(DatabaseTest, PutGet) {
     promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
 
     // Execute put
-    priority_t priority = priority_get_next();
-    database_put(db, priority, path, value, put_prom);
+    database_put(db, path, value, put_prom);
 
     // Wait for completion
     std::future<void> put_future = put_promise[0].get_future();
@@ -215,7 +213,7 @@ TEST_F(DatabaseTest, PutGet) {
     promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
 
     // Execute get
-    database_get(db, priority, get_path, get_prom);
+    database_get(db, get_path, get_prom);
 
     // Wait for result
     std::future<identifier_t*> get_future = get_promise[0].get_future();
@@ -237,7 +235,7 @@ TEST_F(DatabaseTest, PutGetMultiple) {
     ASSERT_EQ(error, 0);
 
     const int COUNT = 25;
-    priority_t priority = priority_get_next();
+    
 
     // Store multiple values sequentially
     for (int i = 0; i < COUNT; i++) {
@@ -253,7 +251,7 @@ TEST_F(DatabaseTest, PutGetMultiple) {
         ctx->i = i;
         ctx->test = this;
         promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path, value, put_prom);
+        database_put(db, path, value, put_prom);
 
         std::future<void> put_future = put_promise[i].get_future();
         EXPECT_NO_THROW(put_future.get());
@@ -277,7 +275,7 @@ TEST_F(DatabaseTest, PutGetMultiple) {
         ctx->i = i;
         ctx->test = this;
         promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, get_path, get_prom);
+        database_get(db, get_path, get_prom);
 
         std::future<identifier_t*> get_future = get_promise[i].get_future();
         identifier_t* result = nullptr;
@@ -304,8 +302,8 @@ TEST_F(DatabaseTest, GetNonExistent) {
     ctx->test = this;
     promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
 
-    priority_t priority = priority_get_next();
-    database_get(db, priority, path, get_prom);
+    
+    database_get(db, path, get_prom);
 
     std::future<identifier_t*> get_future = get_promise[0].get_future();
     identifier_t* result = nullptr;
@@ -323,7 +321,7 @@ TEST_F(DatabaseTest, UpdateValue) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    priority_t priority = priority_get_next();
+    
 
     // Insert initial value
     path_t* path = make_path({"key"});
@@ -333,7 +331,7 @@ TEST_F(DatabaseTest, UpdateValue) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-    database_put(db, priority, path, value1, put_prom);
+    database_put(db, path, value1, put_prom);
 
     std::future<void> put_future = put_promise[0].get_future();
     EXPECT_NO_THROW(put_future.get());
@@ -349,7 +347,7 @@ TEST_F(DatabaseTest, UpdateValue) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* get_prom1 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-    database_get(db, priority, get_path1, get_prom1);
+    database_get(db, get_path1, get_prom1);
 
     std::future<identifier_t*> get_future1 = get_promise[0].get_future();
     identifier_t* result1 = nullptr;
@@ -372,7 +370,7 @@ TEST_F(DatabaseTest, UpdateValue) {
     ctx->i = 1;
     ctx->test = this;
     promise_t* put_prom2 = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-    database_put(db, priority, path2, value2, put_prom2);
+    database_put(db, path2, value2, put_prom2);
 
     std::future<void> put_future2 = put_promise[1].get_future();
     EXPECT_NO_THROW(put_future2.get());
@@ -388,7 +386,7 @@ TEST_F(DatabaseTest, UpdateValue) {
     ctx->i = 1;
     ctx->test = this;
     promise_t* get_prom2 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-    database_get(db, priority, get_path2, get_prom2);
+    database_get(db, get_path2, get_prom2);
 
     std::future<identifier_t*> get_future2 = get_promise[1].get_future();
     identifier_t* result2 = nullptr;
@@ -406,7 +404,7 @@ TEST_F(DatabaseTest, Delete) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    priority_t priority = priority_get_next();
+    
 
     // Insert a value
     path_t* path = make_path({"key", "to", "delete"});
@@ -416,7 +414,7 @@ TEST_F(DatabaseTest, Delete) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-    database_put(db, priority, path, value, put_prom);
+    database_put(db, path, value, put_prom);
 
     std::future<void> put_future = put_promise[0].get_future();
     EXPECT_NO_THROW(put_future.get());
@@ -432,7 +430,7 @@ TEST_F(DatabaseTest, Delete) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* get_prom1 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-    database_get(db, priority, get_path1, get_prom1);
+    database_get(db, get_path1, get_prom1);
 
     std::future<identifier_t*> get_future1 = get_promise[0].get_future();
     identifier_t* result1 = nullptr;
@@ -451,7 +449,7 @@ TEST_F(DatabaseTest, Delete) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* del_prom = promise_create(delete_callback_wrapper, delete_callback_err_wrapper, ctx);
-    database_delete(db, priority, del_path, del_prom);
+    database_delete(db, del_path, del_prom);
 
     std::future<void> del_future = delete_promise[0].get_future();
     EXPECT_NO_THROW(del_future.get());
@@ -467,7 +465,7 @@ TEST_F(DatabaseTest, Delete) {
     ctx->i = 1;
     ctx->test = this;
     promise_t* get_prom2 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-    database_get(db, priority, get_path2, get_prom2);
+    database_get(db, get_path2, get_prom2);
 
     std::future<identifier_t*> get_future2 = get_promise[1].get_future();
     identifier_t* result2 = nullptr;
@@ -482,7 +480,7 @@ TEST_F(DatabaseTest, DeleteNonExistent) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    priority_t priority = priority_get_next();
+    
 
     // Delete a key that doesn't exist (should succeed without error)
     path_t* del_path = make_path({"nonexistent", "key"});
@@ -491,7 +489,7 @@ TEST_F(DatabaseTest, DeleteNonExistent) {
     ctx->i = 0;
     ctx->test = this;
     promise_t* del_prom = promise_create(delete_callback_wrapper, delete_callback_err_wrapper, ctx);
-    database_delete(db, priority, del_path, del_prom);
+    database_delete(db, del_path, del_prom);
 
     std::future<void> del_future = delete_promise[0].get_future();
     EXPECT_NO_THROW(del_future.get());
@@ -505,7 +503,7 @@ TEST_F(DatabaseTest, ConcurrentOperations) {
     ASSERT_EQ(error, 0);
 
     const int COUNT = 50;
-    priority_t priority = priority_get_next();
+    
 
     // Insert values sequentially
     for (int i = 0; i < COUNT; i++) {
@@ -520,7 +518,7 @@ TEST_F(DatabaseTest, ConcurrentOperations) {
         ctx->i = i;
         ctx->test = this;
         promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path, value, put_prom);
+        database_put(db, path, value, put_prom);
 
         std::future<void> put_future = put_promise[i].get_future();
         EXPECT_NO_THROW(put_future.get());
@@ -543,7 +541,7 @@ TEST_F(DatabaseTest, ConcurrentOperations) {
         ctx->i = i;
         ctx->test = this;
         promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, get_path, get_prom);
+        database_get(db, get_path, get_prom);
 
         std::future<identifier_t*> get_future = get_promise[i].get_future();
         identifier_t* result = nullptr;
@@ -565,7 +563,7 @@ TEST_F(DatabaseTest, Persistence) {
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
-        priority_t priority = priority_get_next();
+        
 
         // Insert values
         path_t* path1 = make_path({"persistent", "key1"});
@@ -575,7 +573,7 @@ TEST_F(DatabaseTest, Persistence) {
         ctx->i = 0;
         ctx->test = this;
         promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path1, value1, put_prom);
+        database_put(db, path1, value1, put_prom);
 
         std::future<void> put_future = put_promise[0].get_future();
         EXPECT_NO_THROW(put_future.get());
@@ -588,7 +586,7 @@ TEST_F(DatabaseTest, Persistence) {
         ctx->i = 1;
         ctx->test = this;
         promise_t* put_prom2 = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path2, value2, put_prom2);
+        database_put(db, path2, value2, put_prom2);
 
         std::future<void> put_future2 = put_promise[1].get_future();
         EXPECT_NO_THROW(put_future2.get());
@@ -608,7 +606,7 @@ TEST_F(DatabaseTest, Persistence) {
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
-        priority_t priority = priority_get_next();
+        
 
         // Verify first value
         path_t* get_path1 = make_path({"persistent", "key1"});
@@ -617,7 +615,7 @@ TEST_F(DatabaseTest, Persistence) {
         ctx->i = 0;
         ctx->test = this;
         promise_t* get_prom1 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, get_path1, get_prom1);
+        database_get(db, get_path1, get_prom1);
 
         std::future<identifier_t*> get_future1 = get_promise[0].get_future();
         identifier_t* result1 = nullptr;
@@ -634,7 +632,7 @@ TEST_F(DatabaseTest, Persistence) {
         ctx->i = 1;
         ctx->test = this;
         promise_t* get_prom2 = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, get_path2, get_prom2);
+        database_get(db, get_path2, get_prom2);
 
         std::future<identifier_t*> get_future2 = get_promise[1].get_future();
         identifier_t* result2 = nullptr;
@@ -653,7 +651,7 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    priority_t priority = priority_get_next();
+    
 
     // Test paths with depths 1 through 15 sequentially
     for (int depth = 1; depth <= 15; depth++) {
@@ -676,7 +674,7 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
         ctx->i = depth - 1;
         ctx->test = this;
         promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path, value, put_prom);
+        database_put(db, path, value, put_prom);
 
         std::future<void> put_future = put_promise[depth - 1].get_future();
         EXPECT_NO_THROW(put_future.get());
@@ -704,7 +702,7 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
         ctx->i = depth - 1;
         ctx->test = this;
         promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, path, get_prom);
+        database_get(db, path, get_prom);
 
         std::future<identifier_t*> get_future = get_promise[depth - 1].get_future();
         identifier_t* result = nullptr;
@@ -728,7 +726,7 @@ TEST_F(DatabaseTest, Snapshot) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    priority_t priority = priority_get_next();
+    
 
     // Insert values
     const int COUNT = 10;
@@ -744,7 +742,7 @@ TEST_F(DatabaseTest, Snapshot) {
         ctx->i = i;
         ctx->test = this;
         promise_t* put_prom = promise_create(put_callback_wrapper, put_callback_err_wrapper, ctx);
-        database_put(db, priority, path, value, put_prom);
+        database_put(db, path, value, put_prom);
 
         std::future<void> put_future = put_promise[i].get_future();
         EXPECT_NO_THROW(put_future.get());
@@ -777,7 +775,7 @@ TEST_F(DatabaseTest, Snapshot) {
         ctx->i = i;
         ctx->test = this;
         promise_t* get_prom = promise_create(get_callback_wrapper, get_callback_err_wrapper, ctx);
-        database_get(db, priority, get_path, get_prom);
+        database_get(db, get_path, get_prom);
 
         std::future<identifier_t*> get_future = get_promise[i].get_future();
         identifier_t* result = nullptr;
