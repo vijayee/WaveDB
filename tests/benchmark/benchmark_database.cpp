@@ -156,6 +156,50 @@ static void concurrent_write_worker(concurrent_bench_ctx_t* ctx) {
     ctx->total_latency_ns->fetch_add(duration_ns);
 }
 
+static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
+                                           hierarchical_timing_wheel_t* wheel,
+                                           int thread_count, int ops_per_thread) {
+    std::vector<std::thread> threads;
+    std::atomic<uint64_t> total_ops{0};
+    std::atomic<uint64_t> total_errors{0};
+    std::atomic<uint64_t> total_latency_ns{0};
+
+    auto start = std::chrono::high_resolution_clock::now();
+
+    for (int t = 0; t < thread_count; t++) {
+        threads.emplace_back([&, t]() {
+            concurrent_bench_ctx_t ctx;
+            ctx.db = db;
+            ctx.total_ops = &total_ops;
+            ctx.total_errors = &total_errors;
+            ctx.total_latency_ns = &total_latency_ns;
+            ctx.thread_id = t;
+            ctx.ops_per_thread = ops_per_thread;
+            ctx.pool = pool;
+            ctx.wheel = wheel;
+
+            concurrent_write_worker(&ctx);
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+
+    double ops_per_sec = (total_ops.load() * 1e9) / duration_ns;
+    double avg_latency_ns = total_latency_ns.load() / (double)total_ops.load();
+
+    printf("Concurrent Write (%d threads):\n", thread_count);
+    printf("  Operations: %lu\n", total_ops.load());
+    printf("  Ops/sec: %.0f\n", ops_per_sec);
+    printf("  Avg latency: %.0f ns\n", avg_latency_ns);
+    printf("  Errors: %lu\n", total_errors.load());
+    printf("\n");
+}
+
 // Setup helper
 static void setup_database(bench_context_t* ctx) {
     ctx->pool = work_pool_create(platform_core_count());
