@@ -717,3 +717,65 @@ size_t database_count(database_t* db) {
     // Return LRU cache size as approximation
     return database_lru_cache_size(db->lru);
 }
+
+// ============================================================================
+// Synchronous API Implementation
+// ============================================================================
+
+int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
+    // Validation (same as async)
+    if (db == NULL || path == NULL || value == NULL) {
+        if (path) path_destroy(path);
+        if (value) identifier_destroy(value);
+        return -1;
+    }
+
+    // Begin MVCC transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        path_destroy(path);
+        identifier_destroy(value);
+        return -1;
+    }
+
+    // Write to thread-local WAL
+    buffer_t* entry = encode_put_entry(path, value);
+    if (entry != NULL) {
+        thread_wal_t* twal = get_thread_wal(db->wal_manager);
+        if (twal != NULL) {
+            int result = thread_wal_write(twal, txn->txn_id, WAL_PUT, entry);
+            if (result != 0) {
+                log_warn("Failed to write to thread-local WAL");
+            }
+        }
+        buffer_destroy(entry);
+    }
+
+    // Acquire sharded write lock
+    size_t shard = get_write_lock_shard(path);
+    platform_lock(&db->write_locks[shard]);
+
+    // Apply to trie with MVCC
+    hbtrie_insert_mvcc(db->trie, path, value, txn->txn_id);
+
+    // Release write lock
+    platform_unlock(&db->write_locks[shard]);
+
+    // Commit transaction
+    tx_manager_commit(db->tx_manager, txn);
+
+    // Update LRU cache
+    path_t* copied_path = path_copy(path);
+    identifier_t* value_ref = REFERENCE(value, identifier_t);
+    identifier_t* ejected = database_lru_cache_put(db->lru, copied_path, value_ref);
+    if (ejected) {
+        identifier_destroy(ejected);
+    }
+
+    // Cleanup
+    path_destroy(path);
+    identifier_destroy(value);
+    txn_desc_destroy(txn);
+
+    return 0;
+}
