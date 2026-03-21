@@ -73,7 +73,7 @@ From `OPTIMIZATION_RESULTS.md`:
 **Sharded Queue Structure:**
 
 ```c
-#define QUEUE_SHARDS 16
+#define QUEUE_SHARDS 16  // 16 shards: balance between contention and memory
 
 typedef struct {
     work_queue_item_t* first;
@@ -87,13 +87,19 @@ typedef struct {
 } sharded_work_queue_t;
 ```
 
+**Rationale for 16 Shards:**
+- Typical CPU cache line size (64 bytes) × 16 = 1024 bytes total lock array
+- Expected thread count (8-32 threads): 16 shards provides 2-4x overprovisioning
+- Memory overhead: 16 × (lock + queue pointers) ≈ 256 bytes
+- Trade-off: More shards → less contention, more memory/iteration overhead
+
 **Key Changes:**
 
 1. Remove priority field from `work_t` (no longer needed)
 2. Replace single queue with array of 16 FIFO queues
 3. Replace single lock with array of 16 locks
 4. Round-robin distribution for submissions
-5. Work stealing for dequeue
+5. Work stealing with fair starting offset for dequeue
 6. Simplify `work_enqueue()` to O(1) tail insertion
 
 ### Data Flow
@@ -101,6 +107,8 @@ typedef struct {
 **Submitter Thread:**
 
 ```c
+#include <stdatomic.h>  // Required for _Atomic
+
 void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
     // Round-robin distribution
     size_t shard = atomic_fetch_add(&sq->next_shard, 1) % QUEUE_SHARDS;
@@ -115,11 +123,17 @@ void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
 
 ```c
 work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
-    // Try all shards (work stealing)
+    // Fair work stealing: use random/thread-local starting offset
+    // This prevents systematic bias where lower-numbered shards are always checked first
+    static _Thread_local size_t start_shard = 0;
+    size_t shard = start_shard;
+    start_shard = (start_shard + 1) % QUEUE_SHARDS;  // Rotate for fairness
+
     for (size_t i = 0; i < QUEUE_SHARDS; i++) {
-        platform_lock(&sq->locks[i]);
-        work_t* work = work_dequeue_head(&sq->queues[i]);  // O(1)
-        platform_unlock(&sq->locks[i]);
+        size_t idx = (shard + i) % QUEUE_SHARDS;
+        platform_lock(&sq->locks[idx]);
+        work_t* work = work_dequeue_head(&sq->queues[idx]);  // O(1)
+        platform_unlock(&sq->locks[idx]);
 
         if (work) return work;
     }
@@ -129,18 +143,20 @@ work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
 
 **Integration with Condition Variables:**
 
-The pool lock remains for condition variable signaling:
+**Critical Lock Ordering**: Workers must release `pool->lock` before calling `sharded_work_dequeue()` to avoid serializing dequeue operations. The pool lock is only for condition variable synchronization, not queue access.
 
 ```c
 void* workerFunction(void* args) {
     work_pool_t* pool = args;
 
     while (true) {
-        platform_lock(&pool->lock);  // For condition wait
+        platform_lock(&pool->lock);  // For condition wait only
 
+        // Dequeue using shard locks (pool lock NOT held during queue access)
         work_t* work = sharded_work_dequeue(&pool->sharded_queue);
 
-        if (!work && !pool->stop) {
+        // Wait for work if queue empty
+        while (!work && !pool->stop) {
             pool->idleCount++;
             if (pool->idleCount == pool->size) {
                 platform_signal_condition(&pool->idle);
@@ -150,9 +166,10 @@ void* workerFunction(void* args) {
             work = sharded_work_dequeue(&pool->sharded_queue);
         }
 
-        platform_unlock(&pool->lock);
+        platform_unlock(&pool->lock);  // Release before execution
 
         if (work) {
+            work = (work_t*)refcounter_reference((refcounter_t*)work);
             work->execute(work->ctx);
             work_destroy(work);
         } else if (pool->stop) {
@@ -162,6 +179,19 @@ void* workerFunction(void* args) {
     return NULL;
 }
 ```
+
+**Thread Safety Explanation:**
+
+**Lock Ordering**:
+- Enqueue: `pool->lock` (for stop check only, released immediately) → `shard_lock`
+- Dequeue: `pool->lock` (for condition wait) → `shard_locks` (iterative, pool lock released before shard locks)
+- No circular dependency because pool lock is never held while acquiring shard locks for queue operations
+
+**Condition Variable Correctness**:
+- `platform_condition_wait()` atomically releases `pool->lock` and sleeps
+- Upon wakeup, re-acquires `pool->lock` before returning
+- Work can't be missed because dequeue is re-checked after wakeup
+- Workers release pool lock before executing work, allowing concurrent dequeues
 
 ### Implementation Details
 
@@ -187,10 +217,14 @@ typedef struct {
     void (*abort)(void* ctx);
     void* ctx;
 } work_t;
+
+// Update work_create signature:
+work_t* work_create(void (*execute)(void*), void (*abort)(void*), void* ctx);
 ```
 
 **2. src/Workers/work.c** - Simplify work creation
 ```c
+// Remove priority parameter and priority creation logic
 work_t* work_create(void (*execute)(void*), void (*abort)(void*), void* ctx) {
     work_t* work = get_clear_memory(sizeof(work_t));
     work->execute = execute;
@@ -205,22 +239,26 @@ work_t* work_create(void (*execute)(void*), void (*abort)(void*), void* ctx) {
 
 **4. src/Workers/queue.h** - Add sharded structures
 ```c
+#include <stdatomic.h>  // Required for _Atomic
+
 #define QUEUE_SHARDS 16
 
+// Existing FIFO queue (unchanged)
 typedef struct {
     work_queue_item_t* first;
     work_queue_item_t* last;
 } work_queue_t;
 
+// New sharded queue
 typedef struct {
     work_queue_t queues[QUEUE_SHARDS];
     PLATFORMLOCKTYPE(locks[QUEUE_SHARDS]);
-    _Atomic uint64_t next_shard;
+    _Atomic uint64_t next_shard;  // For round-robin distribution
 } sharded_work_queue_t;
 
-// Existing API
+// Existing API (unchanged)
 void work_queue_init(work_queue_t* queue);
-void work_enqueue(work_queue_t* queue, work_t* work);  // Simplified
+void work_enqueue(work_queue_t* queue, work_t* work);  // Simplified to tail insert
 work_t* work_dequeue(work_queue_t* queue);
 
 // New sharded API
@@ -232,6 +270,8 @@ void sharded_work_queue_destroy(sharded_work_queue_t* sq);
 
 **5. src/Workers/queue.c** - Implement sharded functions
 ```c
+#include <stdatomic.h>
+
 // Simplify to O(1) tail insertion
 void work_enqueue(work_queue_t* queue, work_t* work) {
     work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
@@ -242,7 +282,7 @@ void work_enqueue(work_queue_t* queue, work_t* work) {
     if (queue->last) {
         queue->last->next = item;
     } else {
-        queue->first = item;
+        queue->first = item;  // Empty queue
     }
     queue->last = item;
 }
@@ -264,10 +304,16 @@ void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
 }
 
 work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
+    // Fair work stealing: use thread-local starting offset
+    static _Thread_local size_t start_shard = 0;
+    size_t shard = start_shard;
+    start_shard = (start_shard + 1) % QUEUE_SHARDS;
+
     for (size_t i = 0; i < QUEUE_SHARDS; i++) {
-        platform_lock(&sq->locks[i]);
-        work_t* work = work_dequeue(&sq->queues[i]);
-        platform_unlock(&sq->locks[i]);
+        size_t idx = (shard + i) % QUEUE_SHARDS;
+        platform_lock(&sq->locks[idx]);
+        work_t* work = work_dequeue(&sq->queues[idx]);
+        platform_unlock(&sq->locks[idx]);
 
         if (work) return work;
     }
@@ -288,7 +334,7 @@ typedef struct {
     PLATFORMTHREADTYPE* workers;
     size_t size;
 
-    sharded_work_queue_t sharded_queue;  // ← Changed
+    sharded_work_queue_t sharded_queue;  // ← Changed from work_queue_t queue
     PLATFORMLOCKTYPE(lock);               // For condition variable only
     PLATFORMCONDITIONTYPE(condition);
     PLATFORMCONDITIONTYPE(shutdown);
@@ -303,9 +349,37 @@ typedef struct {
 ```c
 work_pool_t* work_pool_create(size_t size) {
     work_pool_t* pool = get_clear_memory(sizeof(work_pool_t));
-    // ... existing init ...
-    sharded_work_queue_init(&pool->sharded_queue);
-    // ... rest unchanged ...
+    pool->workers = get_clear_memory(sizeof(PLATFORMTHREADTYPE) * size);
+#if _WIN32
+    pool->workerIds = get_clear_memory(sizeof(DWORD) * size);
+#endif
+    pool->size = size;
+    refcounter_init((refcounter_t*) pool);
+    sharded_work_queue_init(&pool->sharded_queue);  // ← Changed
+    platform_lock_init(&pool->lock);
+    platform_condition_init(&pool->condition);
+    platform_condition_init(&pool->shutdown);
+    platform_condition_init(&pool->idle);
+    platform_barrier_init(&pool->barrier, size + 1);
+    return pool;
+}
+
+void work_pool_destroy(work_pool_t* pool) {
+    refcounter_dereference((refcounter_t*) pool);
+    if (refcounter_count((refcounter_t*) pool) == 0) {
+        sharded_work_queue_destroy(&pool->sharded_queue);  // ← NEW
+        platform_lock_destroy(&pool->lock);
+        platform_condition_destroy(&pool->condition);
+        platform_condition_destroy(&pool->shutdown);
+        platform_condition_destroy(&pool->idle);
+        platform_barrier_destroy(&pool->barrier);
+        free(pool->workers);
+#if _WIN32
+        free(pool->workerIds);
+#endif
+        refcounter_destroy_lock((refcounter_t*) pool);
+        free(pool);
+    }
 }
 
 int work_pool_enqueue(work_pool_t* pool, work_t* work) {
@@ -316,20 +390,62 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
     }
     platform_unlock(&pool->lock);
 
-    sharded_work_enqueue(&pool->sharded_queue, work);
+    sharded_work_enqueue(&pool->sharded_queue, work);  // ← Changed
     platform_signal_condition(&pool->condition);
     return 0;
 }
+
+// workerFunction updated per thread safety explanation above
+void* workerFunction(void* args) {
+    work_pool_t* pool = args;
+    platform_barrier_wait(&pool->barrier);
+
+    while (true) {
+        platform_lock(&pool->lock);
+
+        work_t* work = sharded_work_dequeue(&pool->sharded_queue);
+
+        while (!work && !pool->stop) {
+            pool->idleCount++;
+            if (pool->idleCount == pool->size) {
+                platform_signal_condition(&pool->idle);
+            }
+            platform_condition_wait(&pool->lock, &pool->condition);
+            pool->idleCount--;
+            work = sharded_work_dequeue(&pool->sharded_queue);
+        }
+
+        platform_unlock(&pool->lock);
+
+        if (work) {
+            work = (work_t*) refcounter_reference((refcounter_t*) work);
+            work->execute(work->ctx);
+            work_destroy(work);
+        } else if (pool->stop) {
+            break;
+        }
+    }
+    return NULL;
+}
 ```
 
-**8. Database Layer** - Remove priority from work creation
-- `src/Database/database.c` - All `work_create()` calls remove priority parameter
-- Test files - Update work creation calls
+**8. Database Layer Callers** - Remove priority parameter
+```c
+// src/Database/database.c - Lines 631, 663, 694
+// BEFORE:
+work_t* work = work_create(priority, ctx, execute, abort);
 
-**9. CMakeLists.txt** - Remove priority.c from build
+// AFTER:
+work_t* work = work_create(execute, abort, ctx);
+
+// src/Time/wheel.c - Lines 160, 209
+// Same change
+```
+
+**9. CMakeLists.txt** - Remove priority from build
 ```cmake
-# Remove from WAVEDB_SOURCES:
-# src/Workers/priority.c
+# Line ~73: Remove this line from WAVEDB_SOURCES
+    src/Workers/priority.c
 ```
 
 ### Work Distribution Strategy
@@ -339,6 +455,12 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 - Perfect distribution across shards (no hot spots)
 - Atomic counter increment is cache-friendly (single cache line)
 - Simple and predictable
+
+**Why Thread-Local Starting Offset for Dequeue:**
+- Prevents systematic bias where lower-numbered shards are always checked first
+- Each worker thread starts at a different shard
+- Provides better load distribution under light load
+- Minimal overhead (just increment modulo counter)
 
 **Work Stealing Benefits:**
 - Load balancing: busy threads help idle threads
@@ -363,6 +485,22 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 
 **Total Expected Improvement:** 10-50x concurrent throughput (similar to sharded write locks improvement)
 
+**Performance Measurement Plan:**
+
+```c
+// Benchmark 1: O(1) insertion verification
+// Measure time to enqueue N items with varying queue depths (10, 100, 1000, 10000)
+// Should show constant time regardless of queue depth
+
+// Benchmark 2: Contention scaling
+// Measure throughput with 1, 2, 4, 8, 16, 32 threads
+// Should show linear scaling up to shard count (16)
+
+// Benchmark 3: Work stealing fairness
+// Verify all 16 shards are utilized evenly under load
+// Track dequeue count per shard
+```
+
 ## Testing Strategy
 
 ### Unit Tests
@@ -372,6 +510,7 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 3. **Test work stealing** - Worker threads steal from other shards
 4. **Test empty queue** - All shards empty returns NULL
 5. **Test shutdown** - Stop signal empties all shards correctly
+6. **Test thread-local offset** - Verify workers start at different shards
 
 ### Integration Tests
 
@@ -381,23 +520,37 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 ### Performance Tests
 
 1. **Single-threaded** - Verify O(1) insertion performance
+   - Measure enqueue time for N=10, 100, 1000, 10000 items
+   - Compare before/after to verify constant time
+
 2. **Multi-threaded** - Verify linear scaling with threads
+   - Measure throughput (ops/sec) with 1, 2, 4, 8, 16, 32 threads
+   - Expect near-linear scaling up to number of shards
+
 3. **High contention** - Measure throughput under heavy load
+   - Submit burst of 1000 items from multiple threads
+   - Measure dequeue latency and throughput
+   - Compare with baseline (single queue)
+
+4. **Work stealing fairness** - Verify all shards utilized evenly
+   - Track dequeue count per shard
+   - Verify no systematic bias (variance < 10%)
 
 ## Migration Path
 
 ### Phase 1: Remove Priority System
 1. Delete `priority.h` and `priority.c`
 2. Remove priority field from `work_t`
-3. Update all `work_create()` calls
+3. Update all `work_create()` calls (parameter reordering)
 4. Verify tests pass
 
 ### Phase 2: Implement Sharded Queue
-1. Add `sharded_work_queue_t` structures
+1. Add `sharded_work_queue_t` structures to `queue.h`
 2. Implement sharded functions in `queue.c`
 3. Update `work_pool_t` to use sharded queue
-4. Update worker function to use `sharded_work_dequeue()`
-5. Verify tests pass
+4. Update `work_pool_create()`, `work_pool_destroy()`, `work_pool_enqueue()`
+5. Update `workerFunction()` to use `sharded_work_dequeue()`
+6. Verify tests pass
 
 ### Phase 3: Benchmark and Validate
 1. Run existing test suite
@@ -412,11 +565,6 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 **Impact:** High (would require rework)
 **Mitigation:** Verify with user that no code paths require priority ordering
 
-### Risk: Work Stealing Starvation
-**Likelihood:** Low (work stealing is fair)
-**Impact:** Medium (some work delayed)
-**Mitigation:** Implement random start offset for dequeue to prevent systematic bias
-
 ### Risk: Lock Contention Still High
 **Likelihood:** Low (16 shards should be sufficient)
 **Impact:** Medium (less improvement than expected)
@@ -427,13 +575,18 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 **Impact:** Low (acceptable for performance gain)
 **Mitigation:** Monitor memory usage, adjust shard count if needed
 
+### Risk: Thread-Local Storage Portability
+**Likelihood:** Low (C11 thread-local is widely supported)
+**Impact:** Medium (would need alternative approach)
+**Mitigation:** Fallback to atomic counter for starting offset if thread-local unavailable
+
 ## Success Criteria
 
 1. **All existing tests pass** - No regressions in functionality
 2. **O(1) insertion verified** - Benchmark shows constant time
 3. **Throughput improvement** - Measurable increase in concurrent operations
 4. **Code simplicity** - Cleaner than priority queue implementation
-5. **Linear scaling** - Throughput scales with thread count
+5. **Linear scaling** - Throughput scales with thread count up to shard count
 
 ## Alternatives Considered
 
