@@ -25,8 +25,11 @@
 - `src/Workers/queue.c` - Implement sharded functions, simplify work_enqueue
 - `src/Workers/pool.h` - Use sharded queue
 - `src/Workers/pool.c` - Update to sharded queue with correct lock ordering
-- `src/Database/database.c` - Update work_create calls (lines 631, 663, 694)
+- `src/Database/database.h` - Remove priority parameter from function declarations
+- `src/Database/database.c` - Remove priority parameter from function implementations
 - `src/Time/wheel.c` - Update work_create calls (lines 160, 209)
+- `tests/test_database.cpp` - Remove priority parameters from test calls
+- `tests/benchmark/benchmark_database.cpp` - Remove priority parameters from benchmark calls
 - `CMakeLists.txt` - Remove priority.c from build
 
 **Test Files:**
@@ -148,11 +151,13 @@ Part of sharded FIFO queue implementation"
 
 - [ ] **Step 1: Add sharded structures to queue.h**
 
-Open `src/Workers/queue.h` and add:
+Open `src/Workers/queue.h` and add `#include <stdatomic.h>` after existing includes, then add sharded structures:
 
 ```c
-#include <stdatomic.h>
+// At the top of queue.h, after existing includes:
+#include <stdatomic.h>  // Required for _Atomic uint64_t
 
+// Then add sharded structures:
 #define QUEUE_SHARDS 16
 
 // Existing FIFO queue (unchanged)
@@ -211,12 +216,13 @@ Part of sharded FIFO queue implementation"
 
 - [ ] **Step 1: Simplify work_enqueue to O(1) tail insertion**
 
-Open `src/Workers/queue.c` and replace the entire `work_enqueue` function:
+Open `src/Workers/queue.c` and replace the entire `work_enqueue` function (currently lines 12-56 with priority logic):
 
 ```c
-// BEFORE: O(n) priority insertion with traversal
+// BEFORE: O(n) priority insertion with complex traversal
+// (Current implementation has priority comparison logic)
 
-// AFTER: O(1) tail insertion
+// AFTER: O(1) tail insertion (FIFO - no priority needed)
 void work_enqueue(work_queue_t* queue, work_t* work) {
     work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
     item->work = work;
@@ -224,11 +230,11 @@ void work_enqueue(work_queue_t* queue, work_t* work) {
     item->previous = queue->last;
 
     if (queue->last) {
-        queue->last->next = item;
+        queue->last->next = item;  // Add to tail
     } else {
-        queue->first = item;  // Empty queue
+        queue->first = item;  // Queue was empty
     }
-    queue->last = item;
+    queue->last = item;  // Update tail
 }
 ```
 
@@ -593,7 +599,7 @@ Part of sharded FIFO queue implementation"
 
 ---
 
-## Task 6: Build and Test
+## Task 5.5: Update Database API Signatures**Files:**- Modify: `src/Database/database.h`- Modify: `src/Database/database.c`- [ ] **Step 1: Update database.h function declarations**Open `src/Database/database.h` and update three function signatures:```c// BEFORE (lines 115, 128, 138 approximately):void database_put(database_t* db, priority_t priority, path_t* path,                   identifier_t* value, promise_t* promise);void database_get(database_t* db, priority_t priority, path_t* path, promise_t* promise);void database_delete(database_t* db, priority_t priority, path_t* path, promise_t* promise);// AFTER:void database_put(database_t* db, path_t* path, identifier_t* value, promise_t* promise);void database_get(database_t* db, path_t* path, promise_t* promise);void database_delete(database_t* db, path_t* path, promise_t* promise);```- [ ] **Step 2: Update database.c function implementations**Open `src/Database/database.c` and update three function signatures (approximately lines 607, 645, 676):```c// BEFORE:void database_put(database_t* db, priority_t priority, path_t* path,                   identifier_t* value, promise_t* promise) {    // ... existing code ...}void database_get(database_t* db, priority_t priority, path_t* path, promise_t* promise) {    // ... existing code ...}void database_delete(database_t* db, priority_t priority, path_t* path, promise_t* promise) {    // ... existing code ...}// AFTER:void database_put(database_t* db, path_t* path, identifier_t* value, promise_t* promise) {    // ... existing code ...}void database_get(database_t* db, path_t* path, promise_t* promise) {    // ... existing code ...}void database_delete(database_t* db, path_t* path, promise_t* promise) {    // ... existing code ...}```Note: The work_create calls inside these functions were already updated in Task 5.- [ ] **Step 3: Verify compilation**```bashcd buildcmake .. && make -j$(nproc) 2>&1 | grep -E "error|undefined" | head -20```Expected: Compilation succeeds, but tests may still reference priority (that's OK for now)- [ ] **Step 4: Commit database API changes**```bashgit add src/Database/database.h src/Database/database.cgit commit -m "refactor: remove priority from database API- Remove priority parameter from database_put/get/delete- Update function signatures in database.h- Simplify API for FIFO-only work queuePart of sharded FIFO queue implementation"```---## Task 5.6: Update Test Files**Files:**- Modify: `tests/test_database.cpp`- Modify: `tests/benchmark/benchmark_database.cpp`- [ ] **Step 1: Find priority references in test_database.cpp**```bashgrep -n "priority" tests/test_database.cpp```Expected output: Multiple lines with `priority_t` declarations and parameters- [ ] **Step 2: Remove priority from test_database.cpp**Use one of these approaches:**Option A: Manual edits**Find and remove all lines like:```cpppriority_t priority = priority_get_next();```And update all function calls:```cpp// BEFORE:database_put(db, priority, path, value, promise);database_get(db, priority, path, promise);database_delete(db, priority, path, promise);// AFTER:database_put(db, path, value, promise);database_get(db, path, promise);database_delete(db, path, promise);```**Option B: Automated sed**```bashsed -i 's/priority_t priority = priority_get_next();//g' tests/test_database.cppsed -i 's/database_put(db, priority,/database_put(db,/g' tests/test_database.cppsed -i 's/database_get(db, priority,/database_get(db,/g' tests/test_database.cppsed -i 's/database_delete(db, priority,/database_delete(db,/g' tests/test_database.cpp```- [ ] **Step 3: Update benchmark_database.cpp**The benchmark uses static priority `{1, 1}`. Remove:```bash# Remove priority declarationssed -i '/priority_t priority = {1, 1};/d' tests/benchmark/benchmark_database.cpp# Remove priority parameterssed -i 's/database_put(db, priority,/database_put(db,/g' tests/benchmark/benchmark_database.cppsed -i 's/database_get(db, priority,/database_get(db,/g' tests/benchmark/benchmark_database.cppsed -i 's/database_delete(db, priority,/database_delete(db,/g' tests/benchmark/benchmark_database.cpp```- [ ] **Step 4: Remove priority.h includes**```bash# Check if tests include priority.hgrep -n "priority.h" tests/test_database.cppgrep -n "priority.h" tests/benchmark/benchmark_database.cpp# Remove if foundsed -i '/#include.*priority.h/d' tests/test_database.cppsed -i '/#include.*priority.h/d' tests/benchmark/benchmark_database.cpp```- [ ] **Step 5: Verify build**```bashcd buildcmake .. && make -j$(nproc)```Expected: Build succeeds without errors- [ ] **Step 6: Run tests**```bashcd buildctest --output-on-failure```Expected: All tests pass (8/8 or similar)- [ ] **Step 7: Commit test updates**```bashgit add tests/test_database.cpp tests/benchmark/benchmark_database.cppgit commit -m "test: remove priority from test files- Remove priority_t variables from test_database.cpp- Remove priority parameters from database calls- Remove priority.h includes from test filesPart of sharded FIFO queue implementation"```---## Task 6: Build and Test
 
 **Files:**
 - All modified files
