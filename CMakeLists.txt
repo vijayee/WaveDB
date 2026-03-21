@@ -244,6 +244,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_database tests/benchmark/benchmark_database.cpp)
     target_link_libraries(benchmark_database benchmark_base wavedb Threads::Threads)
 
+    # Thread-local WAL benchmark
+    add_executable(benchmark_thread_wal tests/benchmark/benchmark_thread_wal.cpp)
+    target_link_libraries(benchmark_thread_wal benchmark_base wavedb Threads::Threads)
+
     # Create benchmark output directory
     add_custom_target(benchmark_output_dir
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
