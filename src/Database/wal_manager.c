@@ -355,17 +355,27 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         return -1;  // File full, needs rotation
     }
 
-    // Prepare entry header
-    wal_entry_header_t header;
-    header.type = type;
-    header.crc32 = wal_crc32(data->data, data->size);
-    header.data_len = (uint32_t)data->size;
+    // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
+    // Calculate CRC32 of data
+    uint32_t crc = wal_crc32(data->data, data->size);
 
-    // Serialize header to big-endian buffer
-    uint8_t header_buf[9];  // type(1) + crc32(4) + data_len(4)
-    header_buf[0] = (uint8_t)header.type;
-    write_uint32_be(&header_buf[1], header.crc32);
-    write_uint32_be(&header_buf[5], header.data_len);
+    // Prepare header buffer: type(1) + txn_id(24) + crc32(4) + data_len(4)
+    uint8_t header_buf[33];  // 1 + 24 + 4 + 4 = 33 bytes
+    uint8_t* ptr = header_buf;
+
+    // Write type (1 byte)
+    *ptr++ = (uint8_t)type;
+
+    // Write transaction ID (24 bytes, serialized)
+    transaction_id_serialize(&txn_id, ptr);
+    ptr += 24;
+
+    // Write CRC32 (4 bytes, big-endian)
+    write_uint32_be(ptr, crc);
+    ptr += 4;
+
+    // Write data length (4 bytes, big-endian)
+    write_uint32_be(ptr, (uint32_t)data->size);
 
     // Write header atomically with O_APPEND
     ssize_t bytes_written = write(twal->fd, header_buf, sizeof(header_buf));
@@ -398,6 +408,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             if (fsync(twal->fd) != 0) {
                 result = -1;
             }
+            twal->pending_writes = 0;
             break;
 
         case WAL_SYNC_DEBOUNCED:
