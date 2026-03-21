@@ -11,6 +11,16 @@
 #include <sys/stat.h>
 #include <sys/uio.h>
 
+// Error codes
+#define WAL_ERROR_INVALID_ARG -1
+#define WAL_ERROR_IO -2
+#define WAL_ERROR_MEMORY -3
+#define WAL_ERROR_CORRUPT -4
+#define WAL_ERROR_LIMIT -5
+
+// Maximum entries to prevent DoS
+#define MANIFEST_MAX_ENTRIES 10000
+
 // Thread-local storage for WAL
 static __thread thread_wal_t* thread_local_wal = NULL;
 
@@ -123,16 +133,20 @@ static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
 // Read manifest file
 int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* count) {
     if (manager == NULL || entries == NULL || count == NULL) {
-        return -1;
+        return WAL_ERROR_INVALID_ARG;
     }
 
     *entries = NULL;
     *count = 0;
 
+    // Acquire manifest lock for thread safety
+    platform_lock(&manager->manifest_lock);
+
     // Open manifest file for reading
     int fd = open(manager->manifest_path, O_RDONLY);
     if (fd < 0) {
-        return -1;
+        platform_unlock(&manager->manifest_lock);
+        return WAL_ERROR_IO;
     }
 
     // Read header
@@ -140,21 +154,24 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
     ssize_t bytes_read = read(fd, &header, sizeof(header));
     if (bytes_read != sizeof(header)) {
         close(fd);
-        return -1;
+        platform_unlock(&manager->manifest_lock);
+        return WAL_ERROR_IO;
     }
 
     // Check version
     if (header.version != MANIFEST_VERSION) {
         close(fd);
-        return -1;
+        platform_unlock(&manager->manifest_lock);
+        return WAL_ERROR_CORRUPT;
     }
 
     // Allocate entries array (start with capacity 16, double as needed)
     size_t capacity = 16;
-    manifest_entry_t* result = malloc(capacity * sizeof(manifest_entry_t));
+    manifest_entry_t* result = get_clear_memory(capacity * sizeof(manifest_entry_t));
     if (result == NULL) {
         close(fd);
-        return -1;
+        platform_unlock(&manager->manifest_lock);
+        return WAL_ERROR_MEMORY;
     }
 
     size_t num_entries = 0;
@@ -173,7 +190,18 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
 
         // Stop on error or partial read
         if (bytes_read != sizeof(entry)) {
-            break;
+            free(result);
+            close(fd);
+            platform_unlock(&manager->manifest_lock);
+            return WAL_ERROR_IO;
+        }
+
+        // Check maximum entries limit (DoS protection)
+        if (num_entries >= MANIFEST_MAX_ENTRIES) {
+            free(result);
+            close(fd);
+            platform_unlock(&manager->manifest_lock);
+            return WAL_ERROR_LIMIT;
         }
 
         // Preserve the stored checksum before computing
@@ -193,19 +221,25 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
 
         // Stop on corrupted entry (checksum mismatch)
         if (computed_checksum != stored_checksum) {
-            break;
+            free(result);
+            close(fd);
+            platform_unlock(&manager->manifest_lock);
+            return WAL_ERROR_CORRUPT;
         }
 
         // Grow array if needed
         if (num_entries >= capacity) {
             size_t new_capacity = capacity * 2;
-            manifest_entry_t* new_result = realloc(result,
-                                                   new_capacity * sizeof(manifest_entry_t));
+            manifest_entry_t* new_result = get_clear_memory(new_capacity * sizeof(manifest_entry_t));
             if (new_result == NULL) {
                 free(result);
                 close(fd);
-                return -1;
+                platform_unlock(&manager->manifest_lock);
+                return WAL_ERROR_MEMORY;
             }
+            // Copy existing entries
+            memcpy(new_result, result, num_entries * sizeof(manifest_entry_t));
+            free(result);
             result = new_result;
             capacity = new_capacity;
         }
@@ -215,6 +249,7 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
     }
 
     close(fd);
+    platform_unlock(&manager->manifest_lock);
 
     *entries = result;
     *count = num_entries;

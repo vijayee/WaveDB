@@ -160,12 +160,22 @@ int compact_wal_files(wal_manager_t* manager);
 int wal_manager_flush(wal_manager_t* manager);
 
 /**
- * Read manifest entries.
+ * Read manifest entries from disk.
  *
- * @param manager   WAL manager
- * @param entries   Output array for entries (caller must free)
- * @param count     Output count of entries
- * @return 0 on success, -1 on failure
+ * @param manager The WAL manager
+ * @param entries Output array of manifest entries (caller must free)
+ * @param count Output count of entries
+ * @return 0 on success, negative error code on failure
+ *
+ * On success, *entries is allocated and must be freed by caller.
+ * On failure, *entries is set to NULL and *count to 0.
+ *
+ * Error codes:
+ *   WAL_ERROR_INVALID_ARG (-1) - Invalid arguments
+ *   WAL_ERROR_IO (-2) - I/O error
+ *   WAL_ERROR_MEMORY (-3) - Memory allocation failed
+ *   WAL_ERROR_CORRUPT (-4) - Corrupted manifest data
+ *   WAL_ERROR_LIMIT (-5) - Maximum entries limit exceeded
  */
 int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* count);
 
