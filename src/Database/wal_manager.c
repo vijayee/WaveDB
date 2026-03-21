@@ -743,8 +743,9 @@ void wal_manager_destroy(wal_manager_t* manager) {
                         close(twal->fd);
                     }
 
-                    // Destroy debouncer if present
+                    // Flush and destroy debouncer if present
                     if (twal->fsync_debouncer != NULL) {
+                        debouncer_flush(twal->fsync_debouncer);
                         debouncer_destroy(twal->fsync_debouncer);
                     }
 

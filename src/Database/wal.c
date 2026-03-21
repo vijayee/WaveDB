@@ -319,8 +319,9 @@ void wal_destroy(wal_t* wal) {
             wal->pending_writes = 0;
         }
 
-        // Destroy debouncer if present
+        // Flush and destroy debouncer if present
         if (wal->fsync_debouncer != NULL) {
+            debouncer_flush(wal->fsync_debouncer);
             debouncer_destroy(wal->fsync_debouncer);
             wal->fsync_debouncer = NULL;
         }
