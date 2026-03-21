@@ -297,9 +297,6 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
         } else {
             db->storage_cache_size = cache_size;
             db->storage_max_tuple = section_concurrency;
-
-            // Attach storage to trie
-            db->trie->root->storage = db->storage;
         }
     } else {
         db->storage = NULL;

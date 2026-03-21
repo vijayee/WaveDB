@@ -23,6 +23,11 @@ void debouncer_destroy(debouncer_t* bouncer) {
   }
 }
 void debouncer_debounce(debouncer_t* bouncer) {
+  // Skip timer operations if no timing wheel (synchronous mode)
+  if (bouncer->wheel == NULL) {
+    return;
+  }
+
   if (bouncer->timerId == 0) {
     bouncer->timerId = hierarchical_timing_wheel_set_timer(bouncer->wheel, bouncer->ctx, bouncer->cb, bouncer->abort,(timer_duration_t) {.milliseconds = bouncer->wait});
     if (bouncer->max_wait > 0) {
@@ -45,6 +50,11 @@ void debouncer_debounce(debouncer_t* bouncer) {
 }
 
 void debouncer_flush(debouncer_t* bouncer) {
+  // Skip timer operations if no timing wheel (synchronous mode)
+  if (bouncer->wheel == NULL) {
+    return;
+  }
+
   if (bouncer->timerId != 0) {
     hierarchical_timing_wheel_cancel_timer(bouncer->wheel, bouncer->timerId);
     bouncer->timerId = 0;

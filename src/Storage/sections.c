@@ -44,11 +44,15 @@ sections_lru_cache_t* sections_lru_cache_create(size_t size) {
 }
 
 void sections_lru_cache_destroy(sections_lru_cache_t* lru) {
-    sections_lru_node_t* node;
-    hashmap_foreach_data(node, &lru->cache) {
-        section_destroy(node->value);
-        free(node);
+    // Free all nodes and sections from the LRU list
+    sections_lru_node_t* current = lru->first;
+    while (current != NULL) {
+        sections_lru_node_t* next = current->next;
+        section_destroy(current->value);
+        free(current);
+        current = next;
     }
+    // Cleanup the hashmap (this will free all keys)
     hashmap_cleanup(&lru->cache);
     free(lru);
 }
@@ -109,6 +113,8 @@ void sections_lru_cache_put(sections_lru_cache_t* lru, section_t* section) {
         node->value = section;
         node->next = NULL;
         node->previous = NULL;
+        // Consume yield if present (transfers ownership)
+        refcounter_reference((refcounter_t*) section);
         if (lru->first == NULL) {
             lru->first = node;
             lru->last = node;
@@ -431,7 +437,9 @@ void sections_destroy(sections_t* sections) {
 
     sections_lru_cache_destroy(sections->lru);
     round_robin_destroy(sections->robin);
-    hierarchical_timing_wheel_destroy(sections->wheel);
+    if (sections->wheel != NULL) {
+        hierarchical_timing_wheel_destroy(sections->wheel);
+    }
     free(sections->meta_path);
     free(sections->data_path);
     free(sections->robin_path);
