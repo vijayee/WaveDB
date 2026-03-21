@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <cstring>
+#include <sys/stat.h>
 
 class WalManagerTest : public ::testing::Test {
 protected:
@@ -111,6 +112,35 @@ TEST_F(WalManagerTest, WriteToThreadWal) {
     // Write to thread-local WAL
     int result = thread_wal_write(twal, txn_id, WAL_PUT, data);
     EXPECT_EQ(result, 0);
+
+    buffer_destroy(data);
+}
+
+TEST_F(WalManagerTest, ReadManifest) {
+    int error = 0;
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    thread_wal_t* twal = get_thread_wal(manager);
+    ASSERT_NE(twal, nullptr);
+
+    // Write entry
+    const char* test_data = "test";
+    buffer_t* data = buffer_create_from_pointer_copy((uint8_t*)test_data, 4);
+    ASSERT_NE(data, nullptr);
+    transaction_id_t txn_id = transaction_id_get_next();
+    thread_wal_write(twal, txn_id, WAL_PUT, data);
+
+    // Close and reopen
+    wal_manager_destroy(manager);
+    manager = wal_manager_create(temp_dir, &config, &error);
+    ASSERT_NE(manager, nullptr);
+
+    // Verify manifest exists
+    struct stat st;
+    char manifest_path[512];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.dat", temp_dir);
+    EXPECT_EQ(stat(manifest_path, &st), 0);
 
     buffer_destroy(data);
 }

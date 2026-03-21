@@ -118,6 +118,61 @@ static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
     // Fsync is handled by background thread
 }
 
+int read_manifest(const char* path, manifest_header_t* header,
+                  manifest_entry_t** entries, size_t* count) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    // Read header
+    if (read(fd, header, sizeof(manifest_header_t)) != sizeof(manifest_header_t)) {
+        close(fd);
+        return -1;
+    }
+
+    // Read entries
+    size_t capacity = 16;
+    manifest_entry_t* list = malloc(capacity * sizeof(manifest_entry_t));
+    size_t n = 0;
+
+    while (1) {
+        if (n >= capacity) {
+            capacity *= 2;
+            list = realloc(list, capacity * sizeof(manifest_entry_t));
+        }
+
+        ssize_t bytes = read(fd, &list[n], sizeof(manifest_entry_t));
+        if (bytes == 0) {
+            break;  // EOF
+        }
+        if (bytes != sizeof(manifest_entry_t)) {
+            free(list);
+            close(fd);
+            return -1;
+        }
+
+        // Verify checksum
+        uint32_t expected = list[n].checksum;
+        list[n].checksum = 0;
+        uint32_t actual = wal_crc32((const uint8_t*)&list[n],
+                                    sizeof(manifest_entry_t) - 4);
+        list[n].checksum = expected;
+
+        if (actual != expected) {
+            // Corrupted entry, stop reading
+            break;
+        }
+
+        n++;
+    }
+
+    close(fd);
+    *entries = list;
+    *count = n;
+    return 0;
+}
+
 // Helper to create thread-local WAL
 static thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     thread_wal_t* twal = get_clear_memory(sizeof(thread_wal_t));
