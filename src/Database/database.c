@@ -43,6 +43,26 @@ static void _database_put(database_put_ctx_t* ctx);
 static void _database_get(database_get_ctx_t* ctx);
 static void _database_delete(database_delete_ctx_t* ctx);
 
+// Abort functions for cleanup when work is not executed
+static void abort_database_put(void* ctx) {
+    database_put_ctx_t* put_ctx = (database_put_ctx_t*)ctx;
+    if (put_ctx->path) path_destroy(put_ctx->path);
+    if (put_ctx->value) identifier_destroy(put_ctx->value);
+    free(put_ctx);
+}
+
+static void abort_database_get(void* ctx) {
+    database_get_ctx_t* get_ctx = (database_get_ctx_t*)ctx;
+    if (get_ctx->path) path_destroy(get_ctx->path);
+    free(get_ctx);
+}
+
+static void abort_database_delete(void* ctx) {
+    database_delete_ctx_t* del_ctx = (database_delete_ctx_t*)ctx;
+    if (del_ctx->path) path_destroy(del_ctx->path);
+    free(del_ctx);
+}
+
 // Helper to encode path+value for WAL
 static buffer_t* encode_put_entry(path_t* path, identifier_t* value) {
     cbor_item_t* array = cbor_new_definite_array(2);
@@ -630,8 +650,8 @@ void database_put(database_t* db, path_t* path,
 
     work_t* work = work_create(
         (void (*)(void*))_database_put,
-        (void (*)(void*))free,
-        ctx);  // abort: free context
+        (void (*)(void*))abort_database_put,
+        ctx);
     if (work == NULL) {
         free(ctx);
         path_destroy(path);
@@ -664,7 +684,7 @@ void database_get(database_t* db, path_t* path, promise_t* promise) {
 
     work_t* work = work_create(
         (void (*)(void*))_database_get,
-        (void (*)(void*))free,
+        (void (*)(void*))abort_database_get,
         ctx);
     if (work == NULL) {
         free(ctx);
@@ -697,7 +717,7 @@ void database_delete(database_t* db, path_t* path, promise_t* promise) {
 
     work_t* work = work_create(
         (void (*)(void*))_database_delete,
-        (void (*)(void*))free,
+        (void (*)(void*))abort_database_delete,
         ctx);
     if (work == NULL) {
         free(ctx);
