@@ -82,6 +82,7 @@ set(WAVEDB_SOURCES
 
     # Database
     src/Database/wal.c
+    src/Database/wal_manager.c
     src/Database/database_lru.c
     src/Database/database.c
 )
@@ -197,6 +198,11 @@ if(BUILD_TESTS)
     add_executable(test_abort_cleanup tests/test_abort_cleanup.cpp)
     target_link_libraries(test_abort_cleanup wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_abort_cleanup COMMAND test_abort_cleanup)
+
+    # Test for WAL manager
+    add_executable(test_wal_manager tests/test_wal_manager.cpp)
+    target_link_libraries(test_wal_manager wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_wal_manager COMMAND test_wal_manager)
 
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
