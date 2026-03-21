@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 
 // Thread-local storage for WAL
 static __thread thread_wal_t* thread_local_wal = NULL;
@@ -162,9 +163,11 @@ static thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_i
     platform_lock_init(&twal->lock);
     refcounter_init((refcounter_t*)twal);
 
-    // Write initial manifest entry (ACTIVE)
+    // Write initial manifest entry (ACTIVE) - protected by manifest lock
+    platform_lock(&manager->manifest_lock);
     write_manifest_entry(manager, twal->thread_id, twal->file_path,
                         WAL_FILE_ACTIVE, &twal->newest_txn_id);
+    platform_unlock(&manager->manifest_lock);
 
     return twal;
 }
@@ -377,16 +380,14 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     // Write data length (4 bytes, big-endian)
     write_uint32_be(ptr, (uint32_t)data->size);
 
-    // Write header atomically with O_APPEND
-    ssize_t bytes_written = write(twal->fd, header_buf, sizeof(header_buf));
-    if (bytes_written != sizeof(header_buf)) {
-        platform_unlock(&twal->lock);
-        return -1;
-    }
-
-    // Write data
-    bytes_written = write(twal->fd, data->data, data->size);
-    if (bytes_written != (ssize_t)data->size) {
+    // Write header and data atomically using writev() with O_APPEND
+    struct iovec iov[2];
+    iov[0].iov_base = header_buf;
+    iov[0].iov_len = sizeof(header_buf);
+    iov[1].iov_base = data->data;
+    iov[1].iov_len = data->size;
+    ssize_t bytes_written = writev(twal->fd, iov, 2);
+    if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
         platform_unlock(&twal->lock);
         return -1;
     }
