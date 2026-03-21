@@ -1258,7 +1258,7 @@ identifier_t* hbtrie_delete_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t 
 
             entry->versions = old_version;
             entry->has_versions = 1;
-            entry->value = NULL;
+            // entry->value and entry->versions share memory via union, so don't set value to NULL
 
             // Add tombstone version
             if (version_entry_add(&entry->versions, txn_id, NULL, 1) != 0) {
