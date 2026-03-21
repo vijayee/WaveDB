@@ -1063,8 +1063,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             entry->value_txn_id = txn_id;  // Store transaction ID
           } else if (entry->has_versions) {
             // Already has version chain - add new version
-            if (version_entry_add(&entry->versions, txn_id,
-                                 (identifier_t*)refcounter_reference((refcounter_t*)value), 0) != 0) {
+            identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
+            if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
+              identifier_destroy(new_value_ref);
               vec_deinit(&path_stack);
               platform_unlock(&trie->lock);
               return -1;
@@ -1090,8 +1091,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             // entry->value is now in the union with versions, so we don't need to set it
 
             // Add new version
-            if (version_entry_add(&entry->versions, txn_id,
-                                 (identifier_t*)refcounter_reference((refcounter_t*)value), 0) != 0) {
+            identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
+            if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
+              identifier_destroy(new_value_ref);
               version_entry_destroy(old_version);
               entry->has_versions = 0;
               entry->versions = NULL;
