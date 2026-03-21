@@ -765,6 +765,62 @@ void run_database_benchmarks(void) {
     benchmark_print_results(&delete_metrics);
     printf("\n");
 
+    // ============================================================================
+    // Concurrent Throughput Benchmarks
+    // ============================================================================
+    //
+    // Purpose:
+    //   Measure database performance under concurrent load to assess:
+    //   - Thread scalability (how throughput scales with thread count)
+    //   - Lock contention characteristics
+    //   - Real-world multi-client throughput
+    //
+    // Design:
+    //   Each benchmark spawns N worker threads that independently perform
+    //   operations against a shared database instance. The work pool and
+    //   timing wheel are shared across all threads, creating realistic
+    //   contention on internal locks.
+    //
+    // Thread Counts Tested:
+    //   - 1 thread:  Baseline single-threaded performance
+    //   - 2 threads: Minimal contention scenario
+    //   - 4 threads: Typical multi-core utilization
+    //   - 8 threads: High contention scenario
+    //   - 16 threads: Stress test for lock scalability
+    //
+    // Scenarios:
+    //   1. Concurrent Write: Each thread writes to unique keys (no key overlap)
+    //      - Tests write throughput under concurrent access
+    //      - Measures contention on WAL, B+tree, and LRU cache locks
+    //      - Key format: key_{thread_id}_{op_id}
+    //
+    //   2. Concurrent Read: All threads read from shared pre-populated key space
+    //      - Tests read throughput under concurrent access
+    //      - Measures contention on read path (HBTrie traversal)
+    //      - Reads are interleaved across shared keys to stress cache
+    //      - Key format: readkey_{0..prepopulate_count}
+    //
+    //   3. Concurrent Mixed: 70% read, 20% write, 10% delete operations
+    //      - Realistic mixed workload simulation
+    //      - Tests concurrent read-modify-write patterns
+    //      - Key format: mixedkey_{0..prepopulate_count}
+    //
+    // Metrics Collected (per thread count):
+    //   - Total operations: Sum of all thread operation counts
+    //   - Operations/sec: Throughput (total_ops / wall_clock_time)
+    //   - Average latency: Mean operation latency across all threads
+    //   - Error count: Number of failed operations (should be 0)
+    //
+    // Scaling Expectations:
+    //   - Perfect scaling: N threads = Nx throughput (unlikely due to contention)
+    //   - Good scaling: N threads = 0.7-0.9 * Nx throughput
+    //   - Poor scaling: N threads < 0.5 * Nx throughput (indicates contention)
+    //
+    // Known Issues:
+    //   - Lock initialization errors may occur when benchmarks run sequentially
+    //     in the same process (see header comment for details)
+    //   - Each concurrent benchmark should ideally be run in a fresh process
+    //
     printf("========================================\n");
     printf("Concurrent Throughput Benchmarks\n");
     printf("========================================\n\n");
