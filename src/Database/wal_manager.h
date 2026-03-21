@@ -61,6 +61,8 @@ typedef struct {
 /**
  * Thread-local WAL state
  */
+typedef struct wal_manager wal_manager_t;  // Forward declaration
+
 typedef struct {
     refcounter_t refcounter;
     PLATFORMLOCKTYPE(lock);              // Lock for this thread's WAL
@@ -75,6 +77,7 @@ typedef struct {
     size_t current_size;                 // Current file size
     size_t max_size;                     // Max before seal
     uint64_t pending_writes;             // Count of writes since last fsync
+    wal_manager_t* manager;              // Back-reference to manager
 } thread_wal_t;
 
 /**

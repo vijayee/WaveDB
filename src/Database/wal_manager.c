@@ -293,8 +293,8 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
         return NULL;
     }
 
-    // Check if thread-local WAL already exists
-    if (thread_local_wal != NULL) {
+    // Check if thread-local WAL already exists and belongs to this manager
+    if (thread_local_wal != NULL && thread_local_wal->manager == manager) {
         return thread_local_wal;
     }
 
