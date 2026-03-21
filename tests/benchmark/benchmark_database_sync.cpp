@@ -36,9 +36,11 @@ static int sync_benchmark_init(sync_benchmark_ctx_t* ctx, const char* test_name)
 
     // Configure WAL for maximum performance (no fsync)
     wal_config_t wal_config = {
-        .max_size = 100 * 1024 * 1024,  // 100MB WAL file
-        .sync_mode = WAL_SYNC_ASYNC,      // No fsync for performance testing
-        .batch_size = 1000                // Batch writes
+        .sync_mode = WAL_SYNC_ASYNC,           // No fsync for performance testing
+        .debounce_ms = 100,                     // 100ms debounce window
+        .idle_threshold_ms = 10000,             // 10s idle threshold
+        .compact_interval_ms = 60000,           // 60s compaction interval
+        .max_file_size = 100 * 1024 * 1024      // 100MB WAL file
     };
 
     // Create database with 50MB LRU, no work pool or timing wheel
