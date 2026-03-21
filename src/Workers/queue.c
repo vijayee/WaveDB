@@ -3,57 +3,29 @@
 //
 #include "queue.h"
 #include "../Util/allocator.h"
+#include "../Util/threadding.h"
 
 
 void work_queue_init(work_queue_t* queue) {
   queue->first = NULL;
   queue->last = NULL;
 }
-void work_enqueue(work_queue_t* queue, work_t* work) {
-  if (queue->first == NULL && queue->last == NULL) {
-    work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
-    item->previous = NULL;
-    item->next = NULL;
-    item->work = work;
-    queue->first = item;
-    queue->last = item;
-  } else {
-    work_queue_item_t* new_item = get_clear_memory(sizeof(work_queue_item_t));
-    new_item->work= work;
-    work_queue_item_t* current = queue->first;
 
-    int cmp = priority_compare(&work->priority,&current->work->priority);
-    while ((current->next != NULL ) && ((cmp == 1) || (cmp == 0))) {
-      current = current->next;
-      cmp = priority_compare(&work->priority,&current->work->priority);
-    }
-    if ((cmp == -1) && (current->next == NULL)) {// current is the last in the list and the new work has greater priority
-      new_item->previous = current->previous;
-      new_item->next = current;
-      if (current->previous != NULL) { // current is not the first item in the list
-        work_queue_item_t* temp = current->previous;
-        temp->next = new_item;
-      } else {// current is the first in the list and new work should become the new first
-        queue->first= new_item;
-      }
-      current->previous = new_item;
-    } else if ((cmp != -1) && current->next == NULL) { //current is the last in the list and the new work should come after it
-      current->next = new_item;
-      new_item->previous = current;
-      queue->last = new_item;
-    } else if (current->previous == NULL) { // work should be at the begining of a populated list
-      new_item->next = current;
-      current->previous = new_item;
-      queue->first = new_item;
-    } else { // we are somewhere in the middle of the list and work has greater priority than the current
-      work_queue_item_t* temp = current->previous;
-      temp->next = new_item;
-      new_item->previous= temp;
-      new_item->next = current;
-      current->previous = new_item;
-    }
+// O(1) tail insertion (FIFO - no priority needed)
+void work_enqueue(work_queue_t* queue, work_t* work) {
+  work_queue_item_t* item = get_clear_memory(sizeof(work_queue_item_t));
+  item->work = work;
+  item->next = NULL;
+  item->previous = queue->last;
+
+  if (queue->last) {
+    queue->last->next = item;  // Add to tail
+  } else {
+    queue->first = item;  // Queue was empty
   }
+  queue->last = item;  // Update tail
 }
+
 work_t* work_dequeue(work_queue_t* queue) {
   if (queue->first == NULL) {
     return NULL;
@@ -71,21 +43,44 @@ work_t* work_dequeue(work_queue_t* queue) {
     return work;
   }
 }
-/*
-work_queue_t* work_queue_destroy(work_queue_t* queue) {
-  platform_lock(&queue->lock);
-  refcounter_dereference((refcounter_t*) queue);
-  platform_unlock(&queue->lock);
-  if (refcounter_count((refcounter_t*) queue) == 0) {
-    platform_lock_destroy(&queue->lock);
-    work_queue_item_t *current = queue->first;
-    while (current != NULL) {
-      work_queue_item_t *temp = current->next;
-      free(current);
-      current = temp;
-    }
-    free(queue);
-  }
 
+// Sharded work queue implementation
+
+void sharded_work_queue_init(sharded_work_queue_t* sq) {
+  for (size_t i = 0; i < QUEUE_SHARDS; i++) {
+    work_queue_init(&sq->queues[i]);
+    platform_lock_init(&sq->locks[i]);
   }
-}*/
+  atomic_init(&sq->next_shard, 0);
+}
+
+void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
+  size_t shard = atomic_fetch_add(&sq->next_shard, 1) % QUEUE_SHARDS;
+
+  platform_lock(&sq->locks[shard]);
+  work_enqueue(&sq->queues[shard], work);
+  platform_unlock(&sq->locks[shard]);
+}
+
+work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
+  // Fair work stealing: thread-local starting offset prevents bias
+  static _Thread_local size_t start_shard = 0;
+  size_t shard = start_shard;
+  start_shard = (start_shard + 1) % QUEUE_SHARDS;  // Rotate for fairness
+
+  for (size_t i = 0; i < QUEUE_SHARDS; i++) {
+    size_t idx = (shard + i) % QUEUE_SHARDS;
+    platform_lock(&sq->locks[idx]);
+    work_t* work = work_dequeue(&sq->queues[idx]);
+    platform_unlock(&sq->locks[idx]);
+
+    if (work) return work;
+  }
+  return NULL;  // All shards empty
+}
+
+void sharded_work_queue_destroy(sharded_work_queue_t* sq) {
+  for (size_t i = 0; i < QUEUE_SHARDS; i++) {
+    platform_lock_destroy(&sq->locks[i]);
+  }
+}
