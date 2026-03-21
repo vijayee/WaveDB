@@ -21,8 +21,16 @@
 **`src/Database/wal_manager.c`** - Thread-local WAL manager implementation
 - Thread-local storage for WAL files
 - Manifest management (atomic appends)
-- Background compaction thread
 - Migration from legacy WAL
+
+**`src/Database/wal_compactor.h`** - Background compactor interface
+- Compaction thread management
+- Idle/interval trigger configuration
+
+**`src/Database/wal_compactor.c`** - Background compactor implementation
+- Background thread for periodic compaction
+- Idle detection for opportunistic compaction
+- File merging with transaction ordering
 
 **`tests/test_wal_manager.cpp`** - Unit tests for thread-local WAL
 - Write path tests (no contention)
@@ -134,6 +142,7 @@ typedef struct {
     transaction_id_t newest_txn_id;      // Last transaction in file
     size_t current_size;                 // Current file size
     size_t max_size;                     // Max before seal
+    uint64_t pending_writes;             // Count of writes since last fsync
 } thread_wal_t;
 
 /**
@@ -249,6 +258,15 @@ static void init_default_config(wal_config_t* config) {
     config->idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
     config->compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
     config->max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
+}
+
+// Fsync callback for debouncer
+static void thread_wal_fsync_callback(void* ctx) {
+    thread_wal_t* twal = (thread_wal_t*)ctx;
+    if (twal && twal->fd >= 0) {
+        fsync(twal->fd);
+        twal->pending_writes = 0;
+    }
 }
 
 // Skeleton implementations (to be filled in next tasks)
@@ -979,9 +997,13 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     // 2. Scan directory for all thread_*.wal files
     // (This handles case where manifest fsync was delayed)
+    char** wal_files = NULL;
+    size_t wal_count = 0;
+    scan_wal_directory(manager->location, &wal_files, &wal_count);
 
     // 3. Combine manifest entries and directory scan
-    // TODO: Implement directory scanning
+    // Create a set of files from manifest
+    // Add any files from directory not in manifest
 
     // 4. Read all entries from all files
     recovery_entry_t* all_entries = NULL;
@@ -989,6 +1011,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     size_t entry_capacity = 1024;
     all_entries = malloc(entry_capacity * sizeof(recovery_entry_t));
 
+    // Read from manifest entries
     for (size_t i = 0; i < manifest_count; i++) {
         if (manifest_entries[i].status == WAL_FILE_COMPACTED) {
             continue;  // Skip compacted files
@@ -1008,6 +1031,32 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
         }
     }
 
+    // Read from directory scan (files not in manifest)
+    for (size_t i = 0; i < wal_count; i++) {
+        // Check if file is already in manifest
+        int in_manifest = 0;
+        for (size_t j = 0; j < manifest_count; j++) {
+            if (strcmp(wal_files[i], manifest_entries[j].file_path) == 0) {
+                in_manifest = 1;
+                break;
+            }
+        }
+
+        if (!in_manifest) {
+            recovery_entry_t* file_entries = NULL;
+            size_t file_count = 0;
+            if (read_wal_file(wal_files[i], &file_entries, &file_count) == 0) {
+                if (entry_count + file_count >= entry_capacity) {
+                    entry_capacity = (entry_count + file_count) * 2;
+                    all_entries = realloc(all_entries, entry_capacity * sizeof(recovery_entry_t));
+                }
+                memcpy(&all_entries[entry_count], file_entries, file_count * sizeof(recovery_entry_t));
+                entry_count += file_count;
+                free(file_entries);
+            }
+        }
+    }
+
     // 5. Sort by transaction ID
     qsort(all_entries, entry_count, sizeof(recovery_entry_t),
           compare_recovery_entries);
@@ -1023,7 +1072,45 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     }
     free(all_entries);
     free(manifest_entries);
+    for (size_t i = 0; i < wal_count; i++) {
+        free(wal_files[i]);
+    }
+    free(wal_files);
 
+    return 0;
+}
+
+// Helper to scan directory for WAL files
+static int scan_wal_directory(const char* location, char*** wal_files, size_t* count) {
+    DIR* dir = opendir(location);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    size_t capacity = 16;
+    char** files = malloc(capacity * sizeof(char*));
+    size_t n = 0;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != NULL) {
+        // Check for thread_*.wal pattern
+        if (strncmp(entry->d_name, "thread_", 7) == 0) {
+            char* dot = strrchr(entry->d_name, '.');
+            if (dot != NULL && strcmp(dot, ".wal") == 0) {
+                // Found a thread WAL file
+                if (n >= capacity) {
+                    capacity *= 2;
+                    files = realloc(files, capacity * sizeof(char*));
+                }
+                files[n] = path_join(location, entry->d_name);
+                n++;
+            }
+        }
+    }
+
+    closedir(dir);
+    *wal_files = files;
+    *count = n;
     return 0;
 }
 ```
@@ -1371,8 +1458,18 @@ Create `src/Database/wal_compactor.c`:
 ```c
 #include "wal_compactor.h"
 #include "../Util/allocator.h"
+#include "../Time/wheel.h"
 #include <stdlib.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <sys/time.h>
+
+// Helper to get current time in milliseconds
+static uint64_t get_time_ms(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+}
 
 // Background thread function
 static void* compaction_thread_func(void* arg) {
@@ -1381,7 +1478,7 @@ static void* compaction_thread_func(void* arg) {
     while (compactor->running) {
         sleep(1);  // Check every second
 
-        uint64_t now = get_current_time_ms();
+        uint64_t now = get_time_ms();
         uint64_t time_since_last_write = now - compactor->last_write_time;
         uint64_t time_since_last_compact = now - compactor->last_compact_time;
 
@@ -1413,15 +1510,15 @@ wal_compactor_t* wal_compactor_create(wal_manager_t* manager,
     compactor->manager = manager;
     compactor->idle_threshold_ms = idle_threshold_ms;
     compactor->compact_interval_ms = compact_interval_ms;
-    compactor->last_write_time = get_current_time_ms();
+    compactor->last_write_time = get_time_ms();
     compactor->last_compact_time = 0;
     compactor->running = 1;
 
     platform_lock_init(&compactor->lock);
     platform_condition_init(&compactor->cond);
 
-    // Create thread
-    if (platform_thread_create(&compactor->thread, compaction_thread_func, compactor) != 0) {
+    // Create thread using pthread directly
+    if (pthread_create(&compactor->thread, NULL, compaction_thread_func, compactor) != 0) {
         free(compactor);
         return NULL;
     }
@@ -1433,7 +1530,7 @@ void wal_compactor_destroy(wal_compactor_t* compactor) {
     if (compactor == NULL) return;
 
     compactor->running = 0;
-    platform_thread_join(compactor->thread);
+    pthread_join(compactor->thread, NULL);
 
     platform_lock_destroy(&compactor->lock);
     platform_condition_destroy(&compactor->cond);
@@ -1443,7 +1540,7 @@ void wal_compactor_destroy(wal_compactor_t* compactor) {
 
 void wal_compactor_signal_write(wal_compactor_t* compactor) {
     platform_lock(&compactor->lock);
-    compactor->last_write_time = get_current_time_ms();
+    compactor->last_write_time = get_time_ms();
     platform_unlock(&compactor->lock);
 }
 ```
