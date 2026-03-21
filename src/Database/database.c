@@ -3,6 +3,7 @@
 //
 
 #include "database.h"
+#include "wal_manager.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -221,83 +222,8 @@ static hbtrie_t* load_index(const char* location, uint8_t chunk_size, uint32_t b
     return trie ? trie : hbtrie_create(chunk_size, btree_node_size);
 }
 
-// Replay WAL entries
-static int replay_wal(database_t* db) {
-    if (db->wal == NULL) return 0;
-
-    // List all WAL sequence files
-    uint64_t* sequences = NULL;
-    size_t seq_count = 0;
-    if (wal_list_sequences(db->location, &sequences, &seq_count) != 0) {
-        return 0;  // No WAL files
-    }
-
-    // Replay each sequence in order
-    for (size_t i = 0; i < seq_count; i++) {
-        char* wal_path = wal_sequence_path(db->location, sequences[i]);
-        if (wal_path == NULL) continue;
-
-        int fd = open(wal_path, O_RDONLY);
-        free(wal_path);
-        if (fd < 0) continue;
-
-        // Set wal's fd for reading
-        int old_fd = db->wal->fd;
-        db->wal->fd = fd;
-
-        uint64_t cursor = 0;
-        while (1) {
-            transaction_id_t txn_id;
-            wal_type_e type;
-            buffer_t* data = NULL;
-            int result = wal_read(db->wal, &txn_id, &type, &data, &cursor);
-            if (result != 0) break;  // EOF or error
-
-            // Decode and apply
-            struct cbor_load_result cbor_result;
-            cbor_item_t* item = cbor_load(data->data, data->size, &cbor_result);
-            if (item == NULL || cbor_result.error.code != CBOR_ERR_NONE) {
-                if (item) cbor_decref(&item);
-                buffer_destroy(data);
-                continue;
-            }
-
-            if (type == WAL_PUT && cbor_isa_array(item) && cbor_array_size(item) == 2) {
-                cbor_item_t* path_cbor = cbor_array_get(item, 0);
-                cbor_item_t* value_cbor = cbor_array_get(item, 1);
-                path_t* path = cbor_to_path(path_cbor, db->chunk_size);
-                identifier_t* value = cbor_to_identifier(value_cbor, db->chunk_size);
-                if (path && value) {
-                    hbtrie_insert(db->trie, path, value);
-                    identifier_destroy(value);
-                    path_destroy(path);
-                }
-                cbor_decref(&path_cbor);
-                cbor_decref(&value_cbor);
-            } else if (type == WAL_DELETE && cbor_isa_array(item) && cbor_array_size(item) == 1) {
-                cbor_item_t* path_cbor = cbor_array_get(item, 0);
-                path_t* path = cbor_to_path(path_cbor, db->chunk_size);
-                if (path) {
-                    identifier_t* removed = hbtrie_remove(db->trie, path);
-                    if (removed) identifier_destroy(removed);
-                    path_destroy(path);
-                }
-                cbor_decref(&path_cbor);
-            }
-
-            cbor_decref(&item);
-            buffer_destroy(data);
-        }
-
-        close(fd);
-        db->wal->fd = old_fd;
-    }
-
-    free(sequences);
-    return 0;
-}
-
-database_t* database_create(const char* location, size_t lru_memory_mb, size_t wal_max_size,
+database_t* database_create(const char* location, size_t lru_memory_mb,
+                            wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
@@ -321,7 +247,6 @@ database_t* database_create(const char* location, size_t lru_memory_mb, size_t w
 
     db->location = strdup(location);
     db->lru_size = (lru_memory_mb == 0) ? DATABASE_DEFAULT_LRU_MEMORY_MB : lru_memory_mb;
-    db->wal_max_size = (wal_max_size == 0) ? DATABASE_DEFAULT_WAL_MAX_SIZE : wal_max_size;
     db->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
     db->btree_node_size = btree_node_size;
     db->pool = pool;
@@ -418,14 +343,44 @@ database_t* database_create(const char* location, size_t lru_memory_mb, size_t w
         return NULL;
     }
 
-    // Create WAL
-    db->wal = wal_create(db->location, db->wal_max_size, error_code);
+    // Create WAL manager (use default config if none provided)
+    if (wal_config == NULL) {
+        // Use default config
+        wal_config_t default_config;
+        default_config.sync_mode = WAL_SYNC_DEBOUNCED;
+        default_config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
+        default_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
+        default_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
+        default_config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
+        db->wal_manager = wal_manager_create(db->location, &default_config, error_code);
+    } else {
+        db->wal_manager = wal_manager_create(db->location, wal_config, error_code);
+    }
+
+    if (db->wal_manager == NULL) {
+        // Cleanup and return error
+        tx_manager_destroy(db->tx_manager);
+        hbtrie_destroy(db->trie);
+        if (db->storage) sections_destroy(db->storage);
+        database_lru_cache_destroy(db->lru);
+        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
+        free(db->location);
+        free(db);
+        if (error_code && *error_code == 0) {
+            *error_code = ENOMEM;
+        }
+        return NULL;
+    }
+
+    // Set legacy WAL to NULL (migration complete)
+    db->wal = NULL;
 
     // Replay WAL for recovery
     db->is_rebuilding = 1;
-    replay_wal(db);
+    wal_manager_recover(db->wal_manager, db);
     db->is_rebuilding = 0;
-
 
     refcounter_init((refcounter_t*)db);
     return db;
@@ -436,6 +391,10 @@ void database_destroy(database_t* db) {
 
     refcounter_dereference((refcounter_t*)db);
     if (refcounter_count((refcounter_t*)db) == 0) {
+        // Destroy WAL manager (thread-local WAL)
+        if (db->wal_manager) wal_manager_destroy(db->wal_manager);
+
+        // Legacy WAL (should be NULL, but check for safety)
         if (db->wal) wal_destroy(db->wal);
 
         // Destroy trie
@@ -506,10 +465,16 @@ static void _database_put(database_put_ctx_t* ctx) {
         return;
     }
 
-    // Write to WAL first (durability)
+    // Write to thread-local WAL first (durability)
     buffer_t* entry = encode_put_entry(path, value);
     if (entry != NULL) {
-        wal_write(db->wal, txn->txn_id, WAL_PUT, entry);
+        thread_wal_t* twal = get_thread_wal(db->wal_manager);
+        if (twal != NULL) {
+            int result = thread_wal_write(twal, txn->txn_id, WAL_PUT, entry);
+            if (result != 0) {
+                log_warn("Failed to write to thread-local WAL");
+            }
+        }
         buffer_destroy(entry);
     }
 
@@ -590,10 +555,16 @@ static void _database_delete(database_delete_ctx_t* ctx) {
         return;
     }
 
-    // Write to WAL
+    // Write to thread-local WAL
     buffer_t* entry = encode_delete_entry(path);
     if (entry != NULL) {
-        wal_write(db->wal, txn->txn_id, WAL_DELETE, entry);
+        thread_wal_t* twal = get_thread_wal(db->wal_manager);
+        if (twal != NULL) {
+            int result = thread_wal_write(twal, txn->txn_id, WAL_DELETE, entry);
+            if (result != 0) {
+                log_warn("Failed to write to thread-local WAL");
+            }
+        }
         buffer_destroy(entry);
     }
 

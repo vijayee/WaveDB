@@ -460,7 +460,7 @@ static void setup_database(bench_context_t* ctx) {
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
 
     int error = 0;
-    ctx->db = database_create(ctx->test_dir, 50, 128 * 1024, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
+    ctx->db = database_create(ctx->test_dir, 50, NULL, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
     if (error != 0) {
         fprintf(stderr, "Failed to create database: %d\n", error);
         exit(1);

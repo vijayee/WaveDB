@@ -175,14 +175,14 @@ extern "C" void delete_callback_err_wrapper(void* ctx, async_error_t* payload) {
 
 TEST_F(DatabaseTest, CreateDestroy) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     EXPECT_EQ(error, 0);
 }
 
 TEST_F(DatabaseTest, PutGet) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -230,7 +230,7 @@ TEST_F(DatabaseTest, PutGet) {
 
 TEST_F(DatabaseTest, PutGetMultiple) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -290,7 +290,7 @@ TEST_F(DatabaseTest, PutGetMultiple) {
 
 TEST_F(DatabaseTest, GetNonExistent) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -317,7 +317,7 @@ TEST_F(DatabaseTest, GetNonExistent) {
 
 TEST_F(DatabaseTest, UpdateValue) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -400,7 +400,7 @@ TEST_F(DatabaseTest, UpdateValue) {
 
 TEST_F(DatabaseTest, Delete) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -476,7 +476,7 @@ TEST_F(DatabaseTest, Delete) {
 
 TEST_F(DatabaseTest, DeleteNonExistent) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -498,7 +498,7 @@ TEST_F(DatabaseTest, DeleteNonExistent) {
 
 TEST_F(DatabaseTest, ConcurrentOperations) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -559,7 +559,7 @@ TEST_F(DatabaseTest, Persistence) {
 
     // First instance: create and insert
     {
-        db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
@@ -602,7 +602,7 @@ TEST_F(DatabaseTest, Persistence) {
 
     // Second instance: reopen and verify
     {
-        db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
@@ -647,7 +647,7 @@ TEST_F(DatabaseTest, Persistence) {
 
 TEST_F(DatabaseTest, VaryingPathDepths) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -722,7 +722,7 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
 
 TEST_F(DatabaseTest, Snapshot) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, 0, 0, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 

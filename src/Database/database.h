@@ -16,6 +16,7 @@
 #include "../Storage/sections.h"
 #include "database_lru.h"
 #include "wal.h"
+#include "wal_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,12 +45,12 @@ typedef struct {
     hbtrie_t* trie;                      // Single trie with MVCC (renamed from write_trie)
     tx_manager_t* tx_manager;           // Transaction manager for MVCC
     database_lru_cache_t* lru;          // In-memory LRU cache
-    wal_t* wal;                         // Write-ahead log
+    wal_t* wal;                         // Legacy WAL (for migration)
+    wal_manager_t* wal_manager;         // Thread-local WAL manager
     work_pool_t* pool;                  // Thread pool for async ops
     hierarchical_timing_wheel_t* wheel; // Timing wheel
     char* location;                      // Storage directory
     size_t lru_size;                     // LRU cache max size
-    size_t wal_max_size;                 // WAL max size before rotation
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
@@ -78,7 +79,7 @@ typedef struct {
  *
  * @param location          Directory path for database files
  * @param lru_memory_mb     LRU cache memory budget in MB (0 for default 50 MB)
- * @param wal_max_size      Max WAL file size before rotation (0 for default)
+ * @param wal_config        WAL configuration (NULL for defaults)
  * @param chunk_size        HBTrie chunk size (0 for default)
  * @param btree_node_size   B+tree node size (0 for default)
  * @param enable_persist   Enable persistent storage (0 = in-memory only, 1 = persistent)
@@ -88,7 +89,8 @@ typedef struct {
  * @param error_code        Output error code (0 on success)
  * @return New database or NULL on failure
  */
-database_t* database_create(const char* location, size_t lru_memory_mb, size_t wal_max_size,
+database_t* database_create(const char* location, size_t lru_memory_mb,
+                            wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
