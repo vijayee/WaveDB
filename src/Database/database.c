@@ -824,3 +824,56 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
         return -2;  // Not found
     }
 }
+
+int database_delete_sync(database_t* db, path_t* path) {
+    // Validation
+    if (db == NULL || path == NULL) {
+        if (path) path_destroy(path);
+        return -1;
+    }
+
+    // Begin transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        path_destroy(path);
+        return -1;
+    }
+
+    // Write to thread-local WAL
+    buffer_t* entry = encode_delete_entry(path);
+    if (entry != NULL) {
+        thread_wal_t* twal = get_thread_wal(db->wal_manager);
+        if (twal != NULL) {
+            int result = thread_wal_write(twal, txn->txn_id, WAL_DELETE, entry);
+            if (result != 0) {
+                log_warn("Failed to write to thread-local WAL");
+            }
+        }
+        buffer_destroy(entry);
+    }
+
+    // Acquire sharded write lock
+    size_t shard = get_write_lock_shard(path);
+    platform_lock(&db->write_locks[shard]);
+
+    // Remove from trie with MVCC (creates tombstone)
+    identifier_t* removed = hbtrie_delete_mvcc(db->trie, path, txn->txn_id);
+
+    // Release write lock
+    platform_unlock(&db->write_locks[shard]);
+
+    // Commit transaction
+    tx_manager_commit(db->tx_manager, txn);
+    txn_desc_destroy(txn);
+
+    // Remove from LRU cache
+    database_lru_cache_delete(db->lru, path);
+
+    path_destroy(path);
+
+    if (removed) {
+        identifier_destroy(removed);
+    }
+
+    return 0;
+}
