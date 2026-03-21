@@ -83,7 +83,7 @@ typedef struct {
 /**
  * WAL manager (global state)
  */
-typedef struct {
+struct wal_manager {
     refcounter_t refcounter;
     PLATFORMLOCKTYPE(manifest_lock);     // Lock for manifest operations
     char* location;                      // WAL directory
@@ -94,7 +94,7 @@ typedef struct {
     size_t thread_count;                 // Number of threads
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
-} wal_manager_t;
+};
 
 /**
  * Recovery options

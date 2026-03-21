@@ -129,6 +129,7 @@ static thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_i
     snprintf(filename, sizeof(filename), "thread_%lu.wal", (unsigned long)thread_id);
     twal->file_path = path_join(manager->location, filename);
     twal->thread_id = thread_id;
+    twal->manager = manager;  // Set back-reference
     twal->sync_mode = manager->config.sync_mode;
     twal->max_size = manager->config.max_file_size;
     twal->oldest_txn_id = (transaction_id_t){0, 0, 0};
