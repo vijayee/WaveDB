@@ -24,6 +24,17 @@ typedef enum {
 } wal_file_status_e;
 
 /**
+ * Migration state
+ */
+typedef enum {
+    MIGRATION_NONE = 0,          // Fresh database
+    MIGRATION_PENDING = 1,       // Legacy detected, needs migration
+    MIGRATION_IN_PROGRESS = 2,   // Migration started but not completed
+    MIGRATION_COMPLETE = 3,      // Successfully migrated
+    MIGRATION_FAILED = 4         // Migration failed, can rollback
+} migration_state_e;
+
+/**
  * Manifest header
  */
 typedef struct {
