@@ -36,6 +36,20 @@ extern "C" {
 #include "Util/allocator.h"
 }
 
+// Context for concurrent benchmark threads
+typedef struct {
+    database_t* db;
+    std::atomic<uint64_t>* total_ops;
+    std::atomic<uint64_t>* total_errors;
+    std::atomic<uint64_t>* total_latency_ns;
+    int thread_id;
+    int ops_per_thread;
+    int key_range_start;
+    int key_range_end;
+    work_pool_t* pool;
+    hierarchical_timing_wheel_t* wheel;
+} concurrent_bench_ctx_t;
+
 // Test configuration
 #define DATABASE_BENCH_ITERATIONS 100
 #define DATABASE_BENCH_BATCH_SIZE 1000
