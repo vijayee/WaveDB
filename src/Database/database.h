@@ -35,9 +35,12 @@ extern "C" {
  * - In-memory only: storage = NULL, no persistence
  * - Section-based: storage != NULL, incremental persistence
  */
+// Number of shards for write locks (reduces contention)
+#define WRITE_LOCK_SHARDS 64
+
 typedef struct {
     refcounter_t refcounter;
-    PLATFORMLOCKTYPE(write_lock);       // Single-writer lock
+    PLATFORMLOCKTYPE(write_locks[WRITE_LOCK_SHARDS]);  // Sharded write locks
     hbtrie_t* trie;                      // Single trie with MVCC (renamed from write_trie)
     tx_manager_t* tx_manager;           // Transaction manager for MVCC
     database_lru_cache_t* lru;          // In-memory LRU cache
@@ -104,12 +107,11 @@ void database_destroy(database_t* db);
  * Asynchronously insert a value.
  *
  * @param db       Database to modify
- * @param priority Priority for async execution
  * @param path     Path key (takes ownership of reference)
  * @param value    Value to store (takes ownership of reference)
  * @param promise  Promise to resolve on completion
  */
-void database_put(database_t* db, priority_t priority, path_t* path,
+void database_put(database_t* db, path_t* path,
                    identifier_t* value, promise_t* promise);
 
 /**
@@ -118,21 +120,19 @@ void database_put(database_t* db, priority_t priority, path_t* path,
  * Checks LRU cache first, then read_trie.
  *
  * @param db       Database to query
- * @param priority Priority for async execution
  * @param path     Path key to find
  * @param promise  Promise to resolve with value (or NULL if not found)
  */
-void database_get(database_t* db, priority_t priority, path_t* path, promise_t* promise);
+void database_get(database_t* db, path_t* path, promise_t* promise);
 
 /**
  * Asynchronously delete a value.
  *
  * @param db       Database to modify
- * @param priority Priority for async execution
  * @param path     Path key to delete
  * @param promise  Promise to resolve on completion
  */
-void database_delete(database_t* db, priority_t priority, path_t* path, promise_t* promise);
+void database_delete(database_t* db, path_t* path, promise_t* promise);
 
 /**
  * Force an immediate snapshot.

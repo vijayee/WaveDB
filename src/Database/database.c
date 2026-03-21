@@ -322,8 +322,10 @@ database_t* database_create(const char* location, size_t lru_memory_mb, size_t w
         return NULL;
     }
 
-    // Initialize locks
-    platform_lock_init(&db->write_lock);
+    // Initialize write lock shards
+    for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+        platform_lock_init(&db->write_locks[i]);
+    }
 
     // Initialize storage if persistence is enabled
     if (enable_persist) {
@@ -372,7 +374,9 @@ database_t* database_create(const char* location, size_t lru_memory_mb, size_t w
     if (db->trie == NULL) {
         if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
-        platform_lock_destroy(&db->write_lock);
+        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
         free(db->location);
         free(db);
         if (error_code) *error_code = ENOMEM;
@@ -385,36 +389,17 @@ database_t* database_create(const char* location, size_t lru_memory_mb, size_t w
         hbtrie_destroy(db->trie);
         if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
-        platform_lock_destroy(&db->write_lock);
+        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
         free(db->location);
         free(db);
         if (error_code) *error_code = ENOMEM;
         return NULL;
     }
 
-    // Create WAL with debounced fsync for better performance
-    // Use environment variable to control sync mode (default: debounced)
-    wal_sync_mode_e sync_mode = WAL_SYNC_DEBOUNCED;  // Default to debounced for production
-    char* sync_env = getenv("WAVEDB_WAL_SYNC");
-    if (sync_env != NULL) {
-        if (strcmp(sync_env, "immediate") == 0) {
-            sync_mode = WAL_SYNC_IMMEDIATE;
-        } else if (strcmp(sync_env, "async") == 0) {
-            sync_mode = WAL_SYNC_ASYNC;
-        }
-        // else: use default (debounced)
-    }
-
-    // Create WAL with chosen sync mode
-    if (sync_mode == WAL_SYNC_DEBOUNCED) {
-        // Debounced mode requires timing wheel
-        db->wal = wal_create_with_sync(db->location, db->wal_max_size,
-                                        sync_mode, wheel, 100, error_code);
-    } else {
-        // Immediate or async mode
-        db->wal = wal_create_with_sync(db->location, db->wal_max_size,
-                                        sync_mode, NULL, 0, error_code);
-    }
+    // Create WAL
+    db->wal = wal_create(db->location, db->wal_max_size, error_code);
 
     // Replay WAL for recovery
     db->is_rebuilding = 1;
@@ -446,8 +431,10 @@ void database_destroy(database_t* db) {
 
         if (db->lru) database_lru_cache_destroy(db->lru);
 
-        // Destroy locks
-        platform_lock_destroy(&db->write_lock);
+        // Destroy write lock shards
+        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
 
         free(db->location);
         refcounter_destroy_lock((refcounter_t*)db);
@@ -456,6 +443,32 @@ void database_destroy(database_t* db) {
 }
 
 
+
+// Helper: Get write lock shard from path
+static inline size_t get_write_lock_shard(path_t* path) {
+    if (path == NULL || path->identifiers.length == 0) {
+        return 0;
+    }
+
+    // Hash the first identifier to get shard
+    identifier_t* first_id = path->identifiers.data[0];
+    if (first_id == NULL) {
+        return 0;
+    }
+
+    // Simple hash: combine all chunks
+    size_t hash = 0;
+    for (size_t i = 0; i < first_id->chunks.length; i++) {
+        chunk_t* chunk = first_id->chunks.data[i];
+        if (chunk != NULL && chunk->data != NULL) {
+            for (size_t j = 0; j < chunk->data->size; j++) {
+                hash = hash * 31 + chunk->data->data[j];
+            }
+        }
+    }
+
+    return hash % WRITE_LOCK_SHARDS;
+}
 
 static void _database_put(database_put_ctx_t* ctx) {
     database_t* db = ctx->db;
@@ -480,14 +493,15 @@ static void _database_put(database_put_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire write lock (serializes writers)
-    platform_lock(&db->write_lock);
+    // Acquire sharded write lock (allows concurrent writes to different paths)
+    size_t shard = get_write_lock_shard(path);
+    platform_lock(&db->write_locks[shard]);
 
     // Apply to trie with MVCC
     hbtrie_insert_mvcc(db->trie, path, value, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_lock);
+    platform_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -563,14 +577,15 @@ static void _database_delete(database_delete_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire write lock (serialize writers)
-    platform_lock(&db->write_lock);
+    // Acquire sharded write lock (allows concurrent writes to different paths)
+    size_t shard = get_write_lock_shard(path);
+    platform_lock(&db->write_locks[shard]);
 
     // Remove from trie with MVCC (creates tombstone)
     identifier_t* removed = hbtrie_delete_mvcc(db->trie, path, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_lock);
+    platform_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -589,7 +604,7 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     promise_resolve(promise, NULL);
 }
 
-void database_put(database_t* db, priority_t priority, path_t* path,
+void database_put(database_t* db, path_t* path,
                    identifier_t* value, promise_t* promise) {
     if (db == NULL || path == NULL || value == NULL || promise == NULL) {
         if (path) path_destroy(path);
@@ -613,9 +628,10 @@ void database_put(database_t* db, priority_t priority, path_t* path,
     ctx->value = value;
     ctx->promise = promise;
 
-    work_t* work = work_create(priority, ctx,
+    work_t* work = work_create(
         (void (*)(void*))_database_put,
-        (void (*)(void*))free);  // abort: free context
+        (void (*)(void*))free,
+        ctx);  // abort: free context
     if (work == NULL) {
         free(ctx);
         path_destroy(path);
@@ -627,7 +643,7 @@ void database_put(database_t* db, priority_t priority, path_t* path,
     work_pool_enqueue(db->pool, work);
 }
 
-void database_get(database_t* db, priority_t priority, path_t* path, promise_t* promise) {
+void database_get(database_t* db, path_t* path, promise_t* promise) {
     if (db == NULL || path == NULL || promise == NULL) {
         if (path) path_destroy(path);
         promise_resolve(promise, NULL);
@@ -645,9 +661,10 @@ void database_get(database_t* db, priority_t priority, path_t* path, promise_t* 
     ctx->path = path;
     ctx->promise = promise;
 
-    work_t* work = work_create(priority, ctx,
+    work_t* work = work_create(
         (void (*)(void*))_database_get,
-        (void (*)(void*))free);
+        (void (*)(void*))free,
+        ctx);
     if (work == NULL) {
         free(ctx);
         path_destroy(path);
@@ -658,7 +675,7 @@ void database_get(database_t* db, priority_t priority, path_t* path, promise_t* 
     work_pool_enqueue(db->pool, work);
 }
 
-void database_delete(database_t* db, priority_t priority, path_t* path, promise_t* promise) {
+void database_delete(database_t* db, path_t* path, promise_t* promise) {
     if (db == NULL || path == NULL || promise == NULL) {
         if (path) path_destroy(path);
         promise_resolve(promise, NULL);
@@ -676,9 +693,10 @@ void database_delete(database_t* db, priority_t priority, path_t* path, promise_
     ctx->path = path;
     ctx->promise = promise;
 
-    work_t* work = work_create(priority, ctx,
+    work_t* work = work_create(
         (void (*)(void*))_database_delete,
-        (void (*)(void*))free);
+        (void (*)(void*))free,
+        ctx);
     if (work == NULL) {
         free(ctx);
         path_destroy(path);
