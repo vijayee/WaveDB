@@ -19,7 +19,7 @@ work_pool_t* work_pool_create(size_t size) {
 #endif
  pool->size = size;
  refcounter_init((refcounter_t*) pool);
- work_queue_init(&pool->queue);
+ sharded_work_queue_init(&pool->sharded_queue);
  platform_lock_init(&pool->lock);
  platform_condition_init(&pool->condition);
  platform_condition_init(&pool->shutdown);
@@ -30,6 +30,7 @@ work_pool_t* work_pool_create(size_t size) {
 void work_pool_destroy(work_pool_t* pool) {
   refcounter_dereference((refcounter_t*) pool);
   if (refcounter_count((refcounter_t*) pool) == 0) {
+    sharded_work_queue_destroy(&pool->sharded_queue);
     platform_lock_destroy(&pool->lock);
     platform_barrier_destroy(&pool->barrier);
     platform_condition_destroy(&pool->shutdown);
@@ -45,15 +46,14 @@ void work_pool_destroy(work_pool_t* pool) {
 }
 int work_pool_enqueue(work_pool_t* pool, work_t* work) {
   platform_lock(&pool->lock);
-  if (pool->stop) {
-    platform_unlock(&pool->lock);
-    return 1;
-  } else {
-    work_enqueue(&pool->queue, work);
-    platform_unlock(&pool->lock);
-    platform_signal_condition(&pool->condition);
-    return 0;
-  }
+  bool stopped = pool->stop;
+  platform_unlock(&pool->lock);
+
+  if (stopped) return 1;
+
+  sharded_work_enqueue(&pool->sharded_queue, work);
+  platform_signal_condition(&pool->condition);
+  return 0;
 }
 void work_pool_launch(work_pool_t* pool) {
   for (size_t i = 0; i < pool->size; i++) {
@@ -108,32 +108,44 @@ void* workerFunction(void* args) {
   work_pool_t* pool = (work_pool_t*) args;
   platform_barrier_wait(&pool->barrier);
   while(true) {
-    platform_lock(&pool->lock);
-    work_t* work = work_dequeue(&pool->queue);
-    if ((work == NULL) && (pool->stop == 0)) { // If there is nothing on the queue and we are not supposed to stop
-      pool->idleCount++;
-      if (pool->idleCount == pool->size) {
-        platform_signal_condition(&pool->idle);
-      }
-      platform_condition_wait(&pool->lock, &pool->condition);
-      pool->idleCount--;
-      work = work_dequeue(&pool->queue);
-    }
-    platform_unlock(&pool->lock);
+    // Fast path: dequeue WITHOUT pool lock (enables 16-way parallelism)
+    work_t* work = sharded_work_dequeue(&pool->sharded_queue);
 
-    if (work != NULL) { // If we found some work
-      if (pool->stop == 0) {// If we are not supposed to stop execute the work
-        work = (work_t *) refcounter_reference((refcounter_t *) work);
-        work->execute(work->ctx);
-        work_destroy(work);
-      } else { // If we are supposed to stop abort the work
-        work = (work_t *) refcounter_reference((refcounter_t *) work);
-        work->abort(work->ctx);
-        work_destroy(work);
+    // Wait path: only acquire pool lock when queue is empty
+    if (!work) {
+      platform_lock(&pool->lock);
+
+      // Re-check queue while holding lock
+      work = sharded_work_dequeue(&pool->sharded_queue);
+
+      // If still empty, wait for signal
+      if (!work && !pool->stop) {
+        pool->idleCount++;
+        if (pool->idleCount == pool->size) {
+          platform_signal_condition(&pool->idle);
+        }
+        platform_condition_wait(&pool->lock, &pool->condition);
+        pool->idleCount--;
+
+        // Try again after wakeup
+        work = sharded_work_dequeue(&pool->sharded_queue);
       }
-    } else if (pool->stop != 0) { // If we got nothing and we are supposed to stop then break the loop
-      break;
-    }// something anomolous has occured and we continue with business as usual
+
+      bool should_stop = pool->stop;
+      platform_unlock(&pool->lock);
+
+      if (!work && should_stop) break;
+    }
+
+    if (work) {
+      work = (work_t *) refcounter_reference((refcounter_t *) work);
+      if (!pool->stop) {
+        work->execute(work->ctx);
+      } else {
+        work->abort(work->ctx);
+      }
+      work_destroy(work);
+    }
   }
 #if _WIN32
   return 0;

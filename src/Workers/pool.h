@@ -20,7 +20,7 @@ typedef struct {
   PLATFORMCONDITIONTYPE(shutdown);
   PLATFORMCONDITIONTYPE(idle);
   size_t idleCount;
-  work_queue_t queue;
+  sharded_work_queue_t sharded_queue;
   PLATFORMTHREADTYPE* workers;
 #if _WIN32
   DWORD* workerIds;
