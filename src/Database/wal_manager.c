@@ -101,7 +101,7 @@ static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
                                  const char* file_path, wal_file_status_e status,
                                  transaction_id_t* txn_id) {
     manifest_entry_t entry;
-    memset(&entry, 0, sizeof(entry));
+    memset(&entry, 0, sizeof(entry));  // Zero all bytes including padding
     entry.thread_id = thread_id;
     strncpy(entry.file_path, file_path, sizeof(entry.file_path) - 1);
     entry.status = status;
@@ -109,67 +109,116 @@ static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
         entry.oldest_txn_id = *txn_id;
         entry.newest_txn_id = *txn_id;
     }
+    // Compute checksum over entire entry (padding is already zeroed by memset)
     entry.checksum = wal_crc32((const uint8_t*)&entry, sizeof(entry) - sizeof(entry.checksum));
 
     // Atomic append (O_APPEND ensures atomicity for < PIPE_BUF)
-    write(manager->manifest_fd, &entry, sizeof(entry));
+    ssize_t bytes_written = write(manager->manifest_fd, &entry, sizeof(entry));
+    (void)bytes_written;  // Suppress unused variable warning
 
-    // Debounced fsync (manifest doesn't need immediate sync)
-    // Fsync is handled by background thread
+    // Fsync for correctness (manifest must be durable)
+    fsync(manager->manifest_fd);
 }
 
-int read_manifest(const char* path, manifest_header_t* header,
-                  manifest_entry_t** entries, size_t* count) {
-    int fd = open(path, O_RDONLY);
+// Read manifest file
+int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* count) {
+    if (manager == NULL || entries == NULL || count == NULL) {
+        return -1;
+    }
+
+    *entries = NULL;
+    *count = 0;
+
+    // Open manifest file for reading
+    int fd = open(manager->manifest_path, O_RDONLY);
     if (fd < 0) {
         return -1;
     }
 
     // Read header
-    if (read(fd, header, sizeof(manifest_header_t)) != sizeof(manifest_header_t)) {
+    manifest_header_t header;
+    ssize_t bytes_read = read(fd, &header, sizeof(header));
+    if (bytes_read != sizeof(header)) {
         close(fd);
         return -1;
     }
 
-    // Read entries
+    // Check version
+    if (header.version != MANIFEST_VERSION) {
+        close(fd);
+        return -1;
+    }
+
+    // Allocate entries array (start with capacity 16, double as needed)
     size_t capacity = 16;
-    manifest_entry_t* list = malloc(capacity * sizeof(manifest_entry_t));
-    size_t n = 0;
+    manifest_entry_t* result = malloc(capacity * sizeof(manifest_entry_t));
+    if (result == NULL) {
+        close(fd);
+        return -1;
+    }
 
+    size_t num_entries = 0;
+
+    // Read entries in loop
     while (1) {
-        if (n >= capacity) {
-            capacity *= 2;
-            list = realloc(list, capacity * sizeof(manifest_entry_t));
-        }
+        manifest_entry_t entry;
 
-        ssize_t bytes = read(fd, &list[n], sizeof(manifest_entry_t));
-        if (bytes == 0) {
-            break;  // EOF
-        }
-        if (bytes != sizeof(manifest_entry_t)) {
-            free(list);
-            close(fd);
-            return -1;
-        }
+        // Read entry
+        bytes_read = read(fd, &entry, sizeof(entry));
 
-        // Verify checksum
-        uint32_t expected = list[n].checksum;
-        list[n].checksum = 0;
-        uint32_t actual = wal_crc32((const uint8_t*)&list[n],
-                                    sizeof(manifest_entry_t) - 4);
-        list[n].checksum = expected;
-
-        if (actual != expected) {
-            // Corrupted entry, stop reading
+        // Stop on EOF
+        if (bytes_read == 0) {
             break;
         }
 
-        n++;
+        // Stop on error or partial read
+        if (bytes_read != sizeof(entry)) {
+            break;
+        }
+
+        // Preserve the stored checksum before computing
+        uint32_t stored_checksum = entry.checksum;
+
+        // Zero padding bytes (and checksum field) before computing checksum
+        memset(&entry.checksum, 0, sizeof(entry.checksum));
+        // Note: Any padding bytes between newest_txn_id and checksum are already
+        // included in the structure, and the memset above zeros them too
+
+        // Verify CRC32 checksum
+        uint32_t computed_checksum = wal_crc32((const uint8_t*)&entry,
+                                               sizeof(entry) - sizeof(entry.checksum));
+
+        // Restore the checksum for the entry that will be returned
+        entry.checksum = stored_checksum;
+
+        // Stop on corrupted entry (checksum mismatch)
+        if (computed_checksum != stored_checksum) {
+            break;
+        }
+
+        // Grow array if needed
+        if (num_entries >= capacity) {
+            size_t new_capacity = capacity * 2;
+            manifest_entry_t* new_result = realloc(result,
+                                                   new_capacity * sizeof(manifest_entry_t));
+            if (new_result == NULL) {
+                free(result);
+                close(fd);
+                return -1;
+            }
+            result = new_result;
+            capacity = new_capacity;
+        }
+
+        // Copy valid entry
+        result[num_entries++] = entry;
     }
 
     close(fd);
-    *entries = list;
-    *count = n;
+
+    *entries = result;
+    *count = num_entries;
+
     return 0;
 }
 
@@ -268,12 +317,18 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, in
         return NULL;
     }
 
-    // Write manifest header
-    manifest_header_t header;
-    memset(&header, 0, sizeof(header));
-    header.version = MANIFEST_VERSION;
-    header.migration_state = 0;  // MIGRATION_NONE
-    write(manager->manifest_fd, &header, sizeof(header));
+    // Check if manifest already has a header (file exists and is not empty)
+    struct stat st;
+    int has_header = (stat(manager->manifest_path, &st) == 0 && st.st_size >= sizeof(manifest_header_t));
+
+    // Write manifest header only if file is new/empty
+    if (!has_header) {
+        manifest_header_t header;
+        memset(&header, 0, sizeof(header));
+        header.version = MANIFEST_VERSION;
+        header.migration_state = 0;  // MIGRATION_NONE
+        write(manager->manifest_fd, &header, sizeof(header));
+    }
 
     platform_lock_init(&manager->manifest_lock);
     platform_lock_init(&manager->threads_lock);

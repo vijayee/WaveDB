@@ -6,6 +6,7 @@
 #include "Database/wal_manager.h"
 #include "Buffer/buffer.h"
 #include "Workers/transaction_id.h"
+#include "Util/path_join.h"
 #include <pthread.h>
 #include <unistd.h>
 #include <cstring>
@@ -131,16 +132,19 @@ TEST_F(WalManagerTest, ReadManifest) {
     transaction_id_t txn_id = transaction_id_get_next();
     thread_wal_write(twal, txn_id, WAL_PUT, data);
 
-    // Close and reopen
-    wal_manager_destroy(manager);
-    manager = wal_manager_create(temp_dir, &config, &error);
-    ASSERT_NE(manager, nullptr);
+    // Read manifest while manager is still active
+    manifest_entry_t* entries = nullptr;
+    size_t count = 0;
+    int result = read_manifest(manager, &entries, &count);
+    EXPECT_EQ(result, 0);
+    EXPECT_GT(count, (size_t)0);  // At least one entry (the initial ACTIVE entry for thread WAL)
 
-    // Verify manifest exists
-    struct stat st;
-    char manifest_path[512];
-    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.dat", temp_dir);
-    EXPECT_EQ(stat(manifest_path, &st), 0);
+    // Verify entry
+    if (count > 0) {
+        EXPECT_EQ(entries[0].status, WAL_FILE_ACTIVE);
+    }
 
+    // Cleanup
+    free(entries);
     buffer_destroy(data);
 }

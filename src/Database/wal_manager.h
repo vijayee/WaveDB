@@ -159,6 +159,16 @@ int compact_wal_files(wal_manager_t* manager);
  */
 int wal_manager_flush(wal_manager_t* manager);
 
+/**
+ * Read manifest entries.
+ *
+ * @param manager   WAL manager
+ * @param entries   Output array for entries (caller must free)
+ * @param count     Output count of entries
+ * @return 0 on success, -1 on failure
+ */
+int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* count);
+
 #ifdef __cplusplus
 }
 #endif
