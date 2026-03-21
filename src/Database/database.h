@@ -155,6 +155,38 @@ int database_snapshot(database_t* db);
  */
 size_t database_count(database_t* db);
 
+/**
+ * Synchronously insert a value.
+ *
+ * @param db       Database to modify
+ * @param path     Path key (takes ownership of reference)
+ * @param value    Value to store (takes ownership of reference)
+ * @return 0 on success, -1 on error
+ */
+int database_put_sync(database_t* db, path_t* path, identifier_t* value);
+
+/**
+ * Synchronously get a value.
+ *
+ * Checks LRU cache first, then trie.
+ *
+ * @param db       Database to query
+ * @param path     Path key to find (takes ownership, always consumed)
+ * @param result   Output: found value (caller must destroy) or NULL if not found
+ *                 Caller should NOT initialize *result before calling
+ * @return 0 on success (result found), -1 on error, -2 on not found
+ */
+int database_get_sync(database_t* db, path_t* path, identifier_t** result);
+
+/**
+ * Synchronously delete a value.
+ *
+ * @param db       Database to modify
+ * @param path     Path key to delete (takes ownership)
+ * @return 0 on success, -1 on error
+ */
+int database_delete_sync(database_t* db, path_t* path);
+
 #ifdef __cplusplus
 }
 #endif
