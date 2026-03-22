@@ -609,6 +609,71 @@ protected:
 
 **Key Insight:** The destruction order matters. Objects with debouncers must be destroyed **before** stopping the timing wheel, because they flush their debouncers during destruction. If you stop the wheel first, flush can't execute the pending operations.
 
+## Batch Write API
+
+### Creating a Batch
+
+Batches allow grouping multiple write operations for efficient submission:
+
+```c
+// Create batch with expected capacity
+batch_t* batch = batch_create(1000);
+
+// Add operations
+for (int i = 0; i < 1000; i++) {
+    path_t* path = generate_path(i);
+    identifier_t* value = generate_value(i);
+    batch_add_put(batch, path, value);
+}
+
+// Submit synchronously
+int result = database_write_batch_sync(db, batch);
+
+// Check result
+if (result != 0) {
+    // Handle error
+}
+
+// Destroy batch
+batch_destroy(batch);
+```
+
+### Error Handling
+
+Batch operations return error codes. Handle full batches and submission errors:
+
+```c
+int result = batch_add_put(batch, path, value);
+if (result == -2) {
+    // Batch is full - ownership stays with caller
+    path_destroy(path);
+    identifier_destroy(value);
+} else if (result == -6) {
+    // Batch already submitted
+}
+```
+
+### Async Batch Submission
+
+For non-blocking writes, use async submission with promises:
+
+```c
+// Create promise
+promise_t* promise = promise_create();
+
+// Submit async
+database_write_batch(db, batch, promise);
+
+// Wait for result
+promise_wait(promise);
+int result;
+promise_get_result(promise, &result, sizeof(int));
+
+// Cleanup
+promise_destroy(promise);
+batch_destroy(batch);
+```
+
 ## Summary Checklist
 
 - [ ] `refcounter_t` is first member of reference-counted structs
