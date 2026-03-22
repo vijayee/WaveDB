@@ -22,7 +22,8 @@ extern "C" {
  */
 typedef enum {
     WAL_PUT = 'p',      // Insert/update operation
-    WAL_DELETE = 'd'    // Delete operation
+    WAL_DELETE = 'd',   // Delete operation
+    WAL_BATCH = 'b'     // Batch of operations
 } wal_type_e;
 
 /**
