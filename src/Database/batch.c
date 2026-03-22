@@ -4,6 +4,9 @@
 
 #include "batch.h"
 #include "../Util/allocator.h"
+#include "../HBTrie/path.h"
+#include "../HBTrie/identifier.h"
+#include <cbor.h>
 #include <stdlib.h>
 
 // Default initial capacity for operations array
@@ -66,34 +69,62 @@ void batch_destroy(batch_t* batch) {
 }
 
 /**
- * Estimate serialized size of an operation.
+ * Calculate actual serialized size of a CBOR item.
  *
- * Conservative estimate for CBOR overhead and WAL header.
- * Each identifier is ~4 bytes overhead + data length.
- * Path is array of identifiers, value is single identifier.
+ * Uses CBOR serialization to get accurate byte count.
+ *
+ * @param cbor  CBOR item to measure
+ * @return Size in bytes, or 0 on error
  */
-static size_t estimate_operation_size(path_t* path, identifier_t* value) {
+static size_t get_cbor_serialized_size(cbor_item_t* cbor) {
+    if (cbor == NULL) {
+        return 0;
+    }
+
+    unsigned char* buffer = NULL;
+    size_t buffer_size = 0;
+    cbor_serialize_alloc(cbor, &buffer, &buffer_size);
+
+    // Free the allocated buffer
+    if (buffer != NULL) {
+        free(buffer);
+    }
+
+    return buffer_size;
+}
+
+/**
+ * Estimate serialized size of an operation using actual CBOR serialization.
+ *
+ * Serializes path and value to CBOR to get accurate byte counts.
+ *
+ * @param type   Operation type (WAL_PUT or WAL_DELETE)
+ * @param path   Path to serialize
+ * @param value  Value to serialize (NULL for DELETE)
+ * @return Estimated size in bytes
+ */
+static size_t estimate_operation_size(uint8_t type, path_t* path, identifier_t* value) {
     size_t size = 0;
 
     // WAL entry type (1 byte)
     size += 1;
 
-    // Path size: array overhead + each identifier
+    // Path size: serialize to CBOR and measure
     if (path != NULL) {
-        size += 4; // CBOR array overhead
-        size += path_length(path) * 4; // Per-identifier overhead
-        for (size_t i = 0; i < path_length(path); i++) {
-            identifier_t* id = path_get(path, i);
-            if (id != NULL) {
-                size += id->length + 4; // length + data + overhead
-            }
+        cbor_item_t* path_cbor = path_to_cbor(path);
+        if (path_cbor != NULL) {
+            size += get_cbor_serialized_size(path_cbor);
+            cbor_decref(&path_cbor);
         }
     }
 
-    // Value size (for PUT operations)
-    if (value != NULL) {
-        size += 4; // CBOR overhead
-        size += value->length + 4; // length + data
+    // Value size (for PUT operations only)
+    if (type == WAL_PUT && value != NULL) {
+        cbor_item_t* value_cbor = identifier_to_cbor(value);
+        if (value_cbor != NULL) {
+            size += get_cbor_serialized_size(value_cbor);
+            cbor_decref(&value_cbor);
+        }
     }
 
     // CRC32 + data_len header overhead
@@ -167,8 +198,8 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
     batch->ops[batch->count].value = value;
     batch->count++;
 
-    // Update estimated size
-    batch->estimated_size += estimate_operation_size(path, value);
+    // Update estimated size with accurate CBOR serialization
+    batch->estimated_size += estimate_operation_size(WAL_PUT, path, value);
 
     // Unlock batch
     platform_unlock(&batch->lock);
@@ -209,8 +240,8 @@ int batch_add_delete(batch_t* batch, path_t* path) {
     batch->ops[batch->count].value = NULL;
     batch->count++;
 
-    // Update estimated size
-    batch->estimated_size += estimate_operation_size(path, NULL);
+    // Update estimated size with accurate CBOR serialization
+    batch->estimated_size += estimate_operation_size(WAL_DELETE, path, NULL);
 
     // Unlock batch
     platform_unlock(&batch->lock);
