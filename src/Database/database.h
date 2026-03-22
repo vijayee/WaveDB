@@ -17,6 +17,7 @@
 #include "database_lru.h"
 #include "wal.h"
 #include "wal_manager.h"
+#include "batch.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -186,6 +187,24 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result);
  * @return 0 on success, -1 on error
  */
 int database_delete_sync(database_t* db, path_t* path);
+
+/**
+ * Submit batch synchronously.
+ *
+ * @param db Database to modify
+ * @param batch Batch to submit
+ * @return 0 on success, error code on failure
+ */
+int database_write_batch_sync(database_t* db, batch_t* batch);
+
+/**
+ * Submit batch asynchronously.
+ *
+ * @param db Database to modify
+ * @param batch Batch to submit
+ * @param promise Promise to resolve with result
+ */
+void database_write_batch(database_t* db, batch_t* batch, promise_t* promise);
 
 #ifdef __cplusplus
 }
