@@ -86,6 +86,7 @@ set(WAVEDB_SOURCES
     src/Database/wal_compactor.c
     src/Database/database_lru.c
     src/Database/database.c
+    src/Database/batch.c
 )
 
 # Create WaveDB library
@@ -204,6 +205,11 @@ if(BUILD_TESTS)
     add_executable(test_wal_manager tests/test_wal_manager.cpp)
     target_link_libraries(test_wal_manager wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_wal_manager COMMAND test_wal_manager)
+
+    # Test for batch
+    add_executable(test_batch tests/test_batch.cpp)
+    target_link_libraries(test_batch wavedb gtest gtest_main)
+    add_test(NAME test_batch COMMAND test_batch)
 
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
