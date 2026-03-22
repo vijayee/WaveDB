@@ -717,3 +717,337 @@ TEST_F(BatchTest, SizeEstimationMultiplePaths) {
 
     batch_destroy(batch);
 }
+
+// Forward declaration of helper functions from wal.c
+extern "C" {
+    buffer_t* serialize_batch(batch_t* batch);
+    int deserialize_batch(buffer_t* data, batch_op_t** ops, size_t* count);
+}
+
+TEST_F(BatchTest, SerializeDeserializeSinglePut) {
+    // Create batch with single PUT operation
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    identifier_t* value = create_test_value("test_value");
+    ASSERT_NE(value, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path, value), 0);
+    EXPECT_EQ(batch->count, 1);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 1);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify operation
+    EXPECT_EQ(ops[0].type, WAL_PUT);
+    EXPECT_NE(ops[0].path, nullptr);
+    EXPECT_NE(ops[0].value, nullptr);
+
+    // Verify path
+    EXPECT_EQ(path_length(ops[0].path), 1);
+    identifier_t* id = path_get(ops[0].path, 0);
+    ASSERT_NE(id, nullptr);
+    buffer_t* id_buf = identifier_to_buffer(id);
+    ASSERT_NE(id_buf, nullptr);
+    EXPECT_EQ(memcmp(id_buf->data, "test_key", 8), 0);
+    buffer_destroy(id_buf);
+
+    // Verify value
+    buffer_t* val_buf = identifier_to_buffer(ops[0].value);
+    ASSERT_NE(val_buf, nullptr);
+    EXPECT_EQ(memcmp(val_buf->data, "test_value", 10), 0);
+    buffer_destroy(val_buf);
+
+    // Cleanup
+    path_destroy(ops[0].path);
+    identifier_destroy(ops[0].value);
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeDeserializeSingleDelete) {
+    // Create batch with single DELETE operation
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path = create_test_path("delete_key");
+    ASSERT_NE(path, nullptr);
+
+    EXPECT_EQ(batch_add_delete(batch, path), 0);
+    EXPECT_EQ(batch->count, 1);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 1);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify operation
+    EXPECT_EQ(ops[0].type, WAL_DELETE);
+    EXPECT_NE(ops[0].path, nullptr);
+    EXPECT_EQ(ops[0].value, nullptr);
+
+    // Verify path
+    EXPECT_EQ(path_length(ops[0].path), 1);
+    identifier_t* id = path_get(ops[0].path, 0);
+    ASSERT_NE(id, nullptr);
+    buffer_t* id_buf = identifier_to_buffer(id);
+    ASSERT_NE(id_buf, nullptr);
+    EXPECT_EQ(memcmp(id_buf->data, "delete_key", 10), 0);
+    buffer_destroy(id_buf);
+
+    // Cleanup
+    path_destroy(ops[0].path);
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeDeserializeMultipleOperations) {
+    // Create batch with multiple operations
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Add first PUT operation
+    path_t* path1 = create_test_path("key1");
+    ASSERT_NE(path1, nullptr);
+    identifier_t* value1 = create_test_value("value1");
+    ASSERT_NE(value1, nullptr);
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+
+    // Add DELETE operation
+    path_t* path2 = create_test_path("key2");
+    ASSERT_NE(path2, nullptr);
+    EXPECT_EQ(batch_add_delete(batch, path2), 0);
+
+    // Add second PUT operation
+    path_t* path3 = create_test_path("key3");
+    ASSERT_NE(path3, nullptr);
+    identifier_t* value3 = create_test_value("value3");
+    ASSERT_NE(value3, nullptr);
+    EXPECT_EQ(batch_add_put(batch, path3, value3), 0);
+
+    EXPECT_EQ(batch->count, 3);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 3);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify first operation (PUT)
+    EXPECT_EQ(ops[0].type, WAL_PUT);
+    EXPECT_NE(ops[0].path, nullptr);
+    EXPECT_NE(ops[0].value, nullptr);
+    buffer_t* buf1 = identifier_to_buffer(ops[0].value);
+    ASSERT_NE(buf1, nullptr);
+    EXPECT_EQ(memcmp(buf1->data, "value1", 6), 0);
+    buffer_destroy(buf1);
+
+    // Verify second operation (DELETE)
+    EXPECT_EQ(ops[1].type, WAL_DELETE);
+    EXPECT_NE(ops[1].path, nullptr);
+    EXPECT_EQ(ops[1].value, nullptr);
+
+    // Verify third operation (PUT)
+    EXPECT_EQ(ops[2].type, WAL_PUT);
+    EXPECT_NE(ops[2].path, nullptr);
+    EXPECT_NE(ops[2].value, nullptr);
+    buffer_t* buf3 = identifier_to_buffer(ops[2].value);
+    ASSERT_NE(buf3, nullptr);
+    EXPECT_EQ(memcmp(buf3->data, "value3", 6), 0);
+    buffer_destroy(buf3);
+
+    // Cleanup
+    for (size_t i = 0; i < op_count; i++) {
+        path_destroy(ops[i].path);
+        if (ops[i].value) identifier_destroy(ops[i].value);
+    }
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeDeserializeEmptyBatch) {
+    // Create empty batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+    EXPECT_EQ(batch->count, 0);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 0);
+
+    // Cleanup
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeDeserializeMultiPath) {
+    // Create batch with multi-subscript path
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Create path with multiple subscripts
+    path_t* path = path_create();
+    ASSERT_NE(path, nullptr);
+
+    for (int i = 0; i < 3; i++) {
+        char component[32];
+        snprintf(component, sizeof(component), "subscript_%d", i);
+
+        buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)component, strlen(component));
+        ASSERT_NE(buf, nullptr);
+
+        identifier_t* id = identifier_create(buf, 0);
+        buffer_destroy(buf);
+        ASSERT_NE(id, nullptr);
+
+        EXPECT_EQ(path_append(path, id), 0);
+        identifier_destroy(id);
+    }
+
+    identifier_t* value = create_test_value("multi_path_value");
+    ASSERT_NE(value, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path, value), 0);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 1);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify path has 3 subscripts
+    EXPECT_EQ(path_length(ops[0].path), 3);
+
+    // Verify each subscript
+    for (int i = 0; i < 3; i++) {
+        identifier_t* id = path_get(ops[0].path, i);
+        ASSERT_NE(id, nullptr);
+        buffer_t* id_buf = identifier_to_buffer(id);
+        ASSERT_NE(id_buf, nullptr);
+
+        char expected[32];
+        snprintf(expected, sizeof(expected), "subscript_%d", i);
+        EXPECT_EQ(memcmp(id_buf->data, expected, strlen(expected)), 0);
+        buffer_destroy(id_buf);
+    }
+
+    // Verify value
+    buffer_t* val_buf = identifier_to_buffer(ops[0].value);
+    ASSERT_NE(val_buf, nullptr);
+    EXPECT_EQ(memcmp(val_buf->data, "multi_path_value", 16), 0);
+    buffer_destroy(val_buf);
+
+    // Cleanup
+    path_destroy(ops[0].path);
+    identifier_destroy(ops[0].value);
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeDeserializeLargeValue) {
+    // Create batch with large value
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path = create_test_path("large_key");
+    ASSERT_NE(path, nullptr);
+
+    // Create large value (1KB)
+    const size_t large_size = 1024;
+    char* large_value = new char[large_size];
+    memset(large_value, 'X', large_size - 1);
+    large_value[large_size - 1] = '\0';
+
+    buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)large_value, large_size - 1);
+    delete[] large_value;
+    ASSERT_NE(buf, nullptr);
+
+    identifier_t* value = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    ASSERT_NE(value, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path, value), 0);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, large_size);
+
+    // Deserialize batch
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 1);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify value is reconstructed (may have chunk padding)
+    buffer_t* val_buf = identifier_to_buffer(ops[0].value);
+    ASSERT_NE(val_buf, nullptr);
+    // Value size should be at least large_size - 1 (may include padding)
+    EXPECT_GE(val_buf->size, large_size - 1);
+
+    // Verify most of the bytes are 'X' (may have padding at end)
+    size_t x_count = 0;
+    for (size_t i = 0; i < val_buf->size && i < large_size - 1; i++) {
+        if (val_buf->data[i] == 'X') {
+            x_count++;
+        }
+    }
+    // At least 95% of the original bytes should be 'X'
+    EXPECT_GT(x_count, (large_size - 1) * 0.95);
+    buffer_destroy(val_buf);
+
+    // Cleanup
+    path_destroy(ops[0].path);
+    identifier_destroy(ops[0].value);
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}

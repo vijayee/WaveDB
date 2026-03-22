@@ -3,10 +3,12 @@
 //
 
 #include "wal.h"
+#include "batch.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Time/debouncer.h"
+#include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -573,4 +575,243 @@ int wal_list_sequences(const char* location, uint64_t** sequences, size_t* count
     *sequences = seqs;
     *count = n;
     return 0;
+}
+
+// Serialize a batch to a buffer
+// Format: [count (4 bytes)] [op_type (1 byte) path_len (4 bytes) path_data value_len (4 bytes) value_data]...
+buffer_t* serialize_batch(batch_t* batch) {
+    if (batch == NULL || batch->ops == NULL) {
+        return NULL;
+    }
+
+    // Calculate total size
+    size_t total_size = 4; // count (4 bytes)
+
+    for (size_t i = 0; i < batch->count; i++) {
+        batch_op_t* op = &batch->ops[i];
+
+        // op_type (1 byte)
+        total_size += 1;
+
+        // path_len (4 bytes) + path_data
+        cbor_item_t* path_cbor = path_to_cbor(op->path);
+        if (path_cbor == NULL) {
+            return NULL;
+        }
+
+        unsigned char* path_buf = NULL;
+        size_t path_buf_size = 0;
+        cbor_serialize_alloc(path_cbor, &path_buf, &path_buf_size);
+
+        total_size += 4 + path_buf_size;
+        cbor_decref(&path_cbor);
+        free(path_buf);
+
+        // value_len (4 bytes) + value_data
+        total_size += 4;
+        if (op->type == WAL_PUT && op->value != NULL) {
+            cbor_item_t* value_cbor = identifier_to_cbor(op->value);
+            if (value_cbor == NULL) {
+                return NULL;
+            }
+
+            unsigned char* value_buf = NULL;
+            size_t value_buf_size = 0;
+            cbor_serialize_alloc(value_cbor, &value_buf, &value_buf_size);
+
+            total_size += value_buf_size;
+            cbor_decref(&value_cbor);
+            free(value_buf);
+        }
+    }
+
+    // Allocate buffer
+    buffer_t* buffer = buffer_create(total_size);
+    if (buffer == NULL) {
+        return NULL;
+    }
+
+    // Write data
+    size_t offset = 0;
+
+    // Write count (4 bytes, big-endian)
+    write_uint32_be(buffer->data + offset, (uint32_t)batch->count);
+    offset += 4;
+
+    // Write each operation
+    for (size_t i = 0; i < batch->count; i++) {
+        batch_op_t* op = &batch->ops[i];
+
+        // Write op_type (1 byte)
+        buffer->data[offset] = (uint8_t)op->type;
+        offset += 1;
+
+        // Serialize and write path
+        cbor_item_t* path_cbor = path_to_cbor(op->path);
+        if (path_cbor == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+
+        unsigned char* path_buf = NULL;
+        size_t path_buf_size = 0;
+        cbor_serialize_alloc(path_cbor, &path_buf, &path_buf_size);
+
+        // Write path_len (4 bytes, big-endian)
+        write_uint32_be(buffer->data + offset, (uint32_t)path_buf_size);
+        offset += 4;
+
+        // Write path_data
+        if (path_buf_size > 0) {
+            memcpy(buffer->data + offset, path_buf, path_buf_size);
+            offset += path_buf_size;
+        }
+
+        cbor_decref(&path_cbor);
+        free(path_buf);
+
+        // Write value
+        if (op->type == WAL_PUT && op->value != NULL) {
+            cbor_item_t* value_cbor = identifier_to_cbor(op->value);
+            if (value_cbor == NULL) {
+                buffer_destroy(buffer);
+                return NULL;
+            }
+
+            unsigned char* value_buf = NULL;
+            size_t value_buf_size = 0;
+            cbor_serialize_alloc(value_cbor, &value_buf, &value_buf_size);
+
+            // Write value_len (4 bytes, big-endian)
+            write_uint32_be(buffer->data + offset, (uint32_t)value_buf_size);
+            offset += 4;
+
+            // Write value_data
+            if (value_buf_size > 0) {
+                memcpy(buffer->data + offset, value_buf, value_buf_size);
+                offset += value_buf_size;
+            }
+
+            cbor_decref(&value_cbor);
+            free(value_buf);
+        } else {
+            // DELETE operation: value_len = 0
+            write_uint32_be(buffer->data + offset, 0);
+            offset += 4;
+        }
+    }
+
+    buffer->size = offset;
+    return buffer;
+}
+
+// Deserialize a buffer to operations
+// Returns 0 on success, -1 on error
+// Caller must free ops array and all paths/values
+int deserialize_batch(buffer_t* data, batch_op_t** ops, size_t* count) {
+    if (data == NULL || ops == NULL || count == NULL) {
+        return -1;
+    }
+
+    size_t offset = 0;
+
+    // Read count (4 bytes, big-endian)
+    if (data->size < offset + 4) {
+        return -1;
+    }
+
+    uint32_t op_count = read_uint32_be(data->data + offset);
+    offset += 4;
+
+    // Allocate ops array
+    batch_op_t* operations = get_clear_memory(op_count * sizeof(batch_op_t));
+    if (operations == NULL) {
+        return -1;
+    }
+
+    // Read each operation
+    for (size_t i = 0; i < op_count; i++) {
+        // Read op_type (1 byte)
+        if (data->size < offset + 1) {
+            goto error;
+        }
+        operations[i].type = (wal_type_e)data->data[offset];
+        offset += 1;
+
+        // Read path_len (4 bytes, big-endian)
+        if (data->size < offset + 4) {
+            goto error;
+        }
+        uint32_t path_len = read_uint32_be(data->data + offset);
+        offset += 4;
+
+        // Read path_data
+        if (data->size < offset + path_len) {
+            goto error;
+        }
+
+        // Load CBOR and deserialize to path
+        struct cbor_load_result path_result;
+        cbor_item_t* path_cbor = cbor_load(data->data + offset, path_len, &path_result);
+        if (path_cbor == NULL || path_result.error.code != CBOR_ERR_NONE) {
+            if (path_cbor) cbor_decref(&path_cbor);
+            goto error;
+        }
+        offset += path_len;
+
+        // Use default chunk size (4)
+        path_t* path = cbor_to_path(path_cbor, 4);
+        cbor_decref(&path_cbor);
+        if (path == NULL) {
+            goto error;
+        }
+        operations[i].path = path;
+
+        // Read value_len (4 bytes, big-endian)
+        if (data->size < offset + 4) {
+            goto error;
+        }
+        uint32_t value_len = read_uint32_be(data->data + offset);
+        offset += 4;
+
+        // Read value if present (PUT operation)
+        if (operations[i].type == WAL_PUT && value_len > 0) {
+            if (data->size < offset + value_len) {
+                goto error;
+            }
+
+            // Load CBOR and deserialize to identifier
+            struct cbor_load_result value_result;
+            cbor_item_t* value_cbor = cbor_load(data->data + offset, value_len, &value_result);
+            if (value_cbor == NULL || value_result.error.code != CBOR_ERR_NONE) {
+                if (value_cbor) cbor_decref(&value_cbor);
+                goto error;
+            }
+            offset += value_len;
+
+            // Use default chunk size (4)
+            identifier_t* value = cbor_to_identifier(value_cbor, 4);
+            cbor_decref(&value_cbor);
+            if (value == NULL) {
+                goto error;
+            }
+            operations[i].value = value;
+        } else {
+            // DELETE operation or empty value
+            operations[i].value = NULL;
+        }
+    }
+
+    *ops = operations;
+    *count = op_count;
+    return 0;
+
+error:
+    // Free all allocated operations
+    for (size_t j = 0; j < op_count; j++) {
+        if (operations[j].path) path_destroy(operations[j].path);
+        if (operations[j].value) identifier_destroy(operations[j].value);
+    }
+    free(operations);
+    return -1;
 }
