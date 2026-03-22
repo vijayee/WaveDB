@@ -40,6 +40,12 @@ typedef struct {
     promise_t* promise;
 } database_delete_ctx_t;
 
+typedef struct {
+    database_t* db;
+    batch_t* batch;
+    promise_t* promise;
+} batch_work_t;
+
 // Forward declarations
 static void _database_put(database_put_ctx_t* ctx);
 static void _database_get(database_get_ctx_t* ctx);
@@ -1069,4 +1075,56 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     }
 
     return 0;
+}
+
+static void batch_execute_work(void* ctx) {
+    batch_work_t* work = (batch_work_t*)ctx;
+
+    refcounter_reference((refcounter_t*)work->batch);
+    int result = database_write_batch_sync(work->db, work->batch);
+    refcounter_dereference((refcounter_t*)work->batch);
+
+    // Allocate result on heap for promise handoff
+    int* result_ptr = malloc(sizeof(int));
+    if (result_ptr) {
+        *result_ptr = result;
+        promise_resolve(work->promise, result_ptr);
+    } else {
+        promise_resolve(work->promise, NULL);
+    }
+
+    free(work);
+}
+
+void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
+    if (db == NULL || batch == NULL || promise == NULL) {
+        int* error = malloc(sizeof(int));
+        if (error) {
+            *error = -1;
+            promise_resolve(promise, error);
+        } else {
+            promise_resolve(promise, NULL);
+        }
+        return;
+    }
+
+    batch_work_t* work = malloc(sizeof(batch_work_t));
+    if (work == NULL) {
+        int* error = malloc(sizeof(int));
+        if (error) {
+            *error = -1;
+            promise_resolve(promise, error);
+        } else {
+            promise_resolve(promise, NULL);
+        }
+        return;
+    }
+
+    work->db = db;
+    work->batch = batch;
+    work->promise = promise;
+
+    refcounter_reference((refcounter_t*)batch);
+    work_t* task = work_create(batch_execute_work, NULL, work);
+    work_pool_enqueue(db->pool, task);
 }
