@@ -720,6 +720,130 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
     }
 }
 
+TEST_F(DatabaseTest, WriteBatchSyncBasic) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Add operations to batch
+    path_t* path1 = make_path({"batch", "key1"});
+    identifier_t* value1 = make_value("batch_value1");
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+
+    path_t* path2 = make_path({"batch", "key2"});
+    identifier_t* value2 = make_value("batch_value2");
+    EXPECT_EQ(batch_add_put(batch, path2, value2), 0);
+
+    // Submit batch synchronously
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, 0);
+
+    // Verify both values exist
+    path_t* get_path1 = make_path({"batch", "key1"});
+    identifier_t* result1 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path1, &result1), 0);
+    ASSERT_NE(result1, nullptr);
+    expect_identifier_eq(result1, "batch_value1");
+    identifier_destroy(result1);
+
+    path_t* get_path2 = make_path({"batch", "key2"});
+    identifier_t* result2 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path2, &result2), 0);
+    ASSERT_NE(result2, nullptr);
+    expect_identifier_eq(result2, "batch_value2");
+    identifier_destroy(result2);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
+TEST_F(DatabaseTest, WriteBatchSyncEmpty) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Create empty batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Submit empty batch - should return error -3
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, -3);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
+TEST_F(DatabaseTest, WriteBatchSyncTooLarge) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Create batch
+    batch_t* batch = batch_create(10000);
+    ASSERT_NE(batch, nullptr);
+
+    // Add operations to exceed WAL max size (128KB default)
+    // Each operation is ~100 bytes, so add 2000 operations to exceed 128KB
+    for (int i = 0; i < 2000; i++) {
+        char sub1[32], sub2[32], val[256];
+        snprintf(sub1, sizeof(sub1), "large%d", i);
+        snprintf(sub2, sizeof(sub2), "field%d", i);
+        snprintf(val, sizeof(val), "very_long_value_string_to_increase_size_%d", i);
+
+        path_t* path = make_path({sub1, sub2});
+        identifier_t* value = make_value(val);
+
+        int result = batch_add_put(batch, path, value);
+        if (result == -2) {
+            // Batch is full, that's fine for this test
+            break;
+        }
+        EXPECT_EQ(result, 0);
+    }
+
+    // Submit oversized batch - should return error -5
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, -5);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
+TEST_F(DatabaseTest, WriteBatchSyncDoubleSubmit) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Add operation
+    path_t* path1 = make_path({"batch", "key"});
+    identifier_t* value1 = make_value("batch_value");
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+
+    // First submission should succeed
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, 0);
+
+    // Second submission should fail with error -6
+    result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, -6);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
 TEST_F(DatabaseTest, Snapshot) {
     int error = 0;
     db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);

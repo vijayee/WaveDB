@@ -4,6 +4,7 @@
 
 #include "database.h"
 #include "wal_manager.h"
+#include "batch.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -115,6 +116,88 @@ static buffer_t* encode_delete_entry(path_t* path) {
     cbor_decref(&array);
 
     if (buf == NULL) return NULL;
+
+    buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
+    return buffer;
+}
+
+// Helper to serialize batch for WAL
+static buffer_t* serialize_batch(batch_t* batch) {
+    if (batch == NULL || batch->count == 0) {
+        return NULL;
+    }
+
+    // Create CBOR array: [ [type, path, value?], ... ]
+    cbor_item_t* batch_array = cbor_new_definite_array(batch->count);
+    if (batch_array == NULL) {
+        return NULL;
+    }
+
+    // Lock batch for reading
+    platform_lock(&batch->lock);
+
+    // Serialize each operation
+    for (size_t i = 0; i < batch->count; i++) {
+        batch_op_t* op = &batch->ops[i];
+
+        // Create operation entry: [type, path, value?]
+        cbor_item_t* op_array = cbor_new_definite_array(op->type == WAL_PUT ? 3 : 2);
+        if (op_array == NULL) {
+            platform_unlock(&batch->lock);
+            cbor_decref(&batch_array);
+            return NULL;
+        }
+
+        // Add type
+        cbor_item_t* type_item = cbor_build_uint8(op->type);
+        if (type_item == NULL) {
+            platform_unlock(&batch->lock);
+            cbor_decref(&op_array);
+            cbor_decref(&batch_array);
+            return NULL;
+        }
+        cbor_array_push(op_array, type_item);
+        cbor_decref(&type_item);
+
+        // Add path
+        cbor_item_t* path_cbor = path_to_cbor(op->path);
+        if (path_cbor == NULL) {
+            platform_unlock(&batch->lock);
+            cbor_decref(&op_array);
+            cbor_decref(&batch_array);
+            return NULL;
+        }
+        cbor_array_push(op_array, path_cbor);
+        cbor_decref(&path_cbor);
+
+        // Add value for PUT operations
+        if (op->type == WAL_PUT && op->value != NULL) {
+            cbor_item_t* value_cbor = identifier_to_cbor(op->value);
+            if (value_cbor == NULL) {
+                platform_unlock(&batch->lock);
+                cbor_decref(&op_array);
+                cbor_decref(&batch_array);
+                return NULL;
+            }
+            cbor_array_push(op_array, value_cbor);
+            cbor_decref(&value_cbor);
+        }
+
+        cbor_array_push(batch_array, op_array);
+        cbor_decref(&op_array);
+    }
+
+    platform_unlock(&batch->lock);
+
+    // Serialize to buffer
+    unsigned char* buf = NULL;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(batch_array, &buf, &buf_size);
+    cbor_decref(&batch_array);
+
+    if (buf == NULL) {
+        return NULL;
+    }
 
     buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
     return buffer;
@@ -870,6 +953,119 @@ int database_delete_sync(database_t* db, path_t* path) {
 
     if (removed) {
         identifier_destroy(removed);
+    }
+
+    return 0;
+}
+
+int database_write_batch_sync(database_t* db, batch_t* batch) {
+    // Validate inputs
+    if (db == NULL || batch == NULL) {
+        return -1;
+    }
+
+    // Check if batch is empty
+    platform_lock(&batch->lock);
+    if (batch->count == 0) {
+        platform_unlock(&batch->lock);
+        return -3;
+    }
+
+    // Check if already submitted
+    if (batch->submitted) {
+        platform_unlock(&batch->lock);
+        return -6;
+    }
+
+    platform_unlock(&batch->lock);
+
+    // Check size against WAL max size
+    size_t size = batch_estimate_size(batch);
+    if (size > db->wal_manager->config.max_file_size) {
+        return -5;
+    }
+
+    // Begin MVCC transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        return -1;
+    }
+
+    // Mark batch as submitted
+    platform_lock(&batch->lock);
+    batch->submitted = 1;
+    platform_unlock(&batch->lock);
+
+    // Acquire ALL write locks (in order: 0-63)
+    for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+        platform_lock(&db->write_locks[i]);
+    }
+
+    // Serialize batch
+    buffer_t* data = serialize_batch(batch);
+    if (data == NULL) {
+        // Release locks
+        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
+            platform_unlock(&db->write_locks[i - 1]);
+        }
+        txn_desc_destroy(txn);
+        return -1;
+    }
+
+    // Write to thread-local WAL
+    thread_wal_t* twal = get_thread_wal(db->wal_manager);
+    if (twal == NULL) {
+        buffer_destroy(data);
+        // Release locks
+        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
+            platform_unlock(&db->write_locks[i - 1]);
+        }
+        txn_desc_destroy(txn);
+        return -1;
+    }
+
+    int result = thread_wal_write(twal, txn->txn_id, WAL_BATCH, data);
+    buffer_destroy(data);
+
+    if (result != 0) {
+        // Release locks
+        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
+            platform_unlock(&db->write_locks[i - 1]);
+        }
+        txn_desc_destroy(txn);
+        return result;
+    }
+
+    // Apply to trie with MVCC
+    platform_lock(&batch->lock);
+    for (size_t i = 0; i < batch->count; i++) {
+        int op_result;
+        if (batch->ops[i].type == WAL_PUT) {
+            op_result = hbtrie_insert_mvcc(db->trie, batch->ops[i].path, batch->ops[i].value, txn->txn_id);
+        } else {
+            identifier_t* removed = hbtrie_delete_mvcc(db->trie, batch->ops[i].path, txn->txn_id);
+            op_result = 0; // Delete always succeeds
+            if (removed) {
+                identifier_destroy(removed);
+            }
+        }
+
+        if (op_result != 0) {
+            platform_unlock(&batch->lock);
+            // CRITICAL: Crash to force recovery
+            fprintf(stderr, "CRITICAL: Batch apply failed at operation %zu, crashing for recovery\n", i);
+            abort();
+        }
+    }
+    platform_unlock(&batch->lock);
+
+    // Commit transaction
+    tx_manager_commit(db->tx_manager, txn);
+    txn_desc_destroy(txn);
+
+    // Release locks (in reverse order: 63-0)
+    for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
+        platform_unlock(&db->write_locks[i - 1]);
     }
 
     return 0;
