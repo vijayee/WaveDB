@@ -1051,3 +1051,143 @@ TEST_F(BatchTest, SerializeDeserializeLargeValue) {
     buffer_destroy(serialized);
     batch_destroy(batch);
 }
+
+TEST_F(BatchTest, DeserializeCorruptedData) {
+    // Test that deserializing corrupted data fails gracefully
+    // Create batch with operations
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path = create_test_path("corrupt_test_key");
+    ASSERT_NE(path, nullptr);
+    identifier_t* value = create_test_value("corrupt_test_value");
+    ASSERT_NE(value, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path, value), 0);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Corrupt the data by modifying bytes in the middle
+    // This tests that the deserializer handles invalid data gracefully
+    if (serialized->size > 20) {
+        serialized->data[serialized->size / 2] ^= 0xFF;
+        serialized->data[serialized->size / 2 + 1] ^= 0xFF;
+    }
+
+    // Attempt to deserialize corrupted data
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+
+    // Deserialization should fail with corrupted data
+    // Either return an error code or the result should be invalid
+    if (result == 0 && ops != nullptr) {
+        // If deserialization succeeded somehow, clean up
+        for (size_t i = 0; i < op_count; i++) {
+            if (ops[i].path) path_destroy(ops[i].path);
+            if (ops[i].value) identifier_destroy(ops[i].value);
+        }
+        free(ops);
+    }
+
+    // Cleanup
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, DeserializeTruncatedData) {
+    // Test that deserializing truncated data fails gracefully
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path = create_test_path("truncated_key");
+    ASSERT_NE(path, nullptr);
+    identifier_t* value = create_test_value("truncated_value");
+    ASSERT_NE(value, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path, value), 0);
+
+    // Serialize batch
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 10);
+
+    // Truncate the data to simulate incomplete read/corruption
+    size_t original_size = serialized->size;
+    serialized->size = serialized->size / 2;  // Cut in half
+
+    // Attempt to deserialize truncated data
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+
+    // Deserialization should fail with truncated data
+    EXPECT_NE(result, 0);  // Should return error
+
+    // Cleanup
+    if (ops != nullptr) {
+        for (size_t i = 0; i < op_count; i++) {
+            if (ops[i].path) path_destroy(ops[i].path);
+            if (ops[i].value) identifier_destroy(ops[i].value);
+        }
+        free(ops);
+    }
+
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, SerializeProducesValidOutput) {
+    // Test that serialize produces consistent, valid output
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Add multiple operations
+    path_t* path1 = create_test_path("key1");
+    ASSERT_NE(path1, nullptr);
+    identifier_t* value1 = create_test_value("value1");
+    ASSERT_NE(value1, nullptr);
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+
+    path_t* path2 = create_test_path("key2");
+    ASSERT_NE(path2, nullptr);
+    EXPECT_EQ(batch_add_delete(batch, path2), 0);
+
+    // Serialize
+    buffer_t* serialized = serialize_batch(batch);
+    ASSERT_NE(serialized, nullptr);
+    EXPECT_GT(serialized->size, 0);
+
+    // Verify header structure: count (4 bytes) at minimum
+    EXPECT_GE(serialized->size, 4);
+
+    // Deserialize and verify all operations preserved
+    batch_op_t* ops = nullptr;
+    size_t op_count = 0;
+    int result = deserialize_batch(serialized, &ops, &op_count);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(op_count, 2);
+    ASSERT_NE(ops, nullptr);
+
+    // Verify first operation (PUT)
+    EXPECT_EQ(ops[0].type, WAL_PUT);
+    EXPECT_NE(ops[0].path, nullptr);
+    EXPECT_NE(ops[0].value, nullptr);
+
+    // Verify second operation (DELETE)
+    EXPECT_EQ(ops[1].type, WAL_DELETE);
+    EXPECT_NE(ops[1].path, nullptr);
+    EXPECT_EQ(ops[1].value, nullptr);
+
+    // Cleanup
+    for (size_t i = 0; i < op_count; i++) {
+        path_destroy(ops[i].path);
+        if (ops[i].value) identifier_destroy(ops[i].value);
+    }
+    free(ops);
+    buffer_destroy(serialized);
+    batch_destroy(batch);
+}

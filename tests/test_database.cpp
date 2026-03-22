@@ -6,6 +6,8 @@
 #include <future>
 #include <vector>
 #include <string>
+#include <chrono>
+#include <chrono>
 extern "C" {
 #include "Database/database.h"
 #include "Time/wheel.h"
@@ -850,7 +852,7 @@ TEST_F(DatabaseTest, Snapshot) {
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
-    
+
 
     // Insert values
     const int COUNT = 10;
@@ -909,5 +911,104 @@ TEST_F(DatabaseTest, Snapshot) {
         expect_identifier_eq(result, val);
         identifier_destroy(result);
         promise_destroy(get_prom);
+    }
+}
+
+TEST_F(DatabaseTest, BatchVsIndividualPutPerformance) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    const int COUNT = 100;  // Use smaller count to stay within TEST_COUNT
+
+    // Measure individual put operations using synchronous API
+    auto individual_start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < COUNT; i++) {
+        char key[32], val[32];
+        snprintf(key, sizeof(key), "ind_key_%d", i);
+        snprintf(val, sizeof(val), "ind_val_%d", i);
+
+        path_t* path = make_path({key});
+        identifier_t* value = make_value(val);
+
+        int result = database_put_sync(db, path, value);
+        EXPECT_EQ(result, 0);
+    }
+
+    auto individual_end = std::chrono::high_resolution_clock::now();
+    auto individual_ms = std::chrono::duration_cast<std::chrono::milliseconds>(individual_end - individual_start).count();
+
+    if (HasFailure()) {
+        GTEST_SKIP();
+    }
+
+    // Measure batch put operations
+    batch_t* batch = batch_create(COUNT);
+    ASSERT_NE(batch, nullptr);
+
+    // Add all operations to batch
+    for (int i = 0; i < COUNT; i++) {
+        char key[32], val[32];
+        snprintf(key, sizeof(key), "batch_key_%d", i);
+        snprintf(val, sizeof(val), "batch_val_%d", i);
+
+        path_t* path = make_path({key});
+        identifier_t* value = make_value(val);
+
+        int result = batch_add_put(batch, path, value);
+        EXPECT_EQ(result, 0);
+        if (result != 0) {
+            // Clean up on error
+            path_destroy(path);
+            identifier_destroy(value);
+        }
+    }
+
+    auto batch_start = std::chrono::high_resolution_clock::now();
+
+    // Submit batch
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, 0);
+
+    auto batch_end = std::chrono::high_resolution_clock::now();
+    auto batch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(batch_end - batch_start).count();
+
+    batch_destroy(batch);
+
+    if (HasFailure()) {
+        GTEST_SKIP();
+    }
+
+    // Verify all batch values exist
+    for (int i = 0; i < COUNT; i++) {
+        char key[32], val[32];
+        snprintf(key, sizeof(key), "batch_key_%d", i);
+        snprintf(val, sizeof(val), "batch_val_%d", i);
+
+        path_t* get_path = make_path({key});
+
+        identifier_t* result_val = nullptr;
+        EXPECT_EQ(database_get_sync(db, get_path, &result_val), 0);
+        ASSERT_NE(result_val, nullptr);
+        expect_identifier_eq(result_val, val);
+        identifier_destroy(result_val);
+    }
+
+    // Log performance comparison
+    if (individual_ms > 0 && batch_ms > 0) {
+        double individual_ops_per_sec = (double)COUNT / (individual_ms / 1000.0);
+        double batch_ops_per_sec = (double)COUNT / (batch_ms / 1000.0);
+
+        // Performance metrics logged for analysis
+        // Individual puts: individual_ms ms (individual_ops_per_sec ops/sec)
+        // Batch put: batch_ms ms (batch_ops_per_sec ops/sec)
+        // Speedup: (individual_ops_per_sec / batch_ops_per_sec)x
+
+        SUCCEED() << "Individual: " << individual_ms << "ms (" << individual_ops_per_sec
+                  << " ops/sec), Batch: " << batch_ms << "ms (" << batch_ops_per_sec << " ops/sec)";
+    } else {
+        SUCCEED() << "Individual: " << individual_ms << "ms, Batch: " << batch_ms << "ms";
     }
 }
