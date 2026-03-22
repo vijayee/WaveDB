@@ -1,4 +1,9 @@
 #include "wal_manager.h"
+#include "database.h"
+#include "batch.h"
+#include "../HBTrie/hbtrie.h"
+#include "../HBTrie/path.h"
+#include "../HBTrie/identifier.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -15,6 +20,9 @@
 #include <sys/uio.h>
 #include <dirent.h>
 #include "../Util/log.h"  // For log_warn
+
+// Forward declaration from wal.c
+int deserialize_batch(buffer_t* data, batch_op_t** ops, size_t* count);
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
@@ -1067,8 +1075,50 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     }
 
     // 5. Replay in order
-    // TODO: Apply to database (passed as void* db parameter)
-    // For now, just verify entries are sorted
+    database_t* database = (database_t*)db;
+    for (size_t i = 0; i < entry_count; i++) {
+        recovery_entry_t* entry = &all_entries[i];
+        buffer_t* data = entry->data;
+
+        switch (entry->type) {
+            case WAL_BATCH: {
+                // Deserialize batch
+                batch_op_t* ops = NULL;
+                size_t op_count = 0;
+
+                if (deserialize_batch(data, &ops, &op_count) != 0) {
+                    fprintf(stderr, "ERROR: Failed to deserialize batch\n");
+                    break;
+                }
+
+                // Apply each operation to trie
+                for (size_t j = 0; j < op_count; j++) {
+                    if (ops[j].type == WAL_PUT) {
+                        hbtrie_insert_mvcc(database->trie, ops[j].path, ops[j].value, entry->txn_id);
+                    } else {
+                        hbtrie_delete_mvcc(database->trie, ops[j].path, entry->txn_id);
+                    }
+
+                    // Clean up
+                    path_destroy(ops[j].path);
+                    if (ops[j].value) {
+                        identifier_destroy(ops[j].value);
+                    }
+                }
+
+                free(ops);
+                break;
+            }
+            case WAL_PUT:
+            case WAL_DELETE:
+                // TODO: Handle individual PUT/DELETE entries
+                // These would need to be deserialized from buffer_t* data
+                break;
+            default:
+                fprintf(stderr, "WARNING: Unknown WAL entry type: %c\n", entry->type);
+                break;
+        }
+    }
 
     // 6. Clean up
     for (size_t i = 0; i < entry_count; i++) {
