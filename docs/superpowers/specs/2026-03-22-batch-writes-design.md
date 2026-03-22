@@ -42,10 +42,12 @@ typedef struct {
 typedef struct {
     refcounter_t refcounter;
     PLATFORMLOCKTYPE(lock);
-    batch_op_t* ops;         // Dynamic array of operations
-    size_t count;            // Current operation count
-    size_t capacity;         // Array capacity
-    size_t max_size;         // Maximum allowed operations
+    batch_op_t* ops;            // Dynamic array of operations
+    size_t count;               // Current operation count
+    size_t capacity;            // Array capacity
+    size_t max_size;           // Maximum allowed operations
+    size_t estimated_size;     // Running total of estimated serialized size
+    uint8_t submitted;        // 0 = not submitted, 1 = submitted
 } batch_t;
 ```
 
@@ -64,6 +66,8 @@ typedef struct {
 - `batch_t` is reference-counted (caller can retain batch across multiple submissions)
 - Thread-safe for concurrent `batch_add_*` calls
 - Path/value ownership transfers to batch on add (caller shouldn't destroy)
+- `estimated_size` tracks running total for size enforcement
+- `submitted` prevents double-submission
 - Configurable size limit prevents runaway memory usage
 
 ---
@@ -84,12 +88,22 @@ batch_t* batch_create(size_t reserve_count);
 /**
  * Add a PUT operation to batch.
  *
- * Ownership of path and value transfers to batch.
- * Caller should not destroy path or value after this call.
+ * Ownership semantics:
+ *   - On success: ownership of path and value transfers to batch
+ *   - On error: ownership remains with caller (caller must destroy)
+ *
+ * Validation performed:
+ *   1. Check batch is not full (count < max_size)
+ *   2. Check batch is not already submitted
+ *   3. Check path is not NULL
+ *   4. Check value is not NULL
+ *   5. Validate path can be serialized
+ *   6. Validate value can be serialized
+ *   7. Update estimated_size
  *
  * @param batch Batch to modify
- * @param path Key path (ownership transfers)
- * @param value Value to store (ownership transfers)
+ * @param path Key path (ownership transfers on success)
+ * @param value Value to store (ownership transfers on success)
  * @return 0 on success, -1 on error, -2 if batch is full
  */
 int batch_add_put(batch_t* batch, path_t* path, identifier_t* value);
@@ -97,14 +111,32 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value);
 /**
  * Add a DELETE operation to batch.
  *
- * Ownership of path transfers to batch.
- * Caller should not destroy path after this call.
+ * Ownership semantics:
+ *   - On success: ownership of path transfers to batch
+ *   - On error: ownership remains with caller (caller must destroy)
+ *
+ * Validation performed:
+ *   1. Check batch is not full
+ *   2. Check batch is not already submitted
+ *   3. Check path is not NULL
+ *   4. Validate path can be serialized
+ *   5. Update estimated_size
  *
  * @param batch Batch to modify
- * @param path Key path to delete (ownership transfers)
+ * @param path Key path to delete (ownership transfers on success)
  * @return 0 on success, -1 on error, -2 if batch is full
  */
 int batch_add_delete(batch_t* batch, path_t* path);
+
+/**
+ * Estimate serialized size of batch.
+ *
+ * Useful for checking against WAL max_size before submission.
+ *
+ * @param batch Batch to estimate
+ * @return Estimated size in bytes
+ */
+size_t batch_estimate_size(batch_t* batch);
 
 /**
  * Submit batch synchronously.
@@ -112,11 +144,17 @@ int batch_add_delete(batch_t* batch, path_t* path);
  * Blocks until entire batch is written to WAL and applied to database.
  * On any error: entire batch is rolled back, no partial writes.
  *
+ * After submission:
+ *   - Batch is marked as submitted (cannot add more operations)
+ *   - Caller should destroy the batch after checking result
+ *   - Batch is NOT reusable
+ *
  * Batch must not be empty.
  * Batch size must not exceed WAL max_file_size.
+ * Batch must not already be submitted.
  *
  * @param db Database to modify
- * @param batch Batch to submit (caller retains ownership)
+ * @param batch Batch to submit (caller retains ownership until destroyed)
  * @return 0 on success, error code on failure
  *
  * Error codes:
@@ -125,6 +163,7 @@ int batch_add_delete(batch_t* batch, path_t* path);
  *   -3: Batch is empty
  *   -4: Path/value validation failed
  *   -5: Batch too large for WAL
+ *   -6: Batch already submitted
  */
 int database_write_batch_sync(database_t* db, batch_t* batch);
 
@@ -134,8 +173,23 @@ int database_write_batch_sync(database_t* db, batch_t* batch);
  * Entire batch is processed by single worker thread (not split across threads).
  * On any error: entire batch is rolled back, no partial writes.
  *
+ * After submission:
+ *   - Batch is marked as submitted (cannot add more operations)
+ *   - Worker references batch before starting work
+ *   - Caller should destroy batch after promise resolves
+ *   - Batch is NOT reusable
+ *
+ * Async reference counting flow:
+ *   - Caller creates batch (refcount = 1)
+ *   - Caller calls database_write_batch (refcount still 1)
+ *   - Worker thread references batch (refcount = 2)
+ *   - Worker executes batch, resolves promise
+ *   - Worker dereferences batch (refcount = 1)
+ *   - Caller destroys batch (refcount = 0, freed)
+ *
  * Batch must not be empty.
  * Batch size must not exceed WAL max_file_size.
+ * Batch must not already be submitted.
  *
  * @param db Database to modify
  * @param batch Batch to submit (caller retains ownership until promise resolved)
@@ -147,6 +201,7 @@ void database_write_batch(database_t* db, batch_t* batch, promise_t* promise);
  * Destroy a batch.
  *
  * Frees all operations and their paths/values.
+ * Safe to call even if batch was submitted.
  *
  * @param batch Batch to destroy
  */
@@ -156,14 +211,15 @@ void batch_destroy(batch_t* batch);
 ### Error Handling
 
 **Batch building errors:**
-- `batch_add_*` returns error immediately if batch is full or invalid
-- Caller handles error before submission (batch remains valid)
+- `batch_add_*` returns error immediately if validation fails
+- On error: ownership remains with caller (caller must destroy path/value)
+- Batch remains valid, caller can retry or destroy
 
-**Batch execution errors:**
+**Batch submission errors:**
 - Sync version returns error code
 - Async version resolves promise with error code
-- On any error: entire batch rolled back, no partial writes
-- WAL may contain batch, but recovery will skip if apply failed
+- On any error during submission: entire batch rolled back, no partial writes
+- Error recovery documented in Execution Flow section
 
 **Return codes:**
 - `0`: Success
@@ -172,6 +228,7 @@ void batch_destroy(batch_t* batch);
 - `-3`: Batch is empty
 - `-4`: Path/value validation failed
 - `-5`: Batch too large for WAL
+- `-6`: Batch already submitted
 
 ---
 
@@ -190,34 +247,42 @@ typedef enum {
 ### Batch Entry Format
 
 ```
-[Header: 33 bytes]
+[Header: 33 bytes - SAME AS EXISTING FORMAT]
   - type (1 byte): WAL_BATCH
   - txn_id (24 bytes): transaction_id_t serialized (single ID for entire batch)
   - crc32 (4 bytes): CRC32 of data section
-  - count (4 bytes): number of operations
+  - data_len (4 bytes): total data section length in bytes
 
-[Data: variable]
-  For each operation:
-    - op_type (1 byte): WAL_PUT or WAL_DELETE
-    - path_len (4 bytes): path byte length
-    - path_data (path_len bytes): serialized path
-    - value_len (4 bytes): value byte length (0 for DELETE)
-    - value_data (value_len bytes): serialized value (absent for DELETE)
+[Data section: data_len bytes]
+  - count (4 bytes): number of operations in batch
+  - operations[]: serialized operations, one after another
+    For each operation:
+      - op_type (1 byte): WAL_PUT or WAL_DELETE
+      - path_len (4 bytes): path byte length
+      - path_data (path_len bytes): serialized path
+      - value_len (4 bytes): value byte length (0 for DELETE)
+      - value_data (value_len bytes): serialized value (absent for DELETE)
 ```
 
-**Note:** Single CRC32 for entire batch data section (not per-operation). Since batch is atomic, per-operation CRCs would be redundant integrity checking.
+**Key points:**
+- Header format is IDENTICAL to existing WAL_PUT/WAL_DELETE format
+- `data_len` field allows WAL reader to allocate buffer correctly
+- `count` is the first field in data section, not in header
+- Single CRC32 for entire data section (atomic integrity)
+- Batch must fit in single WAL file (enforced by size estimation)
 
 **Serialization flow:**
 1. Generate single `transaction_id_t` for entire batch
-2. Serialize all operations into `buffer_t*`
+2. Serialize count and all operations into `buffer_t*`
 3. Compute CRC32 of serialized data
-4. Write header + data to WAL as single entry
+4. Write header + data to WAL as single entry (using existing `wal_write` pattern)
 5. WAL rotation if needed (same as single-op writes)
 
-**Size constraint:**
-- Batch must fit in single WAL file
-- If batch exceeds `wal_max_size`, error code `-5` returned
-- Caller must split into smaller batches or increase WAL max_size
+**Size enforcement:**
+- `batch_add_*` updates `estimated_size` on each operation
+- If `estimated_size` approaches `wal_max_size`, return error early
+- Before submission: check `estimated_size` against `wal_max_size`, error if too large
+- Caller can check size with `batch_estimate_size()` before submitting
 
 ---
 
@@ -227,42 +292,54 @@ typedef enum {
 
 ```
 1. Validate batch (not empty, not full, not already submitted)
-2. Estimate serialized size
-3. Check against WAL max_size → error if too large
-4. Generate single transaction_id_t for entire batch
-5. Acquire ALL write locks (all 64 shards)
-6. Serialize all operations into buffer_t
-7. Compute CRC32 of buffer
+2. Check estimated_size against WAL max_size → error if too large
+3. Generate single transaction_id_t for entire batch
+4. Mark batch as submitted (prevent double-submission)
+5. Serialize all operations into buffer_t
+6. Compute CRC32 of buffer
+7. Acquire ALL write locks (all 64 shards) IN ORDER
+   - Acquire locks[0], locks[1], ..., locks[63] to prevent deadlock
 8. Write single WAL_BATCH entry (may rotate WAL)
-9. If WAL write fails: release locks, return error (no data written)
+9. If WAL write fails:
+   - Release all locks
+   - Return error (no data written, nothing to rollback)
 10. Apply all operations to database trie (in-memory)
 11. If any operation fails:
-    - Don't commit to trie
-    - Release locks
-    - Return error
-    - Note: WAL still has the batch, will be replayed on recovery
-12. Release all write locks
+    - THIS IS A CRITICAL ERROR - should not happen
+    - Log error and crash the process
+    - Recovery will replay the batch from WAL
+    - Ensures consistency: either fully applied or not at all
+12. Release all write locks (in reverse order: locks[63] down to locks[0])
 13. Return success
 ```
 
 ### Asynchronous Batch (database_write_batch)
 
 ```
-1. Validate batch
-2. Reference batch (prevent destruction until promise resolved)
+1. Validate batch (not empty, not full, not already submitted)
+2. Reference batch: refcounter_reference(&batch->refcounter)
 3. Create work_t with batch context
 4. Enqueue to thread pool
 5. Worker thread picks up work
 6. Worker executes steps 2-11 from sync version
 7. Resolve promise with result code
-8. Dereference batch
+8. Dereference batch: refcounter_dereference(&batch->refcounter)
 ```
+
+**Critical error handling (step 11):**
+- **Before WAL write fails:** Return error, no recovery needed
+- **After WAL write succeeds, before trie apply:** Process MUST crash
+  - Batch is in WAL (durable) but not in trie (in-memory)
+  - Cannot safely continue without risking inconsistency
+  - Crash forces recovery to replay from WAL
+  - Recovery will apply the entire batch atomically
+- **No intermediate states:** Either batch fully applied or not at all
 
 **Key points:**
 - Steps 5-10 are WAL + in-memory updates (fast, single-threaded)
 - Single transaction ID ties everything together
-- If trie apply fails, WAL still has batch (recovery will replay or skip via MVCC)
-- Recovery handles idempotency (MVCC versioning prevents double-applies)
+- Lock acquisition order prevents deadlocks
+- Process crash on trie-apply failure ensures consistency via recovery
 
 ---
 
@@ -274,8 +351,23 @@ typedef enum {
 // batch_t is thread-safe for concurrent batch_add_* calls
 int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
     platform_lock(&batch->lock);
-    // ... check capacity, grow array if needed ...
-    // ... add operation ...
+
+    // Check if already submitted
+    if (batch->submitted) {
+        platform_unlock(&batch->lock);
+        return -6;  // Batch already submitted
+    }
+
+    // Check capacity
+    if (batch->count >= batch->max_size) {
+        platform_unlock(&batch->lock);
+        return -2;  // Batch is full
+    }
+
+    // Validate and add operation
+    // ... update estimated_size ...
+    // ... add to ops array ...
+
     platform_unlock(&batch->lock);
     return 0;
 }
@@ -285,13 +377,29 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 
 **Current:** Database has 64 sharded write locks for concurrent single-op writes.
 
-**Batch writes:** Acquire ALL write locks (all 64 shards) before writing batch.
+**Batch writes:** Acquire ALL write locks (all 64 shards) IN ORDER to prevent deadlock.
+
+**Lock acquisition order:**
+```c
+// MUST acquire locks in consistent order
+for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+    platform_lock(&db->write_locks[i]);
+}
+
+// ... perform batch operations ...
+
+// Release in REVERSE order
+for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
+    platform_unlock(&db->write_locks[i - 1]);
+}
+```
 
 **Rationale:**
-- Simpler implementation
-- Ensures consistent database view across entire batch
+- Consistent lock ordering prevents deadlock with concurrent operations
+- All batches use same order (ascending)
+- All single operations use same order (acquire one lock, but in ascending order)
+- Ensures consistency across entire batch
 - Blocks all concurrent writes during batch execution
-- Matches atomic semantics (all-or-nothing)
 
 **Performance impact:**
 - Batches block all writers for duration of batch
@@ -312,18 +420,20 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 
 2. **For WAL_BATCH entries:**
    ```
-   a. Read header (type, txn_id, crc32, count)
-   b. Validate CRC32 of data section
-   c. For each operation in batch:
-      - Deserialize path and value
-      - Apply to trie (same as single-op replay)
+   a. Read header (type, txn_id, crc32, data_len)
+   b. Read data section (data_len bytes)
+   c. Validate CRC32 of data section
    d. If CRC32 fails:
       - Log error with transaction ID
       - Skip this batch (don't apply any operations)
       - Continue to next WAL entry
-   e. If any operation fails:
+   e. Deserialize count from data section
+   f. For each operation in batch:
+      - Deserialize op_type, path, value
+      - Apply to trie (same as single-op replay)
+   g. If any operation fails:
       - Log error
-      - Skip this batch
+      - Skip this batch (don't mark as applied)
       - Continue to next WAL entry
    ```
 
@@ -343,6 +453,7 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 - Existing MVCC handles duplicate prevention
 - CRC32 validation catches incomplete writes
 - Single transaction ID simplifies deduplication
+- Data section format allows correct buffer allocation
 
 ---
 
@@ -351,42 +462,48 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 ### Phase 1: Batch Builder
 - Add `batch_op_t` and `batch_t` structs to new `src/Database/batch.h/c`
 - Implement `batch_create`, `batch_add_put`, `batch_add_delete`, `batch_destroy`
-- Add max_batch_size to database configuration
-- Unit tests for batch builder
+- Implement `batch_estimate_size` helper
+- Add `max_batch_size` to database configuration
+- Add `submitted` field tracking to prevent double-submission
+- Add `estimated_size` field tracking for size enforcement
+- Unit tests for batch builder (including size estimation and submission tracking)
 
 ### Phase 2: WAL Batch Format
 - Add `WAL_BATCH` type to `wal_type_e` in `src/Database/wal.h`
 - Implement batch serialization in `wal.c`: helper function to serialize batch
 - Implement batch deserialization in `wal.c`: helper function to deserialize batch
-- Update `wal_write` to handle batch type
-- Update `wal_read` to handle batch type
-- Unit tests for WAL batch serialization
+- Update `wal_write` to handle batch type (use existing header format)
+- Update `wal_read` to handle batch type (read data_len, then deserialize)
+- Unit tests for WAL batch serialization (including size limits)
 
 ### Phase 3: Database API
 - Implement `database_write_batch_sync` in `src/Database/database.c`
-- Add write lock acquisition (all shards)
+- Add write lock acquisition (all shards in order to prevent deadlock)
 - Integrate with WAL batch write
 - Apply operations to trie
-- Unit tests for sync batch
+- Handle critical error (crash on trie-apply failure)
+- Unit tests for sync batch (including size validation and lock ordering)
 
 ### Phase 4: Async Support
 - Implement `database_write_batch` async version in `src/Database/database.c`
 - Create work context for batch execution
 - Integrate with thread pool
+- Implement reference counting flow (reference before enqueue, dereference after resolve)
 - Resolve promise with result
-- Unit tests for async batch
+- Unit tests for async batch (including reference counting)
 
 ### Phase 5: Recovery
 - Update recovery in `src/Database/wal_manager.c` to handle `WAL_BATCH`
 - Deserialize and replay batch operations
 - MVCC integration (check transaction ID)
-- Integration tests for crash recovery
+- Handle CRC32 failures (skip batch)
+- Integration tests for crash recovery (including interrupted batches)
 
 ### Phase 6: Documentation & Testing
 - Update STYLEGUIDE.md with batch API patterns
 - Add examples to project documentation
 - Performance benchmarks
-- Edge case testing
+- Edge case testing (size limits, double-submission, concurrent batches)
 
 ---
 
@@ -397,8 +514,10 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 **Batch builder tests:**
 - Create/destroy batch
 - Add operations until full
-- Error on oversized batch
+- Error on oversized batch (estimated_size)
 - Error on empty batch submission
+- Error on double-submission
+- Size estimation accuracy
 - Thread-safe concurrent additions
 
 **WAL serialization tests:**
@@ -406,13 +525,16 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 - Serialize batch with various operations
 - Deserialize and verify all operations
 - CRC32 validation (corrupted data)
+- Size limit enforcement (reject if data_len > wal_max_size)
 
 **Database batch tests:**
 - Submit batch, verify all operations applied
-- Batch with one failure: entire batch rolled back
-- Batch exceeds WAL max_size: error returned
+- Batch with one failure: process crash (recovery replays)
+- Batch exceeds WAL max_size: error returned before WAL write
 - Concurrent batches (different databases)
 - Concurrent batches (same database, serialized by locks)
+- Double-submission prevention
+- Lock acquisition order (no deadlocks)
 
 ### Integration Tests
 
@@ -421,11 +543,13 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 - Batch with partial write (corrupted): recovery skips
 - Duplicate batch (same txn_id): recovery skips
 - Multiple batches: all recovered in order
+- Interrupted batch (process crash during trie apply): recovery replays
 
 **Performance tests:**
 - Batch of 1000 puts vs 1000 individual puts
 - Measure WAL write throughput
 - Measure database lock contention
+- Compare sync vs async batch performance
 
 ### Edge Cases
 
@@ -435,6 +559,8 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 - Mixed PUT and DELETE in same batch
 - DELETE of non-existent key in batch
 - PUT then DELETE of same key in same batch
+- Batch size exceeds WAL max_size → error (-5)
+- Double-submission → error (-6)
 
 ---
 
@@ -450,9 +576,12 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 | Async support | Both sync and async | Matches existing API pattern |
 | Async processing | Single worker thread | Atomic execution, no operation splitting |
 | Batch size limits | Configurable with error on overflow | Prevents runaway memory, clear errors |
-| Write locking | Acquire all shards | Simpler, ensures consistency |
+| Write locking | Acquire all shards in order | Prevents deadlock, ensures consistency |
 | Recovery CRC | Single CRC for entire batch | Atomic batch = atomic integrity check |
-| Oversized batch handling | Reject with error | Simple, caller handles splitting |
+| Oversized batch handling | Reject with error before WAL write | Simple, caller handles splitting |
+| Error recovery | Crash on trie-apply failure | Forces recovery to replay, ensures consistency |
+| Batch reusability | Not reusable after submission | Clear ownership, simpler implementation |
+| Size estimation | Track running total | Enable early rejection of oversized batches |
 
 ---
 
@@ -461,7 +590,7 @@ int batch_add_put(batch_t* batch, path_t* path, identifier_t* value) {
 Not in initial implementation, but considered for future:
 
 1. **Per-key write locking** - Only acquire shards for keys in batch
-2. **Batch size estimation API** - `size_t batch_size_estimate(batch_t* batch)`
+2. **Batch size estimation API** - Expose `batch_estimate_size()` for caller optimization
 3. **Batch reads** - Read operations in batch (visibility semantics TBD)
 4. **Batch cancellation** - Cancel async batch before execution
 5. **Batch progress callbacks** - Progress reporting for large batches
@@ -470,14 +599,12 @@ Not in initial implementation, but considered for future:
 
 ## Questions for Implementation
 
-1. Should `batch_add_*` validate paths and values immediately, or defer to submission?
-   - **Recommendation:** Validate on add (fail-fast, easier debugging)
+**All questions have been resolved in this spec:**
 
-2. Should batches be reusable after submission?
-   - **Recommendation:** No, caller should destroy after submit (clear ownership)
+1. ~~Should `batch_add_*` validate paths and values immediately, or defer to submission?~~ **RESOLVED: Validate on add (fail-fast, easier debugging)**
 
-3. Default `max_batch_size` value?
-   - **Recommendation:** 10,000 operations (reasonable default, caller can increase)
+2. ~~Should batches be reusable after submission?~~ **RESOLVED: No, caller should destroy after submit (clear ownership)**
 
-4. Should we expose WAL max_size to help callers size batches?
-   - **Recommendation:** Yes, add `size_t database_get_max_wal_size(database_t* db)`
+3. ~~Default `max_batch_size` value?~~ **RESOLVED: 10,000 operations (reasonable default, caller can increase)**
+
+4. ~~Should we expose WAL max_size to help callers size batches?~~ **RESOLVED: Yes, add `size_t database_get_max_wal_size(database_t* db)`**
