@@ -3,6 +3,10 @@
 //
 
 #include <gtest/gtest.h>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <cstring>
 #include "Database/batch.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
@@ -142,6 +146,385 @@ TEST_F(BatchTest, LargeReserveCount) {
     batch_t* batch = batch_create(10000);
     ASSERT_NE(batch, nullptr);
     EXPECT_EQ(batch->capacity, 10000);
+
+    batch_destroy(batch);
+}
+
+// Helper function to create a test path
+static path_t* create_test_path(const char* key) {
+    buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)key, strlen(key));
+    if (buf == nullptr) return nullptr;
+
+    identifier_t* id = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    if (id == nullptr) return nullptr;
+
+    path_t* path = path_create();
+    if (path == nullptr) {
+        identifier_destroy(id);
+        return nullptr;
+    }
+
+    if (path_append(path, id) != 0) {
+        identifier_destroy(id);
+        path_destroy(path);
+        return nullptr;
+    }
+
+    identifier_destroy(id);
+    return path;
+}
+
+// Helper function to create a test value
+static identifier_t* create_test_value(const char* value) {
+    buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)value, strlen(value));
+    if (buf == nullptr) return nullptr;
+
+    identifier_t* id = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    return id;
+}
+
+TEST_F(BatchTest, AddPutSuccess) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Create test path and value
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    identifier_t* value = create_test_value("test_value");
+    ASSERT_NE(value, nullptr);
+
+    // Add PUT operation
+    int result = batch_add_put(batch, path, value);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(batch->count, 1);
+    EXPECT_EQ(batch->ops[0].type, WAL_PUT);
+    EXPECT_EQ(batch->ops[0].path, path);
+    EXPECT_EQ(batch->ops[0].value, value);
+    EXPECT_GT(batch->estimated_size, 0);
+
+    // Destroy batch (will also destroy path and value)
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddDeleteSuccess) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Create test path
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    // Add DELETE operation
+    int result = batch_add_delete(batch, path);
+    EXPECT_EQ(result, 0);
+    EXPECT_EQ(batch->count, 1);
+    EXPECT_EQ(batch->ops[0].type, WAL_DELETE);
+    EXPECT_EQ(batch->ops[0].path, path);
+    EXPECT_EQ(batch->ops[0].value, nullptr);
+    EXPECT_GT(batch->estimated_size, 0);
+
+    // Destroy batch
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddPutNullBatch) {
+    // Create test path and value
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    identifier_t* value = create_test_value("test_value");
+    ASSERT_NE(value, nullptr);
+
+    // Try to add to NULL batch
+    int result = batch_add_put(nullptr, path, value);
+    EXPECT_EQ(result, -1);
+
+    // Ownership remains with caller, so we must destroy
+    path_destroy(path);
+    identifier_destroy(value);
+}
+
+TEST_F(BatchTest, AddPutNullPath) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Create test value
+    identifier_t* value = create_test_value("test_value");
+    ASSERT_NE(value, nullptr);
+
+    // Try to add with NULL path
+    int result = batch_add_put(batch, nullptr, value);
+    EXPECT_EQ(result, -1);
+    EXPECT_EQ(batch->count, 0);
+
+    // Ownership remains with caller, so we must destroy
+    identifier_destroy(value);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddPutNullValue) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Create test path
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    // Try to add with NULL value
+    int result = batch_add_put(batch, path, nullptr);
+    EXPECT_EQ(result, -1);
+    EXPECT_EQ(batch->count, 0);
+
+    // Ownership remains with caller, so we must destroy
+    path_destroy(path);
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddDeleteNullBatch) {
+    // Create test path
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    // Try to add to NULL batch
+    int result = batch_add_delete(nullptr, path);
+    EXPECT_EQ(result, -1);
+
+    // Ownership remains with caller, so we must destroy
+    path_destroy(path);
+}
+
+TEST_F(BatchTest, AddDeleteNullPath) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Try to add with NULL path
+    int result = batch_add_delete(batch, nullptr);
+    EXPECT_EQ(result, -1);
+    EXPECT_EQ(batch->count, 0);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddWhenBatchFull) {
+    // Create batch with small max size
+    batch_t* batch = batch_create(2);
+    ASSERT_NE(batch, nullptr);
+    batch->max_size = 2; // Set a small max_size for testing
+
+    // Add two operations
+    path_t* path1 = create_test_path("key1");
+    ASSERT_NE(path1, nullptr);
+    identifier_t* value1 = create_test_value("value1");
+    ASSERT_NE(value1, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+    EXPECT_EQ(batch->count, 1);
+
+    path_t* path2 = create_test_path("key2");
+    ASSERT_NE(path2, nullptr);
+    identifier_t* value2 = create_test_value("value2");
+    ASSERT_NE(value2, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path2, value2), 0);
+    EXPECT_EQ(batch->count, 2);
+
+    // Try to add third operation - should fail
+    path_t* path3 = create_test_path("key3");
+    ASSERT_NE(path3, nullptr);
+    identifier_t* value3 = create_test_value("value3");
+    ASSERT_NE(value3, nullptr);
+
+    int result = batch_add_put(batch, path3, value3);
+    EXPECT_EQ(result, -2);
+    EXPECT_EQ(batch->count, 2); // Count unchanged
+
+    // Ownership remains with caller on error
+    path_destroy(path3);
+    identifier_destroy(value3);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, AddWhenBatchSubmitted) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Mark batch as submitted
+    batch->submitted = 1;
+
+    // Create test path and value
+    path_t* path = create_test_path("test_key");
+    ASSERT_NE(path, nullptr);
+
+    identifier_t* value = create_test_value("test_value");
+    ASSERT_NE(value, nullptr);
+
+    // Try to add operation - should fail
+    int result = batch_add_put(batch, path, value);
+    EXPECT_EQ(result, -6);
+    EXPECT_EQ(batch->count, 0);
+
+    // Ownership remains with caller on error
+    path_destroy(path);
+    identifier_destroy(value);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, ConcurrentAddOperations) {
+    // Create batch
+    batch_t* batch = batch_create(100);
+    ASSERT_NE(batch, nullptr);
+
+    // Number of concurrent threads
+    const int num_threads = 10;
+    const int ops_per_thread = 100;
+    std::vector<std::thread> threads;
+    std::atomic<int> success_count{0};
+
+    // Launch threads
+    for (int t = 0; t < num_threads; t++) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < ops_per_thread; i++) {
+                char key[32];
+                snprintf(key, sizeof(key), "key_%d_%d", t, i);
+
+                path_t* path = create_test_path(key);
+                if (path == nullptr) continue;
+
+                identifier_t* value = create_test_value("value");
+                if (value == nullptr) {
+                    path_destroy(path);
+                    continue;
+                }
+
+                int result = batch_add_put(batch, path, value);
+                if (result == 0) {
+                    success_count++;
+                } else {
+                    // Ownership remains with caller on error
+                    path_destroy(path);
+                    identifier_destroy(value);
+                }
+            }
+        });
+    }
+
+    // Wait for all threads
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    // Verify all operations succeeded
+    EXPECT_EQ(batch->count, static_cast<size_t>(num_threads * ops_per_thread));
+    EXPECT_EQ(success_count.load(), num_threads * ops_per_thread);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, MixedPutAndDelete) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Add PUT operation
+    path_t* path1 = create_test_path("key1");
+    ASSERT_NE(path1, nullptr);
+    identifier_t* value1 = create_test_value("value1");
+    ASSERT_NE(value1, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+    EXPECT_EQ(batch->count, 1);
+
+    // Add DELETE operation
+    path_t* path2 = create_test_path("key2");
+    ASSERT_NE(path2, nullptr);
+
+    EXPECT_EQ(batch_add_delete(batch, path2), 0);
+    EXPECT_EQ(batch->count, 2);
+
+    // Verify operations
+    EXPECT_EQ(batch->ops[0].type, WAL_PUT);
+    EXPECT_EQ(batch->ops[0].path, path1);
+    EXPECT_EQ(batch->ops[0].value, value1);
+
+    EXPECT_EQ(batch->ops[1].type, WAL_DELETE);
+    EXPECT_EQ(batch->ops[1].path, path2);
+    EXPECT_EQ(batch->ops[1].value, nullptr);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, EstimateSize) {
+    // Create batch
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    // Initially size should be 0
+    EXPECT_EQ(batch_estimate_size(batch), 0);
+
+    // Add operation
+    path_t* path1 = create_test_path("key1");
+    ASSERT_NE(path1, nullptr);
+    identifier_t* value1 = create_test_value("value1");
+    ASSERT_NE(value1, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path1, value1), 0);
+
+    // Size should be > 0
+    size_t size1 = batch_estimate_size(batch);
+    EXPECT_GT(size1, 0);
+
+    // Add another operation
+    path_t* path2 = create_test_path("key2");
+    ASSERT_NE(path2, nullptr);
+    identifier_t* value2 = create_test_value("value2");
+    ASSERT_NE(value2, nullptr);
+
+    EXPECT_EQ(batch_add_put(batch, path2, value2), 0);
+
+    // Size should increase
+    size_t size2 = batch_estimate_size(batch);
+    EXPECT_GT(size2, size1);
+
+    batch_destroy(batch);
+}
+
+TEST_F(BatchTest, ArrayGrowth) {
+    // Create batch with small capacity
+    batch_t* batch = batch_create(2);
+    ASSERT_NE(batch, nullptr);
+    EXPECT_EQ(batch->capacity, 2);
+
+    // Add operations beyond initial capacity
+    for (int i = 0; i < 10; i++) {
+        char key[32];
+        snprintf(key, sizeof(key), "key_%d", i);
+
+        path_t* path = create_test_path(key);
+        ASSERT_NE(path, nullptr);
+
+        identifier_t* value = create_test_value("value");
+        ASSERT_NE(value, nullptr);
+
+        EXPECT_EQ(batch_add_put(batch, path, value), 0);
+        EXPECT_EQ(batch->count, static_cast<size_t>(i + 1));
+
+        // Capacity should grow as needed
+        EXPECT_GE(batch->capacity, batch->count);
+    }
+
+    // Verify all operations added
+    EXPECT_EQ(batch->count, 10);
 
     batch_destroy(batch);
 }
