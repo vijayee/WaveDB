@@ -12,6 +12,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#include <unistd.h>  // for close(), unlink()
 
 // D3.js will be embedded as base64 in HTML output
 // Size: ~274KB minified, ~365KB base64 encoded
@@ -222,8 +223,8 @@ static char* identifier_to_hex(identifier_t* id) {
 
     // Calculate total length
     size_t total_len = 0;
-    for (size_t i = 0; i < vec_length(&id->chunks); i++) {
-        chunk_t* chunk = vec_at(&id->chunks, i);
+    for (int i = 0; i < id->chunks.length; i++) {
+        chunk_t* chunk = id->chunks.data[i];
         total_len += chunk->data->size;
     }
 
@@ -233,8 +234,8 @@ static char* identifier_to_hex(identifier_t* id) {
 
     // Copy chunk data
     size_t offset = 0;
-    for (size_t i = 0; i < vec_length(&id->chunks); i++) {
-        chunk_t* chunk = vec_at(&id->chunks, i);
+    for (int i = 0; i < id->chunks.length; i++) {
+        chunk_t* chunk = id->chunks.data[i];
         memcpy(buffer + offset, chunk_data_const(chunk), chunk->data->size);
         offset += chunk->data->size;
     }
@@ -403,5 +404,123 @@ static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t*
     }
 
     fprintf(fp, "    ]");
+    return 0;
+}
+
+// Main visualization function
+int hbtrie_visualize(hbtrie_t* trie, const char* path) {
+    if (trie == NULL || path == NULL) {
+        log_error("Invalid parameters: trie=%p, path=%p", trie, path);
+        return -1;
+    }
+
+    // Open output file
+    FILE* fp = fopen(path, "w");
+    if (fp == NULL) {
+        log_error("Failed to open file: %s", path);
+        return -1;
+    }
+
+    // Reset node ID counter
+    atomic_store(&g_node_id_counter, 0);
+
+    // Create temporary file for JSON
+    char temp_path[] = "/tmp/hbtrie_viz_json_XXXXXX";
+    int temp_fd = mkstemp(temp_path);
+    if (temp_fd < 0) {
+        log_error("Failed to create temp file");
+        fclose(fp);
+        return -1;
+    }
+
+    FILE* json_fp = fdopen(temp_fd, "w");
+    if (json_fp == NULL) {
+        log_error("Failed to open temp stream");
+        close(temp_fd);
+        fclose(fp);
+        return -1;
+    }
+
+    // Build JSON
+    size_t node_count = 0;
+    fprintf(json_fp, "{\n");
+    fprintf(json_fp, "  \"chunk_size\": %u,\n", trie->chunk_size);
+    fprintf(json_fp, "  \"btree_node_size\": %u,\n", trie->btree_node_size);
+    fprintf(json_fp, "  \"root\": ");
+
+    if (serialize_hbtrie_node(trie->root, json_fp, trie->chunk_size, &node_count, 0) != 0) {
+        log_error("Failed to serialize root node");
+        fclose(json_fp);
+        fclose(fp);
+        return -1;
+    }
+
+    fprintf(json_fp, ",\n");
+    fprintf(json_fp, "  \"stats\": {\n");
+    fprintf(json_fp, "    \"total_nodes\": %zu,\n", node_count);
+    fprintf(json_fp, "    \"total_entries\": 0,\n");
+    fprintf(json_fp, "    \"max_depth\": 0\n");
+    fprintf(json_fp, "  }\n");
+    fprintf(json_fp, "}\n");
+    fclose(json_fp);
+
+    // Read JSON back
+    FILE* read_fp = fopen(temp_path, "r");
+    if (read_fp == NULL) {
+        log_error("Failed to read temp file");
+        unlink(temp_path);
+        fclose(fp);
+        return -1;
+    }
+
+    fseek(read_fp, 0, SEEK_END);
+    long json_size = ftell(read_fp);
+    fseek(read_fp, 0, SEEK_SET);
+
+    char* json_data = malloc(json_size + 1);
+    if (json_data == NULL) {
+        log_error("Failed to allocate JSON buffer");
+        fclose(read_fp);
+        unlink(temp_path);
+        fclose(fp);
+        return -1;
+    }
+
+    fread(json_data, 1, json_size, read_fp);
+    json_data[json_size] = '\0';
+    fclose(read_fp);
+    unlink(temp_path);
+
+    // Load D3.js base64
+    FILE* d3_fp = fopen("/tmp/d3.min.js.base64", "r");
+    char* d3_base64 = NULL;
+    if (d3_fp) {
+        fseek(d3_fp, 0, SEEK_END);
+        long d3_size = ftell(d3_fp);
+        fseek(d3_fp, 0, SEEK_SET);
+
+        d3_base64 = malloc(d3_size + 1);
+        if (d3_base64) {
+            fread(d3_base64, 1, d3_size, d3_fp);
+            d3_base64[d3_size] = '\0';
+        }
+        fclose(d3_fp);
+    }
+
+    if (d3_base64 == NULL) {
+        log_error("D3.js base64 not found. Run: curl -s https://d3js.org/d3.v7.min.js | base64 -w 0 > /tmp/d3.min.js.base64");
+        free(json_data);
+        fclose(fp);
+        return -1;
+    }
+
+    // Write HTML
+    fprintf(fp, HTML_TEMPLATE, d3_base64, json_data);
+
+    // Cleanup
+    free(d3_base64);
+    free(json_data);
+    fclose(fp);
+
     return 0;
 }
