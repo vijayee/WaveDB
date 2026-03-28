@@ -12,6 +12,13 @@
 #include <string.h>
 #include <ctype.h>
 
+// Static counter for unique node IDs
+static size_t g_node_id_counter = 0;
+
+// Forward declarations
+static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count);
+static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count);
+
 // Helper: Convert binary data to hex string
 // Returns newly allocated string, caller must free
 static char* bytes_to_hex(const uint8_t* data, size_t len) {
@@ -98,5 +105,102 @@ static int write_json_string(FILE* fp, const char* str) {
 
     fprintf(fp, "\"%s\"", escaped);
     free(escaped);
+    return 0;
+}
+
+// Serialize HBTrie node to JSON
+static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count) {
+    if (node == NULL) {
+        fprintf(fp, "null");
+        return 0;
+    }
+
+    (*node_count)++;
+
+    fprintf(fp, "{\n");
+    fprintf(fp, "      \"id\": \"node_%zu\",\n", g_node_id_counter++);
+
+    // Serialize B+tree
+    fprintf(fp, "      \"entries\": ");
+    if (serialize_bnode(node->btree, fp, chunk_size, node_count) != 0) {
+        return -1;
+    }
+
+    // Stats
+    fprintf(fp, ",\n");
+    fprintf(fp, "      \"stats\": {\n");
+    fprintf(fp, "        \"entry_count\": %zu,\n", bnode_count(node->btree));
+    fprintf(fp, "        \"node_size_bytes\": %zu\n", bnode_size(node->btree, chunk_size));
+    fprintf(fp, "      }\n");
+    fprintf(fp, "    }");
+
+    return 0;
+}
+
+// Serialize B+tree node to JSON
+static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count) {
+    if (bnode == NULL || bnode_is_empty(bnode)) {
+        fprintf(fp, "[]");
+        return 0;
+    }
+
+    fprintf(fp, "[\n");
+
+    size_t count = bnode_count(bnode);
+    for (size_t i = 0; i < count; i++) {
+        bnode_entry_t* entry = bnode_get(bnode, i);
+        if (entry == NULL) continue;
+
+        fprintf(fp, "      {\n");
+
+        // Key (chunk) as hex
+        char* key_hex = chunk_to_hex(entry->key);
+        fprintf(fp, "        \"key_hex\": \"%s\",\n", key_hex ? key_hex : "");
+        free(key_hex);
+
+        // has_value flag
+        fprintf(fp, "        \"has_value\": %s,\n", entry->has_value ? "true" : "false");
+
+        if (entry->has_value) {
+            // Value (leaf)
+            if (entry->has_versions) {
+                // For now, serialize only the latest version
+                version_entry_t* latest = entry->versions;
+                if (latest && latest->value) {
+                    char* value_hex = identifier_to_hex(latest->value);
+                    fprintf(fp, "        \"value\": {\n");
+                    fprintf(fp, "          \"length\": %zu,\n", latest->value->length);
+                    fprintf(fp, "          \"data_hex\": \"%s\"\n", value_hex ? value_hex : "");
+                    fprintf(fp, "        }\n");
+                    free(value_hex);
+                } else {
+                    fprintf(fp, "        \"value\": null\n");
+                }
+            } else {
+                // Legacy single value
+                if (entry->value) {
+                    char* value_hex = identifier_to_hex(entry->value);
+                    fprintf(fp, "        \"value\": {\n");
+                    fprintf(fp, "          \"length\": %zu,\n", entry->value->length);
+                    fprintf(fp, "          \"data_hex\": \"%s\"\n", value_hex ? value_hex : "");
+                    fprintf(fp, "        }\n");
+                    free(value_hex);
+                } else {
+                    fprintf(fp, "        \"value\": null\n");
+                }
+            }
+        } else {
+            // Child node
+            fprintf(fp, "        \"child\": ");
+            if (serialize_hbtrie_node(entry->child, fp, chunk_size, node_count) != 0) {
+                return -1;
+            }
+            fprintf(fp, "\n");
+        }
+
+        fprintf(fp, "      }%s\n", (i < count - 1) ? "," : "");
+    }
+
+    fprintf(fp, "    ]");
     return 0;
 }
