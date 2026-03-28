@@ -154,7 +154,25 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
       size_t size = chunk->data->size;
 
-      part += std::string(reinterpret_cast<const char*>(data), size);
+      // Check if all bytes are printable ASCII
+      bool printable = true;
+      for (size_t k = 0; k < size; k++) {
+        if (!isprint(data[k]) && data[k] != '\t' && data[k] != '\n' && data[k] != '\r') {
+          printable = false;
+          break;
+        }
+      }
+
+      if (printable) {
+        part += std::string(reinterpret_cast<const char*>(data), size);
+      } else {
+        // Non-printable: represent as hex
+        char hex[3];
+        for (size_t k = 0; k < size; k++) {
+          snprintf(hex, 3, "%02x", data[k]);
+          part += hex;
+        }
+      }
     }
 
     arr.Set(i, Napi::String::New(env, part));
