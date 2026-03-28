@@ -212,6 +212,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_batch wavedb gtest gtest_main)
     add_test(NAME test_batch COMMAND test_batch)
 
+    # Test for HBTrie visualization
+    add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
+    target_link_libraries(test_hbtrie_viz wavedb gtest gtest_main)
+    add_test(NAME test_hbtrie_viz COMMAND test_hbtrie_viz)
+
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
     if(BUILD_STRESS_TESTS)
