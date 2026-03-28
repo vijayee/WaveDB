@@ -11,13 +11,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdatomic.h>
 
 // Static counter for unique node IDs
-static size_t g_node_id_counter = 0;
+static atomic_size_t g_node_id_counter = ATOMIC_VAR_INIT(0);
 
 // Forward declarations
-static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count);
-static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count);
+static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count, int depth);
+static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count, int depth);
 
 // Helper: Convert binary data to hex string
 // Returns newly allocated string, caller must free
@@ -83,16 +84,36 @@ static char* escape_json_string(const char* str) {
     if (str == NULL) return strdup("");
 
     size_t len = strlen(str);
-    char* escaped = malloc(len * 2 + 1);  // Worst case: every char needs escaping
+    char* escaped = malloc(len * 6 + 1);  // Worst case: \uXXXX for control chars
     if (escaped == NULL) return NULL;
 
     size_t j = 0;
     for (size_t i = 0; i < len; i++) {
-        char c = str[i];
+        unsigned char c = str[i];
         if (c == '"' || c == '\\') {
             escaped[j++] = '\\';
+            escaped[j++] = c;
+        } else if (c == '\n') {
+            escaped[j++] = '\\';
+            escaped[j++] = 'n';
+        } else if (c == '\r') {
+            escaped[j++] = '\\';
+            escaped[j++] = 'r';
+        } else if (c == '\t') {
+            escaped[j++] = '\\';
+            escaped[j++] = 't';
+        } else if (c == '\b') {
+            escaped[j++] = '\\';
+            escaped[j++] = 'b';
+        } else if (c == '\f') {
+            escaped[j++] = '\\';
+            escaped[j++] = 'f';
+        } else if (c < 0x20) {
+            // Control characters: \uXXXX
+            j += sprintf(escaped + j, "\\u%04x", c);
+        } else {
+            escaped[j++] = c;
         }
-        escaped[j++] = c;
     }
     escaped[j] = '\0';
     return escaped;
@@ -109,7 +130,12 @@ static int write_json_string(FILE* fp, const char* str) {
 }
 
 // Serialize HBTrie node to JSON
-static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count) {
+static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count, int depth) {
+    if (depth > 1000) {
+        log_error("Recursion depth exceeded in HBTrie serialization");
+        return -1;
+    }
+
     if (node == NULL) {
         fprintf(fp, "null");
         return 0;
@@ -118,11 +144,11 @@ static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_si
     (*node_count)++;
 
     fprintf(fp, "{\n");
-    fprintf(fp, "      \"id\": \"node_%zu\",\n", g_node_id_counter++);
+    fprintf(fp, "      \"id\": \"node_%zu\",\n", atomic_fetch_add(&g_node_id_counter, 1));
 
     // Serialize B+tree
     fprintf(fp, "      \"entries\": ");
-    if (serialize_bnode(node->btree, fp, chunk_size, node_count) != 0) {
+    if (serialize_bnode(node->btree, fp, chunk_size, node_count, depth + 1) != 0) {
         return -1;
     }
 
@@ -138,7 +164,7 @@ static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_si
 }
 
 // Serialize B+tree node to JSON
-static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count) {
+static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t* node_count, int depth) {
     if (bnode == NULL || bnode_is_empty(bnode)) {
         fprintf(fp, "[]");
         return 0;
@@ -192,7 +218,7 @@ static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t*
         } else {
             // Child node
             fprintf(fp, "        \"child\": ");
-            if (serialize_hbtrie_node(entry->child, fp, chunk_size, node_count) != 0) {
+            if (serialize_hbtrie_node(entry->child, fp, chunk_size, node_count, depth + 1) != 0) {
                 return -1;
             }
             fprintf(fp, "\n");
