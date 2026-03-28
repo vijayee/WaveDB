@@ -13,6 +13,11 @@
 #include <ctype.h>
 #include <stdatomic.h>
 
+// D3.js will be embedded as base64 in HTML output
+// Size: ~274KB minified, ~365KB base64 encoded
+// Generated with: curl -s https://d3js.org/d3.v7.min.js | base64 -w 0 > /tmp/d3.min.js.base64
+static const char* D3_JS_BASE64 = "";  // Placeholder - will be loaded from file at runtime
+
 // Static counter for unique node IDs
 static atomic_size_t g_node_id_counter = ATOMIC_VAR_INIT(0);
 
