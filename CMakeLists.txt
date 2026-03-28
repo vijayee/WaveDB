@@ -60,6 +60,7 @@ set(WAVEDB_SOURCES
     src/HBTrie/hbtrie.c
     src/HBTrie/bs_array.c
     src/HBTrie/bnode.c
+    src/HBTrie/hbtrie_viz.c
     src/HBTrie/mvcc.c
 
     # Time
