@@ -7,6 +7,8 @@
 #include "chunk.h"
 #include "identifier.h"
 #include "../Util/log.h"
+#include "../Util/vec.h"
+#include "../Util/vec.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
