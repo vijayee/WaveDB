@@ -4,6 +4,7 @@ build-*/
 
 # IDE
 .idea/
+cmake-build-debug/
 
 # Reference materials
 reference/old_session.md
@@ -22,3 +23,5 @@ benchmark_*.txt
 *.json
 !.github/
 !CMakeLists.txt
+!bindings/nodejs/*.json
+
