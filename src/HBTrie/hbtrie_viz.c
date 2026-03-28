@@ -451,6 +451,7 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
     if (serialize_hbtrie_node(trie->root, json_fp, trie->chunk_size, &node_count, 0) != 0) {
         log_error("Failed to serialize root node");
         fclose(json_fp);
+        unlink(temp_path);
         fclose(fp);
         return -1;
     }
@@ -500,10 +501,15 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
         fseek(d3_fp, 0, SEEK_SET);
 
         d3_base64 = malloc(d3_size + 1);
-        if (d3_base64) {
-            fread(d3_base64, 1, d3_size, d3_fp);
-            d3_base64[d3_size] = '\0';
+        if (d3_base64 == NULL) {
+            log_error("Failed to allocate D3 buffer");
+            fclose(d3_fp);
+            free(json_data);
+            fclose(fp);
+            return -1;
         }
+        fread(d3_base64, 1, d3_size, d3_fp);
+        d3_base64[d3_size] = '\0';
         fclose(d3_fp);
     }
 
