@@ -15,7 +15,10 @@
     ],
     "include_dirs": [
       "<!@(node -p \"require('node-addon-api').include\")",
-      "../../src"
+      "../../src",
+      "../../deps/libcbor/src",
+      "../../build/deps/libcbor/src",
+      "../../build/deps/libcbor"
     ],
     "dependencies": [
       "<!@(node -p \"require('node-addon-api').gyp\")"
