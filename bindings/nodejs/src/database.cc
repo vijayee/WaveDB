@@ -6,6 +6,7 @@
 #include "async_worker.h"
 #include "put_worker.h"
 #include "get_worker.h"
+#include "del_worker.h"
 
 class WaveDB : public Napi::ObjectWrap<WaveDB> {
 public:
@@ -194,6 +195,42 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
 
   // Create and queue worker
   GetWorker* worker = new GetWorker(env, callback, db_, path);
+  worker->Queue();
+
+  return worker->Promise();
+}
+
+Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Key required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  // Convert key to path_t
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) {
+    return env.Null();  // Error already thrown
+  }
+
+  // Get optional callback
+  Napi::Function callback;
+  if (info.Length() > 1 && info[1].IsFunction()) {
+    callback = info[1].As<Napi::Function>();
+  } else {
+    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
+      return info.Env().Undefined();
+    });
+  }
+
+  // Create and queue worker
+  DelWorker* worker = new DelWorker(env, callback, db_, path);
   worker->Queue();
 
   return worker->Promise();
