@@ -1,10 +1,7 @@
-#include <napi.h>
-#include <string>
-#include <vector>
-#include <cctype>
-#include "../../../src/HBTrie/identifier.h"
+#include "identifier.h"
 #include "../../../src/HBTrie/chunk.h"
 #include "../../../src/Buffer/buffer.h"
+#include <cctype>
 
 // Check if bytes are printable ASCII
 static bool IsPrintableASCII(const uint8_t* data, size_t size) {

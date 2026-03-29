@@ -71,8 +71,8 @@ TEST_F(HbtrieVizTest, EmptyTrie) {
     EXPECT_NE(content.find("<!DOCTYPE html>"), std::string::npos);
     EXPECT_NE(content.find("<title>HBTrie Visualizer</title>"), std::string::npos);
 
-    // Clean up
-    unlink(output_path);
+    // Clean up (DISABLED for testing)
+    // unlink(output_path);
 }
 
 TEST_F(HbtrieVizTest, SingleNode) {
@@ -99,7 +99,7 @@ TEST_F(HbtrieVizTest, SingleNode) {
     // Clean up
     path_destroy(path);
     identifier_destroy(value);
-    unlink(output_path);
+    // unlink(output_path);  // DISABLED for testing
 }
 
 TEST_F(HbtrieVizTest, DeepTree) {
@@ -130,6 +130,6 @@ TEST_F(HbtrieVizTest, DeepTree) {
     std::streamsize size = ifs.tellg();
     EXPECT_GT(size, 10000);  // Should be at least 10KB (D3 + HTML + JSON)
 
-    // Clean up
-    unlink(output_path);
+    // Clean up (DISABLED for testing)
+    // unlink(output_path);
 }

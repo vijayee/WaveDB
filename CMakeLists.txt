@@ -11,6 +11,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror=return-type")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0")
 set(CMAKE_C_FLAGS_RELEASE "-O3")
 
+# Position Independent Code for shared library linking
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # Installation support
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -216,6 +219,18 @@ if(BUILD_TESTS)
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
     target_link_libraries(test_hbtrie_viz wavedb gtest gtest_main)
     add_test(NAME test_hbtrie_viz COMMAND test_hbtrie_viz)
+
+    # Complex visualization example
+    add_executable(example_complex_viz example_complex_viz.c)
+    target_link_libraries(example_complex_viz wavedb Threads::Threads)
+
+    # Example programs
+    option(BUILD_EXAMPLES "Build example programs" OFF)
+    if(BUILD_EXAMPLES)
+        # HBTrie visualization example
+        add_executable(example_hbtrie_viz examples/example_complex_viz.c)
+        target_link_libraries(example_hbtrie_viz wavedb Threads::Threads)
+    endif()
 
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)

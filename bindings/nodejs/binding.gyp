@@ -28,8 +28,9 @@
     "cflags!": ["-fno-exceptions"],
     "cflags_cc!": ["-fno-exceptions"],
     "libraries": [
-      "-L../../build",
-      "-lwavedb"
+      "-L../../../build",
+      "-lwavedb",
+      "-lpthread"
     ],
     "conditions": [
       ["OS=='linux'", {

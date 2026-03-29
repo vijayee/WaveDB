@@ -1,9 +1,7 @@
-#include <napi.h>
-#include <string>
-#include <vector>
-#include "../../../src/HBTrie/path.h"
+#include "path.h"
 #include "../../../src/HBTrie/identifier.h"
 #include "../../../src/Buffer/buffer.h"
+#include <cctype>
 
 // Split string by delimiter
 std::vector<std::string> SplitString(const std::string& str, char delimiter) {
@@ -102,7 +100,7 @@ path_t* PathFromJS(Napi::Env env, Napi::Value key, char delimiter) {
 std::string PathToJS(path_t* path, char delimiter) {
   std::string result;
 
-  for (size_t i = 0; i < path->identifiers.length; i++) {
+  for (size_t i = 0; i < static_cast<size_t>(path->identifiers.length); i++) {
     if (i > 0) {
       result += delimiter;
     }
@@ -110,7 +108,7 @@ std::string PathToJS(path_t* path, char delimiter) {
     identifier_t* id = path->identifiers.data[i];
 
     // Extract identifier bytes to string
-    for (size_t j = 0; j < id->chunks.length; j++) {
+    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
       size_t size = chunk->data->size;
@@ -144,12 +142,12 @@ std::string PathToJS(path_t* path, char delimiter) {
 Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
   Napi::Array arr = Napi::Array::New(env);
 
-  for (size_t i = 0; i < path->identifiers.length; i++) {
+  for (size_t i = 0; i < static_cast<size_t>(path->identifiers.length); i++) {
     identifier_t* id = path->identifiers.data[i];
 
     // Extract identifier as string
     std::string part;
-    for (size_t j = 0; j < id->chunks.length; j++) {
+    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
       size_t size = chunk->data->size;
