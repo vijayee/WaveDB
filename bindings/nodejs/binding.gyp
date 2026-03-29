@@ -18,7 +18,9 @@
       "../../src",
       "../../deps/libcbor/src",
       "../../build/deps/libcbor/src",
-      "../../build/deps/libcbor"
+      "../../build/deps/libcbor",
+      "../../deps/hashmap/include",
+      "../../deps/xxhash"
     ],
     "dependencies": [
       "<!@(node -p \"require('node-addon-api').gyp\")"
