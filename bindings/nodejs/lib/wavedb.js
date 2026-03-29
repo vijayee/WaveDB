@@ -266,7 +266,7 @@ class WaveDB {
   }
 
   /**
-   * Store a JSON object (stub - not implemented yet)
+   * Store a JSON object asynchronously
    *
    * @param {string|Array} key - Key path
    * @param {Object} obj - Object to store
@@ -274,8 +274,19 @@ class WaveDB {
    * @returns {Promise<void>}
    */
   putObject(key, obj, callback) {
-    const error = new Error('putObject is not implemented yet');
-    const promise = Promise.reject(error);
+    const promise = new Promise((resolve, reject) => {
+      try {
+        this._db.putObject(key, obj, (err) => {
+          if (err) {
+            reject(convertError(err));
+          } else {
+            resolve();
+          }
+        });
+      } catch (err) {
+        reject(convertError(err));
+      }
+    });
 
     if (typeof callback === 'function') {
       promise.then(
@@ -288,15 +299,26 @@ class WaveDB {
   }
 
   /**
-   * Retrieve a JSON object (stub - not implemented yet)
+   * Retrieve a JSON object asynchronously
    *
    * @param {string|Array} key - Key path
    * @param {Function} [callback] - Optional callback(err, obj)
    * @returns {Promise<Object|null>}
    */
   getObject(key, callback) {
-    const error = new Error('getObject is not implemented yet');
-    const promise = Promise.reject(error);
+    const promise = new Promise((resolve, reject) => {
+      try {
+        this._db.getObject(key, (err, obj) => {
+          if (err) {
+            reject(convertError(err));
+          } else {
+            resolve(obj);
+          }
+        });
+      } catch (err) {
+        reject(convertError(err));
+      }
+    });
 
     if (typeof callback === 'function') {
       promise.then(
