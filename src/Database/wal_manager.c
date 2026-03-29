@@ -794,8 +794,30 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
     }
 
     // Check if thread-local WAL already exists and belongs to this manager
-    if (thread_local_wal != NULL && thread_local_wal->manager == manager) {
-        return thread_local_wal;
+    if (thread_local_wal != NULL) {
+        // Check if it belongs to this manager
+        if (thread_local_wal->manager == manager) {
+            // Validate that the WAL is still in the manager's thread list
+            // This catches cases where the WAL was destroyed but thread_local_wal wasn't cleared
+            platform_lock(&manager->threads_lock);
+            int found = 0;
+            for (size_t i = 0; i < manager->thread_count; i++) {
+                if (manager->threads[i] == thread_local_wal) {
+                    found = 1;
+                    break;
+                }
+            }
+            platform_unlock(&manager->threads_lock);
+
+            if (found) {
+                return thread_local_wal;
+            }
+            // WAL was destroyed but thread_local_wal still points to it, clear it
+            thread_local_wal = NULL;
+        } else {
+            // WAL belongs to a different (possibly destroyed) manager, clear it
+            thread_local_wal = NULL;
+        }
     }
 
     // Get thread ID
