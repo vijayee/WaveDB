@@ -178,3 +178,32 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
 
   return arr;
 }
+
+// Create path from vector of string parts
+path_t* PathFromParts(const std::vector<std::string>& parts) {
+  path_t* path = path_create();
+  if (!path) return nullptr;
+
+  for (const auto& part : parts) {
+    buffer_t* buf = buffer_create_from_pointer_copy(
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(part.c_str())),
+      part.size()
+    );
+    if (!buf) {
+      path_destroy(path);
+      return nullptr;
+    }
+
+    identifier_t* id = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    if (!id) {
+      path_destroy(path);
+      return nullptr;
+    }
+
+    path_append(path, id);
+    identifier_destroy(id);
+  }
+
+  return path;
+}

@@ -32,6 +32,13 @@ private:
   Napi::Value DeleteSync(const Napi::CallbackInfo& info);
   Napi::Value BatchSync(const Napi::CallbackInfo& info);
 
+  // Object operations helpers
+  static void FlattenObject(Napi::Env env,
+                           Napi::Object obj,
+                           std::vector<std::string>& path_parts,
+                           std::vector<BatchOp>& ops,
+                           char delimiter);
+
   // Object operations
   Napi::Value PutObject(const Napi::CallbackInfo& info);
   Napi::Value GetObject(const Napi::CallbackInfo& info);
@@ -509,10 +516,107 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+void WaveDB::FlattenObject(Napi::Env env,
+                          Napi::Object obj,
+                          std::vector<std::string>& path_parts,
+                          std::vector<BatchOp>& ops,
+                          char delimiter) {
+  Napi::Array keys = obj.GetPropertyNames();
+
+  for (uint32_t i = 0; i < keys.Length(); i++) {
+    std::string key = keys.Get(i).As<Napi::String>().Utf8Value();
+    Napi::Value value = obj.Get(key);
+
+    path_parts.push_back(key);
+
+    if (value.IsObject() && !value.IsArray() && !value.IsBuffer()) {
+      // Nested object - recurse
+      FlattenObject(env, value.As<Napi::Object>(), path_parts, ops, delimiter);
+    } else if (value.IsArray()) {
+      // Array - use numeric indices
+      Napi::Array arr = value.As<Napi::Array>();
+      for (uint32_t j = 0; j < arr.Length(); j++) {
+        path_parts.push_back(std::to_string(j));
+
+        BatchOp op;
+        op.type = BatchOpType::PUT;
+        op.path = PathFromParts(path_parts);
+        op.value = ValueFromJS(env, arr.Get(j));
+
+        if (!op.path || !op.value) {
+          // Error already thrown
+          if (op.path) path_destroy(op.path);
+          if (op.value) identifier_destroy(op.value);
+          path_parts.pop_back();
+          throw std::runtime_error("Failed to create path or value");
+        }
+
+        ops.push_back(op);
+        path_parts.pop_back();
+      }
+    } else {
+      // Leaf value
+      BatchOp op;
+      op.type = BatchOpType::PUT;
+      op.path = PathFromParts(path_parts);
+      op.value = ValueFromJS(env, value);
+
+      if (!op.path || !op.value) {
+        if (op.path) path_destroy(op.path);
+        if (op.value) identifier_destroy(op.value);
+        path_parts.pop_back();
+        throw std::runtime_error("Failed to create path or value");
+      }
+
+      ops.push_back(op);
+    }
+
+    path_parts.pop_back();
+  }
+}
+
 Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  Napi::Error::New(env, "NOT_IMPLEMENTED: putObject not implemented").ThrowAsJavaScriptException();
-  return env.Null();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsObject()) {
+    Napi::TypeError::New(env, "Object required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Function callback;
+  if (info.Length() > 1 && info[1].IsFunction()) {
+    callback = info[1].As<Napi::Function>();
+  } else {
+    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
+      return info.Env().Undefined();
+    });
+  }
+
+  Napi::Object obj = info[0].As<Napi::Object>();
+  std::vector<BatchOp> ops;
+  std::vector<std::string> path_parts;
+
+  try {
+    FlattenObject(env, obj, path_parts, ops, delimiter_);
+  } catch (const std::exception& e) {
+    // Clean up operations
+    for (auto& op : ops) {
+      if (op.path) path_destroy(op.path);
+      if (op.value) identifier_destroy(op.value);
+    }
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  BatchWorker* worker = new BatchWorker(env, db_, std::move(ops), callback);
+  worker->Queue();
+
+  return worker->Promise();
 }
 
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {

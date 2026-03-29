@@ -18,4 +18,7 @@ std::string PathToJS(path_t* path, char delimiter);
 // Convert path_t* to JavaScript array
 Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter);
 
+// Create path from vector of string parts
+path_t* PathFromParts(const std::vector<std::string>& parts);
+
 #endif // WAVEDB_BINDINGS_PATH_H
