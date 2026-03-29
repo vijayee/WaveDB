@@ -367,6 +367,12 @@ if(BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
+# Node.js bindings
+option(BUILD_NODEJS_BINDINGS "Build Node.js bindings" OFF)
+if(BUILD_NODEJS_BINDINGS)
+  add_subdirectory(bindings/nodejs)
+endif()
+
 # Installation and packaging
 # Install libraries and export targets
 install(TARGETS wavedb xxhash hashmap

@@ -4,7 +4,7 @@
   "description": "Node.js bindings for WaveDB - Hierarchical B+Tree Database",
   "main": "lib/wavedb.js",
   "scripts": {
-    "build": "node-pre-gyp build",
+    "build": "node-gyp rebuild",
     "test": "npm run build && mocha test/*.test.js",
     "test:valgrind": "valgrind --leak-check=full node test/*.test.js"
   },

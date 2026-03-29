@@ -3,3 +3,7 @@ src/
 binding.gyp
 .*.swp
 .git*
+*.log
+.DS_Store
+node_modules/
+build/
