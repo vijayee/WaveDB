@@ -144,6 +144,7 @@ describe('WaveDB', () => {
       const value = dbCustom.getSync('users:alice:name');
       assert.strictEqual(value, 'Alice');
       dbCustom.close();
+      fs.rmSync('/tmp/test-custom-delim', { recursive: true });
     });
   });
 
