@@ -1,6 +1,6 @@
 'use strict';
 
-const { WaveDB: WaveDBNative } = require('../build/Release/wavedb.node');
+const { WaveDB: WaveDBNative, Iterator } = require('../build/Release/wavedb.node');
 const { WaveDBIterator } = require('./iterator.js');
 
 /**
