@@ -138,13 +138,27 @@ describe('WaveDB', () => {
   });
 
   describe('delimiter option', () => {
+    let dbCustom;
+    let customPath;
+
+    beforeEach(() => {
+      customPath = `/tmp/test-custom-delim-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      dbCustom = new WaveDB(customPath, { delimiter: ':' });
+    });
+
+    afterEach(() => {
+      if (dbCustom) {
+        dbCustom.close();
+      }
+      if (fs.existsSync(customPath)) {
+        fs.rmSync(customPath, { recursive: true });
+      }
+    });
+
     it('should support custom delimiter', () => {
-      const dbCustom = new WaveDB('/tmp/test-custom-delim', { delimiter: ':' });
       dbCustom.putSync('users:alice:name', 'Alice');
       const value = dbCustom.getSync('users:alice:name');
       assert.strictEqual(value, 'Alice');
-      dbCustom.close();
-      fs.rmSync('/tmp/test-custom-delim', { recursive: true });
     });
   });
 
