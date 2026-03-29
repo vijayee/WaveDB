@@ -508,3 +508,21 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
 
   return env.Undefined();
 }
+
+Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Error::New(env, "NOT_IMPLEMENTED: putObject not implemented").ThrowAsJavaScriptException();
+  return env.Null();
+}
+
+Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Error::New(env, "NOT_IMPLEMENTED: getObject not implemented").ThrowAsJavaScriptException();
+  return env.Null();
+}
+
+Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Error::New(env, "NOT_IMPLEMENTED: createReadStream not implemented").ThrowAsJavaScriptException();
+  return env.Null();
+}
