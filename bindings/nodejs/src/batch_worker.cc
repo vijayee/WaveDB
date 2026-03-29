@@ -1,14 +1,26 @@
 #include "batch_worker.h"
 
 BatchWorker::BatchWorker(Napi::Env env,
+                         Napi::Object databaseObj,
                          database_t* db,
                          std::vector<BatchOp> ops,
                          Napi::Function callback)
   : WaveDBAsyncWorker(env, callback),
+    databaseRef_(Napi::Persistent(databaseObj)),
     db_(db),
-    ops_(std::move(ops)) {}
+    ops_(std::move(ops)) {
+  // Keep database alive while operation is pending
+  if (db_) {
+    REFERENCE(db_, database_t);
+  }
+}
 
 BatchWorker::~BatchWorker() {
+  // Release database reference
+  if (db_) {
+    DEREFERENCE(db_);
+  }
+
   for (auto& op : ops_) {
     if (op.path) {
       path_destroy(op.path);

@@ -56,9 +56,15 @@ private:
   Napi::Value Close(const Napi::CallbackInfo& info);
 
   static Napi::FunctionReference constructor_;
+  static void Cleanup(void* arg);
 };
 
 Napi::FunctionReference WaveDB::constructor_;
+
+// Cleanup callback to release static references before Node.js shuts down
+void WaveDB::Cleanup(void* arg) {
+  constructor_.Reset();
+}
 
 Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
@@ -80,6 +86,10 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
 
   constructor_ = Napi::Persistent(func);
   exports.Set("WaveDB", func);
+
+  // Register cleanup hook to reset constructor_ before environment destruction
+  napi_add_env_cleanup_hook(env, Cleanup, nullptr);
+
   return exports;
 }
 
@@ -129,8 +139,9 @@ WaveDB::~WaveDB() {
 
 Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
   if (db_) {
-    database_destroy(db_);
-    db_ = nullptr;
+    database_t* db = db_;
+    db_ = nullptr;  // Clear pointer first to prevent double-destroy
+    database_destroy(db);  // This just dereferences, actual destruction happens when all refs are gone
   }
   return info.Env().Undefined();
 }
@@ -172,7 +183,7 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
   }
 
   // Create and queue worker
-  PutWorker* worker = new PutWorker(env, callback, db_, path, value);
+  PutWorker* worker = new PutWorker(env, Value(), callback, db_, path, value);
   worker->Queue();
 
   return worker->Promise();
@@ -208,7 +219,7 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
   }
 
   // Create and queue worker
-  GetWorker* worker = new GetWorker(env, callback, db_, path);
+  GetWorker* worker = new GetWorker(env, Value(), callback, db_, path);
   worker->Queue();
 
   return worker->Promise();
@@ -244,7 +255,7 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
   }
 
   // Create and queue worker
-  DelWorker* worker = new DelWorker(env, callback, db_, path);
+  DelWorker* worker = new DelWorker(env, Value(), callback, db_, path);
   worker->Queue();
 
   return worker->Promise();
@@ -453,7 +464,7 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
     batchOps.push_back(batchOp);
   }
 
-  BatchWorker* worker = new BatchWorker(env, db_, std::move(batchOps), callback);
+  BatchWorker* worker = new BatchWorker(env, Value(), db_, std::move(batchOps), callback);
   worker->Queue();
 
   return worker->Promise();
@@ -619,7 +630,7 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  BatchWorker* worker = new BatchWorker(env, db_, std::move(ops), callback);
+  BatchWorker* worker = new BatchWorker(env, Value(), db_, std::move(ops), callback);
   worker->Queue();
 
   return worker->Promise();

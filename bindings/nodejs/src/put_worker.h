@@ -10,6 +10,7 @@
 class PutWorker : public WaveDBAsyncWorker {
 public:
   PutWorker(Napi::Env env,
+            Napi::Object databaseObj,
             Napi::Function callback,
             database_t* db,
             path_t* path,
@@ -23,6 +24,7 @@ protected:
   std::vector<napi_value> GetResult(Napi::Env env) override;
 
 private:
+  Napi::ObjectReference databaseRef_;
   database_t* db_;
   path_t* path_;
   identifier_t* value_;

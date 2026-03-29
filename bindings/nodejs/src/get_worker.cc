@@ -1,15 +1,27 @@
 #include "get_worker.h"
 
 GetWorker::GetWorker(Napi::Env env,
+                     Napi::Object databaseObj,
                      Napi::Function callback,
                      database_t* db,
                      path_t* path)
   : WaveDBAsyncWorker(env, callback),
+    databaseRef_(Napi::Persistent(databaseObj)),
     db_(db),
     path_(path),
-    result_(nullptr) {}
+    result_(nullptr) {
+  // Keep database alive while operation is pending
+  if (db_) {
+    REFERENCE(db_, database_t);
+  }
+}
 
 GetWorker::~GetWorker() {
+  // Release database reference
+  if (db_) {
+    DEREFERENCE(db_);
+  }
+
   if (path_) {
     path_destroy(path_);
     path_ = nullptr;

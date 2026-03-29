@@ -57,21 +57,24 @@ Napi::Value ValueToJS(Napi::Env env, identifier_t* id) {
     return env.Null();
   }
 
-  // Collect all bytes from identifier
-  std::vector<uint8_t> bytes;
-  for (size_t i = 0; i < static_cast<size_t>(id->chunks.length); i++) {
-    chunk_t* chunk = static_cast<chunk_t*>(id->chunks.data[i]);
-    const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-    size_t size = chunk->data->size;
-
-    bytes.insert(bytes.end(), data, data + size);
+  // Use identifier_to_buffer to reconstruct original data (removes padding)
+  buffer_t* buf = identifier_to_buffer(id);
+  if (!buf) {
+    return env.Null();
   }
+
+  // Get data pointer and size
+  const uint8_t* data = buf->data;
+  size_t size = buf->size;
 
   // Return as string if printable ASCII, otherwise Buffer
-  if (IsPrintableASCII(bytes.data(), bytes.size())) {
-    return Napi::String::New(env,
-      std::string(bytes.begin(), bytes.end()));
+  Napi::Value result;
+  if (IsPrintableASCII(data, size)) {
+    result = Napi::String::New(env, std::string(reinterpret_cast<const char*>(data), size));
   } else {
-    return Napi::Buffer<uint8_t>::Copy(env, bytes.data(), bytes.size());
+    result = Napi::Buffer<uint8_t>::Copy(env, data, size);
   }
+
+  buffer_destroy(buf);
+  return result;
 }

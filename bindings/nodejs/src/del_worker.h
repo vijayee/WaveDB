@@ -9,6 +9,7 @@
 class DelWorker : public WaveDBAsyncWorker {
 public:
   DelWorker(Napi::Env env,
+            Napi::Object databaseObj,
             Napi::Function callback,
             database_t* db,
             path_t* path);
@@ -21,6 +22,7 @@ protected:
   std::vector<napi_value> GetResult(Napi::Env env) override;
 
 private:
+  Napi::ObjectReference databaseRef_;
   database_t* db_;
   path_t* path_;
 };

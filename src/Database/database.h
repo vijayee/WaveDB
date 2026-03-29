@@ -107,6 +107,15 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
 void database_destroy(database_t* db);
 
 /**
+ * Track pending async operations.
+ *
+ * These functions manage a counter for async operations in progress.
+ * database_destroy() will wait for all pending operations to complete.
+ */
+void database_pending_op_start(database_t* db);
+void database_pending_op_finish(database_t* db);
+
+/**
  * Asynchronously insert a value.
  *
  * @param db       Database to modify

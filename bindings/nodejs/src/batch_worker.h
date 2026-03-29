@@ -19,6 +19,7 @@ struct BatchOp {
 class BatchWorker : public WaveDBAsyncWorker {
 public:
   BatchWorker(Napi::Env env,
+              Napi::Object databaseObj,
               database_t* db,
               std::vector<BatchOp> ops,
               Napi::Function callback);
@@ -31,6 +32,7 @@ protected:
   std::vector<napi_value> GetResult(Napi::Env env) override;
 
 private:
+  Napi::ObjectReference databaseRef_;
   database_t* db_;
   std::vector<BatchOp> ops_;
 };

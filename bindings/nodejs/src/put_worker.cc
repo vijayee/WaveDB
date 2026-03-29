@@ -1,16 +1,28 @@
 #include "put_worker.h"
 
 PutWorker::PutWorker(Napi::Env env,
+                     Napi::Object databaseObj,
                      Napi::Function callback,
                      database_t* db,
                      path_t* path,
                      identifier_t* value)
   : WaveDBAsyncWorker(env, callback),
+    databaseRef_(Napi::Persistent(databaseObj)),
     db_(db),
     path_(path),
-    value_(value) {}
+    value_(value) {
+  // Keep database alive while operation is pending
+  if (db_) {
+    REFERENCE(db_, database_t);
+  }
+}
 
 PutWorker::~PutWorker() {
+  // Release database reference
+  if (db_) {
+    DEREFERENCE(db_);
+  }
+
   if (path_) {
     path_destroy(path_);
     path_ = nullptr;

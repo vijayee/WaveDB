@@ -25,6 +25,9 @@
     "dependencies": [
       "<!@(node -p \"require('node-addon-api').gyp\")"
     ],
+    "defines": [
+      "REFCOUNTER_ATOMIC"
+    ],
     "cflags!": ["-fno-exceptions"],
     "cflags_cc!": ["-fno-exceptions"],
     "libraries": [

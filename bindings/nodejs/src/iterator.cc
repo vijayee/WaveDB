@@ -14,6 +14,12 @@ Napi::Object Iterator::Init(Napi::Env env, Napi::Object exports) {
 
   constructor_ = Napi::Persistent(func);
   exports.Set("Iterator", func);
+
+  // Register cleanup hook to release constructor_ before Node.js shuts down
+  napi_add_env_cleanup_hook(env, [](void* arg) {
+    Iterator::constructor_.Reset();
+  }, nullptr);
+
   return exports;
 }
 

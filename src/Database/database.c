@@ -476,7 +476,9 @@ void database_destroy(database_t* db) {
     if (db == NULL) return;
 
     refcounter_dereference((refcounter_t*)db);
-    if (refcounter_count((refcounter_t*)db) == 0) {
+    uint_fast32_t count = refcounter_count((refcounter_t*)db);
+
+    if (count == 0) {
         // Destroy WAL manager (thread-local WAL)
         if (db->wal_manager) wal_manager_destroy(db->wal_manager);
 
@@ -884,7 +886,7 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     identifier_t* value = database_lru_cache_get(db->lru, path);
     if (value != NULL) {
         path_destroy(path);
-        *result = value;
+        *result = REFERENCE(value, identifier_t);
         return 0;
     }
 
@@ -904,7 +906,7 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     path_destroy(path);
 
     if (value != NULL) {
-        *result = value;
+        *result = REFERENCE(value, identifier_t);
         return 0;
     } else {
         return -2;  // Not found
