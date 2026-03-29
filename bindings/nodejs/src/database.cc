@@ -7,6 +7,7 @@
 #include "put_worker.h"
 #include "get_worker.h"
 #include "del_worker.h"
+#include "batch_worker.h"
 
 class WaveDB : public Napi::ObjectWrap<WaveDB> {
 public:
@@ -336,6 +337,173 @@ Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Failed to delete value").ThrowAsJavaScriptException();
     return env.Undefined();
+  }
+
+  return env.Undefined();
+}
+
+Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Array of operations required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Function callback;
+  if (info.Length() > 1 && info[1].IsFunction()) {
+    callback = info[1].As<Napi::Function>();
+  } else {
+    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
+      return info.Env().Undefined();
+    });
+  }
+
+  Napi::Array ops = info[0].As<Napi::Array>();
+  std::vector<BatchOp> batchOps;
+
+  for (uint32_t i = 0; i < ops.Length(); i++) {
+    Napi::Object op = ops.Get(i).As<Napi::Object>();
+
+    if (!op.Has("type")) {
+      Napi::TypeError::New(env, "Operation must have 'type'").ThrowAsJavaScriptException();
+      for (auto& bop : batchOps) {
+        if (bop.path) path_destroy(bop.path);
+        if (bop.value) identifier_destroy(bop.value);
+      }
+      return env.Null();
+    }
+
+    std::string type = op.Get("type").As<Napi::String>().Utf8Value();
+    if (!op.Has("key")) {
+      Napi::TypeError::New(env, "Operation must have 'key'").ThrowAsJavaScriptException();
+      for (auto& bop : batchOps) {
+        if (bop.path) path_destroy(bop.path);
+        if (bop.value) identifier_destroy(bop.value);
+      }
+      return env.Null();
+    }
+
+    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
+    if (!path) {
+      for (auto& bop : batchOps) {
+        if (bop.path) path_destroy(bop.path);
+        if (bop.value) identifier_destroy(bop.value);
+      }
+      return env.Null();
+    }
+
+    BatchOp batchOp;
+    batchOp.path = path;
+
+    if (type == "put") {
+      if (!op.Has("value")) {
+        Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
+        path_destroy(path);
+        for (auto& bop : batchOps) {
+          if (bop.path) path_destroy(bop.path);
+          if (bop.value) identifier_destroy(bop.value);
+        }
+        return env.Null();
+      }
+
+      identifier_t* value = ValueFromJS(env, op.Get("value"));
+      if (!value) {
+        path_destroy(path);
+        for (auto& bop : batchOps) {
+          if (bop.path) path_destroy(bop.path);
+          if (bop.value) identifier_destroy(bop.value);
+        }
+        return env.Null();
+      }
+
+      batchOp.type = BatchOpType::PUT;
+      batchOp.value = value;
+    } else if (type == "del") {
+      batchOp.type = BatchOpType::DEL;
+      batchOp.value = nullptr;
+    } else {
+      Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
+      path_destroy(path);
+      for (auto& bop : batchOps) {
+        if (bop.path) path_destroy(bop.path);
+        if (bop.value) identifier_destroy(bop.value);
+      }
+      return env.Null();
+    }
+
+    batchOps.push_back(batchOp);
+  }
+
+  BatchWorker* worker = new BatchWorker(env, db_, std::move(batchOps), callback);
+  worker->Queue();
+
+  return worker->Promise();
+}
+
+Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Array of operations required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  Napi::Array ops = info[0].As<Napi::Array>();
+
+  for (uint32_t i = 0; i < ops.Length(); i++) {
+    Napi::Object op = ops.Get(i).As<Napi::Object>();
+
+    if (!op.Has("type") || !op.Has("key")) {
+      Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+
+    std::string type = op.Get("type").As<Napi::String>().Utf8Value();
+    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
+    if (!path) {
+      return env.Undefined();
+    }
+
+    int rc;
+    if (type == "put") {
+      if (!op.Has("value")) {
+        Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
+        path_destroy(path);
+        return env.Undefined();
+      }
+
+      identifier_t* value = ValueFromJS(env, op.Get("value"));
+      if (!value) {
+        path_destroy(path);
+        return env.Undefined();
+      }
+
+      rc = database_put_sync(db_, path, value);
+      // database_put_sync takes ownership of path and value
+    } else if (type == "del") {
+      rc = database_delete_sync(db_, path);
+      // database_delete_sync takes ownership of path
+    } else {
+      Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
+      path_destroy(path);
+      return env.Undefined();
+    }
+
+    if (rc != 0) {
+      Napi::Error::New(env, "IO_ERROR: Batch operation failed").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
   }
 
   return env.Undefined();
