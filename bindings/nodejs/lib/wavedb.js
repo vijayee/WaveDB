@@ -1,6 +1,7 @@
 'use strict';
 
 const { WaveDB: WaveDBNative } = require('../build/Release/wavedb.node');
+const { WaveDBIterator } = require('./iterator.js');
 
 /**
  * Base error class for all WaveDB errors
@@ -331,13 +332,13 @@ class WaveDB {
   }
 
   /**
-   * Create a read stream (stub - not implemented yet)
+   * Create a read stream
    *
    * @param {Object} [options] - Stream options
-   * @throws {Error} Always throws as not implemented
+   * @returns {WaveDBIterator} Readable stream
    */
-  createReadStream(options) {
-    throw new Error('createReadStream is not implemented yet');
+  createReadStream(options = {}) {
+    return new WaveDBIterator(this, options);
   }
 
   /**
