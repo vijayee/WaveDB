@@ -12,10 +12,16 @@
 static void* compaction_thread_func(void* arg) {
     wal_compactor_t* compactor = (wal_compactor_t*)arg;
 
-    while (compactor->running) {
+    while (1) {
         sleep(1);  // Check every second
 
         platform_lock(&compactor->lock);
+
+        // Check if we should stop
+        if (!compactor->running) {
+            platform_unlock(&compactor->lock);
+            break;
+        }
 
         uint64_t now = 0;
         timeval_t tv;
@@ -77,9 +83,13 @@ wal_compactor_t* wal_compactor_create(wal_manager_t* manager,
 void wal_compactor_destroy(wal_compactor_t* compactor) {
     if (compactor == NULL) return;
 
+    // Signal thread to stop
     compactor->running = 0;
+
+    // Wait for thread to finish (it will complete its current sleep cycle)
     pthread_join(compactor->thread, NULL);
 
+    // Now safe to destroy locks - thread has exited and released all locks
     platform_lock_destroy(&compactor->lock);
     platform_condition_destroy(&compactor->cond);
 

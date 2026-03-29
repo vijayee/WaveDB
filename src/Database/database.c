@@ -507,6 +507,8 @@ void database_destroy(database_t* db) {
         refcounter_destroy_lock((refcounter_t*)db);
         free(db);
     }
+    // If count > 0, database will be destroyed when last reference is released
+    // This can happen when async workers still hold references
 }
 
 
