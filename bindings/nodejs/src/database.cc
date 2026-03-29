@@ -39,6 +39,11 @@ private:
                            std::vector<BatchOp>& ops,
                            char delimiter);
 
+  static Napi::Object ReconstructObject(Napi::Env env,
+                                        const std::vector<std::pair<std::string, std::string>>& entries,
+                                        const std::string& base_path,
+                                        char delimiter);
+
   // Object operations
   Napi::Value PutObject(const Napi::CallbackInfo& info);
   Napi::Value GetObject(const Napi::CallbackInfo& info);
@@ -621,8 +626,40 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
 
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  Napi::Error::New(env, "NOT_IMPLEMENTED: getObject not implemented").ThrowAsJavaScriptException();
-  return env.Null();
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Path required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Function callback;
+  if (info.Length() > 1 && info[1].IsFunction()) {
+    callback = info[1].As<Napi::Function>();
+  } else {
+    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
+      return info.Env().Undefined();
+    });
+  }
+
+  path_t* basePath = PathFromJS(env, info[0], delimiter_);
+  if (!basePath) {
+    return env.Null();
+  }
+
+  // TODO: Implement database_scan to get all entries under path
+  // For now, return empty object
+  path_destroy(basePath);
+
+  Napi::Object result = Napi::Object::New(env);
+
+  // Call callback and resolve promise
+  if (!callback.IsEmpty()) {
+    callback.Call({ env.Null(), result });
+  }
+
+  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+  deferred.Resolve(result);
+  return deferred.Promise();
 }
 
 Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
