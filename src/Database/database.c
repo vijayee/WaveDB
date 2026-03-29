@@ -506,9 +506,16 @@ void database_destroy(database_t* db) {
         free(db->location);
         refcounter_destroy_lock((refcounter_t*)db);
         free(db);
+    } else {
+        // Wait for all references to be released before destroying
+        // This can happen when async workers still hold references
+        while (count > 0) {
+            usleep(1000);  // Wait 1ms
+            count = refcounter_count((refcounter_t*)db);
+        }
+        // Recursively call to perform actual destruction
+        database_destroy(db);
     }
-    // If count > 0, database will be destroyed when last reference is released
-    // This can happen when async workers still hold references
 }
 
 

@@ -1,5 +1,6 @@
 #include <napi.h>
 #include <string>
+#include <unistd.h>  // for usleep
 #include "../../../src/Database/database.h"
 #include "path.h"
 #include "identifier.h"
@@ -139,6 +140,20 @@ WaveDB::~WaveDB() {
 
 Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
   if (db_) {
+    // Flush WAL and save index before closing
+    database_snapshot(db_);
+
+    // Wait for all references to be released
+    // This ensures all async operations complete before we destroy
+    uint32_t count = refcounter_count((refcounter_t*)db_);
+    uint32_t max_wait_ms = 5000;  // Max 5 seconds
+    uint32_t waited_ms = 0;
+    while (count > 1 && waited_ms < max_wait_ms) {  // > 1 because we still hold a reference
+      usleep(1000);  // Wait 1ms
+      count = refcounter_count((refcounter_t*)db_);
+      waited_ms += 1;
+    }
+
     database_t* db = db_;
     db_ = nullptr;  // Clear pointer first to prevent double-destroy
     database_destroy(db);  // This just dereferences, actual destruction happens when all refs are gone
