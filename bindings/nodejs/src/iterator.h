@@ -1,0 +1,33 @@
+#ifndef WAVEDB_BINDINGS_ITERATOR_H
+#define WAVEDB_BINDINGS_ITERATOR_H
+
+#include <napi.h>
+#include <string>
+#include "../../../src/Database/database.h"
+
+class Iterator : public Napi::ObjectWrap<Iterator> {
+public:
+  static Napi::Object Init(Napi::Env env, Napi::Object exports);
+
+  Iterator(const Napi::CallbackInfo& info);
+  ~Iterator();
+
+  static Napi::FunctionReference constructor_;
+
+private:
+  Napi::Value Read(const Napi::CallbackInfo& info);
+  Napi::Value End(const Napi::CallbackInfo& info);
+
+  database_t* db_;
+  std::string start_;
+  std::string end_;
+  bool reverse_;
+  bool keys_;
+  bool values_;
+  bool keyAsArray_;
+  char delimiter_;
+  bool ended_;
+  void* scan_handle_;  // Opaque scan handle
+};
+
+#endif // WAVEDB_BINDINGS_ITERATOR_H

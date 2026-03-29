@@ -8,6 +8,7 @@
 #include "get_worker.h"
 #include "del_worker.h"
 #include "batch_worker.h"
+#include "iterator.h"
 
 class WaveDB : public Napi::ObjectWrap<WaveDB> {
 public:
@@ -669,6 +670,15 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
 
 Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-  Napi::Error::New(env, "NOT_IMPLEMENTED: createReadStream not implemented").ThrowAsJavaScriptException();
-  return env.Null();
+
+  Napi::Object options = Napi::Object::New(env);
+  if (info.Length() > 0 && info[0].IsObject()) {
+    options = info[0].As<Napi::Object>();
+  }
+
+  // Create iterator instance
+  // TODO: Pass options and database handle
+  Napi::Object iterObj = Iterator::constructor_.New({ options });
+
+  return iterObj;
 }
