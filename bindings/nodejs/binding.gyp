@@ -28,9 +28,12 @@
     "cflags!": ["-fno-exceptions"],
     "cflags_cc!": ["-fno-exceptions"],
     "libraries": [
-      "-L../../../build",
-      "-lwavedb",
-      "-lpthread"
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libwavedb.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libxxhash.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libhashmap.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/deps/libcbor/src/libcbor.a",
+      "-lpthread",
+      "-latomic"
     ],
     "conditions": [
       ["OS=='linux'", {
