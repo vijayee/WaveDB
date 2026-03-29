@@ -627,6 +627,11 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
   if (info.Length() < 1) {
     Napi::TypeError::New(env, "Path required").ThrowAsJavaScriptException();
     return env.Null();
