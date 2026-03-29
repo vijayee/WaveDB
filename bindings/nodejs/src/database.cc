@@ -235,3 +235,108 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
 
   return worker->Promise();
 }
+
+Napi::Value WaveDB::PutSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (info.Length() < 2) {
+    Napi::TypeError::New(env, "Key and value required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  // Convert key to path_t
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) {
+    return env.Undefined();  // Error already thrown
+  }
+
+  // Convert value to identifier_t
+  identifier_t* value = ValueFromJS(env, info[1]);
+  if (!value) {
+    path_destroy(path);
+    return env.Undefined();  // Error already thrown
+  }
+
+  // Call sync function (consumes path and value)
+  int rc = database_put_sync(db_, path, value);
+
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Failed to put value").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  return env.Undefined();
+}
+
+Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Key required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  // Convert key to path_t
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) {
+    return env.Null();  // Error already thrown
+  }
+
+  // Call sync function (consumes path)
+  identifier_t* result = NULL;
+  int rc = database_get_sync(db_, path, &result);
+
+  if (rc == 0 && result != NULL) {
+    // Success - convert result to JS value
+    Napi::Value value = ValueToJS(env, result);
+    identifier_destroy(result);
+    return value;
+  } else if (rc == -2) {
+    // Not found
+    return env.Null();
+  } else {
+    // Error
+    Napi::Error::New(env, "IO_ERROR: Failed to get value").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Key required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  // Convert key to path_t
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) {
+    return env.Undefined();  // Error already thrown
+  }
+
+  // Call sync function (consumes path)
+  int rc = database_delete_sync(db_, path);
+
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Failed to delete value").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  return env.Undefined();
+}
