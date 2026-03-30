@@ -1489,10 +1489,9 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
             entry->versions->next == NULL &&
             !entry->versions->is_deleted) {
           // Single non-deleted version - convert to legacy
-          entry->value = entry->versions->value;
+          entry->value = (identifier_t*)refcounter_reference((refcounter_t*)entry->versions->value);
           entry->value_txn_id = entry->versions->txn_id;
           version_entry_destroy(entry->versions);
-          entry->versions = NULL;
           entry->has_versions = 0;
         }
       }

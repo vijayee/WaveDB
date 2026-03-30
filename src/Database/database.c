@@ -222,17 +222,22 @@ static int save_index(database_t* db) {
     uint64_t index_id = db->next_index_id++;
 
     char* index_file = create_index_path(db->location, index_id, crc);
-    if (index_file == NULL) return -1;
+    if (index_file == NULL) {
+        log_error("Failed to create index path");
+        return -1;
+    }
 
     uint8_t* buf = NULL;
     size_t len = 0;
     if (hbtrie_serialize(db->trie, &buf, &len) != 0) {
+        log_error("Failed to serialize HBTrie");
         free(index_file);
         return -1;
     }
 
     int fd = open(index_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) {
+        log_error("Failed to open index file: %s", index_file);
         free(buf);
         free(index_file);
         return -1;
@@ -243,7 +248,13 @@ static int save_index(database_t* db) {
     free(buf);
     free(index_file);
 
-    return (written == (ssize_t)len) ? 0 : -1;
+    if (written != (ssize_t)len) {
+        log_error("Failed to write index file: wrote %zd of %zu bytes", written, len);
+        return -1;
+    }
+
+    log_info("Saved index file successfully");
+    return 0;
 }
 
 // Load HBTrie from disk

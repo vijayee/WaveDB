@@ -10,6 +10,7 @@
 #include "../Util/path_join.h"
 #include "../Util/log.h"
 #include "../Time/debouncer.h"
+#include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include <sys/uio.h>
 #include <dirent.h>
 #include "../Util/log.h"  // For log_warn
+#include <cbor.h>
 
 // Forward declaration from wal.c
 int deserialize_batch(buffer_t* data, batch_op_t** ops, size_t* count);
@@ -987,6 +989,8 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
         return WAL_ERROR_INVALID_ARG;
     }
 
+    log_info("WAL Recovery: Starting recovery");
+
     // Suppress unused parameter warning
     (void)db;
 
@@ -995,15 +999,19 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     size_t manifest_count = 0;
     int rc = read_manifest(manager, &manifest_entries, &manifest_count);
     if (rc != 0) {
+        log_warn("WAL Recovery: Failed to read manifest (error %d), continuing with directory scan", rc);
         // Manifest read failed - continue with directory scan
         manifest_entries = NULL;
         manifest_count = 0;
+    } else {
+        log_info("WAL Recovery: Read %zu manifest entries", manifest_count);
     }
 
     // 2. Scan directory for all thread_*.wal files
     char** wal_files = NULL;
     size_t wal_count = 0;
     scan_wal_directory(manager->location, &wal_files, &wal_count);
+    log_info("WAL Recovery: Found %zu WAL files in directory", wal_count);
 
     // 3. Read all entries from all files
     recovery_entry_t* all_entries = NULL;
@@ -1101,6 +1109,8 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
               compare_recovery_entries);
     }
 
+    log_info("WAL Recovery: Total %zu entries to replay", entry_count);
+
     // 5. Replay in order
     database_t* database = (database_t*)db;
     for (size_t i = 0; i < entry_count; i++) {
@@ -1137,10 +1147,62 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 break;
             }
             case WAL_PUT:
-            case WAL_DELETE:
-                // TODO: Handle individual PUT/DELETE entries
-                // These would need to be deserialized from buffer_t* data
+            case WAL_DELETE: {
+                // Deserialize individual PUT/DELETE entry
+                // Format: CBOR array [path, value]
+                struct cbor_load_result result;
+                cbor_item_t* entry_cbor = cbor_load(data->data, data->size, &result);
+                if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
+                    if (entry_cbor) cbor_decref(&entry_cbor);
+                    log_error("WAL Recovery: Failed to load entry CBOR");
+                    break;
+                }
+
+                // Verify it's an array with 2 elements
+                if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != 2) {
+                    cbor_decref(&entry_cbor);
+                    log_error("WAL Recovery: Invalid entry format");
+                    break;
+                }
+
+                // Get path
+                cbor_item_t* path_cbor = cbor_array_handle(entry_cbor)[0];
+                path_t* path = cbor_to_path(path_cbor, database->chunk_size);
+                if (path == NULL) {
+                    cbor_decref(&entry_cbor);
+                    log_error("WAL Recovery: Failed to deserialize path");
+                    break;
+                }
+
+                // Get value (for PUT operations)
+                identifier_t* value = NULL;
+                if (entry->type == WAL_PUT) {
+                    cbor_item_t* value_cbor = cbor_array_handle(entry_cbor)[1];
+                    value = cbor_to_identifier(value_cbor, database->chunk_size);
+                    if (value == NULL) {
+                        path_destroy(path);
+                        cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Failed to deserialize value");
+                        break;
+                    }
+                }
+
+                // Apply operation to trie
+                if (entry->type == WAL_PUT) {
+                    hbtrie_insert_mvcc(database->trie, path, value, entry->txn_id);
+                    log_info("WAL Recovery: Applied PUT operation");
+                } else {
+                    identifier_t* removed = hbtrie_delete_mvcc(database->trie, path, entry->txn_id);
+                    if (removed) identifier_destroy(removed);
+                    log_info("WAL Recovery: Applied DELETE operation");
+                }
+
+                // Clean up
+                path_destroy(path);
+                if (value) identifier_destroy(value);
+                cbor_decref(&entry_cbor);
                 break;
+            }
             default:
                 fprintf(stderr, "WARNING: Unknown WAL entry type: %c\n", entry->type);
                 break;

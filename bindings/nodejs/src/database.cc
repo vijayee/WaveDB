@@ -151,10 +151,18 @@ Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
       waited_ms += 1;
     }
 
-    // Note: database_snapshot() temporarily disabled due to MVCC serialization issue
-    // during hash computation. WAL recovery provides persistence for now.
-    // TODO: Re-enable after fixing version chain hash computation.
-    // database_snapshot(db_);
+    // Flush all thread-local WALs to ensure persistence
+    // WAL recovery provides data persistence across database restarts
+    if (db_->wal_manager != NULL) {
+      wal_manager_flush(db_->wal_manager);
+    }
+
+    // Save index to disk for faster startup
+    int snapshot_result = database_snapshot(db_);
+    if (snapshot_result != 0) {
+      Napi::Error::New(info.Env(), "SNAPSHOT_FAILED: Failed to save database snapshot").ThrowAsJavaScriptException();
+      return info.Env().Null();
+    }
 
     database_t* db = db_;
     db_ = nullptr;  // Clear pointer first to prevent double-destroy
