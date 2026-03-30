@@ -630,7 +630,7 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
 
   for (int i = 0; i < node->btree->entries.length; i++) {
     bnode_entry_t* entry = &node->btree->entries.data[i];
-    cbor_item_t* entry_item = cbor_new_definite_array(4); // [key_bstr, has_value, value_or_child]
+    cbor_item_t* entry_item = cbor_new_definite_array(3); // [key_bstr, has_value, value_or_child]
     if (entry_item == NULL) {
       cbor_decref(&entries);
       return NULL;
@@ -649,9 +649,77 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
 
     // Value or child
     if (entry->has_value) {
-      cbor_item_t* value_cbor = identifier_to_cbor(entry->value);
-      cbor_array_push(entry_item, value_cbor);
-      cbor_decref(&value_cbor);
+      if (entry->has_versions) {
+        // MVCC: Serialize version chain
+        // Count versions
+        size_t version_count = 0;
+        version_entry_t* current = entry->versions;
+        while (current != NULL) {
+          version_count++;
+          current = current->next;
+        }
+
+        // Create array of versions: [[txn_id, is_deleted, value], ...]
+        cbor_item_t* versions_array = cbor_new_definite_array(version_count);
+        if (versions_array == NULL) {
+          cbor_decref(&entries);
+          cbor_decref(&entry_item);
+          return NULL;
+        }
+
+        current = entry->versions;
+        while (current != NULL) {
+          cbor_item_t* version_item = cbor_new_definite_array(3);
+          if (version_item == NULL) {
+            cbor_decref(&versions_array);
+            cbor_decref(&entries);
+            cbor_decref(&entry_item);
+            return NULL;
+          }
+
+          // Transaction ID: [time, nanos, count]
+          cbor_item_t* txn_id = cbor_new_definite_array(3);
+          cbor_item_t* time = cbor_build_uint64(current->txn_id.time);
+          cbor_item_t* nanos = cbor_build_uint64(current->txn_id.nanos);
+          cbor_item_t* counter = cbor_build_uint64(current->txn_id.count);
+          cbor_array_push(txn_id, time);
+          cbor_decref(&time);
+          cbor_array_push(txn_id, nanos);
+          cbor_decref(&nanos);
+          cbor_array_push(txn_id, counter);
+          cbor_decref(&counter);
+          cbor_array_push(version_item, txn_id);
+          cbor_decref(&txn_id);
+
+          // is_deleted flag
+          cbor_item_t* is_deleted = cbor_build_bool(current->is_deleted);
+          cbor_array_push(version_item, is_deleted);
+          cbor_decref(&is_deleted);
+
+          // value (can be null for tombstones)
+          if (current->value != NULL) {
+            cbor_item_t* value_cbor = identifier_to_cbor(current->value);
+            cbor_array_push(version_item, value_cbor);
+            cbor_decref(&value_cbor);
+          } else {
+            cbor_item_t* null_val = cbor_new_null();
+            cbor_array_push(version_item, null_val);
+            cbor_decref(&null_val);
+          }
+
+          cbor_array_push(versions_array, version_item);
+          cbor_decref(&version_item);
+          current = current->next;
+        }
+
+        cbor_array_push(entry_item, versions_array);
+        cbor_decref(&versions_array);
+      } else {
+        // Legacy: Single value
+        cbor_item_t* value_cbor = identifier_to_cbor(entry->value);
+        cbor_array_push(entry_item, value_cbor);
+        cbor_decref(&value_cbor);
+      }
     } else {
       cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->child);
       cbor_array_push(entry_item, child_cbor);
@@ -731,7 +799,101 @@ static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node
     // Value or child
     cbor_item_t* value_or_child = cbor_array_get(entry_item, 2);
     if (entry.has_value) {
-      entry.value = cbor_to_identifier(value_or_child, DEFAULT_CHUNK_SIZE); // TODO: pass chunk_size
+      // Check if it's a version chain (array of versions) or single value (bytestring)
+      if (cbor_isa_array(value_or_child)) {
+        // MVCC: Deserialize version chain
+        entry.has_versions = 1;
+        entry.versions = NULL;
+
+        size_t num_versions = cbor_array_size(value_or_child);
+        version_entry_t* prev_version = NULL;
+
+        for (size_t j = 0; j < num_versions; j++) {
+          cbor_item_t* version_item = cbor_array_get(value_or_child, j);
+          if (!cbor_isa_array(version_item) || cbor_array_size(version_item) != 3) {
+            cbor_decref(&version_item);
+            cbor_decref(&value_or_child);
+            cbor_decref(&entry_item);
+            hbtrie_node_destroy(node);
+            return NULL;
+          }
+
+          // Transaction ID: [time, nanos, count]
+          cbor_item_t* txn_id_item = cbor_array_get(version_item, 0);
+          if (!cbor_isa_array(txn_id_item) || cbor_array_size(txn_id_item) != 3) {
+            cbor_decref(&txn_id_item);
+            cbor_decref(&version_item);
+            cbor_decref(&value_or_child);
+            cbor_decref(&entry_item);
+            hbtrie_node_destroy(node);
+            return NULL;
+          }
+
+          cbor_item_t* time_item = cbor_array_get(txn_id_item, 0);
+          cbor_item_t* nanos_item = cbor_array_get(txn_id_item, 1);
+          cbor_item_t* counter_item = cbor_array_get(txn_id_item, 2);
+
+          if (!cbor_isa_uint(time_item) || !cbor_isa_uint(nanos_item) || !cbor_isa_uint(counter_item)) {
+            cbor_decref(&time_item);
+            cbor_decref(&nanos_item);
+            cbor_decref(&counter_item);
+            cbor_decref(&txn_id_item);
+            cbor_decref(&version_item);
+            cbor_decref(&value_or_child);
+            cbor_decref(&entry_item);
+            hbtrie_node_destroy(node);
+            return NULL;
+          }
+
+          transaction_id_t txn_id;
+          txn_id.time = cbor_get_uint64(time_item);
+          txn_id.nanos = cbor_get_uint64(nanos_item);
+          txn_id.count = cbor_get_uint64(counter_item);
+          cbor_decref(&time_item);
+          cbor_decref(&nanos_item);
+          cbor_decref(&counter_item);
+          cbor_decref(&txn_id_item);
+
+          // is_deleted flag
+          cbor_item_t* is_deleted_item = cbor_array_get(version_item, 1);
+          uint8_t is_deleted = cbor_is_bool(is_deleted_item) && cbor_get_bool(is_deleted_item);
+          cbor_decref(&is_deleted_item);
+
+          // value (can be null for tombstones)
+          cbor_item_t* value_item = cbor_array_get(version_item, 2);
+          identifier_t* value = NULL;
+          if (!cbor_is_null(value_item)) {
+            value = cbor_to_identifier(value_item, DEFAULT_CHUNK_SIZE);
+          }
+          cbor_decref(&value_item);
+
+          // Create version entry
+          version_entry_t* version = version_entry_create(txn_id, value, is_deleted);
+          if (version == NULL) {
+            if (value != NULL) identifier_destroy(value);
+            cbor_decref(&version_item);
+            cbor_decref(&value_or_child);
+            cbor_decref(&entry_item);
+            hbtrie_node_destroy(node);
+            return NULL;
+          }
+
+          // Link versions (newest first)
+          if (entry.versions == NULL) {
+            entry.versions = version;
+          } else {
+            prev_version->next = version;
+            version->prev = prev_version;
+          }
+          prev_version = version;
+
+          cbor_decref(&version_item);
+        }
+      } else {
+        // Legacy: Single value
+        entry.has_versions = 0;
+        entry.value = cbor_to_identifier(value_or_child, DEFAULT_CHUNK_SIZE);
+      }
     } else {
       entry.child = cbor_to_hbtrie_node(value_or_child, btree_node_size);
     }

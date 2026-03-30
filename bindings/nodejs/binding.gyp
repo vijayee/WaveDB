@@ -29,7 +29,10 @@
       "REFCOUNTER_ATOMIC"
     ],
     "cflags!": ["-fno-exceptions"],
+    "cflags": ["-g", "-O0"],
     "cflags_cc!": ["-fno-exceptions"],
+    "cflags_cc": ["-g", "-O0"],
+    "ldflags": ["-g"],
     "libraries": [
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libwavedb.a",
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libxxhash.a",

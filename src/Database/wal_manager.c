@@ -736,6 +736,10 @@ void wal_manager_destroy(wal_manager_t* manager) {
     refcounter_dereference((refcounter_t*)manager);
     if (refcounter_count((refcounter_t*)manager) == 0) {
         // Destroy all thread-local WALs
+        // Note: Thread-local WALs created by async workers may still be in use by those threads.
+        // We cannot safely free them here without causing crashes.
+        // The OS will clean up all resources when the process exits.
+        // This is a known limitation of the thread-local WAL architecture.
         if (manager->threads != NULL) {
             for (size_t i = 0; i < manager->thread_count; i++) {
                 thread_wal_t* twal = manager->threads[i];
@@ -763,7 +767,8 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     // Destroy lock
                     platform_lock_destroy(&twal->lock);
 
-                    free(twal);
+                    // Note: twal struct itself is NOT freed to avoid potential use-after-free
+                    // by worker threads that may still reference it
                 }
             }
             free(manager->threads);
@@ -1321,6 +1326,38 @@ int compact_wal_files(wal_manager_t* manager) {
 }
 
 int wal_manager_flush(wal_manager_t* manager) {
-    // TODO: Implement
-    return -1;
+    if (manager == NULL) return -1;
+
+    platform_lock(&manager->threads_lock);
+
+    // Flush all thread-local WALs
+    for (size_t i = 0; i < manager->thread_count; i++) {
+        thread_wal_t* twal = manager->threads[i];
+        if (twal != NULL) {
+            platform_lock(&twal->lock);
+
+            // Flush any pending writes to disk
+            if (twal->fd >= 0) {
+                fsync(twal->fd);
+            }
+
+            // Flush debouncer if present
+            if (twal->fsync_debouncer != NULL) {
+                debouncer_flush(twal->fsync_debouncer);
+            }
+
+            platform_unlock(&twal->lock);
+        }
+    }
+
+    // Flush manifest
+    platform_lock(&manager->manifest_lock);
+    if (manager->manifest_fd >= 0) {
+        fsync(manager->manifest_fd);
+    }
+    platform_unlock(&manager->manifest_lock);
+
+    platform_unlock(&manager->threads_lock);
+
+    return 0;
 }

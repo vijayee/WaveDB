@@ -7,6 +7,9 @@
 #include <cbor.h>
 #include <string.h>
 
+// Forward declaration for old format deserialization
+identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size);
+
 identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
   if (chunk_size == 0) {
     chunk_size = DEFAULT_CHUNK_SIZE;
@@ -133,7 +136,21 @@ cbor_item_t* identifier_to_cbor(identifier_t* id) {
 
   for (int i = 0; i < id->chunks.length; i++) {
     chunk_t* chunk = id->chunks.data[i];
-    cbor_item_t* bstr = cbor_build_bytestring(chunk->data->data, chunk->data->size);
+
+    // For last chunk, only serialize the actual data bytes (not padding)
+    size_t chunk_len = chunk->data->size;
+    if (i == id->chunks.length - 1) {
+      // Last chunk: calculate actual data length
+      size_t nchunk = id->chunks.length;
+      size_t full_chunks = (nchunk > 0) ? (nchunk - 1) : 0;
+      size_t expected_full_size = full_chunks * id->chunk_size;
+      chunk_len = id->length - expected_full_size;
+      if (chunk_len > chunk->data->size) {
+        chunk_len = chunk->data->size;  // Safety check
+      }
+    }
+
+    cbor_item_t* bstr = cbor_build_bytestring(chunk->data->data, chunk_len);
     if (bstr == NULL) {
       cbor_decref(&array);
       return NULL;
@@ -150,6 +167,28 @@ cbor_item_t* identifier_to_cbor(identifier_t* id) {
 }
 
 identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size) {
+  if (item == NULL) return NULL;
+
+  if (!cbor_isa_bytestring(item)) {
+    // Old format: array of chunks (deprecated)
+    return cbor_to_identifier_old(item, chunk_size);
+  }
+
+  // New format: single bytestring with original data
+  size_t data_len = cbor_bytestring_length(item);
+  cbor_data data = cbor_bytestring_handle(item);
+
+  // Create buffer and identifier
+  buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)data, data_len);
+  if (buf == NULL) return NULL;
+
+  identifier_t* id = identifier_create(buf, chunk_size);
+  buffer_destroy(buf);
+
+  return id;
+}
+
+identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
   if (item == NULL) return NULL;
 
   if (!cbor_isa_array(item)) {
@@ -196,13 +235,14 @@ identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size) {
 
   id->length = total_length;
 
-  // Create chunks from CBOR data
+  // Create chunks from CBOR data - all chunks are full chunk_size except last
   for (size_t i = 0; i < num_chunks; i++) {
     cbor_item_t* chunk_item = cbor_array_get(item, i);
     size_t chunk_len = cbor_bytestring_length(chunk_item);
     cbor_data chunk_data = cbor_bytestring_handle(chunk_item);
 
-    chunk_t* chunk = chunk_create(chunk_data, chunk_len);
+    // All chunks should be created with full chunk_size
+    chunk_t* chunk = chunk_create_empty(id->chunk_size);
     if (chunk == NULL) {
       cbor_decref(&chunk_item);
       // Clean up
@@ -213,6 +253,11 @@ identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size) {
       free(id);
       return NULL;
     }
+
+    // Copy data (chunk_len bytes for last chunk, chunk_size for others)
+    memcpy(chunk->data->data, chunk_data, chunk_len);
+    // Rest is already zeroed by chunk_create_empty
+
     vec_push(&id->chunks, chunk);
     cbor_decref(&chunk_item);
   }

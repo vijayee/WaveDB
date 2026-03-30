@@ -49,6 +49,11 @@ class IOError extends WaveDBError {
 function convertError(err) {
   if (!err) return null;
 
+  // Preserve TypeError from native code
+  if (err instanceof TypeError) {
+    return err;
+  }
+
   const message = err.message || String(err);
 
   if (message.includes('NOT_FOUND') || message.includes('Key not found')) {
