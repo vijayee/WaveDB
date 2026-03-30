@@ -151,9 +151,9 @@ Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
       waited_ms += 1;
     }
 
-    // Note: database_snapshot is skipped to avoid thread-local WAL crashes
-    // AND because MVCC version chain CBOR serialization is not yet stable.
-    // Data persists via WAL recovery. Use synchronous operations for guaranteed persistence.
+    // Note: database_snapshot() temporarily disabled due to MVCC serialization issue
+    // during hash computation. WAL recovery provides persistence for now.
+    // TODO: Re-enable after fixing version chain hash computation.
     // database_snapshot(db_);
 
     database_t* db = db_;

@@ -793,6 +793,12 @@ void database_delete(database_t* db, path_t* path, promise_t* promise) {
 int database_snapshot(database_t* db) {
     if (db == NULL) return -1;
 
+    // Flush all thread-local WALs to ensure all data is persisted
+    // This must be done before saving the index to guarantee consistency
+    if (db->wal_manager != NULL) {
+        wal_manager_flush(db->wal_manager);
+    }
+
     // MVCC: Trigger GC to clean up old versions
     tx_manager_gc(db->tx_manager);
 
