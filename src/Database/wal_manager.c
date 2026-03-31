@@ -450,10 +450,12 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     // Open file with O_APPEND for atomic writes
     twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (twal->fd < 0) {
+        log_error("Failed to create WAL file: %s (errno=%d)", twal->file_path, errno);
         free(twal->file_path);
         free(twal);
         return NULL;
     }
+    log_info("Created WAL file: %s (thread_id=%lu, fd=%d)", twal->file_path, (unsigned long)thread_id, twal->fd);
 
     // Create debouncer if needed
     if (twal->sync_mode == WAL_SYNC_DEBOUNCED && manager->config.debounce_ms > 0) {
@@ -868,6 +870,8 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
         manager->thread_capacity = new_capacity;
     }
     manager->threads[manager->thread_count++] = thread_local_wal;
+    log_info("Registered thread WAL (manager=%p, total_threads=%zu, thread_id=%lu)",
+             (void*)manager, manager->thread_count, (unsigned long)thread_id);
     platform_unlock(&manager->threads_lock);
 
     return thread_local_wal;
@@ -884,6 +888,8 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
 
     // Check file size limit (TODO: file rotation not implemented yet)
     if (twal->current_size >= twal->max_size) {
+        log_warn("WAL file full (current_size=%zu, max_size=%zu), rejecting write",
+                 twal->current_size, twal->max_size);
         platform_unlock(&twal->lock);
         return -1;  // File full, needs rotation
     }
@@ -1204,7 +1210,36 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
                 // Apply operation to trie
                 if (entry->type == WAL_PUT) {
+                    // Debug logging to file
+                    FILE* debug_file = fopen("/tmp/wal_debug.log", "a");
+                    if (debug_file) {
+                        fprintf(debug_file, "=== WAL Recovery: PUT operation ===\n");
+                        fprintf(debug_file, "Path identifiers: %d\n", path->identifiers.length);
+                        for (int i = 0; i < path->identifiers.length && i < 5; i++) {
+                            identifier_t* id = path->identifiers.data[i];
+                            fprintf(debug_file, "  Identifier %d: length=%zu, chunks=%d\n", i, id->length, id->chunks.length);
+                            // Print first few bytes of identifier
+                            fprintf(debug_file, "    Data bytes: ");
+                            for (int j = 0; j < id->length && j < 20; j++) {
+                                uint8_t byte = ((uint8_t*)id->chunks.data[0]->data)[j];
+                                fprintf(debug_file, "%02x ", byte);
+                            }
+                            fprintf(debug_file, "\n");
+                        }
+                        fprintf(debug_file, "Value length: %zu\n", value ? value->length : 0);
+                        fprintf(debug_file, "Txn ID: %lu.%09lu.%lu\n",
+                                entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
+                        fclose(debug_file);
+                    }
+
                     hbtrie_insert_mvcc(database->trie, path, value, entry->txn_id);
+
+                    debug_file = fopen("/tmp/wal_debug.log", "a");
+                    if (debug_file) {
+                        fprintf(debug_file, "Returned from hbtrie_insert_mvcc\n\n");
+                        fclose(debug_file);
+                    }
+
                     log_info("WAL Recovery: Applied PUT operation (txn_id=%lu.%09lu.%lu)",
                              entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
                 } else {
@@ -1228,11 +1263,9 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     // Update transaction manager with highest transaction ID
     // This makes recovered MVCC entries visible to subsequent reads
-    if (max_txn_id.count > 0 && database->tx_manager != NULL) {
-        // Use lock to safely update the atomic transaction ID struct
-        platform_lock(&database->tx_manager->lock);
-        database->tx_manager->last_committed_txn_id = max_txn_id;
-        platform_unlock(&database->tx_manager->lock);
+    if (entry_count > 0 && database->tx_manager != NULL) {
+        // Use atomic store to safely update the transaction ID
+        atomic_store(&database->tx_manager->last_committed_txn_id, max_txn_id);
         log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);
 
         // Advance global transaction ID generator to prevent collisions
@@ -1421,16 +1454,20 @@ int wal_manager_flush(wal_manager_t* manager) {
     if (manager == NULL) return -1;
 
     platform_lock(&manager->threads_lock);
+    log_info("WAL Manager flush: manager=%p, thread_count=%zu", (void*)manager, manager->thread_count);
 
     // Flush all thread-local WALs
     for (size_t i = 0; i < manager->thread_count; i++) {
         thread_wal_t* twal = manager->threads[i];
+        log_info("  Thread %zu: twal=%p, fd=%d, file_path=%s",
+                 i, (void*)twal, twal ? twal->fd : -1, twal ? twal->file_path : "NULL");
         if (twal != NULL) {
             platform_lock(&twal->lock);
 
             // Flush any pending writes to disk
             if (twal->fd >= 0) {
                 fsync(twal->fd);
+                log_info("  Flushed WAL file: %s", twal->file_path);
             }
 
             // Flush debouncer if present

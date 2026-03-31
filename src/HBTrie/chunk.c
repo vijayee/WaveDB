@@ -5,6 +5,8 @@
 #include "chunk.h"
 #include "../Util/allocator.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdio.h>
 
 chunk_t* chunk_create(const void* data, size_t chunk_size) {
   chunk_t* chunk = get_clear_memory(sizeof(chunk_t));
@@ -60,6 +62,20 @@ int chunk_compare(chunk_t* a, chunk_t* b) {
   size_t size_a = a->data->size;
   size_t size_b = b->data->size;
   size_t min_size = size_a < size_b ? size_a : size_b;
+
+  // Debug logging for WAL recovery
+  if (getenv("WAVEDB_DEBUG_CHUNK")) {
+    fprintf(stderr, "CHUNK_COMPARE: size_a=%zu, size_b=%zu\n", size_a, size_b);
+    fprintf(stderr, "  Chunk A: ");
+    for (size_t i = 0; i < size_a && i < 8; i++) {
+      fprintf(stderr, "%02x ", a->data->data[i]);
+    }
+    fprintf(stderr, "\n  Chunk B: ");
+    for (size_t i = 0; i < size_b && i < 8; i++) {
+      fprintf(stderr, "%02x ", b->data->data[i]);
+    }
+    fprintf(stderr, "\n");
+  }
 
   int cmp = memcmp(a->data->data, b->data->data, min_size);
   if (cmp != 0) return cmp;

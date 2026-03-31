@@ -57,7 +57,11 @@ void PutWorker::Execute() {
 
   if (result != 0) {
     SetError("IO_ERROR: Put operation failed");
+    return;
   }
+
+  // NOTE: Do NOT flush WAL here - flushing happens during database close
+  // after all workers have completed
 }
 
 std::vector<napi_value> PutWorker::GetResult(Napi::Env env) {

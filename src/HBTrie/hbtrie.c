@@ -1202,6 +1202,8 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
         // Final position - insert value with version chain
         if (entry == NULL) {
           // Create new entry
+          log_info("MVCC: Creating NEW entry for path (txn=%lu.%09lu.%lu)",
+                  txn_id.time, txn_id.nanos, txn_id.count);
           bnode_entry_t new_entry = {0};
           new_entry.key = chunk_share(chunk);
           new_entry.has_value = 1;
@@ -1216,6 +1218,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             return -1;
           }
         } else {
+          // Entry exists - upgrade to version chain or add version
+          log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, txn=%lu.%09lu.%lu)",
+                  entry->has_value, entry->has_versions, txn_id.time, txn_id.nanos, txn_id.count);
           // Entry exists - upgrade to version chain or add version
           if (!entry->has_value) {
             // Entry exists but no value - set first value (legacy mode)
@@ -1234,6 +1239,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             }
           } else {
             // Legacy single value - upgrade to version chain
+            log_info("MVCC: Upgrading legacy entry to version chain (old_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
+                    entry->value_txn_id.time, entry->value_txn_id.nanos, entry->value_txn_id.count,
+                    txn_id.time, txn_id.nanos, txn_id.count);
             // Save the value pointer before upgrading (union will be reused)
             identifier_t* old_value = entry->value;
 
@@ -1254,6 +1262,8 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
 
             // Add new version
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
+            log_info("MVCC: Added new version to chain (txn=%lu.%09lu.%lu)",
+                    txn_id.time, txn_id.nanos, txn_id.count);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
               version_entry_destroy(old_version);

@@ -200,6 +200,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_mvcc wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_mvcc COMMAND test_mvcc)
 
+    # Test for MVCC recovery
+    add_executable(test_mvcc_recovery tests/test_mvcc_recovery.cpp)
+    target_link_libraries(test_mvcc_recovery wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_mvcc_recovery COMMAND test_mvcc_recovery)
+
     # Test for abort cleanup
     add_executable(test_abort_cleanup tests/test_abort_cleanup.cpp)
     target_link_libraries(test_abort_cleanup wavedb gtest gtest_main Threads::Threads)

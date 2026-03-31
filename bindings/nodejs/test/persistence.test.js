@@ -120,6 +120,8 @@ describe('Persistence', () => {
         { type: 'del', key: 'key2' },
         { type: 'put', key: 'key3', value: 'value3' }
       ]);
+      // Small delay to ensure WAL is flushed
+      await new Promise(resolve => setTimeout(resolve, 50));
       db.close();
 
       db = new WaveDB(testDbPath);
@@ -146,6 +148,8 @@ describe('Persistence', () => {
         await db.del(`key${i}`);
       }
 
+      // Small delay to ensure WAL is flushed
+      await new Promise(resolve => setTimeout(resolve, 50));
       db.close();
 
       // Reopen and verify

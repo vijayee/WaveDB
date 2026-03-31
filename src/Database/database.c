@@ -490,6 +490,11 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
+        // Flush all thread-local WALs to disk before destroying
+        if (db->wal_manager) {
+            wal_manager_flush(db->wal_manager);
+        }
+
         // Destroy WAL manager (thread-local WAL)
         if (db->wal_manager) wal_manager_destroy(db->wal_manager);
 
@@ -851,10 +856,18 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         if (twal != NULL) {
             int result = thread_wal_write(twal, txn->txn_id, WAL_PUT, entry);
             if (result != 0) {
-                log_warn("Failed to write to thread-local WAL");
+                log_error("Failed to write to thread-local WAL (result=%d, txn_id=%lu.%09lu.%lu)",
+                         result, txn->txn_id.time, txn->txn_id.nanos, txn->txn_id.count);
+            } else {
+                log_debug("Wrote PUT to WAL (txn_id=%lu.%09lu.%lu)",
+                         txn->txn_id.time, txn->txn_id.nanos, txn->txn_id.count);
             }
+        } else {
+            log_error("get_thread_wal returned NULL - cannot write to WAL");
         }
         buffer_destroy(entry);
+    } else {
+        log_error("encode_put_entry returned NULL - cannot write to WAL");
     }
 
     // Acquire sharded write lock

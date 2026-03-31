@@ -157,12 +157,9 @@ Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
       wal_manager_flush(db_->wal_manager);
     }
 
-    // Save index to disk for faster startup
-    int snapshot_result = database_snapshot(db_);
-    if (snapshot_result != 0) {
-      Napi::Error::New(info.Env(), "SNAPSHOT_FAILED: Failed to save database snapshot").ThrowAsJavaScriptException();
-      return info.Env().Null();
-    }
+    // Note: Do NOT call database_snapshot() here!
+    // Snapshot saves the index file with old transaction IDs that conflict with WAL replay.
+    // Data persistence is provided by WAL recovery on next database open.
 
     database_t* db = db_;
     db_ = nullptr;  // Clear pointer first to prevent double-destroy
