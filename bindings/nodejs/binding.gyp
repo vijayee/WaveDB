@@ -17,8 +17,8 @@
       "<!@(node -p \"require('node-addon-api').include\")",
       "../../src",
       "../../deps/libcbor/src",
-      "../../build/deps/libcbor/src",
-      "../../build/deps/libcbor",
+      "../../build-release/deps/libcbor/src",
+      "../../build-release/deps/libcbor",
       "../../deps/hashmap/include",
       "../../deps/xxhash"
     ],
@@ -29,15 +29,15 @@
       "REFCOUNTER_ATOMIC"
     ],
     "cflags!": ["-fno-exceptions"],
-    "cflags": ["-g", "-O0"],
+    "cflags": ["-O3"],
     "cflags_cc!": ["-fno-exceptions"],
-    "cflags_cc": ["-g", "-O0"],
-    "ldflags": ["-g"],
+    "cflags_cc": ["-O3"],
+    "ldflags": [""],
     "libraries": [
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libwavedb.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libxxhash.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/libhashmap.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build/deps/libcbor/src/libcbor.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libwavedb.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libxxhash.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libhashmap.a",
+      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/deps/libcbor/src/libcbor.a",
       "-lpthread",
       "-latomic"
     ],

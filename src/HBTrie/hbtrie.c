@@ -1218,9 +1218,12 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             return -1;
           }
         } else {
-          // Entry exists - upgrade to version chain or add version
-          log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, txn=%lu.%09lu.%lu)",
-                  entry->has_value, entry->has_versions, txn_id.time, txn_id.nanos, txn_id.count);
+          log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
+                  entry->has_value, entry->has_versions,
+                  entry->has_versions ? entry->versions->txn_id.time : entry->value_txn_id.time,
+                  entry->has_versions ? entry->versions->txn_id.nanos : entry->value_txn_id.nanos,
+                  entry->has_versions ? entry->versions->txn_id.count : entry->value_txn_id.count,
+                  txn_id.time, txn_id.nanos, txn_id.count);
           // Entry exists - upgrade to version chain or add version
           if (!entry->has_value) {
             // Entry exists but no value - set first value (legacy mode)
@@ -1228,8 +1231,11 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             entry->has_versions = 0;
             entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
             entry->value_txn_id = txn_id;  // Store transaction ID
+            log_info("MVCC: Set first value (legacy mode) with txn_id=%lu.%09lu.%lu",
+                    txn_id.time, txn_id.nanos, txn_id.count);
           } else if (entry->has_versions) {
             // Already has version chain - add new version
+            log_info("MVCC: Adding to existing version chain");
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);

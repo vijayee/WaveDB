@@ -1113,6 +1113,8 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     }
 
     // 4. Sort by transaction ID
+    log_info("WAL Recovery: Sorting %zu entries by transaction ID", entry_count);
+
     if (entry_count > 0) {
         qsort(all_entries, entry_count, sizeof(recovery_entry_t),
               compare_recovery_entries);
@@ -1120,12 +1122,29 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     log_info("WAL Recovery: Total %zu entries to replay", entry_count);
 
+    // Check entries array
+    if (all_entries == NULL && entry_count > 0) {
+        fprintf(stderr, "ERROR: all_entries is NULL but entry_count=%zu\n", entry_count);
+        // Clean up and return error
+        if (manifest_entries) free(manifest_entries);
+        for (size_t i = 0; i < wal_count; i++) free(wal_files[i]);
+        free(wal_files);
+        return WAL_ERROR_MEMORY;
+    }
+
     // Track highest transaction ID for transaction manager update
-    transaction_id_t max_txn_id = {0};
+    transaction_id_t max_txn_id;
+    memset(&max_txn_id, 0, sizeof(transaction_id_t));
+    log_info("WAL Recovery: Initialized max_txn_id");
 
     // 5. Replay in order
     database_t* database = (database_t*)db;
+    log_info("WAL Recovery: Cast database pointer");
+
+    log_info("WAL Recovery: Starting replay loop, entry_count=%zu, all_entries=%p", entry_count, (void*)all_entries);
+
     for (size_t i = 0; i < entry_count; i++) {
+        log_info("WAL Recovery: Accessing entry %zu of %zu", i, entry_count);
         recovery_entry_t* entry = &all_entries[i];
 
         // Track highest transaction ID
@@ -1133,6 +1152,10 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
             max_txn_id = entry->txn_id;
         }
         buffer_t* data = entry->data;
+
+        log_info("WAL Recovery: Processing entry %zu: type=%d, data_size=%zu, txn_id=%lu.%09lu.%lu",
+                 i, entry->type, data ? data->size : 0,
+                 entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
 
         switch (entry->type) {
             case WAL_BATCH: {
@@ -1168,10 +1191,15 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 // Deserialize individual PUT/DELETE entry
                 // Format: CBOR array [path, value]
                 struct cbor_load_result result;
-                cbor_item_t* entry_cbor = cbor_load(data->data, data->size, &result);
+                cbor_item_t* entry_cbor;
+
+                log_info("WAL Recovery: Deserializing entry (type=%s, data_size=%zu)",
+                         entry->type == WAL_PUT ? "PUT" : "DELETE", data ? data->size : 0);
+
+                entry_cbor = cbor_load(data->data, data->size, &result);
                 if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
                     if (entry_cbor) cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Failed to load entry CBOR");
+                    log_error("WAL Recovery: Failed to load entry CBOR (error=%d)", result.error.code);
                     break;
                 }
 
@@ -1210,39 +1238,39 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
                 // Apply operation to trie
                 if (entry->type == WAL_PUT) {
-                    // Debug logging to file
-                    FILE* debug_file = fopen("/tmp/wal_debug.log", "a");
-                    if (debug_file) {
-                        fprintf(debug_file, "=== WAL Recovery: PUT operation ===\n");
-                        fprintf(debug_file, "Path identifiers: %d\n", path->identifiers.length);
-                        for (int i = 0; i < path->identifiers.length && i < 5; i++) {
-                            identifier_t* id = path->identifiers.data[i];
-                            fprintf(debug_file, "  Identifier %d: length=%zu, chunks=%d\n", i, id->length, id->chunks.length);
-                            // Print first few bytes of identifier
-                            fprintf(debug_file, "    Data bytes: ");
-                            for (int j = 0; j < id->length && j < 20; j++) {
-                                uint8_t byte = ((uint8_t*)id->chunks.data[0]->data)[j];
-                                fprintf(debug_file, "%02x ", byte);
-                            }
-                            fprintf(debug_file, "\n");
-                        }
-                        fprintf(debug_file, "Value length: %zu\n", value ? value->length : 0);
-                        fprintf(debug_file, "Txn ID: %lu.%09lu.%lu\n",
-                                entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
-                        fclose(debug_file);
+                    if (path == NULL) {
+                        log_error("WAL Recovery: Path is NULL, skipping entry");
+                        if (value) identifier_destroy(value);
+                        cbor_decref(&entry_cbor);
+                        continue;
                     }
+
+                    // Convert first identifier to string for logging
+                    char key_str[256] = {0};
+                    if (path->identifiers.length > 0) {
+                        identifier_t* id = path->identifiers.data[0];
+                        if (id->chunks.length > 0) {
+                            chunk_t* chunk = (chunk_t*)id->chunks.data[0];
+                            if (chunk && chunk->data) {
+                                size_t copy_len = (chunk->data->size < 255) ? chunk->data->size : 255;
+                                memcpy(key_str, chunk->data->data, copy_len);
+                                key_str[copy_len] = '\0';
+                            }
+                        }
+                    }
+
+                    log_info("WAL Recovery: Applying PUT key='%s' (path_depth=%zu, value_len=%zu, txn_id=%lu.%09lu.%lu)",
+                             key_str, path->identifiers.length, value ? value->length : 0,
+                             entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
 
                     hbtrie_insert_mvcc(database->trie, path, value, entry->txn_id);
-
-                    debug_file = fopen("/tmp/wal_debug.log", "a");
-                    if (debug_file) {
-                        fprintf(debug_file, "Returned from hbtrie_insert_mvcc\n\n");
-                        fclose(debug_file);
+                } else {
+                    if (path == NULL) {
+                        log_error("WAL Recovery: Path is NULL for DELETE, skipping entry");
+                        cbor_decref(&entry_cbor);
+                        continue;
                     }
 
-                    log_info("WAL Recovery: Applied PUT operation (txn_id=%lu.%09lu.%lu)",
-                             entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
-                } else {
                     identifier_t* removed = hbtrie_delete_mvcc(database->trie, path, entry->txn_id);
                     if (removed) identifier_destroy(removed);
                     log_info("WAL Recovery: Applied DELETE operation (txn_id=%lu.%09lu.%lu)",

@@ -5,26 +5,16 @@
 #include "transaction_id.h"
 #include <time.h>
 #include <string.h>
+#include <stdatomic.h>
 #include <arpa/inet.h>
 #include "../Util/threadding.h"
 
 // Thread-local pool size (number of IDs per batch)
 #define TXN_ID_BATCH_SIZE 1000
 
-// Thread-local pool for transaction ID generation
-typedef struct {
-    transaction_id_t current;    // Current ID in the pool
-    transaction_id_t max;        // Maximum ID in the pool
-    uint64_t remaining;          // Number of IDs remaining in pool
-    int initialized;             // Whether this thread pool is initialized
-} txn_id_pool_t;
-
 // Global state for transaction ID generation
-static PLATFORMLOCKTYPE(g_txn_id_lock);
 static transaction_id_t g_current_txn_id = {0, 0, 0};
-
-// Thread-local pool
-static __thread txn_id_pool_t thread_pool = {0};
+static atomic_uint_fast64_t g_global_count = ATOMIC_VAR_INIT(0);
 
 // One-time initialization control
 #if _WIN32
@@ -35,7 +25,7 @@ static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 // Actual initialization function (called once)
 static void transaction_id_do_init(void) {
-    platform_lock_init(&g_txn_id_lock);
+    // Nothing needed - atomic is already initialized
 }
 
 // Initialize global transaction ID generator (safe to call multiple times)
@@ -47,88 +37,52 @@ void transaction_id_init(void) {
 #endif
 }
 
-// Allocate a new batch of transaction IDs from global pool
-static transaction_id_t allocate_batch(void) {
-    platform_lock(&g_txn_id_lock);
-
+// Generate unique transaction ID (thread-safe with atomic counter)
+transaction_id_t transaction_id_get_next(void) {
     struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    // Atomic increment - much faster than mutex lock
+    // Count rollover is handled by timestamp-first ordering in comparison
+    uint64_t count = atomic_fetch_add(&g_global_count, 1);
 
     transaction_id_t next = {
         .time = (uint64_t)ts.tv_sec,
         .nanos = (uint64_t)ts.tv_nsec,
-        .count = 0
+        .count = count
     };
 
-    // First call ever
-    if (g_current_txn_id.time == 0 && g_current_txn_id.nanos == 0 && g_current_txn_id.count == 0) {
-        g_current_txn_id = next;
-        g_current_txn_id.count = TXN_ID_BATCH_SIZE;
-        platform_unlock(&g_txn_id_lock);
-        return next;
-    }
-
-    // Compare with current
-    int cmp = transaction_id_compare(&next, &g_current_txn_id);
-
-    if (cmp == 1) {
-        // New timestamp is strictly greater - use it
-        g_current_txn_id = next;
-        g_current_txn_id.count = TXN_ID_BATCH_SIZE;
-        platform_unlock(&g_txn_id_lock);
-        return next;
-    } else {
-        // Same time or clock went backward - use current + batch size
-        next = g_current_txn_id;
-        next.count += TXN_ID_BATCH_SIZE;
-        g_current_txn_id.count += TXN_ID_BATCH_SIZE;
-        platform_unlock(&g_txn_id_lock);
-        return next;
-    }
+    return next;
 }
 
-// Generate unique transaction ID (thread-safe with thread-local pool)
-transaction_id_t transaction_id_get_next(void) {
-    // Fast path: use thread-local pool if available
-    if (thread_pool.initialized && thread_pool.remaining > 0) {
-        thread_pool.remaining--;
-        thread_pool.current.count++;
-        return thread_pool.current;
-    }
-
-    // Slow path: allocate new batch from global pool
-    transaction_id_t batch_start = allocate_batch();
-
-    // Initialize thread-local pool
-    thread_pool.current = batch_start;
-    thread_pool.max.time = batch_start.time;
-    thread_pool.max.nanos = batch_start.nanos;
-    thread_pool.max.count = batch_start.count + TXN_ID_BATCH_SIZE - 1;
-    thread_pool.remaining = TXN_ID_BATCH_SIZE;
-    thread_pool.initialized = 1;
-
-    // Return first ID in batch
-    thread_pool.remaining--;
-    return thread_pool.current;
-}
-
-// Compare two transaction IDs lexicographically
+// Compare two transaction IDs
+// Primary ordering: timestamp (CLOCK_MONOTONIC is always increasing)
+// Secondary ordering: nanoseconds (within same second)
+// Tertiary ordering: count (within same timestamp, ensures uniqueness)
+// This handles count rollover correctly - when count wraps, timestamp will be greater
 int transaction_id_compare(const transaction_id_t* id1, const transaction_id_t* id2) {
+    // Primary: timestamp seconds
     if (id1->time > id2->time) {
         return 1;
     } else if (id1->time < id2->time) {
         return -1;
-    } else if (id1->nanos > id2->nanos) {
+    }
+
+    // Secondary: timestamp nanoseconds
+    if (id1->nanos > id2->nanos) {
         return 1;
     } else if (id1->nanos < id2->nanos) {
         return -1;
-    } else if (id1->count > id2->count) {
+    }
+
+    // Tertiary: count (guarantees uniqueness within same timestamp)
+    if (id1->count > id2->count) {
         return 1;
     } else if (id1->count < id2->count) {
         return -1;
-    } else {
-        return 0;
     }
+
+    return 0;
 }
 
 // Helper: write uint64_t in network byte order
@@ -165,14 +119,18 @@ void transaction_id_deserialize(transaction_id_t* id, const uint8_t* buf) {
 // This is needed after WAL recovery to prevent transaction ID collisions
 void transaction_id_advance_to(const transaction_id_t* target) {
     transaction_id_init();
-    platform_lock(&g_txn_id_lock);
 
-    // Only advance if target is greater than current
-    if (transaction_id_compare(target, &g_current_txn_id) > 0) {
-        g_current_txn_id = *target;
-        // Add one batch to ensure we're well past the target
-        g_current_txn_id.count += TXN_ID_BATCH_SIZE;
+    // Advance the global count atomically
+    uint64_t new_count = target->count + TXN_ID_BATCH_SIZE;  // Add buffer to ensure uniqueness
+    uint64_t current = atomic_load(&g_global_count);
+
+    // Use atomic compare-and-swap to ensure we only advance forward
+    while (new_count > current) {
+        if (atomic_compare_exchange_weak(&g_global_count, &current, new_count)) {
+            // Successfully updated
+            g_current_txn_id = *target;
+            break;
+        }
+        // Another thread updated current, retry the comparison
     }
-
-    platform_unlock(&g_txn_id_lock);
 }
