@@ -93,6 +93,16 @@ class WaveDB {
    * @returns {Promise<void>}
    */
   put(key, value, callback) {
+    // Validate required parameters
+    if (value === undefined || value === null) {
+      const error = new TypeError('Value is required for put operation');
+      if (typeof callback === 'function') {
+        callback(error);
+        return Promise.reject(error);
+      }
+      return Promise.reject(error);
+    }
+
     const promise = new Promise((resolve, reject) => {
       try {
         this._db.put(key, value, (err) => {

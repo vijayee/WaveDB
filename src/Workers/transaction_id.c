@@ -160,3 +160,19 @@ void transaction_id_deserialize(transaction_id_t* id, const uint8_t* buf) {
     id->nanos = read_uint64(buf + 8);
     id->count = read_uint64(buf + 16);
 }
+
+// Advance the global transaction ID generator to at least the given ID
+// This is needed after WAL recovery to prevent transaction ID collisions
+void transaction_id_advance_to(const transaction_id_t* target) {
+    transaction_id_init();
+    platform_lock(&g_txn_id_lock);
+
+    // Only advance if target is greater than current
+    if (transaction_id_compare(target, &g_current_txn_id) > 0) {
+        g_current_txn_id = *target;
+        // Add one batch to ensure we're well past the target
+        g_current_txn_id.count += TXN_ID_BATCH_SIZE;
+    }
+
+    platform_unlock(&g_txn_id_lock);
+}

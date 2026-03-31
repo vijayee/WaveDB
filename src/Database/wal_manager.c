@@ -1226,7 +1226,10 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     // Update transaction manager with highest transaction ID
     // This makes recovered MVCC entries visible to subsequent reads
     if (max_txn_id.count > 0 && database->tx_manager != NULL) {
-        atomic_store(&database->tx_manager->last_committed_txn_id, max_txn_id);
+        // Use lock to safely update the atomic transaction ID struct
+        platform_lock(&database->tx_manager->lock);
+        database->tx_manager->last_committed_txn_id = max_txn_id;
+        platform_unlock(&database->tx_manager->lock);
         log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);
     }
 

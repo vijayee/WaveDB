@@ -4,7 +4,7 @@
   # WaveDB Node.js Bindings
 </div>
 
-[Node.js](https://nodejs.org/) bindings for [WaveDB](../../README.md) - A hierarchical B+tree database.
+[Node.js](https://nodejs.org/) bindings for [WaveDB](../../README.md) - A hierarchical B+trie database. It is a love child of ForrestDB and MUMPS.
 
 ## Installation
 
