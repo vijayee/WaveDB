@@ -34,6 +34,10 @@ void transaction_id_serialize(const transaction_id_t* id, uint8_t* buf);
 // Deserialize transaction ID from network byte order (24 bytes)
 void transaction_id_deserialize(transaction_id_t* id, const uint8_t* buf);
 
+// Advance the global transaction ID generator to at least the given ID
+// This is needed after WAL recovery to prevent transaction ID collisions
+void transaction_id_advance_to(const transaction_id_t* target);
+
 #ifdef __cplusplus
 }
 #endif

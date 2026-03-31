@@ -5,6 +5,7 @@
 #include "../HBTrie/path.h"
 #include "../HBTrie/identifier.h"
 #include "../HBTrie/mvcc.h"
+#include "../Workers/transaction_id.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -1231,6 +1232,9 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
         database->tx_manager->last_committed_txn_id = max_txn_id;
         platform_unlock(&database->tx_manager->lock);
         log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);
+
+        // Advance global transaction ID generator to prevent collisions
+        transaction_id_advance_to(&max_txn_id);
     }
 
     // 6. Clean up
