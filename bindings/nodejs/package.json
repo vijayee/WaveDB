@@ -1,12 +1,18 @@
 {
-  "name": "wavedb",
+  "name": "@vijayee/wavedb",
   "version": "0.1.0",
   "description": "Node.js bindings for WaveDB - Hierarchical B+Tree Database",
   "main": "lib/wavedb.js",
+  "author": "Victor Morrow <victor.j.morrow@gmail.com>",
+  "homepage": "https://github.com/vijayee/WaveDB#readme",
+  "bugs": {
+    "url": "https://github.com/vijayee/WaveDB/issues"
+  },
   "scripts": {
     "build": "node-gyp rebuild",
     "test": "npm run build && mocha test/*.test.js",
-    "test:valgrind": "valgrind --leak-check=full node test/*.test.js"
+    "test:valgrind": "valgrind --leak-check=full node test/*.test.js",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "node-addon-api": "^7.0.0",
@@ -25,10 +31,21 @@
     "key-value",
     "hierarchical",
     "trie",
-    "btree"
+    "btree",
+    "mvcc",
+    "embedded-database",
+    "storage-engine"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/vijayee/WaveDB.git"
-  }
+    "url": "https://github.com/vijayee/WaveDB.git",
+    "directory": "bindings/nodejs"
+  },
+  "files": [
+    "lib/",
+    "src/",
+    "binding.gyp",
+    "README.md",
+    "LICENSE"
+  ]
 }

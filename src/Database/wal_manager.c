@@ -1158,10 +1158,14 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                     break;
                 }
 
-                // Verify it's an array with 2 elements
-                if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != 2) {
+                // Verify it's an array with correct number of elements
+                // PUT operations have 2 elements [path, value]
+                // DELETE operations have 1 element [path]
+                size_t expected_size = (entry->type == WAL_PUT) ? 2 : 1;
+                if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != expected_size) {
                     cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Invalid entry format");
+                    log_error("WAL Recovery: Invalid entry format (expected %zu elements, got %zu)",
+                              expected_size, cbor_isa_array(entry_cbor) ? cbor_array_size(entry_cbor) : 0);
                     break;
                 }
 
