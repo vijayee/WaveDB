@@ -275,19 +275,27 @@ version_entry_t* version_entry_find_visible(version_entry_t* versions,
 
   // Walk the chain (newest first)
   while (current != NULL) {
+    log_info("MVCC Visibility: Checking version txn_id=%lu.%09lu.%lu against read_txn_id=%lu.%09lu.%lu",
+             current->txn_id.time, current->txn_id.nanos, current->txn_id.count,
+             read_txn_id.time, read_txn_id.nanos, read_txn_id.count);
+
     // Check if this version is visible
     if (transaction_id_compare(&current->txn_id, &read_txn_id) <= 0) {
       // txn_id <= read_txn_id, so this version is visible
+      log_info("MVCC Visibility: Version IS visible");
       if (!current->is_deleted) {
         return current;  // Found a visible, non-deleted version
       }
       // Deleted version - no visible version exists
+      log_info("MVCC Visibility: Version is deleted, returning NULL");
       return NULL;
     }
+    log_info("MVCC Visibility: Version NOT visible, trying next");
     current = current->next;  // Try older version
   }
 
   // No visible version found
+  log_info("MVCC Visibility: No visible version found");
   return NULL;
 }
 

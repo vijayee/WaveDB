@@ -1205,11 +1205,13 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 // Apply operation to trie
                 if (entry->type == WAL_PUT) {
                     hbtrie_insert_mvcc(database->trie, path, value, entry->txn_id);
-                    log_info("WAL Recovery: Applied PUT operation");
+                    log_info("WAL Recovery: Applied PUT operation (txn_id=%lu.%09lu.%lu)",
+                             entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
                 } else {
                     identifier_t* removed = hbtrie_delete_mvcc(database->trie, path, entry->txn_id);
                     if (removed) identifier_destroy(removed);
-                    log_info("WAL Recovery: Applied DELETE operation");
+                    log_info("WAL Recovery: Applied DELETE operation (txn_id=%lu.%09lu.%lu)",
+                             entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
                 }
 
                 // Clean up
