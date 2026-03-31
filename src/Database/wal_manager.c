@@ -4,6 +4,7 @@
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/path.h"
 #include "../HBTrie/identifier.h"
+#include "../HBTrie/mvcc.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -18,6 +19,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 #include <sys/uio.h>
 #include <dirent.h>
 #include "../Util/log.h"  // For log_warn
@@ -1111,10 +1113,18 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     log_info("WAL Recovery: Total %zu entries to replay", entry_count);
 
+    // Track highest transaction ID for transaction manager update
+    transaction_id_t max_txn_id = {0};
+
     // 5. Replay in order
     database_t* database = (database_t*)db;
     for (size_t i = 0; i < entry_count; i++) {
         recovery_entry_t* entry = &all_entries[i];
+
+        // Track highest transaction ID
+        if (transaction_id_compare(&entry->txn_id, &max_txn_id) > 0) {
+            max_txn_id = entry->txn_id;
+        }
         buffer_t* data = entry->data;
 
         switch (entry->type) {
@@ -1211,6 +1221,13 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 fprintf(stderr, "WARNING: Unknown WAL entry type: %c\n", entry->type);
                 break;
         }
+    }
+
+    // Update transaction manager with highest transaction ID
+    // This makes recovered MVCC entries visible to subsequent reads
+    if (max_txn_id.count > 0 && database->tx_manager != NULL) {
+        atomic_store(&database->tx_manager->last_committed_txn_id, max_txn_id);
+        log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);
     }
 
     // 6. Clean up
