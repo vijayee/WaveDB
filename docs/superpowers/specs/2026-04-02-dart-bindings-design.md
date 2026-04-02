@@ -1,563 +1,1107 @@
-# Dart Bindings Design
+# Dart Bindings for WaveDB - Design Document
 
-**Date:** 2026-04-02  
-**Status:** Approved  
-**Author:** Claude Sonnet 4.6
+**Goal:** Provide Dart FFI bindings for WaveDB with async/sync operations, streaming, and object manipulation capabilities, matching the Node.js bindings API.
 
-## Overview
+**Architecture:** Dart FFI bindings using manual type definitions and function signatures. Thin FFI layer wraps C functions, with Dart wrapper classes providing the public API.
 
-This document describes the design for creating Dart FFI bindings for WaveDB, equivalent to the existing Node.js bindings. The bindings will support both server-side Dart VM applications and Flutter mobile/desktop apps.
+**Tech Stack:**
+- dart:ffi for native interop
+- Manual FFI bindings (no code generation)
+- Stream-based iteration (Dart idiomatic)
+- Async/sync API variants
 
-## Goals
-
-1. **Complete API parity** with Node.js bindings (sync + async operations, batch, objects, streaming)
-2. **Cross-platform support** (Linux x64/ARM64, macOS x64/ARM64, Windows x64, Android ARM64/x64, iOS ARM64)
-3. **Pre-built binaries** bundled in package for easy installation
-4. **Idiomatic Dart API** using async/await, Streams, and null safety
-5. **Comprehensive testing** porting all Node.js tests to Dart
+---
 
 ## Architecture
 
-### Package Structure
+### Module Structure
+
+**Core Principle:** Expose database_t as the primary interface, not hbtrie_t. HBTrie is an internal implementation detail.
 
 ```
 bindings/dart/
 ├── lib/
-│   ├── wavedb.dart              # Main library export
-│   ├── src/
-│   │   ├── wavedb.dart          # WaveDB class implementation
-│   │   ├── ffi/
-│   │   │   ├── bindings.dart   # FFI function signatures
-│   │   │   ├── structs.dart    # FFI struct definitions
-│   │   │   └── library.dart    # Native library loading
-│   │   ├── types/
-│   │   │   ├── path.dart       # Path type wrapper
-│   │   │   ├── identifier.dart # Identifier type wrapper
-│   │   │   └── batch.dart      # Batch operation types
-│   │   ├── utils/
-│   │   │   ├── iterator.dart   # ReadStream iterator
-│   │   │   └── converter.dart  # JS/Dart type conversion helpers
-│   │   └── exceptions.dart     # Exception hierarchy
-├── src/                         # C wrapper source
-│   ├── wavedb_wrapper.h        # C wrapper header
-│   └── wavedb_wrapper.c        # C wrapper implementation
-├── build/                       # Pre-built binaries
-│   ├── linux-x64/
-│   ├── linux-arm64/
-│   ├── macos-x64/
-│   ├── macos-arm64/
-│   ├── windows-x64/
-│   ├── android-arm64/
-│   └── android-x64/
+│   ├── wavedb.dart              # Library entry point
+│   ├── src.dart                  # Internal exports
+│   └── src/
+│       ├── native/
+│       │   ├── types.dart        # FFI type definitions
+│       │   ├── wavedb_bindings.dart  # FFI function bindings
+│       │   └── wavedb_library.dart  # Platform-specific loader
+│       ├── database.dart         # WaveDB public class
+│       ├── path.dart             # Path conversion
+│       ├── identifier.dart       # Value conversion
+│       ├── exceptions.dart       # WaveDBException
+│       ├── iterator.dart         # Stream iterator
+│       └── object_ops.dart       # putObject/getObject helpers
 ├── test/
-│   ├── unit/
-│   ├── integration/
-│   ├── performance/
-│   └── platform/
+│   ├── wavedb_test.dart          # Core operations tests
+│   ├── object_ops_test.dart      # Object operations tests
+│   └── stream_test.dart          # Iterator tests
+├── example/
+│   └── example.dart              # Usage examples
 ├── pubspec.yaml
-├── CMakeLists.txt
+├── build.yaml
 └── README.md
 ```
 
-### Key Design Decisions
+### Layered Architecture
 
-1. **Thin C Wrapper**: Expose a FFI-friendly C API that wraps WaveDB's complex structs
-2. **Opaque Handles**: Use opaque pointers for database/batch/iterator handles
-3. **Manual FFI Bindings**: Hand-written FFI bindings (not ffigen) for full control
-4. **Thread Pool for Async**: C wrapper maintains thread pool for background operations
-5. **Pre-built Binaries**: Platform-specific libraries bundled in package
-
-## C Wrapper API Design
-
-### Rationale
-
-WaveDB's C API uses complex structs (`database_t`, `path_t`, `identifier_t`) that are difficult to work with via FFI. A thin C wrapper provides:
-
-- **Opaque handles** instead of complex struct pointers
-- **Simpler function signatures** that map cleanly to FFI
-- **Error codes** instead of complex error structs
-- **String-based APIs** for paths instead of struct construction
-- **Thread pool** for async operations without isolates
-
-### API Functions
-
-```c
-// Lifecycle
-wavedb_handle_t* wavedb_open(const char* path, int* error_code);
-void wavedb_close(wavedb_handle_t* handle);
-const char* wavedb_get_version();
-
-// Synchronous Operations
-int wavedb_put(wavedb_handle_t* handle, const char* key, const char* value);
-int wavedb_get(wavedb_handle_t* handle, const char* key, char** value, int* value_len);
-int wavedb_delete(wavedb_handle_t* handle, const char* key);
-
-// Batch Operations
-wavedb_batch_t* wavedb_batch_create();
-int wavedb_batch_put(wavedb_batch_t* batch, const char* key, const char* value);
-int wavedb_batch_delete(wavedb_batch_t* batch, const char* key);
-int wavedb_batch_execute(wavedb_handle_t* handle, wavedb_batch_t* batch);
-void wavedb_batch_destroy(wavedb_batch_t* batch);
-
-// Async Operations (Thread Pool)
-async_handle_t* wavedb_put_async(wavedb_handle_t* handle, 
-                                   const char* key, 
-                                   const char* value,
-                                   async_callback_t callback,
-                                   void* user_data);
-
-async_handle_t* wavedb_get_async(wavedb_handle_t* handle,
-                                   const char* key,
-                                   async_callback_t callback,
-                                   void* user_data);
-
-int wavedb_async_wait(async_handle_t* async_handle, int timeout_ms);
-int wavedb_async_is_complete(async_handle_t* async_handle);
-int wavedb_async_get_result(async_handle_t* async_handle);
-char* wavedb_async_get_value(async_handle_t* async_handle, int* value_len);
-void wavedb_async_destroy(async_handle_t* async_handle);
-
-// Iteration
-wavedb_iterator_t* wavedb_iterator_create(wavedb_handle_t* handle);
-int wavedb_iterator_next(wavedb_iterator_t* iter, char** key, int* key_len, char** value, int* value_len);
-void wavedb_iterator_destroy(wavedb_iterator_t* iter);
-
-// Object Operations
-int wavedb_put_object(wavedb_handle_t* handle, const char* base_key, const char* json_value);
-int wavedb_get_object(wavedb_handle_t* handle, const char* base_key, char** json_value, int* value_len);
-
-// Memory Management
-void wavedb_free_string(char* str);
-void wavedb_cleanup(void);
-
-// Error Messages
-const char* wavedb_get_error_message(int error_code);
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Dart Application                       │
+├─────────────────────────────────────────────────────────┤
+│                   Public API Layer                        │
+│  ┌─────────────┐  ┌───────────┐  ┌─────────────────┐    │
+│  │  Database   │  │ WaveDB    │  │  StreamIterator │    │
+│  │  (public)   │  │Exception  │  │  (public)       │    │
+│  └──────┬──────┘  └───────────┘  └─────────────────┘    │
+├─────────┼───────────────────────────────────────────────┤
+│         │           Conversion Layer                      │
+│  ┌──────┴──────┐  ┌───────────┐  ┌─────────────────┐    │
+│  │    Path     │  │Identifier │  │    Object       │    │
+│  │ Conversion  │  │Conversion │  │   Flatten/Build  │    │
+│  └──────┬──────┘  └─────┬─────┘  └─────────────────┘    │
+├─────────┼───────────────┼─────────────────────────────────┤
+│         │     FFI Bindings Layer                          │
+│  ┌──────┴───────────────┴──────┐                         │
+│  │     WaveDBNative (dart:ffi) │                         │
+│  └──────────────┬──────────────┘                         │
+├────────────────┼─────────────────────────────────────────┤
+│                │    libwavedb.so / wavedb.dll            │
+│                │    (C Library)                          │
+│                │                                           │
+│  ┌─────────────┴─────────────┐                           │
+│  │    database_t / path_t    │                           │
+│  │    identifier_t / etc.    │                           │
+│  └───────────────────────────┘                           │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### Memory Ownership
+---
 
-- **Input strings**: Dart owns, C wrapper copies if needed
-- **Output strings**: C wrapper allocates, Dart must call `wavedb_free_string()`
-- **Handles**: C wrapper manages, Dart calls `*_destroy()` functions
-- **Async handles**: C wrapper manages, Dart calls `wavedb_async_destroy()`
+## FFI Bindings Layer
 
-### Thread Pool Implementation
-
-The C wrapper maintains a thread pool (8 threads by default) for async operations:
-
-1. Async operations are queued to thread pool
-2. Worker threads execute operations concurrently
-3. Results stored in async_handle with completion flag
-4. Dart polls completion or waits on condition variable
-
-Advantages:
-- **True parallelism** - Multiple operations run concurrently
-- **Efficient** - No thread creation overhead, threads are reused
-- **Scalable** - Configurable thread pool size
-- **Same handle** - Database handle shared across threads (WaveDB internally thread-safe)
-
-## Dart FFI Bindings Layer
-
-### Library Loading
+### Type Definitions
 
 ```dart
+// lib/src/native/types.dart
+import 'dart:ffi';
+
+/// Opaque database handle
+class database_t extends Opaque {}
+
+/// Opaque path handle  
+class path_t extends Opaque {}
+
+/// Opaque identifier handle
+class identifier_t extends Opaque {}
+
+/// Opaque iterator handle
+class database_iterator_t extends Opaque {}
+
+/// Reference counter (first field of refcounted structs)
+class refcounter_t extends Struct {
+  @Uint32()
+  external int count;
+}
+```
+
+### Function Bindings
+
+```dart
+// lib/src/native/wavedb_bindings.dart
 import 'dart:ffi';
 import 'dart:io';
+import 'types.dart';
 
-DynamicLibrary _openLibrary() {
-  if (Platform.isLinux) {
-    if (Platform.version.contains('arm64')) {
-      return DynamicLibrary.open('build/linux-arm64/libwavedb_wrapper.so');
-    }
-    return DynamicLibrary.open('build/linux-x64/libwavedb_wrapper.so');
-  }
-  if (Platform.isMacOS) {
-    if (Platform.version.contains('arm64')) {
-      return DynamicLibrary.open('build/macos-arm64/libwavedb_wrapper.dylib');
-    }
-    return DynamicLibrary.open('build/macos-x64/libwavedb_wrapper.dylib');
-  }
-  if (Platform.isWindows) {
-    return DynamicLibrary.open('build/windows-x64/wavedb_wrapper.dll');
-  }
-  // Android handled via jniLibs
-  throw UnsupportedError('Unsupported platform');
-}
-
-final DynamicLibrary _library = _openLibrary();
-```
-
-### FFI Type Definitions
-
-```dart
-// Opaque handles
-typedef WavedbHandle = Pointer<Void>;
-typedef WavedbBatch = Pointer<Void>;
-typedef WavedbIterator = Pointer<Void>;
-typedef AsyncHandle = Pointer<Void>;
-
-// Native function signatures (C side)
-typedef WavedbOpenNative = Pointer<WavedbHandle> Function(Pointer<Utf8> path, Pointer<Int32> error_code);
-typedef WavedbPutAsyncNative = Pointer<AsyncHandle> Function(
-  Pointer<WavedbHandle> handle,
-  Pointer<Utf8> key,
-  Pointer<Utf8> value,
-  Pointer<NativeFunction<AsyncCallback>> callback,
-  Pointer<Void> user_data
+typedef DatabaseCreateC = Pointer<database_t> Function(
+  Pointer<Utf8> path,
+  Uint32 chunk_size,
+  Pointer<Void> options,
+  Uint32 btree_node_size,
+  Uint32 wal_enabled,
+  Uint32 snapshot_enabled,
+  Pointer<Void> callback,
+  Pointer<Int32> error_code,
+);
+typedef DatabaseCreate = Pointer<database_t> Function(
+  Pointer<Utf8> path,
+  int chunk_size,
+  Pointer<Void> options,
+  int btree_node_size,
+  int wal_enabled,
+  int snapshot_enabled,
+  Pointer<Void> callback,
+  Pointer<Int32> error_code,
 );
 
-// Dart wrapper signatures
-typedef WavedbOpen = Pointer<WavedbHandle> Function(Pointer<Utf8> path, Pointer<Int32> error_code);
-typedef WavedbPutAsync = Pointer<AsyncHandle> Function(
-  Pointer<WavedbHandle> handle,
-  Pointer<Utf8> key,
-  Pointer<Utf8> value,
-  Pointer<NativeFunction<AsyncCallback>> callback,
-  Pointer<Void> user_data
+typedef DatabaseDestroyC = Void Function(Pointer<database_t> db);
+typedef DatabaseDestroy = void Function(Pointer<database_t> db);
+
+typedef DatabasePutSyncC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
+);
+typedef DatabasePutSync = int Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
 );
 
-// Binding class
-class WaveDBBindings {
-  final WavedbOpen open;
-  final WavedbPutAsync put_async;
-  final WavedbAsyncWait async_wait;
-  final WavedbAsyncGetResult async_get_result;
-  // ... more bindings
-  
-  WaveDBBindings(DynamicLibrary library)
-      : open = library.lookupFunction<WavedbOpenNative, WavedbOpen>('wavedb_open'),
-        put_async = library.lookupFunction<WavedbPutAsyncNative, WavedbPutAsync>('wavedb_put_async');
-}
-```
+typedef DatabaseGetSyncC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<Pointer<identifier_t>> result,
+);
+typedef DatabaseGetSync = int Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<Pointer<identifier_t>> result,
+);
 
-### Memory Management
+typedef DatabaseDeleteSyncC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+);
+typedef DatabaseDeleteSync = int Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+);
 
-```dart
-// Helper to allocate and convert Dart string to C string
-Pointer<Utf8> stringToNative(String str) {
-  return str.toNativeUtf8();
-}
+typedef PathCreateC = Pointer<path_t> Function();
+typedef PathCreate = Pointer<path_t> Function();
 
-// Helper to convert C string to Dart string and free C memory
-String nativeToString(Pointer<Utf8> native, int length) {
-  final str = native.toDartString(length: length);
-  calloc.free(native);
-  return str;
-}
-```
+typedef PathAppendC = Int32 Function(
+  Pointer<path_t> path,
+  Pointer<identifier_t> identifier,
+);
+typedef PathAppend = int Function(
+  Pointer<path_t> path,
+  Pointer<identifier_t> identifier,
+);
 
-## Public Dart API Design
+typedef PathDestroyC = Void Function(Pointer<path_t> path);
+typedef PathDestroy = void Function(Pointer<path_t> path);
 
-### Main WaveDB Class
+typedef IdentifierCreateC = Pointer<identifier_t> Function(
+  Pointer<Uint8> data,
+  Uint32 length,
+);
+typedef IdentifierCreate = Pointer<identifier_t> Function(
+  Pointer<Uint8> data,
+  int length,
+);
 
-```dart
-class WaveDB {
-  Pointer<WavedbHandle>? _handle;
-  final String _path;
-  final String _delimiter;
-  static final WaveDBBindings _bindings = WaveDBBindings(_library);
+typedef IdentifierDestroyC = Void Function(Pointer<identifier_t> id);
+typedef IdentifierDestroy = void Function(Pointer<identifier_t> id);
+
+// Iterator functions
+typedef DatabaseScanStartC = Pointer<database_iterator_t> Function(
+  Pointer<database_t> db,
+  Pointer<path_t> start_path,
+  Pointer<path_t> end_path,
+);
+typedef DatabaseScanStart = Pointer<database_iterator_t> Function(
+  Pointer<database_t> db,
+  Pointer<path_t> start_path,
+  Pointer<path_t> end_path,
+);
+
+typedef DatabaseScanNextC = Int32 Function(
+  Pointer<database_iterator_t> iter,
+  Pointer<Pointer<path_t>> out_path,
+  Pointer<Pointer<identifier_t>> out_value,
+);
+typedef DatabaseScanNext = int Function(
+  Pointer<database_iterator_t> iter,
+  Pointer<Pointer<path_t>> out_path,
+  Pointer<Pointer<identifier_t>> out_value,
+);
+
+typedef DatabaseScanEndC = Void Function(Pointer<database_iterator_t> iter);
+typedef DatabaseScanEnd = void Function(Pointer<database_iterator_t> iter);
+
+/// FFI bindings wrapper
+class WaveDBNative {
+  static DynamicLibrary? _lib;
   
-  // Constructor is private - use factory methods
-  WaveDB._(this._path, this._delimiter, this._handle);
-  
-  // ==================== OPEN/CLOSE ====================
-  
-  static Future<WaveDB> open(String path, {String delimiter = '/'}) async {
-    return _openInternal(path, delimiter);
-  }
-  
-  static WaveDB openSync(String path, {String delimiter = '/'}) {
-    return _openInternal(path, delimiter);
-  }
-  
-  static WaveDB _openInternal(String path, String delimiter) {
-    final pathPtr = path.toNativeUtf8();
-    final errorCodePtr = calloc<Int32>();
+  static DynamicLibrary _openLibrary() {
+    if (_lib != null) return _lib!;
     
+    if (Platform.isLinux) {
+      _lib = DynamicLibrary.open('libwavedb.so');
+    } else if (Platform.isMacOS) {
+      _lib = DynamicLibrary.open('libwavedb.dylib');
+    } else if (Platform.isWindows) {
+      _lib = DynamicLibrary.open('wavedb.dll');
+    } else {
+      throw UnsupportedError('Unsupported platform');
+    }
+    return _lib!;
+  }
+
+  // Lazy-loaded function pointers
+  static late final DatabaseCreate _databaseCreate = 
+      _openLibrary().lookupFunction<DatabaseCreateC, DatabaseCreate>('database_create');
+  static late final DatabaseDestroy _databaseDestroy = 
+      _openLibrary().lookupFunction<DatabaseDestroyC, DatabaseDestroy>('database_destroy');
+  static late final DatabasePutSync _databasePutSync = 
+      _openLibrary().lookupFunction<DatabasePutSyncC, DatabasePutSync>('database_put_sync');
+  static late final DatabaseGetSync _databaseGetSync = 
+      _openLibrary().lookupFunction<DatabaseGetSyncC, DatabaseGetSync>('database_get_sync');
+  static late final DatabaseDeleteSync _databaseDeleteSync = 
+      _openLibrary().lookupFunction<DatabaseDeleteSyncC, DatabaseDeleteSync>('database_delete_sync');
+  static late final PathCreate _pathCreate = 
+      _openLibrary().lookupFunction<PathCreateC, PathCreate>('path_create');
+  static late final PathAppend _pathAppend = 
+      _openLibrary().lookupFunction<PathAppendC, PathAppend>('path_append');
+  static late final PathDestroy _pathDestroy = 
+      _openLibrary().lookupFunction<PathDestroyC, PathDestroy>('path_destroy');
+  static late final IdentifierCreate _identifierCreate = 
+      _openLibrary().lookupFunction<IdentifierCreateC, IdentifierCreate>('identifier_create');
+  static late final IdentifierDestroy _identifierDestroy = 
+      _openLibrary().lookupFunction<IdentifierDestroyC, IdentifierDestroy>('identifier_destroy');
+
+  // Public methods delegate to native functions
+  static Pointer<database_t> databaseCreate(String path) {
+    final pathPtr = path.toNativeUtf8();
+    final errorPtr = calloc<Int32>();
     try {
-      final handle = _bindings.open(pathPtr, errorCodePtr);
-      if (errorCodePtr.value != 0) {
-        throwWaveDBError(errorCodePtr.value, _bindings);
+      final db = _databaseCreate(
+        pathPtr.cast(),
+        0,        // default chunk_size
+        nullptr,  // options
+        0,        // default btree_node_size  
+        0,        // default wal_enabled
+        1,        // snapshot_enabled
+        nullptr,  // callback
+        errorPtr,
+      );
+      if (db == nullptr) {
+        throw WaveDBException('DATABASE_ERROR', 'Failed to create database');
       }
-      
-      final instance = WaveDB._(path, delimiter, handle);
-      _finalizer.attach(instance, handle, detach: instance);
-      return instance;
+      return db;
     } finally {
       calloc.free(pathPtr);
-      calloc.free(errorCodePtr);
+      calloc.free(errorPtr);
     }
   }
-  
-  Future<void> close() async => closeSync();
-  
-  void closeSync() {
-    if (_handle != null) {
-      _finalizer.detach(this);
-      _bindings.close(_handle!);
-      _handle = null;
+
+  static void databaseDestroy(Pointer<database_t> db) {
+    _databaseDestroy(db);
+  }
+
+  static int databasePutSync(Pointer<database_t> db, Pointer<path_t> path, Pointer<identifier_t> value) {
+    return _databasePutSync(db, path, value);
+  }
+
+  static int databaseGetSync(Pointer<database_t> db, Pointer<path_t> path, Pointer<Pointer<identifier_t>> result) {
+    return _databaseGetSync(db, path, result);
+  }
+
+  static int databaseDeleteSync(Pointer<database_t> db, Pointer<path_t> path) {
+    return _databaseDeleteSync(db, path);
+  }
+
+  static Pointer<path_t> pathCreate() => _pathCreate();
+  static int pathAppend(Pointer<path_t> path, Pointer<identifier_t> id) => _pathAppend(path, id);
+  static void pathDestroy(Pointer<path_t> path) => _pathDestroy(path);
+  static Pointer<identifier_t> identifierCreate(Pointer<Uint8> data, int length) => 
+      _identifierCreate(data, length);
+  static void identifierDestroy(Pointer<identifier_t> id) => _identifierDestroy(id);
+}
+```
+
+---
+
+## Public API
+
+### Database Class
+
+```dart
+// lib/src/database.dart
+import 'dart:async';
+import 'dart:ffi';
+import 'package:meta/meta.dart';
+
+import 'native/types.dart';
+import 'native/wavedb_bindings.dart';
+import 'path.dart';
+import 'identifier.dart';
+import 'exceptions.dart';
+import 'iterator.dart';
+import 'object_ops.dart';
+
+/// WaveDB database instance
+class WaveDB {
+  Pointer<database_t>? _db;
+  final String _path;
+  final String _delimiter;
+  bool _isClosed = false;
+
+  WaveDB(String path, {String delimiter = '/'})
+      : _path = path,
+        _delimiter = delimiter {
+    _db = WaveDBNative.databaseCreate(path);
+  }
+
+  bool get isClosed => _isClosed;
+
+  void _checkClosed() {
+    if (_isClosed || _db == null) {
+      throw WaveDBException('DATABASE_CLOSED', 'Database is closed');
     }
   }
-  
-  // ==================== SYNC OPERATIONS ====================
-  
-  void putSync(Path key, String value);
-  String? getSync(Path key);
-  void deleteSync(Path key);
-  void batchSync(List<BatchOperation> operations);
-  void putObjectSync(Path baseKey, Map<String, dynamic> object);
-  Map<String, dynamic>? getObjectSync(Path baseKey);
-  
-  // ==================== ASYNC OPERATIONS ====================
-  
-  /// Async put - uses background thread pool in C
-  Future<void> put(Path key, String value) async {
-    _ensureOpen();
-    
-    final keyPtr = key.toString().toNativeUtf8();
-    final valuePtr = value.toNativeUtf8();
+
+  // ============================================================
+  // ASYNC OPERATIONS
+  // ============================================================
+
+  Future<void> put(dynamic key, dynamic value) async {
+    _checkClosed();
+    if (value == null) {
+      throw ArgumentError('Value is required for put operation');
+    }
+    return _runInIsolate(() => _putSyncInternal(key, value));
+  }
+
+  Future<dynamic> get(dynamic key) async {
+    _checkClosed();
+    return _runInIsolate(() => _getSyncInternal(key));
+  }
+
+  Future<void> del(dynamic key) async {
+    _checkClosed();
+    return _runInIsolate(() => _delSyncInternal(key));
+  }
+
+  Future<void> batch(List<Map<String, dynamic>> operations) async {
+    _checkClosed();
+    return _runInIsolate(() => _batchSyncInternal(operations));
+  }
+
+  Future<void> putObject(dynamic key, Map<String, dynamic> obj) async {
+    _checkClosed();
+    return _runInIsolate(() => _putObjectSyncInternal(key, obj));
+  }
+
+  Future<Map<String, dynamic>?> getObject(dynamic key) async {
+    _checkClosed();
+    return _runInIsolate(() => _getObjectSyncInternal(key));
+  }
+
+  // ============================================================
+  // SYNC OPERATIONS
+  // ============================================================
+
+  void putSync(dynamic key, dynamic value) {
+    _checkClosed();
+    _putSyncInternal(key, value);
+  }
+
+  dynamic getSync(dynamic key) {
+    _checkClosed();
+    return _getSyncInternal(key);
+  }
+
+  void delSync(dynamic key) {
+    _checkClosed();
+    _delSyncInternal(key);
+  }
+
+  void batchSync(List<Map<String, dynamic>> operations) {
+    _checkClosed();
+    _batchSyncInternal(operations);
+  }
+
+  void putObjectSync(dynamic key, Map<String, dynamic> obj) {
+    _checkClosed();
+    _putObjectSyncInternal(key, obj);
+  }
+
+  Map<String, dynamic>? getObjectSync(dynamic key) {
+    _checkClosed();
+    return _getObjectSyncInternal(key);
+  }
+
+  // ... internal implementations ...
+
+  // ============================================================
+  // STREAMING
+  // ============================================================
+
+  Stream<KeyValue> createReadStream({
+    dynamic start,
+    dynamic end,
+    bool reverse = false,
+    bool keys = true,
+    bool values = true,
+  }) {
+    _checkClosed();
+    return WaveDBIterator(
+      db: _db!,
+      delimiter: _delimiter,
+      startPath: start,
+      endPath: end,
+      reverse: reverse,
+      keys: keys,
+      values: values,
+    ).stream;
+  }
+
+  // ============================================================
+  // LIFECYCLE
+  // ============================================================
+
+  void close() {
+    if (_db != null && !_isClosed) {
+      WaveDBNative.databaseDestroy(_db!);
+      _db = null;
+      _isClosed = true;
+    }
+  }
+
+  Future<T> _runInIsolate<T>(T Function() operation) async {
+    return operation();
+  }
+}
+
+class KeyValue {
+  final dynamic key;
+  final dynamic value;
+  KeyValue({this.key, this.value});
+}
+```
+
+---
+
+## Key/Value Conversion
+
+### Path Conversion
+
+```dart
+// lib/src/path.dart
+import 'dart:ffi';
+import 'native/types.dart';
+import 'native/wavedb_bindings.dart';
+import 'identifier.dart';
+
+class PathConverter {
+  static Pointer<path_t> toNative(dynamic key, String delimiter) {
+    final path = WaveDBNative.pathCreate();
     
     try {
-      final asyncHandle = _bindings.put_async(_handle!, keyPtr, valuePtr, nullptr, nullptr);
+      List<String> parts;
       
-      // Wait in isolate for true async
-      await Isolate.run(() {
-        while (_bindings.async_is_complete(asyncHandle) == 0) {
-          usleep(1000); // 1ms sleep
+      if (key is String) {
+        parts = key.split(delimiter).where((s) => s.isNotEmpty).toList();
+      } else if (key is List) {
+        parts = key.map((e) => e.toString()).toList();
+      } else {
+        throw ArgumentError('Key must be String or List<String>');
+      }
+      
+      if (parts.isEmpty) {
+        throw ArgumentError('Key cannot be empty');
+      }
+      
+      for (final part in parts) {
+        final partPtr = part.toNativeUtf8();
+        try {
+          final id = IdentifierConverter.fromDataPointer(
+            partPtr.cast(),
+            part.length,
+          );
+          try {
+            final rc = WaveDBNative.pathAppend(path, id);
+            if (rc != 0) {
+              throw WaveDBException('INVALID_PATH', 'Failed to append path component');
+            }
+          } finally {
+            // pathAppend takes ownership of identifier
+          }
+        } finally {
+          calloc.free(partPtr);
+        }
+      }
+      
+      return path;
+    } catch (e) {
+      WaveDBNative.pathDestroy(path);
+      rethrow;
+    }
+  }
+
+  static dynamic fromNative(Pointer<path_t> path, String delimiter, {bool asArray = false}) {
+    // TODO: Implement proper path reconstruction
+    final parts = <String>[];
+    if (asArray) {
+      return parts;
+    } else {
+      return parts.join(delimiter);
+    }
+  }
+}
+```
+
+### Identifier Conversion
+
+```dart
+// lib/src/identifier.dart
+import 'dart:ffi';
+import 'dart:typed_data';
+import 'native/types.dart';
+import 'native/wavedb_bindings.dart';
+
+class IdentifierConverter {
+  static Pointer<identifier_t> toNative(dynamic value) {
+    if (value is String) {
+      final utf8Bytes = value.toNativeUtf8();
+      try {
+        return fromDataPointer(utf8Bytes.cast(), value.length);
+      } finally {
+        // identifier_create should copy the data
+      }
+    } else if (value is Uint8List) {
+      final ptr = calloc<Uint8>(value.length);
+      try {
+        ptr.asTypedList(value.length).setAll(0, value);
+        return fromDataPointer(ptr.cast(), value.length);
+      } finally {
+        // Cleanup handled by caller
+      }
+    } else if (value is List<int>) {
+      final bytes = Uint8List.fromList(value);
+      final ptr = calloc<Uint8>(bytes.length);
+      try {
+        ptr.asTypedList(bytes.length).setAll(0, bytes);
+        return fromDataPointer(ptr.cast(), bytes.length);
+      } finally {
+        // Cleanup handled by caller
+      }
+    } else {
+      throw ArgumentError('Value must be String, Uint8List, or List<int>');
+    }
+  }
+
+  static Pointer<identifier_t> fromDataPointer(Pointer<Uint8> data, int length) {
+    return WaveDBNative.identifierCreate(data, length);
+  }
+
+  static dynamic fromNative(Pointer<identifier_t> id) {
+    if (id == nullptr) return null;
+    
+    final bytes = _readIdentifierBytes(id);
+    
+    if (_isPrintableUTF8(bytes)) {
+      return String.fromCharCodes(bytes);
+    } else {
+      return Uint8List.fromList(bytes);
+    }
+  }
+
+  static List<int> _readIdentifierBytes(Pointer<identifier_t> id) {
+    // TODO: Implement chunk reading via FFI
+    return [];
+  }
+
+  static bool _isPrintableUTF8(List<int> bytes) {
+    if (bytes.isEmpty) return true;
+    try {
+      final str = String.fromCharCodes(bytes);
+      return str.codeUnits.every((c) => c >= 32 && c < 127);
+    } catch (e) {
+      return false;
+    }
+  }
+}
+```
+
+---
+
+## Object Operations (Iterative)
+
+```dart
+// lib/src/object_ops.dart
+import 'dart:typed_data';
+
+class ObjectOps {
+  static List<Map<String, dynamic>> flattenObject(
+    dynamic key,
+    Map<String, dynamic> obj,
+    String delimiter,
+  ) {
+    final operations = <Map<String, dynamic>>[];
+    final basePath = <String>[];
+    
+    if (key != null) {
+      if (key is String) {
+        basePath.addAll(key.split(delimiter).where((s) => s.isNotEmpty));
+      } else if (key is List) {
+        basePath.addAll(key.map((e) => e.toString()));
+      }
+    }
+    
+    // Stack entries: (object/value, current path)
+    final stack = <MapEntry<dynamic, List<String>>>[
+      MapEntry(obj, List<String>.from(basePath)),
+    ];
+    
+    while (stack.isNotEmpty) {
+      final entry = stack.removeLast();
+      final value = entry.key;
+      final pathParts = entry.value;
+      
+      if (value is Map<String, dynamic> || value is Map) {
+        final map = value as Map;
+        final keys = value.keys.toList().reversed;
+        
+        for (final k in keys) {
+          final newPath = List<String>.from(pathParts);
+          newPath.add(k.toString());
+          stack.add(MapEntry(map[k], newPath));
+        }
+      } else if (value is List) {
+        for (var i = value.length - 1; i >= 0; i--) {
+          final newPath = List<String>.from(pathParts);
+          newPath.add(i.toString());
+          stack.add(MapEntry(value[i], newPath));
+        }
+      } else {
+        operations.add({
+          'type': 'put',
+          'key': pathParts,
+          'value': _convertLeafValue(value),
+        });
+      }
+    }
+    
+    return operations;
+  }
+
+  static dynamic _convertLeafValue(dynamic value) {
+    if (value == null) return '';
+    if (value is String || value is Uint8List || value is List<int>) return value;
+    return value.toString();
+  }
+
+  static Map<String, dynamic> reconstructObject(
+    List<MapEntry<List<String>, dynamic>> entries,
+    List<String> basePath,
+  ) {
+    final result = <String, dynamic>{};
+    
+    for (final entry in entries) {
+      final relativePath = _getRelativePath(entry.key, basePath);
+      if (relativePath.isEmpty) continue;
+      
+      var current = result;
+      
+      for (var i = 0; i < relativePath.length - 1; i++) {
+        final key = relativePath[i];
+        if (!current.containsKey(key)) {
+          current[key] = <String, dynamic>{};
+        }
+        current = current[key] as Map<String, dynamic>;
+      }
+      
+      current[relativePath.last] = entry.value;
+    }
+    
+    return _convertArrays(result) as Map<String, dynamic>;
+  }
+
+  static List<String> _getRelativePath(List<String> path, List<String> basePath) {
+    if (basePath.isEmpty) return path;
+    if (path.length < basePath.length) return [];
+    
+    for (var i = 0; i < basePath.length; i++) {
+      if (path[i] != basePath[i]) return [];
+    }
+    
+    return path.sublist(basePath.length);
+  }
+
+  static dynamic _convertArrays(dynamic obj) {
+    if (obj is! Map<String, dynamic>) return obj;
+    
+    final keys = obj.keys.toList();
+    if (_isContiguousNumericKeys(keys)) {
+      final indices = keys.map(int.parse).toList()..sort();
+      final arr = <dynamic>[];
+      
+      for (final idx in indices) {
+        arr.add(_convertArrays(obj[idx.toString()]));
+      }
+      return arr;
+    }
+    
+    final result = <String, dynamic>{};
+    obj.forEach((key, value) {
+      result[key] = _convertArrays(value);
+    });
+    
+    return result;
+  }
+
+  static bool _isContiguousNumericKeys(List<String> keys) {
+    if (keys.isEmpty) return false;
+    
+    final indices = <int>[];
+    for (final key in keys) {
+      final num = int.tryParse(key);
+      if (num == null) return false;
+      indices.add(num);
+    }
+    
+    indices.sort();
+    return indices.first == 0 && indices.last == indices.length - 1;
+  }
+}
+```
+
+---
+
+## Streaming
+
+```dart
+// lib/src/iterator.dart
+import 'dart:async';
+import 'dart:ffi';
+import 'native/types.dart';
+import 'native/wavedb_bindings.dart';
+import 'path.dart';
+import 'identifier.dart';
+import 'exceptions.dart';
+
+class WaveDBIterator {
+  final Pointer<database_t> _db;
+  final String _delimiter;
+  final dynamic _startPath;
+  final dynamic _endPath;
+  final bool _reverse;
+  final bool _keys;
+  final bool _values;
+
+  Pointer<database_iterator_t>? _nativeIterator;
+  bool _started = false;
+  bool _done = false;
+
+  WaveDBIterator({
+    required Pointer<database_t> db,
+    required String delimiter,
+    dynamic startPath,
+    dynamic endPath,
+    bool reverse = false,
+    bool keys = true,
+    bool values = true,
+  })  : _db = db,
+        _delimiter = delimiter,
+        _startPath = startPath,
+        _endPath = endPath,
+        _reverse = reverse,
+        _keys = keys,
+        _values = values;
+
+  Stream<KeyValue> get stream => _createStream();
+
+  Stream<KeyValue> _createStream() async* {
+    try {
+      _startIterator();
+      
+      while (!_done) {
+        final entry = _readNext();
+        if (entry == null) {
+          _done = true;
+          break;
         }
         
-        final result = _bindings.async_get_result(asyncHandle);
-        _bindings.async_destroy(asyncHandle);
-        return result;
-      });
-      
-      if (result != 0) {
-        throwWaveDBError(result, _bindings, context: 'Failed to put key: $key');
+        yield KeyValue(
+          key: _keys ? entry.key : null,
+          value: _values ? entry.value : null,
+        );
       }
     } finally {
-      calloc.free(keyPtr);
+      _endIterator();
+    }
+  }
+
+  void _startIterator() {
+    if (_started) return;
+    _started = true;
+
+    Pointer<path_t>? startNative;
+    Pointer<path_t>? endNative;
+
+    try {
+      if (_startPath != null) {
+        startNative = PathConverter.toNative(_startPath, _delimiter);
+      }
+      if (_endPath != null) {
+        endNative = PathConverter.toNative(_endPath, _delimiter);
+      }
+
+      _nativeIterator = WaveDBNative.databaseScanStart(
+        _db,
+        startNative ?? nullptr,
+        endNative ?? nullptr,
+      );
+
+      if (_nativeIterator == nullptr) {
+        throw WaveDBException('IO_ERROR', 'Failed to create iterator');
+      }
+    } finally {
+      // Scan start takes ownership of paths
+    }
+  }
+
+  KeyValue? _readNext() {
+    if (_nativeIterator == null || _nativeIterator == nullptr) {
+      return null;
+    }
+
+    final pathPtr = calloc<Pointer<path_t>>();
+    final valuePtr = calloc<Pointer<identifier_t>>();
+
+    try {
+      final rc = WaveDBNative.databaseScanNext(
+        _nativeIterator!,
+        pathPtr,
+        valuePtr,
+      );
+
+      if (rc != 0) {
+        _done = true;
+        return null;
+      }
+
+      final path = pathPtr.value;
+      final value = valuePtr.value;
+
+      try {
+        final keyResult = PathConverter.fromNative(path, _delimiter);
+        final valueResult = IdentifierConverter.fromNative(value);
+
+        return KeyValue(key: keyResult, value: valueResult);
+      } finally {
+        WaveDBNative.pathDestroy(path);
+        WaveDBNative.identifierDestroy(value);
+      }
+    } finally {
+      calloc.free(pathPtr);
       calloc.free(valuePtr);
     }
   }
-  
-  Future<String?> get(Path key);
-  Future<void> delete(Path key);
-  Future<void> batch(List<BatchOperation> operations);
-  Future<void> putObject(Path baseKey, Map<String, dynamic> object);
-  Future<Map<String, dynamic>?> getObject(Path baseKey);
-  
-  // ==================== STREAMING ====================
-  
-  Stream<MapEntry<Path, String>> createReadStream({Path? prefix});
-  WaveDBIterator createSyncIterator({Path? prefix});
-}
-```
 
-### Path Type
-
-```dart
-class Path {
-  final List<String> parts;
-  final String delimiter;
-  
-  Path(this.parts, {this.delimiter = '/'});
-  
-  factory Path.fromString(String path, {String delimiter = '/'}) {
-    return Path(path.split(delimiter), delimiter: delimiter);
-  }
-  
-  Path operator +(String part) => Path([...parts, part], delimiter: delimiter);
-  
-  bool startsWith(Path other) {
-    if (other.parts.length > parts.length) return false;
-    for (int i = 0; i < other.parts.length; i++) {
-      if (parts[i] != other.parts[i]) return false;
+  void _endIterator() {
+    if (_nativeIterator != null && _nativeIterator != nullptr) {
+      WaveDBNative.databaseScanEnd(_nativeIterator!);
+      _nativeIterator = null;
     }
-    return true;
   }
-  
-  @override
-  String toString() => parts.join(delimiter);
+}
+
+class KeyValue {
+  final dynamic key;
+  final dynamic value;
+  KeyValue({this.key, this.value});
 }
 ```
 
-### Batch Operations
-
-```dart
-abstract class BatchOperation {
-  Path get key;
-}
-
-class PutOperation implements BatchOperation {
-  @override
-  final Path key;
-  final String value;
-  
-  PutOperation(this.key, this.value);
-}
-
-class DeleteOperation implements BatchOperation {
-  @override
-  final Path key;
-  
-  DeleteOperation(this.key);
-}
-```
-
-### Usage Example
-
-```dart
-import 'package:wavedb/wavedb.dart';
-
-void main() async {
-  // Async API
-  final db = await WaveDB.open('/path/to/db');
-  
-  await db.put(Path(['users', 'alice', 'name']), 'Alice');
-  final name = await db.get(Path(['users', 'alice', 'name']));
-  
-  await db.putObject(Path(['users', 'bob']), {'name': 'Bob', 'age': 30});
-  final user = await db.getObject(Path(['users', 'bob']));
-  
-  await db.batch([
-    PutOperation(Path(['key1']), 'value1'),
-    DeleteOperation(Path(['old'])),
-  ]);
-  
-  await for (final entry in db.createReadStream(prefix: Path(['users']))) {
-    print('${entry.key}: ${entry.value}');
-  }
-  
-  await db.close();
-  
-  // Sync API
-  final dbSync = WaveDB.openSync('/path/to/db');
-  dbSync.putSync(Path(['counter']), '1');
-  print(dbSync.getSync(Path(['counter'])));
-  dbSync.closeSync();
-}
-```
+---
 
 ## Error Handling
 
-### Error Codes
+```dart
+// lib/src/exceptions.dart
 
-```c
-#define WAVEDB_OK                    0
-#define WAVEDB_ERROR_UNKNOWN        1
-#define WAVEDB_ERROR_INVALID_HANDLE 2
-#define WAVEDB_ERROR_INVALID_PATH   3
-#define WAMEDB_ERROR_KEY_NOT_FOUND   404
-#define WAVEDB_ERROR_OUT_OF_MEMORY  5
-#define WAVEDB_ERROR_DATABASE       100
-#define WAVEDB_ERROR_LOCKING        101
-#define WAVEDB_ERROR_CORRUPTION     102
-#define WAVEDB_ERROR_IO             103
+class WaveDBException implements Exception {
+  final String code;
+  final String message;
+
+  WaveDBException(this.code, this.message);
+
+  @override
+  String toString() => 'WaveDBException($code): $message';
+
+  static const String notFound = 'NOT_FOUND';
+  static const String invalidPath = 'INVALID_PATH';
+  static const String ioError = 'IO_ERROR';
+  static const String databaseClosed = 'DATABASE_CLOSED';
+  static const String invalidArgument = 'INVALID_ARGUMENT';
+  static const String notSupported = 'NOT_SUPPORTED';
+  static const String corruption = 'CORRUPTION';
+  static const String conflict = 'CONFLICT';
+
+  factory WaveDBException.notFound([String? key]) {
+    return WaveDBException(notFound, key != null ? 'Key not found: $key' : 'Key not found');
+  }
+
+  factory WaveDBException.invalidPath(String path, [String? reason]) {
+    return WaveDBException(
+      invalidPath,
+      reason != null ? 'Invalid path "$path": $reason' : 'Invalid path: $path',
+    );
+  }
+
+  factory WaveDBException.ioError(String operation, [String? details]) {
+    return WaveDBException(
+      ioError,
+      details != null ? '$operation failed: $details' : '$operation failed',
+    );
+  }
+
+  factory WaveDBException.databaseClosed() {
+    return WaveDBException(databaseClosed, 'Database is closed');
+  }
+
+  factory WaveDBException.invalidArgument(String message) {
+    return WaveDBException(invalidArgument, message);
+  }
+
+  factory WaveDBException.notSupported(String operation) {
+    return WaveDBException(notSupported, 'Operation not supported: $operation');
+  }
+}
+
+class ErrorConverter {
+  static WaveDBException? fromReturnCode(int rc, {String? context}) {
+    switch (rc) {
+      case 0:
+        return null;
+      case -2:
+        return WaveDBException.notFound(context);
+      case -1:
+        return WaveDBException.ioError(context ?? 'Unknown operation');
+      default:
+        return WaveDBException('UNKNOWN', 'Unknown error code: $rc');
+    }
+  }
+
+  static WaveDBException fromMessage(String message) {
+    final upperMessage = message.toUpperCase();
+    
+    if (upperMessage.contains('NOT_FOUND') || upperMessage.contains('KEY NOT FOUND')) {
+      return WaveDBException.notFound();
+    }
+    if (upperMessage.contains('INVALID_PATH') || upperMessage.contains('INVALID KEY')) {
+      return WaveDBException.invalidPath(message);
+    }
+    if (upperMessage.contains('IO_ERROR') || upperMessage.contains('I/O ERROR')) {
+      return WaveDBException.ioError('Operation', message);
+    }
+    if (upperMessage.contains('DATABASE_CLOSED')) {
+      return WaveDBException.databaseClosed();
+    }
+    
+    return WaveDBException('UNKNOWN', message);
+  }
+}
 ```
 
-### Exception Hierarchy
+---
+
+## Platform Support
 
 ```dart
-class WaveDBException implements Exception {
-  final int errorCode;
-  final String message;
-  
-  WaveDBException(this.errorCode, this.message);
-  @override
-  String toString() => 'WaveDBException($errorCode): $message';
-}
+// lib/src/native/wavedb_library.dart
+import 'dart:io';
+import 'dart:ffi';
+import '../exceptions.dart';
 
-class KeyNotFoundException extends WaveDBException {
-  KeyNotFoundException(String key) : super(404, 'Key not found: $key');
-}
+class WaveDBLibrary {
+  static DynamicLibrary? _lib;
+  static String? _libPath;
 
-class InvalidHandleException extends WaveDBException {
-  InvalidHandleException() : super(2, 'Invalid database handle');
-}
+  static void setLibraryPath(String path) {
+    _libPath = path;
+    _lib = null;
+  }
 
-class DatabaseClosedException extends StateError {
-  DatabaseClosedException() : super('Database is closed');
+  static DynamicLibrary load() {
+    if (_lib != null) return _lib!;
+
+    if (_libPath != null) {
+      _lib = DynamicLibrary.open(_libPath!);
+      return _lib!;
+    }
+
+    if (Platform.isLinux) {
+      final paths = [
+        'libwavedb.so',
+        './libwavedb.so',
+        '/usr/local/lib/libwavedb.so',
+        '/usr/lib/libwavedb.so',
+      ];
+      for (final path in paths) {
+        try {
+          _lib = DynamicLibrary.open(path);
+          return _lib!;
+        } catch (_) {}
+      }
+      throw WaveDBException('LIBRARY_NOT_FOUND', 
+        'libwavedb.so not found. Tried: ${paths.join(", ")}');
+    }
+    
+    if (Platform.isMacOS) {
+      final paths = [
+        'libwavedb.dylib',
+        './libwavedb.dylib',
+        '/usr/local/lib/libwavedb.dylib',
+      ];
+      for (final path in paths) {
+        try {
+          _lib = DynamicLibrary.open(path);
+          return _lib!;
+        } catch (_) {}
+      }
+      throw WaveDBException('LIBRARY_NOT_FOUND',
+        'libwavedb.dylib not found. Tried: ${paths.join(", ")}');
+    }
+    
+    if (Platform.isWindows) {
+      final paths = [
+        'wavedb.dll',
+        '.\\wavedb.dll',
+      ];
+      for (final path in paths) {
+        try {
+          _lib = DynamicLibrary.open(path);
+          return _lib!;
+        } catch (_) {}
+      }
+      throw WaveDBException('LIBRARY_NOT_FOUND',
+        'wavedb.dll not found. Tried: ${paths.join(", ")}');
+    }
+    
+    throw WaveDBException('UNSUPPORTED_PLATFORM',
+      'WaveDB is not supported on ${Platform.operatingSystem}');
+  }
 }
 ```
 
-## Build and Distribution
+---
 
-### CMake Build
-
-```cmake
-cmake_minimum_required(VERSION 3.15)
-project(wavedb_wrapper)
-
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -fPIC")
-
-set(WRAPPER_SOURCES src/wavedb_wrapper.c)
-
-include_directories(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../src
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/libcbor/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/hashmap/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/xxhash
-)
-
-add_library(wavedb_wrapper SHARED ${WRAPPER_SOURCES})
-
-target_link_libraries(wavedb_wrapper
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../build-release/libwavedb.a
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../build-release/libxxhash.a
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../build-release/libhashmap.a
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../build-release/deps/libcbor/src/libcbor.a
-    pthread
-)
-```
-
-### Platform Support
-
-| Platform | Architecture | Library Name |
-|----------|--------------|--------------|
-| Linux | x64, ARM64 | libwavedb_wrapper.so |
-| macOS | x64, ARM64 | libwavedb_wrapper.dylib |
-| Windows | x64 | wavedb_wrapper.dll |
-| Android | ARM64, x64 | libwavedb_wrapper.so |
-| iOS | ARM64 | wavedb_wrapper.framework |
-
-### Build Script
-
-A comprehensive `build_all_platforms.sh` script builds for all target platforms:
-
-1. Ensures WaveDB library is built
-2. Compiles wrapper for each platform/architecture
-3. Uses cross-compilers where needed (ARM, Windows)
-4. Uses Android NDK for Android builds
-5. Uses iOS toolchain for iOS builds
-
-### GitHub Actions CI/CD
-
-Automated builds for:
-- Linux x64/ARM64
-- macOS x64/ARM64
-- Windows x64
-- Android ARM64/x64
-
-Artifacts packaged and uploaded for distribution.
-
-### pubspec.yaml
+## Build Configuration
 
 ```yaml
+# pubspec.yaml
 name: wavedb
 version: 0.1.0
-description: Dart bindings for WaveDB
+description: Dart bindings for WaveDB - hierarchical key-value database
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
   ffi: ^2.1.0
-  path: ^1.8.0
+  meta: ^1.9.0
 
 dev_dependencies:
   test: ^1.24.0
-  benchmark_harness: ^2.2.2
+  lints: ^3.0.0
 
 platforms:
   linux:
@@ -565,159 +1109,80 @@ platforms:
   windows:
 ```
 
-## Testing Strategy
-
-### Test Organization
-
-```
-test/
-├── unit/
-│   ├── path_test.dart
-│   ├── batch_test.dart
-│   └── exception_test.dart
-├── integration/
-│   ├── wavedb_test.dart        # Basic operations
-│   ├── mvcc_test.dart          # MVCC version chains
-│   ├── snapshot_test.dart      # Snapshot serialization
-│   ├── persistence_test.dart   # Persistence tests
-│   ├── batch_test.dart         # Batch operations
-│   ├── object_test.dart        # Object operations
-│   └── stream_test.dart        # Streaming
-├── performance/
-│   └── benchmark_test.dart
-└── platform/
-    ├── flutter_test.dart
-    └── isolate_test.dart
-```
-
-### Test Coverage
-
-Porting all Node.js tests:
-
-1. **Basic Operations** (wavedb_test.dart)
-   - Put/Get/Delete
-   - Overwrite
-   - Non-existent keys
-   - Sync operations
-
-2. **MVCC Version Chains** (mvcc_test.dart)
-   - Simple overwrite
-   - Multiple overwrites
-   - Delete operations
-   - Overwrite then delete
-   - Async operations with overwrites
-   - Batch operations with overwrites
-   - Multiple keys with overwrites
-   - Database close and reopen
-
-3. **Snapshot with Version Chains** (snapshot_test.dart)
-   - Single write without version chain
-   - Two writes to same key
-   - Multiple overwrites (10 versions)
-   - Complex version chains across restart
-   - Empty database snapshot
-
-4. **Batch Operations** (batch_test.dart)
-   - Batch put operations
-   - Batch mixed operations
-   - Large batch (1000 operations)
-   - Sync batch
-
-5. **Object Operations** (object_test.dart)
-   - Put and get object
-   - Nested object
-   - Empty object
-   - Non-existent object
-
-6. **Streaming** (stream_test.dart)
-   - Read all entries
-   - Read with prefix
-   - Sync iterator
-
-7. **Isolate Concurrency** (isolate_test.dart)
-   - Concurrent writes from multiple isolates
-   - Concurrent reads
-
-### Test Fixtures
-
 ```dart
-class TestFixture {
-  late WaveDB db;
-  late Directory tempDir;
-  
-  Future<void> setUp({String delimiter = '/'}) async {
-    tempDir = await Directory.systemTemp.createTemp('wavedb_test_');
-    db = await WaveDB.open(tempDir.path, delimiter: delimiter);
-  }
-  
-  Future<void> tearDown() async {
-    await db.close();
-    await tempDir.delete(recursive: true);
-  }
-  
-  Future<void> reopen() async {
-    await db.close();
-    db = await WaveDB.open(tempDir.path);
-  }
-}
+// lib/wavedb.dart
+library wavedb;
+
+export 'src/exceptions.dart';
+export 'src/database.dart';
+export 'src/iterator.dart' show KeyValue;
 ```
 
-### Performance Benchmarks
+---
 
-Using `benchmark_harness` package:
+## Implementation Checklist
 
-- **Put throughput**: Target >10,000 ops/sec
-- **Get throughput**: Target >50,000 ops/sec
-- **Batch throughput**: Target >5,000 ops/sec
-- **Iterator throughput**: Target >20,000 entries/sec
+1. **Core Infrastructure**
+   - [ ] FFI type definitions (types.dart)
+   - [ ] FFI function bindings (wavedb_bindings.dart)
+   - [ ] Platform library loader (wavedb_library.dart)
+   - [ ] WaveDBException class (exceptions.dart)
 
-## Implementation Approach
+2. **Conversion Layer**
+   - [ ] PathConverter (path.dart)
+   - [ ] IdentifierConverter (identifier.dart)
+   - [ ] ObjectOps flatten/reconstruct (object_ops.dart)
 
-### Phase 1: C Wrapper (Week 1)
-1. Implement C wrapper with sync operations
-2. Implement thread pool for async operations
-3. Test C wrapper independently
-4. Build system for all platforms
+3. **Public API**
+   - [ ] WaveDB class async methods (database.dart)
+   - [ ] WaveDB class sync methods (database.dart)
+   - [ ] putObject/getObject (database.dart)
 
-### Phase 2: FFI Bindings (Week 1-2)
-1. Write FFI bindings for all C functions
-2. Implement memory management helpers
-3. Implement error handling
-4. Test FFI layer
+4. **Streaming**
+   - [ ] WaveDBIterator stream implementation (iterator.dart)
+   - [ ] Range scanning support
+   - [ ] Keys-only and values-only options
 
-### Phase 3: Public API (Week 2)
-1. Implement WaveDB class
-2. Implement Path, Batch types
-3. Implement sync operations
-4. Implement async operations
-5. Implement streaming
+5. **Testing**
+   - [ ] Core operations tests (wavedb_test.dart)
+   - [ ] Object operations tests (object_ops_test.dart)
+   - [ ] Stream tests (stream_test.dart)
+   - [ ] Error handling tests
 
-### Phase 4: Testing (Week 2-3)
-1. Port all Node.js tests
-2. Write unit tests
-3. Write integration tests
-4. Write isolate tests
-5. Performance benchmarks
+6. **Documentation**
+   - [ ] README.md with usage examples
+   - [ ] API reference documentation
+   - [ ] Build instructions
 
-### Phase 5: Distribution (Week 3)
-1. Build binaries for all platforms
-2. Package for pub.dev
-3. Write documentation
-4. Write usage examples
-5. Set up CI/CD
+---
 
-## Success Criteria
+## Dependencies
 
-- [ ] All Node.js API functionality available in Dart
-- [ ] All Node.js tests passing in Dart
-- [ ] Performance within 20% of Node.js bindings
-- [ ] Works on all target platforms (Linux, macOS, Windows, Android, iOS)
-- [ ] Easy installation via pub.dev
-- [ ] Comprehensive documentation and examples
+**Native Dependencies:**
+- WaveDB C library (`libwavedb.so` / `libwavedb.dylib` / `wavedb.dll`)
 
-## References
+**Dart Dependencies:**
+- `ffi: ^2.1.0` - FFI support
+- `meta: ^1.9.0` - Annotations
 
-- Node.js bindings: `bindings/nodejs/`
-- WaveDB C API: `src/`
-- C wrapper implementation: `bindings/dart/src/wavedb_wrapper.c`
-- FFI documentation: https://dart.dev/guides/libraries/c-interop
+**Dev Dependencies:**
+- `test: ^1.24.0` - Testing framework
+- `lints: ^3.0.0` - Linting rules
+
+---
+
+## Platform Support
+
+| Platform | Library | Status |
+|----------|---------|--------|
+| Linux | libwavedb.so | Supported |
+| macOS | libwavedb.dylib | Supported |
+| Windows | wavedb.dll | Supported |
+| Android | Bundled via Flutter | Supported |
+| iOS | Bundled via Flutter | Supported |
+
+---
+
+## License
+
+GNU General Public License v3.0 or later
