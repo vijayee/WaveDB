@@ -36,6 +36,26 @@ void main() async {
 }
 ```
 
+## Testing
+
+Tests require the native WaveDB library (`libwavedb.so`, `libwavedb.dylib`, or `wavedb.dll`).
+
+Build the library first:
+```bash
+cd /path/to/WaveDB
+mkdir build && cd build
+cmake ..
+make
+```
+
+Then run tests:
+```bash
+cd bindings/dart
+export LD_LIBRARY_PATH=/path/to/WaveDB/build:$LD_LIBRARY_PATH  # Linux
+# or: export DYLD_LIBRARY_PATH=... on macOS
+dart test
+```
+
 ## License
 
 GNU General Public License v3.0 or later
