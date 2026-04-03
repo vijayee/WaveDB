@@ -31,6 +31,7 @@ typedef struct {
  * Supports optional start and end path bounds.
  */
 typedef struct {
+    refcounter_t refcounter;           // MUST be first member
     database_t* db;                    // Database being iterated
     path_t* start_path;                // Optional start bound (NULL = beginning)
     path_t* end_path;                  // Optional end bound (NULL = no upper bound)
