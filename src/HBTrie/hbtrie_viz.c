@@ -18,8 +18,43 @@
 
 // D3.js will be embedded as base64 in HTML output
 // Size: ~274KB minified, ~365KB base64 encoded
-// Generated with: curl -s https://d3js.org/d3.v7.min.js | base64 -w 0 > /tmp/d3.min.js.base64
-static const char* D3_JS_BASE64 = "";  // Placeholder - will be loaded from file at runtime
+static const char* D3_JS_URL = "https://d3js.org/d3.v7.min.js";
+static const char* D3_BASE64_PATH = "/tmp/d3.min.js.base64";
+
+/**
+ * Fetch D3.js and encode as base64 if not already cached.
+ * Returns 0 on success, -1 on failure.
+ */
+static int ensure_d3js_cached(void) {
+    FILE* fp = fopen(D3_BASE64_PATH, "r");
+    if (fp) {
+        fclose(fp);
+        return 0;  // Already cached
+    }
+
+    log_info("D3.js not cached, fetching from %s", D3_JS_URL);
+
+    // Fetch and encode in one command
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "curl -s '%s' | base64 -w 0 > '%s'", D3_JS_URL, D3_BASE64_PATH);
+
+    int result = system(cmd);
+    if (result != 0) {
+        log_error("Failed to fetch D3.js (exit code %d)", result);
+        return -1;
+    }
+
+    // Verify the file was created
+    fp = fopen(D3_BASE64_PATH, "r");
+    if (!fp) {
+        log_error("D3.js fetch appeared to succeed but file not found");
+        return -1;
+    }
+    fclose(fp);
+
+    log_info("D3.js cached successfully at %s", D3_BASE64_PATH);
+    return 0;
+}
 
 // HTML template for D3.js visualization
 // %s placeholders: 1) D3 base64, 2) JSON data
@@ -494,8 +529,16 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
     fclose(read_fp);
     unlink(temp_path);
 
+    // Ensure D3.js is cached (fetch if needed)
+    if (ensure_d3js_cached() != 0) {
+        log_error("Failed to ensure D3.js is available");
+        free(json_data);
+        fclose(fp);
+        return -1;
+    }
+
     // Load D3.js base64
-    FILE* d3_fp = fopen("/tmp/d3.min.js.base64", "r");
+    FILE* d3_fp = fopen(D3_BASE64_PATH, "r");
     char* d3_base64 = NULL;
     if (d3_fp) {
         fseek(d3_fp, 0, SEEK_END);
@@ -516,7 +559,7 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
     }
 
     if (d3_base64 == NULL) {
-        log_error("D3.js base64 not found. Run: curl -s https://d3js.org/d3.v7.min.js | base64 -w 0 > /tmp/d3.min.js.base64");
+        log_error("Failed to load D3.js from %s", D3_BASE64_PATH);
         free(json_data);
         fclose(fp);
         return -1;

@@ -1157,6 +1157,12 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                  i, entry->type, data ? data->size : 0,
                  entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
 
+        // Skip actual database operations if no database provided (testing mode)
+        if (database == NULL) {
+            log_info("WAL Recovery: No database provided, skipping entry application");
+            continue;
+        }
+
         switch (entry->type) {
             case WAL_BATCH: {
                 // Deserialize batch
@@ -1291,7 +1297,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     // Update transaction manager with highest transaction ID
     // This makes recovered MVCC entries visible to subsequent reads
-    if (entry_count > 0 && database->tx_manager != NULL) {
+    if (database != NULL && entry_count > 0 && database->tx_manager != NULL) {
         // Use atomic store to safely update the transaction ID
         atomic_store(&database->tx_manager->last_committed_txn_id, max_txn_id);
         log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);

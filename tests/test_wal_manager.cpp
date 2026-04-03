@@ -7,6 +7,7 @@
 #include "Buffer/buffer.h"
 #include "Workers/transaction_id.h"
 #include "Util/path_join.h"
+#include <cbor.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -157,22 +158,66 @@ TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
     ASSERT_NE(manager, nullptr);
 
     // Write entries from thread 1
+    // Create proper CBOR-encoded data: [path, value]
+    // path is array of identifiers, value is bytestring
     thread_wal_t* twal1 = get_thread_wal(manager);
-    const char* data1_str = "thread1";
-    buffer_t* data1 = buffer_create_from_pointer_copy((uint8_t*)data1_str, strlen(data1_str));
+
+    // Create CBOR: [["key1"], "value1"]
+    cbor_item_t* path1 = cbor_new_definite_array(1);
+    cbor_item_t* key1 = cbor_build_bytestring((const cbor_data)"key1", 4);
+    cbor_array_push(path1, key1);
+    cbor_decref(&key1);
+
+    cbor_item_t* value1 = cbor_build_bytestring((const cbor_data)"value1", 6);
+
+    cbor_item_t* entry1 = cbor_new_definite_array(2);
+    cbor_array_push(entry1, path1);
+    cbor_decref(&path1);
+    cbor_array_push(entry1, value1);
+    cbor_decref(&value1);
+
+    unsigned char* buf1 = NULL;
+    size_t buf1_size = 0;
+    cbor_serialize_alloc(entry1, &buf1, &buf1_size);
+    cbor_decref(&entry1);
+
+    buffer_t* data1 = buffer_create_from_existing_memory(buf1, buf1_size);
     ASSERT_NE(data1, nullptr);
+
     transaction_id_t txn1 = transaction_id_get_next();
     thread_wal_write(twal1, txn1, WAL_PUT, data1);
+    buffer_destroy(data1);
 
     // Simulate another thread (would normally use pthread_create)
     // For testing, we'll manually create a second WAL
     uint64_t thread_id_2 = (uint64_t)pthread_self() + 1;
     thread_wal_t* twal2 = create_thread_wal(manager, thread_id_2);
-    const char* data2_str = "thread2";
-    buffer_t* data2 = buffer_create_from_pointer_copy((uint8_t*)data2_str, strlen(data2_str));
+
+    // Create CBOR: [["key2"], "value2"]
+    cbor_item_t* path2 = cbor_new_definite_array(1);
+    cbor_item_t* key2 = cbor_build_bytestring((const cbor_data)"key2", 4);
+    cbor_array_push(path2, key2);
+    cbor_decref(&key2);
+
+    cbor_item_t* value2 = cbor_build_bytestring((const cbor_data)"value2", 6);
+
+    cbor_item_t* entry2 = cbor_new_definite_array(2);
+    cbor_array_push(entry2, path2);
+    cbor_decref(&path2);
+    cbor_array_push(entry2, value2);
+    cbor_decref(&value2);
+
+    unsigned char* buf2 = NULL;
+    size_t buf2_size = 0;
+    cbor_serialize_alloc(entry2, &buf2, &buf2_size);
+    cbor_decref(&entry2);
+
+    buffer_t* data2 = buffer_create_from_existing_memory(buf2, buf2_size);
     ASSERT_NE(data2, nullptr);
+
     transaction_id_t txn2 = transaction_id_get_next();
     thread_wal_write(twal2, txn2, WAL_PUT, data2);
+    buffer_destroy(data2);
 
     // Close manager
     wal_manager_destroy(manager);
@@ -185,10 +230,6 @@ TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
     // Recovery should read both files
     int recover_result = wal_manager_recover(manager, nullptr);
     EXPECT_EQ(recover_result, 0);
-
-    // Cleanup
-    buffer_destroy(data1);
-    buffer_destroy(data2);
 }
 
 TEST_F(WalManagerTest, MigrateFromLegacyWal) {
