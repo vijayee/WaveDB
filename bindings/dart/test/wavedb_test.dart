@@ -202,11 +202,29 @@ void main() {
     });
 
     group('getObjectSync', () {
-      test('should throw NOT_SUPPORTED for getObject', () {
-        expect(
-          () => fixture.db!.getObjectSync('key'),
-          throwsA(isA<WaveDBException>().having((e) => e.code, 'code', 'NOT_SUPPORTED')),
-        );
+      test('should retrieve object from stored data', () {
+        // Store an object (note: numeric values are converted to strings)
+        fixture.db!.putObjectSync('users', {
+          'alice': {'name': 'Alice', 'age': '30'},
+          'bob': {'name': 'Bob', 'age': '25'},
+        });
+
+        // Retrieve the object
+        final obj = fixture.db!.getObjectSync('users');
+
+        expect(obj, isNotNull);
+        expect(obj, isA<Map<String, dynamic>>());
+        expect(obj!['alice'], isA<Map<String, dynamic>>());
+        expect(obj['alice']['name'], equals('Alice'));
+        expect(obj['alice']['age'], equals('30'));
+        expect(obj['bob']['name'], equals('Bob'));
+        expect(obj['bob']['age'], equals('25'));
+      });
+
+      test('should return empty object for non-existent key', () {
+        final obj = fixture.db!.getObjectSync('nonexistent');
+        expect(obj, isNotNull);
+        expect(obj, isEmpty);
       });
     });
 

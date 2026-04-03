@@ -239,8 +239,83 @@ class WaveDB {
   }
 
   Map<String, dynamic>? _getObjectSyncInternal(dynamic key) {
-    // TODO: Requires database_scan API
-    throw WaveDBException.notSupported('getObject');
+    // Create start path from key
+    final startPath = key != null ? PathConverter.toNative(key, _delimiter) : nullptr;
+
+    // Start scan
+    final iter = WaveDBNative.databaseScanStart(_db!, startPath, nullptr);
+
+    // Note: databaseScanStart takes ownership of startPath, so we don't free it here
+
+    if (iter == nullptr) {
+      return null;
+    }
+
+    // Collect entries and reconstruct object
+    final entries = <MapEntry<List<String>, dynamic>>[];
+    final basePath = key != null
+        ? (key is List ? key.map((e) => e.toString()).toList() : key.toString().split(_delimiter).where((s) => s.isNotEmpty).toList())
+        : <String>[];
+
+    try {
+      while (true) {
+        final pathPtr = calloc<Pointer<path_t>>();
+        final valuePtr = calloc<Pointer<identifier_t>>();
+
+        try {
+          final rc = WaveDBNative.databaseScanNext(iter, pathPtr, valuePtr);
+          if (rc != 0) break;
+
+          final path = pathPtr.value;
+          final value = valuePtr.value;
+
+          // Both path and value must be valid
+          if (path == nullptr || value == nullptr) {
+            calloc.free(pathPtr);
+            calloc.free(valuePtr);
+            break;
+          }
+
+          try {
+            // Convert path to list of strings
+            final pathParts = PathConverter.fromNative(path, _delimiter, asArray: true) as List<String>;
+            final valueResult = IdentifierConverter.fromNative(value);
+
+            // Strip trailing whitespace/nulls/padding from path parts
+            // (The iterator reconstructs identifiers from chunks without knowing original length)
+            final strippedPathParts = pathParts.map((p) {
+              var result = p.trimRight();
+              result = result.replaceAll('\x00', '');
+              return result;
+            }).toList();
+
+            // Filter: only include entries that are under the base path
+            if (strippedPathParts.length >= basePath.length) {
+              bool matches = true;
+              for (int i = 0; i < basePath.length && matches; i++) {
+                if (strippedPathParts[i] != basePath[i]) {
+                  matches = false;
+                }
+              }
+              if (matches) {
+                entries.add(MapEntry(strippedPathParts, valueResult));
+              }
+            }
+          } finally {
+            WaveDBNative.pathDestroy(path);
+            WaveDBNative.identifierDestroy(value);
+          }
+        } finally {
+          calloc.free(pathPtr);
+          calloc.free(valuePtr);
+        }
+      }
+    } finally {
+      WaveDBNative.databaseScanEnd(iter);
+    }
+
+    // Reconstruct object from entries
+    return ObjectOps.reconstructObject(entries, basePath);
   }
 
   // ============================================================

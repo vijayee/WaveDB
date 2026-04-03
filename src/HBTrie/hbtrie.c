@@ -200,32 +200,43 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
   vec_t(insert_path_item_t) insert_path;
   vec_init(&insert_path);
 
+  // Track chunk counts per identifier for path metadata
+  vec_t(size_t) identifier_chunk_counts;
+  vec_init(&identifier_chunk_counts);
+
   hbtrie_node_t* current = trie->root;
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
     // Empty path - can't insert
     vec_deinit(&insert_path);
+    vec_deinit(&identifier_chunk_counts);
     platform_unlock(&trie->lock);
     return -1;
   }
+
+  // Reserve space for chunk counts
+  vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
 
   // Traverse through each identifier in the path
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
       vec_deinit(&insert_path);
+      vec_deinit(&identifier_chunk_counts);
       platform_unlock(&trie->lock);
       return -1;
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
+    vec_push(&identifier_chunk_counts, nchunk);
 
     // Traverse through chunks of this identifier
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
         vec_deinit(&insert_path);
+        vec_deinit(&identifier_chunk_counts);
         platform_unlock(&trie->lock);
         return -1;
       }
@@ -245,6 +256,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           }
           entry->has_value = 1;
           entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
+          // Set path chunk counts
+          bnode_entry_set_path_chunk_counts(entry,
+              identifier_chunk_counts.data,
+              (size_t)identifier_chunk_counts.length);
         } else {
           // Create new entry with value
           bnode_entry_t new_entry = {0};
@@ -252,6 +267,14 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           new_entry.has_value = 1;
           new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)value);
           bnode_insert(current->btree, &new_entry);
+
+          // Set path chunk counts on the newly inserted entry
+          bnode_entry_t* inserted = bnode_get(current->btree, index);
+          if (inserted != NULL) {
+            bnode_entry_set_path_chunk_counts(inserted,
+                identifier_chunk_counts.data,
+                (size_t)identifier_chunk_counts.length);
+          }
         }
       } else if (is_last_chunk) {
         // End of this identifier, need to move to next HBTrie level
@@ -260,6 +283,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             vec_deinit(&insert_path);
+            vec_deinit(&identifier_chunk_counts);
             platform_unlock(&trie->lock);
             return -1;
           }
@@ -279,12 +303,24 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           vec_push(&insert_path, path_item);
 
           current = child;
-        } else if (!entry->has_value && entry->child != NULL) {
-          // Traverse to existing child
+        } else if (!entry->has_value) {
+          // Traverse to existing child (or create if serialized as null)
+          if (entry->child == NULL) {
+            // Child was serialized as null (empty node), create a new one
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              vec_deinit(&insert_path);
+              vec_deinit(&identifier_chunk_counts);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+            entry->child = child;
+          }
           current = entry->child;
         } else {
           // Entry has a value - need to create subtree
           vec_deinit(&insert_path);
+          vec_deinit(&identifier_chunk_counts);
           platform_unlock(&trie->lock);
           return -1;
         }
@@ -295,6 +331,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             vec_deinit(&insert_path);
+            vec_deinit(&identifier_chunk_counts);
             platform_unlock(&trie->lock);
             return -1;
           }
@@ -306,11 +343,25 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           bnode_insert(current->btree, &new_entry);
 
           current = child;
-        } else if (!entry->has_value && entry->child != NULL) {
+        } else if (!entry->has_value) {
+          // Traverse to existing child (or create if serialized as null)
+          if (entry->child == NULL) {
+            // Child was serialized as null (empty node), create a new one
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              vec_deinit(&insert_path);
+              vec_deinit(&identifier_chunk_counts);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+            entry->child = child;
+          }
           current = entry->child;
         } else {
           // Entry has a value - can't continue
           vec_deinit(&insert_path);
+          vec_deinit(&identifier_chunk_counts);
+          vec_deinit(&identifier_chunk_counts);
           platform_unlock(&trie->lock);
           return -1;
         }
@@ -327,6 +378,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
   }
 
   vec_deinit(&insert_path);
+  vec_deinit(&identifier_chunk_counts);
   platform_unlock(&trie->lock);
   return 0;
 }
@@ -1173,21 +1225,29 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
   vec_t(struct { hbtrie_node_t* node; size_t chunk_index; }) path_stack;
   vec_init(&path_stack);
 
+  // Track chunk counts per identifier for path metadata
+  vec_t(size_t) identifier_chunk_counts;
+  vec_init(&identifier_chunk_counts);
+  vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
+
   // Traverse/create path
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
       vec_deinit(&path_stack);
+      vec_deinit(&identifier_chunk_counts);
       platform_unlock(&trie->lock);
       return -1;
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
+    vec_push(&identifier_chunk_counts, nchunk);
 
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
         vec_deinit(&path_stack);
+        vec_deinit(&identifier_chunk_counts);
         platform_unlock(&trie->lock);
         return -1;
       }
@@ -1214,8 +1274,17 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           if (bnode_insert(current->btree, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             vec_deinit(&path_stack);
+            vec_deinit(&identifier_chunk_counts);
             platform_unlock(&trie->lock);
             return -1;
+          }
+
+          // Set path chunk counts on the newly inserted entry
+          bnode_entry_t* inserted = bnode_get(current->btree, index);
+          if (inserted != NULL) {
+            bnode_entry_set_path_chunk_counts(inserted,
+                identifier_chunk_counts.data,
+                (size_t)identifier_chunk_counts.length);
           }
         } else {
           log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
@@ -1231,6 +1300,10 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             entry->has_versions = 0;
             entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
             entry->value_txn_id = txn_id;  // Store transaction ID
+            // Set path chunk counts
+            bnode_entry_set_path_chunk_counts(entry,
+                identifier_chunk_counts.data,
+                (size_t)identifier_chunk_counts.length);
             log_info("MVCC: Set first value (legacy mode) with txn_id=%lu.%09lu.%lu",
                     txn_id.time, txn_id.nanos, txn_id.count);
           } else if (entry->has_versions) {
@@ -1240,9 +1313,14 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
               vec_deinit(&path_stack);
+              vec_deinit(&identifier_chunk_counts);
               platform_unlock(&trie->lock);
               return -1;
             }
+            // Set path chunk counts
+            bnode_entry_set_path_chunk_counts(entry,
+                identifier_chunk_counts.data,
+                (size_t)identifier_chunk_counts.length);
           } else {
             // Legacy single value - upgrade to version chain
             log_info("MVCC: Upgrading legacy entry to version chain (old_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
@@ -1257,6 +1335,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
                 0
             );
             if (old_version == NULL) {
+              vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               platform_unlock(&trie->lock);
               return -1;
@@ -1275,6 +1354,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
               version_entry_destroy(old_version);
               entry->has_versions = 0;
               entry->versions = NULL;
+              vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               platform_unlock(&trie->lock);
               return -1;
@@ -1287,6 +1367,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
+            vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             platform_unlock(&trie->lock);
             return -1;
@@ -1300,6 +1381,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           if (bnode_insert(current->btree, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
+            vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             platform_unlock(&trie->lock);
             return -1;
@@ -1308,10 +1390,22 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           current = child;
         } else if (entry->has_value) {
           // Entry exists but has value instead of child
+          vec_deinit(&identifier_chunk_counts);
           vec_deinit(&path_stack);
           platform_unlock(&trie->lock);
           return -1;
         } else {
+          if (entry->child == NULL) {
+            // Child was serialized as null (empty node), create a new one
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+            entry->child = child;
+          }
           current = entry->child;
         }
       } else {
@@ -1320,6 +1414,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
+            vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             platform_unlock(&trie->lock);
             return -1;
@@ -1333,6 +1428,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           if (bnode_insert(current->btree, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
+            vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             platform_unlock(&trie->lock);
             return -1;
@@ -1340,16 +1436,29 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
 
           current = child;
         } else if (entry->has_value) {
+          vec_deinit(&identifier_chunk_counts);
           vec_deinit(&path_stack);
           platform_unlock(&trie->lock);
           return -1;
         } else {
+          if (entry->child == NULL) {
+            // Child was serialized as null (empty node), create a new one
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              platform_unlock(&trie->lock);
+              return -1;
+            }
+            entry->child = child;
+          }
           current = entry->child;
         }
       }
     }
   }
 
+  vec_deinit(&identifier_chunk_counts);
   vec_deinit(&path_stack);
   platform_unlock(&trie->lock);
   return 0;

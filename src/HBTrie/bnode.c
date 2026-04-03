@@ -53,6 +53,10 @@ void bnode_destroy(bnode_t* node) {
           // Legacy: single value
           identifier_destroy(entry->value);
         }
+        // Free path chunk counts
+        if (entry->path_chunk_counts.data != NULL) {
+          vec_deinit(&entry->path_chunk_counts);
+        }
       } else if (entry->child != NULL) {
         // Child node should be destroyed separately
         // (reference counting handles this)
@@ -358,4 +362,48 @@ size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_
   }
 
   return removed_count;
+}
+
+// ============================================================================
+// Path Chunk Counts Functions
+// ============================================================================
+
+int bnode_entry_set_path_chunk_counts(bnode_entry_t* entry,
+                                       const size_t* counts,
+                                       size_t count) {
+  if (entry == NULL) return -1;
+  if (!entry->has_value) return -1;  // Only valid for leaf entries
+
+  // Initialize the vector if needed
+  if (entry->path_chunk_counts.data == NULL) {
+    vec_init(&entry->path_chunk_counts);
+  }
+
+  // Copy the counts
+  vec_clear(&entry->path_chunk_counts);
+  for (size_t i = 0; i < count; i++) {
+    vec_push(&entry->path_chunk_counts, counts[i]);
+  }
+
+  return 0;
+}
+
+const size_t* bnode_entry_get_path_chunk_counts(const bnode_entry_t* entry,
+                                                size_t* out_count) {
+  if (entry == NULL || !entry->has_value) {
+    if (out_count) *out_count = 0;
+    return NULL;
+  }
+
+  if (entry->path_chunk_counts.data == NULL || entry->path_chunk_counts.length == 0) {
+    // Legacy entry - treat as single identifier
+    if (out_count) *out_count = 0;
+    return NULL;
+  }
+
+  if (out_count) {
+    *out_count = (size_t)entry->path_chunk_counts.length;
+  }
+
+  return entry->path_chunk_counts.data;
 }

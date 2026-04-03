@@ -373,6 +373,24 @@ class WaveDB {
   }
 
   /**
+   * Retrieve a JSON object synchronously
+   *
+   * @param {string|Array} key - Key path
+   * @returns {Object|null} The reconstructed object, or null if not found
+   * @throws {WaveDBError} If operation fails
+   */
+  getObjectSync(key) {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
+    try {
+      return this._db.getObjectSync(key);
+    } catch (err) {
+      throw convertError(err);
+    }
+  }
+
+  /**
    * Create a read stream
    *
    * @param {Object} [options] - Stream options

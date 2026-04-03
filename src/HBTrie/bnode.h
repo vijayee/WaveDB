@@ -40,6 +40,8 @@ typedef struct version_entry_t {
  * bnode_entry_t - Entry in a B+tree node.
  *
  * Each entry maps a single chunk to either a child HBTrie node or a leaf value.
+ * When has_value == 1 (leaf entry), path_chunk_counts stores the number of chunks
+ * per identifier in the path, enabling path reconstruction during iteration.
  */
 typedef struct bnode_entry_t {
     chunk_t* key;                      // Single chunk for comparison
@@ -53,6 +55,13 @@ typedef struct bnode_entry_t {
 
     // Transaction ID for legacy mode (valid when has_value == 1 and has_versions == 0)
     transaction_id_t value_txn_id;
+
+    // Path metadata for iteration (valid when has_value == 1)
+    // Stores the number of chunks per identifier in the path
+    // NULL for entries inserted before this field was added (treat as single identifier)
+    // Example: path ['users', 'alice'] with chunk_size=4 might have chunk_counts = [2, 2]
+    //          meaning 'users' has 2 chunks, 'alice' has 2 chunks
+    vec_t(size_t) path_chunk_counts;
 
     // Storage location for lazy-loaded children
     // Valid only when has_value == 0 and child pointer is loaded from disk
@@ -252,6 +261,39 @@ int version_entry_add(version_entry_t** versions,
  * @return Number of versions removed
  */
 size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id);
+
+// ============================================================================
+// Path Chunk Counts Functions
+// ============================================================================
+
+/**
+ * Set path chunk counts on a bnode entry.
+ *
+ * Initializes the path_chunk_counts vector with the number of chunks
+ * per identifier in the path. Used during insertion to enable
+ * path reconstruction during iteration.
+ *
+ * @param entry      Entry to modify (must have has_value == 1)
+ * @param counts     Array of chunk counts (one per identifier)
+ * @param count      Number of identifiers
+ * @return 0 on success, -1 on failure
+ */
+int bnode_entry_set_path_chunk_counts(bnode_entry_t* entry,
+                                       const size_t* counts,
+                                       size_t count);
+
+/**
+ * Get path chunk counts from a bnode entry.
+ *
+ * Returns the stored chunk counts per identifier, or NULL if not set.
+ * For entries inserted before path metadata was added, returns NULL.
+ *
+ * @param entry      Entry to query
+ * @param out_count  Output: number of identifiers (size of array)
+ * @return Pointer to chunk counts array, or NULL if not set
+ */
+const size_t* bnode_entry_get_path_chunk_counts(const bnode_entry_t* entry,
+                                                size_t* out_count);
 
 #ifdef __cplusplus
 }

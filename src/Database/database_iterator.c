@@ -21,7 +21,9 @@ static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t pat
         size_t new_size = iter->stack_size * 2;
         iterator_frame_t* new_stack = realloc(iter->stack,
                                                new_size * sizeof(iterator_frame_t));
-        if (new_stack == NULL) return -1;
+        if (new_stack == NULL) {
+            return -1;
+        }
         iter->stack = new_stack;
         iter->stack_size = new_size;
     }
@@ -211,15 +213,23 @@ int database_scan_next(database_iterator_t* iter,
         bnode_t* btree = node->btree;
         size_t count = bnode_count(btree);
 
+        // Track if we pushed a child frame (if so, don't pop this frame)
+        int pushed_child = 0;
+
         // Process entries at current level
         while (frame->entry_index < count) {
             bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
-            frame->entry_index++;
+            // Don't increment entry_index yet - we may need to push a child
 
-            if (entry == NULL) continue;
+            if (entry == NULL) {
+                frame->entry_index++;  // Skip null entries
+                continue;
+            }
 
             // Check if this entry has a value (complete path)
             if (entry->has_value) {
+                frame->entry_index++;  // Move past this entry since we're processing it
+
                 identifier_t* value = NULL;
 
                 // Get visible value from version chain
@@ -235,12 +245,12 @@ int database_scan_next(database_iterator_t* iter,
                 }
 
                 if (value) {
-                    // Build path from stack
-                    // Each frame represents one chunk position in the traversal
-                    // The entry's key at each frame is the chunk for that position
-                    // All chunks form one identifier (single-component path)
-                    // For multi-component paths, the trie structure would need to
-                    // encode identifier boundaries, which it currently doesn't
+                    // Build path from stack using path_chunk_counts metadata
+                    // The leaf entry stores how many chunks each identifier has
+
+                    // Get path chunk counts from the leaf entry
+                    size_t num_identifiers = 0;
+                    const size_t* chunk_counts = bnode_entry_get_path_chunk_counts(entry, &num_identifiers);
 
                     // Collect chunks from the stack
                     size_t nchunks = 0;
@@ -275,51 +285,80 @@ int database_scan_next(database_iterator_t* iter,
                         }
                     }
 
-                    // Build identifier from collected chunks
-                    identifier_t* key_id = build_identifier_from_chunks(chunks, nchunks, chunk_size);
-                    free(chunks);
-
-                    if (key_id == NULL) {
-                        identifier_destroy(value);
-                        return -2;
-                    }
-
-                    // Build path with single identifier
-                    // TODO: For multi-identifier paths, track identifier boundaries
+                    // Build path from collected chunks
                     path_t* result_path = path_create();
                     if (result_path == NULL) {
+                        if (chunks) free(chunks);
+                        identifier_destroy(value);
+                        return -2;
+                    }
+
+                    if (chunk_counts != NULL && num_identifiers > 0) {
+                        // Use metadata to split chunks into identifiers
+                        size_t chunk_offset = 0;
+                        for (size_t i = 0; i < num_identifiers; i++) {
+                            size_t id_chunks = chunk_counts[i];
+                            identifier_t* id = build_identifier_from_chunks(
+                                chunks + chunk_offset, id_chunks, chunk_size);
+                            if (id == NULL) {
+                                if (chunks) free(chunks);
+                                path_destroy(result_path);
+                                identifier_destroy(value);
+                                return -2;
+                            }
+                            int rc = path_append(result_path, id);
+                            identifier_destroy(id);  // path_append takes a reference
+                            if (rc != 0) {
+                                if (chunks) free(chunks);
+                                path_destroy(result_path);
+                                identifier_destroy(value);
+                                return -2;
+                            }
+                            chunk_offset += id_chunks;
+                        }
+                    } else {
+                        // Legacy entry without metadata - treat as single identifier
+                        identifier_t* key_id = build_identifier_from_chunks(chunks, nchunks, chunk_size);
+                        if (key_id == NULL) {
+                            if (chunks) free(chunks);
+                            path_destroy(result_path);
+                            identifier_destroy(value);
+                            return -2;
+                        }
+                        int rc = path_append(result_path, key_id);
                         identifier_destroy(key_id);
-                        identifier_destroy(value);
-                        return -2;
+                        if (rc != 0) {
+                            if (chunks) free(chunks);
+                            path_destroy(result_path);
+                            identifier_destroy(value);
+                            return -2;
+                        }
                     }
 
-                    int rc = path_append(result_path, key_id);
-                    identifier_destroy(key_id);  // path_append takes a reference
-
-                    if (rc != 0) {
-                        path_destroy(result_path);
-                        identifier_destroy(value);
-                        return -2;
-                    }
+                    if (chunks) free(chunks);
 
                     *out_path = result_path;
                     *out_value = value;
                     return 0;  // Success
                 }
-            }
-
-            // If entry has a child, push it onto stack for deeper traversal
-            if (!entry->has_value && entry->child) {
+            } else if (entry->child) {
+                // Entry has a child node - push it for deeper traversal
+                // Increment entry_index before pushing so we don't revisit this entry
+                frame->entry_index++;
+                pushed_child = 1;  // Mark that we pushed a child
                 // Push child frame
                 if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) {
                     return -2;  // Error
                 }
                 break;  // Will continue with child on next iteration
+            } else {
+                // Entry has no value and no child - skip it
+                frame->entry_index++;
             }
         }
 
-        // If we've processed all entries at this level, pop the frame
-        if (frame->entry_index >= count) {
+        // If we've processed all entries at this level and didn't push a child, pop the frame
+        if (!pushed_child && frame->entry_index >= count) {
             pop_frame(iter);
         }
     }

@@ -42,13 +42,14 @@ private:
                            char delimiter);
 
   static Napi::Object ReconstructObject(Napi::Env env,
-                                        const std::vector<std::pair<std::string, std::string>>& entries,
-                                        const std::string& base_path,
-                                        char delimiter);
+                                        const std::vector<std::pair<std::vector<std::string>, Napi::Value>>& entries);
+
+  static Napi::Value ConvertArrays(Napi::Env env, Napi::Value value);
 
   // Object operations
   Napi::Value PutObject(const Napi::CallbackInfo& info);
   Napi::Value GetObject(const Napi::CallbackInfo& info);
+  Napi::Value GetObjectSync(const Napi::CallbackInfo& info);
 
   // Streaming
   Napi::Value CreateReadStream(const Napi::CallbackInfo& info);
@@ -81,6 +82,7 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("batchSync", &WaveDB::BatchSync),
     InstanceMethod("putObject", &WaveDB::PutObject),
     InstanceMethod("getObject", &WaveDB::GetObject),
+    InstanceMethod("getObjectSync", &WaveDB::GetObjectSync),
     InstanceMethod("createReadStream", &WaveDB::CreateReadStream),
     InstanceMethod("close", &WaveDB::Close),
   });
@@ -685,20 +687,324 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // TODO: Implement database_scan to get all entries under path
-  // For now, return empty object
+  // Create start path (same as base path for inclusive start)
+  // We need to scan all entries that start with this path
+  path_t* startPath = nullptr;
+  path_t* endPath = nullptr;
+
+  // For scanning under a path, we use the path as start
+  // and create a path that's one past the last possible key
+  startPath = path_create();
+  if (!startPath) {
+    path_destroy(basePath);
+    Napi::Error::New(env, "Failed to create start path").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  // Copy base path to start path
+  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
+    identifier_t* id = basePath->identifiers.data[i];
+    REFERENCE(id, identifier_t);
+    path_append(startPath, id);
+  }
+
+  // Store base path parts for filtering
+  std::vector<std::string> basePathParts;
+  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
+    identifier_t* id = basePath->identifiers.data[i];
+    std::string part;
+    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
+      chunk_t* chunk = id->chunks.data[j];
+      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
+      size_t size = chunk->data->size;
+      part += std::string(reinterpret_cast<const char*>(data), size);
+    }
+    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
+      part.pop_back();
+    }
+    basePathParts.push_back(part);
+  }
+
+  // Start the scan
+  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
+  path_destroy(startPath);
   path_destroy(basePath);
 
-  Napi::Object result = Napi::Object::New(env);
+  if (!iter) {
+    Napi::Object result = Napi::Object::New(env);
+    callback.Call({ env.Null(), result });
+    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(result);
+    return deferred.Promise();
+  }
+
+  // Collect all entries that match base path
+  std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
+
+  while (true) {
+    path_t* outPath = nullptr;
+    identifier_t* outValue = nullptr;
+
+    int rc = database_scan_next(iter, &outPath, &outValue);
+    if (rc != 0) break;
+
+    // Convert path to vector of strings
+    std::vector<std::string> pathParts;
+    for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
+      identifier_t* id = outPath->identifiers.data[i];
+      std::string part;
+      for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
+        chunk_t* chunk = id->chunks.data[j];
+        const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
+        size_t size = chunk->data->size;
+        part += std::string(reinterpret_cast<const char*>(data), size);
+      }
+      // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+      while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
+        part.pop_back();
+      }
+      pathParts.push_back(part);
+    }
+
+    // Convert value to JS value
+    Napi::Value jsValue = ValueToJS(env, outValue);
+
+    // Filter: only include entries under base path
+    if (pathParts.size() >= basePathParts.size()) {
+      bool matches = true;
+      for (size_t i = 0; i < basePathParts.size() && matches; i++) {
+        if (pathParts[i] != basePathParts[i]) {
+          matches = false;
+        }
+      }
+      if (matches) {
+        entries.push_back({pathParts, jsValue});
+      }
+    }
+
+    path_destroy(outPath);
+    identifier_destroy(outValue);
+  }
+
+  database_scan_end(iter);
+
+  // Reconstruct object from entries
+  Napi::Object result = ReconstructObject(env, entries);
 
   // Call callback and resolve promise
-  if (!callback.IsEmpty()) {
-    callback.Call({ env.Null(), result });
-  }
+  callback.Call({ env.Null(), result });
 
   Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
   deferred.Resolve(result);
   return deferred.Promise();
+}
+
+Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1) {
+    Napi::TypeError::New(env, "Path required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  path_t* basePath = PathFromJS(env, info[0], delimiter_);
+  if (!basePath) {
+    return env.Null();
+  }
+
+  // Store base path parts for filtering
+  std::vector<std::string> basePathParts;
+  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
+    identifier_t* id = basePath->identifiers.data[i];
+    std::string part;
+    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
+      chunk_t* chunk = id->chunks.data[j];
+      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
+      size_t size = chunk->data->size;
+      part += std::string(reinterpret_cast<const char*>(data), size);
+    }
+    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
+      part.pop_back();
+    }
+    basePathParts.push_back(part);
+  }
+
+  // Create start path (same as base path for inclusive start)
+  path_t* startPath = path_create();
+  if (!startPath) {
+    path_destroy(basePath);
+    Napi::Error::New(env, "Failed to create start path").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  // Copy base path to start path
+  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
+    identifier_t* id = basePath->identifiers.data[i];
+    REFERENCE(id, identifier_t);
+    path_append(startPath, id);
+  }
+
+  path_destroy(startPath);
+  path_destroy(basePath);
+
+  // Start the scan
+  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
+
+  if (!iter) {
+    return Napi::Object::New(env);
+  }
+
+  // Collect all entries that match base path
+  std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
+
+  while (true) {
+    path_t* outPath = nullptr;
+    identifier_t* outValue = nullptr;
+
+    int rc = database_scan_next(iter, &outPath, &outValue);
+    if (rc != 0) break;
+
+    // Convert path to vector of strings
+    std::vector<std::string> pathParts;
+    for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
+      identifier_t* id = outPath->identifiers.data[i];
+      std::string part;
+      for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
+        chunk_t* chunk = id->chunks.data[j];
+        const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
+        size_t size = chunk->data->size;
+        part += std::string(reinterpret_cast<const char*>(data), size);
+      }
+      // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+      while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
+        part.pop_back();
+      }
+      pathParts.push_back(part);
+    }
+
+    // Convert value to JS value
+    Napi::Value jsValue = ValueToJS(env, outValue);
+
+    // Filter: only include entries under base path
+    if (pathParts.size() >= basePathParts.size()) {
+      bool matches = true;
+      for (size_t i = 0; i < basePathParts.size() && matches; i++) {
+        if (pathParts[i] != basePathParts[i]) {
+          matches = false;
+        }
+      }
+      if (matches) {
+        entries.push_back({pathParts, jsValue});
+      }
+    }
+
+    path_destroy(outPath);
+    identifier_destroy(outValue);
+  }
+
+  database_scan_end(iter);
+
+  // Reconstruct object from entries
+  return ReconstructObject(env, entries);
+}
+
+Napi::Object WaveDB::ReconstructObject(Napi::Env env,
+                                       const std::vector<std::pair<std::vector<std::string>, Napi::Value>>& entries) {
+  Napi::Object result = Napi::Object::New(env);
+
+  for (const auto& entry : entries) {
+    const std::vector<std::string>& pathParts = entry.first;
+    Napi::Value value = entry.second;
+
+    if (pathParts.empty()) continue;
+
+    // Navigate/create nested structure
+    Napi::Object current = result;
+    for (size_t i = 0; i < pathParts.size() - 1; i++) {
+      const std::string& key = pathParts[i];
+
+      if (!current.Has(key)) {
+        current.Set(key, Napi::Object::New(env));
+      }
+      current = current.Get(key).As<Napi::Object>();
+    }
+
+    // Set final value
+    current.Set(pathParts.back(), value);
+  }
+
+  // Convert arrays with contiguous numeric keys
+  return ConvertArrays(env, result).As<Napi::Object>();
+}
+
+Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
+  if (!value.IsObject()) {
+    return value;
+  }
+
+  Napi::Object obj = value.As<Napi::Object>();
+  Napi::Array keys = obj.GetPropertyNames();
+
+  // Check if all keys are contiguous numeric
+  std::vector<uint32_t> indices;
+  bool allNumeric = true;
+
+  for (uint32_t i = 0; i < keys.Length(); i++) {
+    Napi::Value key = keys.Get(i);
+    if (!key.IsString()) {
+      allNumeric = false;
+      break;
+    }
+    std::string keyStr = key.As<Napi::String>().Utf8Value();
+    char* end;
+    long idx = strtol(keyStr.c_str(), &end, 10);
+    if (*end != '\0' || idx < 0) {
+      allNumeric = false;
+      break;
+    }
+    indices.push_back(static_cast<uint32_t>(idx));
+  }
+
+  if (allNumeric && !indices.empty()) {
+    // Sort indices
+    std::sort(indices.begin(), indices.end());
+
+    // Check if contiguous from 0
+    bool contiguous = true;
+    for (size_t i = 0; i < indices.size(); i++) {
+      if (indices[i] != i) {
+        contiguous = false;
+        break;
+      }
+    }
+
+    if (contiguous) {
+      // Convert to array
+      Napi::Array arr = Napi::Array::New(env);
+      for (uint32_t i = 0; i < indices.size(); i++) {
+        Napi::Value val = obj.Get(Napi::String::New(env, std::to_string(i)));
+        arr.Set(i, ConvertArrays(env, val));
+      }
+      return arr;
+    }
+  }
+
+  // Recursively convert nested objects
+  for (uint32_t i = 0; i < keys.Length(); i++) {
+    Napi::Value key = keys.Get(i);
+    std::string keyStr = key.As<Napi::String>().Utf8Value();
+    Napi::Value val = obj.Get(key);
+    obj.Set(key, ConvertArrays(env, val));
+  }
+
+  return value;
 }
 
 Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
