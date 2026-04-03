@@ -236,49 +236,40 @@ int database_scan_next(database_iterator_t* iter,
 
                 if (value) {
                     // Build path from stack
-                    // Collect chunks from all frames
-                    // Note: This treats all chunks as a single identifier
-                    // TODO: Track identifier boundaries for multi-identifier paths
+                    // Each frame represents one chunk position in the traversal
+                    // The entry's key at each frame is the chunk for that position
+                    // All chunks form one identifier (single-component path)
+                    // For multi-component paths, the trie structure would need to
+                    // encode identifier boundaries, which it currently doesn't
 
-                    // Count total chunks needed
-                    size_t total_chunks = 0;
+                    // Collect chunks from the stack
+                    size_t nchunks = 0;
                     for (size_t i = 0; i < iter->stack_depth; i++) {
                         iterator_frame_t* f = &iter->stack[i];
                         if (f->entry_index > 0) {
-                            // This frame has processed an entry, get the key from that entry
                             bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
                             if (e != NULL && e->key != NULL) {
-                                total_chunks++;
+                                nchunks++;
                             }
                         }
                     }
 
-                    // Also include current entry's key
-                    if (entry->key != NULL) {
-                        // The current entry's key is already part of the path at this level
-                        // We need to get it from the frame, not from entry
-                    }
-
-                    // Build identifier from chunks collected on stack
-                    // Each frame's entry has a key (chunk) that led to that position
-                    // We collect all those chunks to form the path
-
+                    // Allocate chunk array
                     chunk_t** chunks = NULL;
-                    size_t nchunks = 0;
-
-                    if (iter->stack_depth > 0) {
-                        chunks = malloc(iter->stack_depth * sizeof(chunk_t*));
+                    if (nchunks > 0) {
+                        chunks = malloc(nchunks * sizeof(chunk_t*));
                         if (chunks == NULL) {
                             identifier_destroy(value);
                             return -2;
                         }
 
+                        size_t idx = 0;
                         for (size_t i = 0; i < iter->stack_depth; i++) {
                             iterator_frame_t* f = &iter->stack[i];
                             if (f->entry_index > 0) {
                                 bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
                                 if (e != NULL && e->key != NULL) {
-                                    chunks[nchunks++] = e->key;
+                                    chunks[idx++] = e->key;
                                 }
                             }
                         }
@@ -294,7 +285,7 @@ int database_scan_next(database_iterator_t* iter,
                     }
 
                     // Build path with single identifier
-                    // TODO: For multi-identifier paths, we need to track identifier boundaries
+                    // TODO: For multi-identifier paths, track identifier boundaries
                     path_t* result_path = path_create();
                     if (result_path == NULL) {
                         identifier_destroy(key_id);
