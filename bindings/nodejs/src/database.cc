@@ -709,9 +709,9 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
     options = info[0].As<Napi::Object>();
   }
 
-  // Create iterator instance
-  // TODO: Pass options and database handle
-  Napi::Object iterObj = Iterator::constructor_.New({ options });
+  // Pass database pointer as External and options
+  Napi::External<database_t> dbExternal = Napi::External<database_t>::New(env, db_);
+  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options });
 
   return iterObj;
 }

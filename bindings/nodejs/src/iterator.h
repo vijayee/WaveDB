@@ -27,7 +27,7 @@ private:
   bool keyAsArray_;
   char delimiter_;
   bool ended_;
-  void* scan_handle_;  // Opaque scan handle
+  database_iterator_t* scan_handle_;  // Native scan iterator
 };
 
 #endif // WAVEDB_BINDINGS_ITERATOR_H

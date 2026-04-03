@@ -1,49 +1,68 @@
 'use strict';
 
 const { Readable } = require('stream');
-const { Iterator } = require('../build/Release/wavedb.node');
 
 /**
  * WaveDB Readable Stream Iterator
  *
- * This is a stub implementation. Full functionality requires database_scan API.
+ * Provides a Node.js readable stream interface for iterating over database entries.
  */
 class WaveDBIterator extends Readable {
-  constructor(db, options = {}) {
+  constructor(nativeIterator, options = {}) {
     super({ objectMode: true });
 
-    this._db = db;
-    this._iterator = new Iterator(options);
-    this._start = options.start;
-    this._end = options.end;
-    this._reverse = options.reverse || false;
-    this._keys = options.keys !== false;
-    this._values = options.values !== false;
-    this._keyAsArray = options.keyAsArray || false;
-    this._delimiter = options.delimiter || '/';
+    // nativeIterator is the native Iterator object created by WaveDB.createReadStream
+    this._iterator = nativeIterator;
+    this._options = options;
     this._reading = false;
+    this._ended = false;
   }
 
   _read(size) {
-    if (this._reading) return;
+    if (this._reading || this._ended) return;
     this._reading = true;
 
     this._readNext();
   }
 
   _readNext() {
-    // TODO: Implement actual read from native iterator
-    // This requires database_scan API
+    if (this._ended) {
+      this._reading = false;
+      return;
+    }
 
-    // For now, push null to end stream
-    this.push(null);
-    this._reading = false;
+    try {
+      const entry = this._iterator.read();
+
+      if (entry === null || entry === undefined) {
+        // End of iteration
+        this._ended = true;
+        this.push(null);
+        this._reading = false;
+      } else {
+        // Push the entry and continue
+        this.push(entry);
+        this._reading = false;
+      }
+    } catch (err) {
+      this.emit('error', err);
+      this.push(null);
+      this._reading = false;
+    }
   }
 
   _destroy(err, callback) {
+    this._ended = true;
+
     if (this._iterator) {
-      this._iterator.end();
+      try {
+        this._iterator.end();
+      } catch (e) {
+        // Ignore errors on cleanup
+      }
+      this._iterator = null;
     }
+
     callback(err);
   }
 }

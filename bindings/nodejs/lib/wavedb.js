@@ -1,6 +1,6 @@
 'use strict';
 
-const { WaveDB: WaveDBNative, Iterator } = require('../build/Release/wavedb.node');
+const { WaveDB: WaveDBNative } = require('../build/Release/wavedb.node');
 const { WaveDBIterator } = require('./iterator.js');
 
 /**
@@ -350,10 +350,25 @@ class WaveDB {
    * Create a read stream
    *
    * @param {Object} [options] - Stream options
+   *   @param {string|Array} [options.start] - Start path (inclusive)
+   *   @param {string|Array} [options.end] - End path (exclusive)
+   *   @param {boolean} [options.reverse=false] - Scan in reverse order
+   *   @param {boolean} [options.keys=true] - Include keys in results
+   *   @param {boolean} [options.values=true] - Include values in results
+   *   @param {boolean} [options.keyAsArray=false] - Return keys as arrays
+   *   @param {string} [options.delimiter='/'] - Path delimiter
    * @returns {WaveDBIterator} Readable stream
    */
   createReadStream(options = {}) {
-    return new WaveDBIterator(this, options);
+    // Merge default delimiter with options
+    const iterOptions = {
+      ...options,
+      delimiter: options.delimiter || this._delimiter
+    };
+    // Create native iterator through the native createReadStream
+    const nativeIterator = this._db.createReadStream(iterOptions);
+    // Wrap in JavaScript stream
+    return new WaveDBIterator(nativeIterator, iterOptions);
   }
 
   /**
