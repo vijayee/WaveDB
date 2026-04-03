@@ -7,6 +7,7 @@ import 'package:ffi/ffi.dart';
 import 'native/types.dart';
 import 'native/wavedb_bindings.dart';
 import 'exceptions.dart';
+import 'identifier.dart';
 
 /// Convert between Dart keys and native path_t
 class PathConverter {
@@ -78,10 +79,31 @@ class PathConverter {
   /// Convert native path_t to Dart key
   ///
   /// Returns String (joined by delimiter) or List<String> (if asArray=true)
+  /// Uses FFI path_length and path_get functions to traverse the native path.
   static dynamic fromNative(Pointer<path_t> path, String delimiter, {bool asArray = false}) {
-    // TODO: Implement proper path reconstruction when FFI struct access is available
-    // This requires reading the vec_t of identifiers from the path_t struct
+    if (path == nullptr) {
+      return asArray ? <String>[] : '';
+    }
+
+    final length = WaveDBNative.pathLength(path);
+    if (length == 0) {
+      return asArray ? <String>[] : '';
+    }
+
     final parts = <String>[];
+
+    for (var i = 0; i < length; i++) {
+      final idPtr = WaveDBNative.pathGet(path, i);
+      if (idPtr == nullptr) continue;
+
+      final bytes = IdentifierConverter.readIdentifierBytes(idPtr);
+      if (IdentifierConverter.isPrintableASCII(bytes)) {
+        parts.add(String.fromCharCodes(bytes));
+      } else {
+        // For non-ASCII, decode as UTF-8 with error handling
+        parts.add(utf8.decode(bytes, allowMalformed: true));
+      }
+    }
 
     if (asArray) {
       return parts;

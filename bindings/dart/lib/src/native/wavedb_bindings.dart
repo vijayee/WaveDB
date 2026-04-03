@@ -12,35 +12,41 @@ import '../exceptions.dart';
 // ============================================================
 
 /// C signature: database_t* database_create(
-///   const char* path,
-///   uint32_t chunk_size,
-///   void* options,
+///   const char* location,
+///   size_t lru_memory_mb,
+///   wal_config_t* wal_config,
+///   uint8_t chunk_size,
 ///   uint32_t btree_node_size,
-///   uint32_t wal_enabled,
-///   uint32_t snapshot_enabled,
-///   void* callback,
-///   int32_t* error_code
+///   uint8_t enable_persist,
+///   size_t storage_cache_size,
+///   work_pool_t* pool,
+///   hierarchical_timing_wheel_t* wheel,
+///   int* error_code
 /// )
 typedef DatabaseCreateC = Pointer<database_t> Function(
-  Pointer<Utf8> path,
-  Uint32 chunk_size,
-  Pointer<Void> options,
+  Pointer<Utf8> location,
+  UintPtr lru_memory_mb,
+  Pointer<Void> wal_config,
+  Uint8 chunk_size,
   Uint32 btree_node_size,
-  Uint32 wal_enabled,
-  Uint32 snapshot_enabled,
-  Pointer<Void> callback,
+  Uint8 enable_persist,
+  UintPtr storage_cache_size,
+  Pointer<Void> pool,
+  Pointer<Void> wheel,
   Pointer<Int32> error_code,
 );
 
 /// Dart signature for database_create
 typedef DatabaseCreate = Pointer<database_t> Function(
-  Pointer<Utf8> path,
+  Pointer<Utf8> location,
+  int lru_memory_mb,
+  Pointer<Void> wal_config,
   int chunk_size,
-  Pointer<Void> options,
   int btree_node_size,
-  int wal_enabled,
-  int snapshot_enabled,
-  Pointer<Void> callback,
+  int enable_persist,
+  int storage_cache_size,
+  Pointer<Void> pool,
+  Pointer<Void> wheel,
   Pointer<Int32> error_code,
 );
 
@@ -155,22 +161,47 @@ typedef PathGet = Pointer<identifier_t> Function(
 );
 
 // ============================================================
+// C TYPEDEFS - Buffer Operations (must come before Identifier)
+// ============================================================
+
+/// C signature: buffer_t* buffer_create(size_t size)
+typedef BufferCreateC = Pointer<buffer_t> Function(UintPtr size);
+
+/// Dart signature for buffer_create
+typedef BufferCreate = Pointer<buffer_t> Function(int size);
+
+/// C signature: buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size)
+typedef BufferCreateFromPointerCopyC = Pointer<buffer_t> Function(
+  Pointer<Uint8> data,
+  UintPtr size,
+);
+
+/// Dart signature for buffer_create_from_pointer_copy
+typedef BufferCreateFromPointerCopy = Pointer<buffer_t> Function(
+  Pointer<Uint8> data,
+  int size,
+);
+
+/// C signature: void buffer_destroy(buffer_t* buf)
+typedef BufferDestroyC = Void Function(Pointer<buffer_t> buf);
+
+/// Dart signature for buffer_destroy
+typedef BufferDestroy = void Function(Pointer<buffer_t> buf);
+
+// ============================================================
 // C TYPEDEFS - Identifier Operations
 // ============================================================
 
-/// C signature: identifier_t* identifier_create(
-///   const uint8_t* data,
-///   uint32_t length
-/// )
+/// C signature: identifier_t* identifier_create(buffer_t* buf, size_t chunk_size)
 typedef IdentifierCreateC = Pointer<identifier_t> Function(
-  Pointer<Uint8> data,
-  Uint32 length,
+  Pointer<buffer_t> buf,
+  UintPtr chunk_size,
 );
 
 /// Dart signature for identifier_create
 typedef IdentifierCreate = Pointer<identifier_t> Function(
-  Pointer<Uint8> data,
-  int length,
+  Pointer<buffer_t> buf,
+  int chunk_size,
 );
 
 /// C signature: void identifier_destroy(identifier_t* id)
@@ -188,16 +219,6 @@ typedef IdentifierToBufferC = Pointer<buffer_t> Function(
 typedef IdentifierToBuffer = Pointer<buffer_t> Function(
   Pointer<identifier_t> id,
 );
-
-// ============================================================
-// C TYPEDEFS - Buffer Operations
-// ============================================================
-
-/// C signature: void buffer_destroy(buffer_t* buf)
-typedef BufferDestroyC = Void Function(Pointer<buffer_t> buf);
-
-/// Dart signature for buffer_destroy
-typedef BufferDestroy = void Function(Pointer<buffer_t> buf);
 
 // ============================================================
 // C TYPEDEFS - Iterator Operations
@@ -294,6 +315,15 @@ class WaveDBNative {
   static late final PathGet _pathGet = WaveDBLibrary.load()
       .lookupFunction<PathGetC, PathGet>('path_get');
 
+  // Buffer operations
+  static late final BufferCreateFromPointerCopy _bufferCreateFromPointerCopy =
+      WaveDBLibrary.load()
+          .lookupFunction<BufferCreateFromPointerCopyC, BufferCreateFromPointerCopy>(
+              'buffer_create_from_pointer_copy');
+
+  static late final BufferDestroy _bufferDestroy = WaveDBLibrary.load()
+      .lookupFunction<BufferDestroyC, BufferDestroy>('buffer_destroy');
+
   // Identifier operations
   static late final IdentifierCreate _identifierCreate = WaveDBLibrary.load()
       .lookupFunction<IdentifierCreateC, IdentifierCreate>('identifier_create');
@@ -303,10 +333,6 @@ class WaveDBNative {
 
   static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
       .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
-
-  // Buffer operations
-  static late final BufferDestroy _bufferDestroy = WaveDBLibrary.load()
-      .lookupFunction<BufferDestroyC, BufferDestroy>('buffer_destroy');
 
   // Iterator operations
   static late final DatabaseScanStart _databaseScanStart = WaveDBLibrary.load()
@@ -325,19 +351,21 @@ class WaveDBNative {
   /// Create a new database instance
   ///
   /// [path] - Filesystem path for the database
-  /// [chunkSize] - Chunk size (0 = default)
+  /// [lruMemoryMb] - LRU cache memory budget in MB (0 = default 50 MB)
+  /// [chunkSize] - HBTrie chunk size (0 = default)
   /// [btreeNodeSize] - B-tree node size (0 = default)
-  /// [walEnabled] - Enable write-ahead logging (0 = disabled)
-  /// [snapshotEnabled] - Enable snapshots (1 = enabled)
+  /// [enablePersist] - Enable persistent storage (0 = in-memory only, 1 = persistent)
+  /// [storageCacheSize] - Section LRU cache size (0 = default)
   ///
   /// Returns a pointer to the database handle.
   /// Throws [WaveDBException] if creation fails.
   static Pointer<database_t> databaseCreate(
     String path, {
+    int lruMemoryMb = 0,
     int chunkSize = 0,
     int btreeNodeSize = 0,
-    int walEnabled = 0,
-    int snapshotEnabled = 1,
+    int enablePersist = 1,
+    int storageCacheSize = 0,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -345,12 +373,14 @@ class WaveDBNative {
     try {
       final db = _databaseCreate(
         pathPtr.cast(),
+        lruMemoryMb,
+        nullptr, // wal_config
         chunkSize,
-        nullptr,
         btreeNodeSize,
-        walEnabled,
-        snapshotEnabled,
-        nullptr,
+        enablePersist,
+        storageCacheSize,
+        nullptr, // pool
+        nullptr, // wheel
         errorPtr,
       );
 
@@ -478,6 +508,31 @@ class WaveDBNative {
   }
 
   // ============================================================
+  // PUBLIC API - Buffer Operations
+  // ============================================================
+
+  /// Create a buffer from raw data (copies the data)
+  ///
+  /// [data] - Pointer to the data bytes
+  /// [size] - Size of the data
+  ///
+  /// Returns a pointer to the buffer handle.
+  /// The caller is responsible for destroying the buffer using bufferDestroy.
+  static Pointer<buffer_t> bufferCreateFromPointerCopy(
+    Pointer<Uint8> data,
+    int size,
+  ) {
+    return _bufferCreateFromPointerCopy(data, size);
+  }
+
+  /// Destroy a buffer and free all associated resources
+  ///
+  /// [buf] - Buffer handle to destroy
+  static void bufferDestroy(Pointer<buffer_t> buf) {
+    _bufferDestroy(buf);
+  }
+
+  // ============================================================
   // PUBLIC API - Identifier Operations
   // ============================================================
 
@@ -485,14 +540,29 @@ class WaveDBNative {
   ///
   /// [data] - Pointer to the data bytes
   /// [length] - Length of the data
+  /// [chunkSize] - Chunk size (0 = default 4 bytes)
   ///
   /// Returns a pointer to the identifier handle.
   /// The caller is responsible for destroying the identifier.
   static Pointer<identifier_t> identifierCreate(
     Pointer<Uint8> data,
-    int length,
-  ) {
-    return _identifierCreate(data, length);
+    int length, [
+    int chunkSize = 0,
+  ]) {
+    // Create a buffer from the data
+    final buffer = _bufferCreateFromPointerCopy(data, length);
+    if (buffer == nullptr) {
+      return nullptr;
+    }
+
+    try {
+      // Create the identifier from the buffer
+      return _identifierCreate(buffer, chunkSize);
+    } finally {
+      // identifier_create takes ownership of the buffer data, but we still need
+      // to destroy the buffer struct itself
+      _bufferDestroy(buffer);
+    }
   }
 
   /// Destroy an identifier and free all associated resources
@@ -510,17 +580,6 @@ class WaveDBNative {
   /// The caller is responsible for destroying the buffer using bufferDestroy.
   static Pointer<buffer_t> identifierToBuffer(Pointer<identifier_t> id) {
     return _identifierToBuffer(id);
-  }
-
-  // ============================================================
-  // PUBLIC API - Buffer Operations
-  // ============================================================
-
-  /// Destroy a buffer and free all associated resources
-  ///
-  /// [buf] - Buffer handle to destroy
-  static void bufferDestroy(Pointer<buffer_t> buf) {
-    _bufferDestroy(buf);
   }
 
   // ============================================================

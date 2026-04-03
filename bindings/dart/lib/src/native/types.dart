@@ -17,9 +17,27 @@ base class identifier_t extends Opaque {}
 /// Maps to database_iterator_t in C
 base class database_iterator_t extends Opaque {}
 
-/// Opaque handle to a buffer
+/// Buffer structure for raw data
 /// Maps to buffer_t in C
-base class buffer_t extends Opaque {}
+///
+/// C layout on 64-bit Linux with REFCOUNTER_ATOMIC:
+/// - atomic_uint_fast16_t count (8 bytes, aligned)
+/// - atomic_uint_fast8_t yield (1 byte + 7 padding)
+/// - uint8_t* data (8 bytes)
+/// - size_t size (8 bytes)
+/// Total: 32 bytes
+base class buffer_t extends Struct {
+  // refcounter_t with REFCOUNTER_ATOMIC: 16 bytes
+  @Array(16)
+  external Array<Uint8> _refcounter;
+
+  // Data pointer at offset 16
+  external Pointer<Uint8> data;
+
+  // Size at offset 24
+  @UintPtr()
+  external int size;
+}
 
 /// Reference counter structure (first field of refcounted structs)
 /// Maps to refcounter_t in C

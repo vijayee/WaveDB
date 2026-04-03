@@ -39,9 +39,10 @@ class IdentifierConverter {
 
     try {
       ptr.asTypedList(bytes.length).setAll(0, bytes);
+      // WaveDBNative.identifierCreate creates a buffer internally and copies data
       return WaveDBNative.identifierCreate(ptr, bytes.length);
     } finally {
-      // identifierCreate copies the data, so we free our buffer
+      // Data is copied, so we can free our buffer
       calloc.free(ptr);
     }
   }
@@ -64,9 +65,9 @@ class IdentifierConverter {
       return null;
     }
 
-    final bytes = _readIdentifierBytes(id);
+    final bytes = readIdentifierBytes(id);
 
-    if (bytes == null || bytes.isEmpty) {
+    if (bytes.isEmpty) {
       return '';
     }
 
@@ -77,14 +78,35 @@ class IdentifierConverter {
     }
   }
 
-  /// Read bytes from identifier chunks
+  /// Read bytes from identifier using FFI buffer accessor
   ///
-  /// Note: This requires access to identifier_t internals via FFI
-  /// Currently returns empty list - needs C accessor function
-  static List<int>? _readIdentifierBytes(Pointer<identifier_t> id) {
-    // TODO: Implement when we have a C function to read identifier bytes
-    // For now, this requires adding identifier_get_data() to the C API
-    return [];
+  /// Converts native identifier_t to a buffer and extracts the raw bytes.
+  /// The buffer is properly cleaned up after reading.
+  ///
+  /// Returns empty list if identifier is null or has no data.
+  static List<int> readIdentifierBytes(Pointer<identifier_t> id) {
+    if (id == nullptr) {
+      return [];
+    }
+
+    final buffer = WaveDBNative.identifierToBuffer(id);
+    if (buffer == nullptr) {
+      return [];
+    }
+
+    try {
+      final dataPtr = buffer.ref.data;
+      final size = buffer.ref.size;
+
+      if (dataPtr == nullptr || size == 0) {
+        return [];
+      }
+
+      // Copy data to Dart list
+      return dataPtr.asTypedList(size).toList();
+    } finally {
+      WaveDBNative.bufferDestroy(buffer);
+    }
   }
 
   /// Check if bytes are printable ASCII

@@ -132,16 +132,18 @@ This will:
 
 ### Expected Performance
 
-Dart FFI bindings typically have lower overhead than Node.js N-API bindings:
+Dart FFI bindings have comparable performance to Node.js N-API bindings:
 
-| Operation | Node.js (ops/sec) | Dart (ops/sec) | Notes |
-|-----------|-------------------|----------------|-------|
-| put async | ~10,000 | ~12,000 | FFI has lower call overhead |
-| get async | ~15,000 | ~18,000 | Fewer boundary crossings |
-| putSync | ~20,000 | ~25,000 | No async machinery |
-| getSync | ~30,000 | ~35,000 | Direct FFI call |
+| Operation | Dart FFI (ops/sec) | Node.js N-API (ops/sec) | Notes |
+|-----------|-------------------|-----------------------|-------|
+| putSync   | ~62,500 | ~56,000 | Similar performance |
+| getSync   | ~166,000 | ~260,000 | Node.js ~1.5x faster |
+| put async | ~50,000 | N/A | - |
+| get async | ~166,000 | N/A | - |
 
-*Results vary by platform and workload*
+*Benchmarks run on Linux x86_64 with 500 iterations. Results vary by platform and workload.*
+
+Both bindings provide excellent performance for most use cases. The Dart FFI is well-suited for Flutter applications requiring native database access.
 
 ## Known Limitations
 

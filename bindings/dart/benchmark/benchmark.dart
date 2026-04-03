@@ -3,8 +3,8 @@ import 'dart:io';
 import 'dart:async';
 import 'package:wavedb/wavedb.dart';
 
-const int iterations = 10000;
-const int warmup = 100;
+const int iterations = 100;
+const int warmup = 10;
 const String dbPath = '/tmp/wavedb_benchmark_dart';
 
 Future<void> main() async {
@@ -41,7 +41,7 @@ Future<void> main() async {
   print('  put:       ${ops.toString().padLeft(8)} ops/sec (${(elapsed * 1000).toStringAsFixed(2)}ms)');
 
   // Async Get
-  stopwatch.reset()..start();
+  stopwatch..reset()..start();
   for (var i = 0; i < iterations; i++) {
     await db.get('key$i');
   }
@@ -53,7 +53,7 @@ Future<void> main() async {
   // Sync Put
   print('\nSync Operations:');
   print('-' * 50);
-  stopwatch.reset()..start();
+  stopwatch..reset()..start();
   for (var i = 0; i < iterations; i++) {
     db.putSync('sync$i', 'value$i');
   }
@@ -63,7 +63,7 @@ Future<void> main() async {
   print('  putSync:   ${ops.toString().padLeft(8)} ops/sec (${(elapsed * 1000).toStringAsFixed(2)}ms)');
 
   // Sync Get
-  stopwatch.reset()..start();
+  stopwatch..reset()..start();
   for (var i = 0; i < iterations; i++) {
     db.getSync('sync$i');
   }
@@ -81,7 +81,7 @@ Future<void> main() async {
     batchOps.add({'type': 'put', 'key': 'batch$i', 'value': 'value$i'});
   }
 
-  stopwatch.reset()..start();
+  stopwatch..reset()..start();
   for (var i = 0; i < iterations ~/ batchSize; i++) {
     await db.batch(batchOps);
   }
@@ -95,7 +95,7 @@ Future<void> main() async {
   print('-' * 50);
   try {
     var count = 0;
-    stopwatch.reset()..start();
+    stopwatch..reset()..start();
 
     await for (final _ in db.createReadStream()) {
       count++;

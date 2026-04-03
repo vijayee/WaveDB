@@ -154,20 +154,13 @@ class WaveDB {
 
   void _putSyncInternal(dynamic key, dynamic value) {
     final path = PathConverter.toNative(key, _delimiter);
-    try {
-      final id = IdentifierConverter.toNative(value);
-      try {
-        final rc = WaveDBNative.databasePutSync(_db!, path, id);
-        if (rc != 0) {
-          throw WaveDBException.ioError('put', 'return code: $rc');
-        }
-      } finally {
-        // databasePutSync takes ownership of id
-        WaveDBNative.identifierDestroy(id);
-      }
-    } finally {
-      // databasePutSync takes ownership of path
-      WaveDBNative.pathDestroy(path);
+    final id = IdentifierConverter.toNative(value);
+
+    // database_put_sync takes ownership of both path and value
+    // They will be destroyed internally - DO NOT call destroy after
+    final rc = WaveDBNative.databasePutSync(_db!, path, id);
+    if (rc != 0) {
+      throw WaveDBException.ioError('put', 'return code: $rc');
     }
   }
 
@@ -176,6 +169,7 @@ class WaveDB {
     final resultPtr = calloc<Pointer<identifier_t>>();
 
     try {
+      // database_get_sync takes ownership of path
       final rc = WaveDBNative.databaseGetSync(_db!, path, resultPtr);
 
       if (rc == -2) {
@@ -195,25 +189,22 @@ class WaveDB {
       try {
         return IdentifierConverter.fromNative(result);
       } finally {
+        // result must be destroyed by caller
         WaveDBNative.identifierDestroy(result);
       }
     } finally {
       calloc.free(resultPtr);
-      // databaseGetSync takes ownership of path
-      WaveDBNative.pathDestroy(path);
     }
   }
 
   void _delSyncInternal(dynamic key) {
     final path = PathConverter.toNative(key, _delimiter);
-    try {
-      final rc = WaveDBNative.databaseDeleteSync(_db!, path);
-      if (rc != 0) {
-        throw WaveDBException.ioError('delete', 'return code: $rc');
-      }
-    } finally {
-      // databaseDeleteSync takes ownership of path
-      WaveDBNative.pathDestroy(path);
+
+    // database_delete_sync takes ownership of path
+    // It will be destroyed internally - DO NOT call destroy after
+    final rc = WaveDBNative.databaseDeleteSync(_db!, path);
+    if (rc != 0) {
+      throw WaveDBException.ioError('delete', 'return code: $rc');
     }
   }
 

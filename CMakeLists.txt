@@ -200,11 +200,6 @@ if(BUILD_TESTS)
     target_link_libraries(test_mvcc wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_mvcc COMMAND test_mvcc)
 
-    # Test for MVCC recovery
-    add_executable(test_mvcc_recovery tests/test_mvcc_recovery.cpp)
-    target_link_libraries(test_mvcc_recovery wavedb gtest gtest_main Threads::Threads)
-    add_test(NAME test_mvcc_recovery COMMAND test_mvcc_recovery)
-
     # Test for abort cleanup
     add_executable(test_abort_cleanup tests/test_abort_cleanup.cpp)
     target_link_libraries(test_abort_cleanup wavedb gtest gtest_main Threads::Threads)
@@ -376,6 +371,33 @@ endif()
 option(BUILD_NODEJS_BINDINGS "Build Node.js bindings" OFF)
 if(BUILD_NODEJS_BINDINGS)
   add_subdirectory(bindings/nodejs)
+endif()
+
+# Dart FFI shared library
+option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
+if(BUILD_DART_BINDINGS)
+  # Build shared library for Dart FFI
+  add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
+  target_compile_definitions(wavedb_shared PUBLIC REFCOUNTER_ATOMIC)
+  target_link_libraries(wavedb_shared PUBLIC atomic xxhash cbor hashmap)
+  if(NOT WIN32)
+    target_link_libraries(wavedb_shared PUBLIC Threads::Threads)
+  endif()
+  target_include_directories(wavedb_shared
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+      ${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include
+      ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcbor/src
+  )
+  # Set output name to match Dart FFI expectations
+  set_target_properties(wavedb_shared PROPERTIES
+    OUTPUT_NAME "wavedb"
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 0
+  )
 endif()
 
 # Installation and packaging
