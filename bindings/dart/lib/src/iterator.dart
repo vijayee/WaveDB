@@ -81,6 +81,9 @@ class WaveDBIterator {
       }
 
       // Create native iterator
+      // NOTE: database_scan_start function does not exist in C API yet
+      // This will throw NOT_SUPPORTED or symbol not found error when used
+      // TODO: Implement database_scan_* in C API for full iterator support
       _nativeIterator = WaveDBNative.databaseScanStart(
         _db,
         startNative ?? nullptr,
@@ -90,10 +93,18 @@ class WaveDBIterator {
       if (_nativeIterator == nullptr) {
         throw WaveDBException.ioError('scan_start', 'Failed to create iterator');
       }
-    } finally {
-      // TODO: Verify ownership semantics with C implementation
-      // Currently assuming database_scan_start takes ownership of start/end paths
-      // If not, paths should be destroyed here: PathConverter.destroy(startNative);
+
+      // If we reach here, the scan API exists and takes ownership of paths
+      // (The C implementation would need to take ownership to avoid leaks)
+    } catch (e) {
+      // Clean up paths if scan_start failed or doesn't exist
+      if (startNative != null) {
+        WaveDBNative.pathDestroy(startNative);
+      }
+      if (endNative != null) {
+        WaveDBNative.pathDestroy(endNative);
+      }
+      rethrow;
     }
   }
 

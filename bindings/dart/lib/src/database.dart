@@ -263,6 +263,9 @@ class WaveDB {
   /// [reverse] - Scan in reverse order (default: false)
   /// [keys] - Include keys in results (default: true)
   /// [values] - Include values in results (default: true)
+  ///
+  /// NOTE: This method will throw NOT_SUPPORTED if the scan API is not available.
+  /// The database_scan_* functions are not yet implemented in the C API.
   Stream<KeyValue> createReadStream({
     dynamic start,
     dynamic end,
