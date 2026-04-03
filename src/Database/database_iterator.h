@@ -30,7 +30,7 @@ typedef struct {
  * Performs depth-first traversal of HBTrie, yielding (path, value) pairs.
  * Supports optional start and end path bounds.
  */
-typedef struct {
+typedef struct database_iterator_t {
     refcounter_t refcounter;           // MUST be first member
     database_t* db;                    // Database being iterated
     path_t* start_path;                // Optional start bound (NULL = beginning)

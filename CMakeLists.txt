@@ -90,6 +90,7 @@ set(WAVEDB_SOURCES
     src/Database/wal_compactor.c
     src/Database/database_lru.c
     src/Database/database.c
+    src/Database/database_iterator.c
     src/Database/batch.c
 )
 

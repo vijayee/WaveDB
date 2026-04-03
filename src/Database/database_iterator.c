@@ -4,7 +4,7 @@
 
 #include "database_iterator.h"
 #include "../HBTrie/chunk.h"
-#include "../HBTrie/buffer.h"
+#include "../Buffer/buffer.h"
 #include "../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
