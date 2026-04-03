@@ -70,7 +70,7 @@ class IdentifierConverter {
       return '';
     }
 
-    if (_isPrintableASCII(bytes)) {
+    if (isPrintableASCII(bytes)) {
       return String.fromCharCodes(bytes);
     } else {
       return Uint8List.fromList(bytes);
@@ -90,7 +90,7 @@ class IdentifierConverter {
   /// Check if bytes are printable ASCII
   ///
   /// Printable ASCII is defined as bytes in range 32-126 (space through tilde)
-  static bool _isPrintableASCII(List<int> bytes) {
+  static bool isPrintableASCII(List<int> bytes) {
     if (bytes.isEmpty) return true;
 
     return bytes.every((b) => b >= 32 && b < 127);
