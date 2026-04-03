@@ -15,7 +15,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "node-addon-api": "^7.0.0",
+    "node-addon-api": "^7.1.1",
     "node-pre-gyp": "^0.17.0"
   },
   "devDependencies": {
