@@ -1,0 +1,13 @@
+# analysis_options.yaml
+include: package:lints/recommended.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - node_modules/**
+
+linter:
+  rules:
+    - avoid_print
+    - prefer_single_quotes
+    - sort_constructors_first
