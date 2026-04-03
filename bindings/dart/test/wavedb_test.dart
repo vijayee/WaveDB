@@ -211,18 +211,30 @@ void main() {
     });
 
     group('createReadStream', () {
-      test('should throw NOT_SUPPORTED without native scan API', () async {
-        // Note: createReadStream requires database_scan API which may not be available
-        // This test verifies the iterator throws appropriately when consumed
+      test('should iterate over database entries', () async {
+        // Insert some test data
         await fixture.db!.put('key1', 'value1');
+        await fixture.db!.put('key2', 'value2');
+        await fixture.db!.put('key3', 'value3');
 
-        // The stream throws when consumed, not when created
+        // Iterate over entries
         final stream = fixture.db!.createReadStream();
+        final entries = await stream.toList();
 
-        expect(
-          () => stream.toList(),
-          throwsA(isA<WaveDBException>()),
-        );
+        // Verify we got entries back
+        expect(entries.length, greaterThanOrEqualTo(3));
+
+        // Verify each entry has a key and value
+        for (final entry in entries) {
+          expect(entry.key, isNotNull);
+          expect(entry.value, isNotNull);
+        }
+      });
+
+      test('should return empty stream for empty database', () async {
+        final stream = fixture.db!.createReadStream();
+        final entries = await stream.toList();
+        expect(entries, isEmpty);
       });
     });
 
