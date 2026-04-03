@@ -44,6 +44,13 @@ class ObjectOps {
           newPath.add(k.toString());
           stack.add(MapEntry(map[k], newPath));
         }
+      } else if (value is Uint8List || value is List<int>) {
+        // Binary data - treat as leaf value, not as array to flatten
+        operations.add({
+          'type': 'put',
+          'key': pathParts,
+          'value': value,
+        });
       } else if (value is List) {
         // Array - push elements in reverse order
         for (var i = value.length - 1; i >= 0; i--) {
