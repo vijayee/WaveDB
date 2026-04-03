@@ -1,0 +1,10 @@
+// lib/src.dart
+export 'src/native/types.dart';
+export 'src/native/wavedb_library.dart';
+export 'src/native/wavedb_bindings.dart';
+export 'src/exceptions.dart';
+export 'src/path.dart';
+export 'src/identifier.dart';
+export 'src/object_ops.dart';
+export 'src/database.dart';
+export 'src/iterator.dart';
