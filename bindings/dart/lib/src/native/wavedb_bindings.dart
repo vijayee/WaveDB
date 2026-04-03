@@ -136,6 +136,24 @@ typedef PathDestroyC = Void Function(Pointer<path_t> path);
 /// Dart signature for path_destroy
 typedef PathDestroy = void Function(Pointer<path_t> path);
 
+/// C signature: size_t path_length(path_t* path)
+typedef PathLengthC = UintPtr Function(Pointer<path_t> path);
+
+/// Dart signature for path_length
+typedef PathLength = int Function(Pointer<path_t> path);
+
+/// C signature: identifier_t* path_get(path_t* path, size_t index)
+typedef PathGetC = Pointer<identifier_t> Function(
+  Pointer<path_t> path,
+  UintPtr index,
+);
+
+/// Dart signature for path_get
+typedef PathGet = Pointer<identifier_t> Function(
+  Pointer<path_t> path,
+  int index,
+);
+
 // ============================================================
 // C TYPEDEFS - Identifier Operations
 // ============================================================
@@ -160,6 +178,26 @@ typedef IdentifierDestroyC = Void Function(Pointer<identifier_t> id);
 
 /// Dart signature for identifier_destroy
 typedef IdentifierDestroy = void Function(Pointer<identifier_t> id);
+
+/// C signature: buffer_t* identifier_to_buffer(identifier_t* id)
+typedef IdentifierToBufferC = Pointer<buffer_t> Function(
+  Pointer<identifier_t> id,
+);
+
+/// Dart signature for identifier_to_buffer
+typedef IdentifierToBuffer = Pointer<buffer_t> Function(
+  Pointer<identifier_t> id,
+);
+
+// ============================================================
+// C TYPEDEFS - Buffer Operations
+// ============================================================
+
+/// C signature: void buffer_destroy(buffer_t* buf)
+typedef BufferDestroyC = Void Function(Pointer<buffer_t> buf);
+
+/// Dart signature for buffer_destroy
+typedef BufferDestroy = void Function(Pointer<buffer_t> buf);
 
 // ============================================================
 // C TYPEDEFS - Iterator Operations
@@ -250,12 +288,25 @@ class WaveDBNative {
   static late final PathDestroy _pathDestroy = WaveDBLibrary.load()
       .lookupFunction<PathDestroyC, PathDestroy>('path_destroy');
 
+  static late final PathLength _pathLength = WaveDBLibrary.load()
+      .lookupFunction<PathLengthC, PathLength>('path_length');
+
+  static late final PathGet _pathGet = WaveDBLibrary.load()
+      .lookupFunction<PathGetC, PathGet>('path_get');
+
   // Identifier operations
   static late final IdentifierCreate _identifierCreate = WaveDBLibrary.load()
       .lookupFunction<IdentifierCreateC, IdentifierCreate>('identifier_create');
 
   static late final IdentifierDestroy _identifierDestroy = WaveDBLibrary.load()
       .lookupFunction<IdentifierDestroyC, IdentifierDestroy>('identifier_destroy');
+
+  static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
+      .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
+
+  // Buffer operations
+  static late final BufferDestroy _bufferDestroy = WaveDBLibrary.load()
+      .lookupFunction<BufferDestroyC, BufferDestroy>('buffer_destroy');
 
   // Iterator operations
   static late final DatabaseScanStart _databaseScanStart = WaveDBLibrary.load()
@@ -406,6 +457,26 @@ class WaveDBNative {
     _pathDestroy(path);
   }
 
+  /// Get the number of identifiers in a path
+  ///
+  /// [path] - Path handle
+  ///
+  /// Returns the number of identifiers in the path.
+  static int pathLength(Pointer<path_t> path) {
+    return _pathLength(path);
+  }
+
+  /// Get an identifier at a specific index in the path
+  ///
+  /// [path] - Path handle
+  /// [index] - Index of the identifier to retrieve
+  ///
+  /// Returns a pointer to the identifier handle.
+  /// Note: The returned identifier is owned by the path and should not be destroyed.
+  static Pointer<identifier_t> pathGet(Pointer<path_t> path, int index) {
+    return _pathGet(path, index);
+  }
+
   // ============================================================
   // PUBLIC API - Identifier Operations
   // ============================================================
@@ -429,6 +500,27 @@ class WaveDBNative {
   /// [id] - Identifier handle to destroy
   static void identifierDestroy(Pointer<identifier_t> id) {
     _identifierDestroy(id);
+  }
+
+  /// Convert an identifier to a buffer containing the original data
+  ///
+  /// [id] - Identifier handle
+  ///
+  /// Returns a pointer to the buffer handle.
+  /// The caller is responsible for destroying the buffer using bufferDestroy.
+  static Pointer<buffer_t> identifierToBuffer(Pointer<identifier_t> id) {
+    return _identifierToBuffer(id);
+  }
+
+  // ============================================================
+  // PUBLIC API - Buffer Operations
+  // ============================================================
+
+  /// Destroy a buffer and free all associated resources
+  ///
+  /// [buf] - Buffer handle to destroy
+  static void bufferDestroy(Pointer<buffer_t> buf) {
+    _bufferDestroy(buf);
   }
 
   // ============================================================

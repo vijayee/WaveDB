@@ -17,6 +17,10 @@ base class identifier_t extends Opaque {}
 /// Maps to database_iterator_t in C
 base class database_iterator_t extends Opaque {}
 
+/// Opaque handle to a buffer
+/// Maps to buffer_t in C
+base class buffer_t extends Opaque {}
+
 /// Reference counter structure (first field of refcounted structs)
 /// Maps to refcounter_t in C
 /// Note: Only the count field is defined here for reference counting access.
