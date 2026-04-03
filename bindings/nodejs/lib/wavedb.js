@@ -81,7 +81,33 @@ class WaveDB {
     }
 
     this._delimiter = options.delimiter || '/';
+    this._path = path;
     this._db = new WaveDBNative(path, { delimiter: this._delimiter });
+    this._closed = false;
+  }
+
+  /**
+   * Get the database path
+   * @returns {string} Database path
+   */
+  get path() {
+    return this._path;
+  }
+
+  /**
+   * Get the delimiter used for path parsing
+   * @returns {string} Delimiter character
+   */
+  get delimiter() {
+    return this._delimiter;
+  }
+
+  /**
+   * Check if the database is closed
+   * @returns {boolean} True if closed
+   */
+  get isClosed() {
+    return this._closed;
   }
 
   /**
@@ -360,6 +386,9 @@ class WaveDB {
    * @returns {WaveDBIterator} Readable stream
    */
   createReadStream(options = {}) {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
     // Merge default delimiter with options
     const iterOptions = {
       ...options,
@@ -375,8 +404,9 @@ class WaveDB {
    * Close the database
    */
   close() {
-    if (this._db) {
+    if (this._db && !this._closed) {
       this._db.close();
+      this._closed = true;
     }
   }
 }
