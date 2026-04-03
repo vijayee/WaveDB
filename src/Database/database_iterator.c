@@ -3,6 +3,8 @@
 //
 
 #include "database_iterator.h"
+#include "../HBTrie/chunk.h"
+#include "../HBTrie/buffer.h"
 #include "../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
@@ -56,6 +58,42 @@ static void pop_frame(database_iterator_t* iter) {
 static int within_bounds(database_iterator_t* iter) {
     (void)iter;  // Suppress unused parameter warning
     return 1;
+}
+
+/**
+ * Build an identifier from an array of chunks.
+ *
+ * Creates an identifier by concatenating chunk data.
+ * Note: This reconstructs the identifier from chunks, which may include
+ * padding in the last chunk. The actual data length is chunk_size * nchunks
+ * minus any padding, but we don't know the original length during iteration.
+ */
+static identifier_t* build_identifier_from_chunks(chunk_t** chunks, size_t nchunks, uint8_t chunk_size) {
+    if (chunks == NULL || nchunks == 0) {
+        return identifier_create_empty(chunk_size);
+    }
+
+    // Calculate total size
+    size_t total_size = nchunks * chunk_size;
+
+    // Allocate buffer for concatenated data
+    buffer_t* buf = buffer_create(total_size);
+    if (buf == NULL) {
+        return NULL;
+    }
+
+    // Copy chunk data
+    size_t offset = 0;
+    for (size_t i = 0; i < nchunks; i++) {
+        if (chunks[i] != NULL && chunks[i]->data != NULL) {
+            memcpy(buf->data + offset, chunks[i]->data->data, chunk_size);
+        }
+        offset += chunk_size;
+    }
+
+    identifier_t* id = identifier_create(buf, chunk_size);
+    buffer_destroy(buf);
+    return id;
 }
 
 database_iterator_t* database_scan_start(database_t* db,
@@ -155,6 +193,9 @@ int database_scan_next(database_iterator_t* iter,
         return -1;  // End of iteration
     }
 
+    // Get chunk_size from database trie
+    uint8_t chunk_size = iter->db->trie ? iter->db->trie->chunk_size : DEFAULT_CHUNK_SIZE;
+
     // Depth-first traversal
     while (iter->stack_depth > 0) {
         // Get current frame
@@ -177,7 +218,7 @@ int database_scan_next(database_iterator_t* iter,
 
             if (entry == NULL) continue;
 
-            // Check if this entry has a value (leaf node)
+            // Check if this entry has a value (complete path)
             if (entry->has_value) {
                 identifier_t* value = NULL;
 
@@ -194,15 +235,84 @@ int database_scan_next(database_iterator_t* iter,
                 }
 
                 if (value) {
-                    // Build result path
-                    *out_path = path_copy(iter->current_path);
-                    *out_value = value;
+                    // Build path from stack
+                    // Collect chunks from all frames
+                    // Note: This treats all chunks as a single identifier
+                    // TODO: Track identifier boundaries for multi-identifier paths
 
-                    if (*out_path == NULL) {
+                    // Count total chunks needed
+                    size_t total_chunks = 0;
+                    for (size_t i = 0; i < iter->stack_depth; i++) {
+                        iterator_frame_t* f = &iter->stack[i];
+                        if (f->entry_index > 0) {
+                            // This frame has processed an entry, get the key from that entry
+                            bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
+                            if (e != NULL && e->key != NULL) {
+                                total_chunks++;
+                            }
+                        }
+                    }
+
+                    // Also include current entry's key
+                    if (entry->key != NULL) {
+                        // The current entry's key is already part of the path at this level
+                        // We need to get it from the frame, not from entry
+                    }
+
+                    // Build identifier from chunks collected on stack
+                    // Each frame's entry has a key (chunk) that led to that position
+                    // We collect all those chunks to form the path
+
+                    chunk_t** chunks = NULL;
+                    size_t nchunks = 0;
+
+                    if (iter->stack_depth > 0) {
+                        chunks = malloc(iter->stack_depth * sizeof(chunk_t*));
+                        if (chunks == NULL) {
+                            identifier_destroy(value);
+                            return -2;
+                        }
+
+                        for (size_t i = 0; i < iter->stack_depth; i++) {
+                            iterator_frame_t* f = &iter->stack[i];
+                            if (f->entry_index > 0) {
+                                bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
+                                if (e != NULL && e->key != NULL) {
+                                    chunks[nchunks++] = e->key;
+                                }
+                            }
+                        }
+                    }
+
+                    // Build identifier from collected chunks
+                    identifier_t* key_id = build_identifier_from_chunks(chunks, nchunks, chunk_size);
+                    free(chunks);
+
+                    if (key_id == NULL) {
                         identifier_destroy(value);
                         return -2;
                     }
 
+                    // Build path with single identifier
+                    // TODO: For multi-identifier paths, we need to track identifier boundaries
+                    path_t* result_path = path_create();
+                    if (result_path == NULL) {
+                        identifier_destroy(key_id);
+                        identifier_destroy(value);
+                        return -2;
+                    }
+
+                    int rc = path_append(result_path, key_id);
+                    identifier_destroy(key_id);  // path_append takes a reference
+
+                    if (rc != 0) {
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        return -2;
+                    }
+
+                    *out_path = result_path;
+                    *out_value = value;
                     return 0;  // Success
                 }
             }
