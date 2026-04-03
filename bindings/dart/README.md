@@ -148,10 +148,7 @@ Both bindings provide excellent performance for most use cases. The Dart FFI is 
 ## Known Limitations
 
 ### getObject / getObjectSync
-Throws `NOT_SUPPORTED` - requires C `database_scan` API not yet implemented.
-
-### createReadStream
-Throws `NOT_SUPPORTED` when used - requires C `database_scan_start/next/end` API not yet implemented.
+Throws `NOT_SUPPORTED` - requires C scan API for reconstruction. Use `createReadStream` to iterate over entries and reconstruct objects manually.
 
 ### Reverse Iteration
 The `reverse` parameter in `createReadStream` is reserved for future use. The C API doesn't support reverse iteration yet.
