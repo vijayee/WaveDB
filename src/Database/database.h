@@ -215,6 +215,45 @@ int database_write_batch_sync(database_t* db, batch_t* batch);
  */
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise);
 
+// Forward declaration for database iterator
+typedef struct database_iterator_t database_iterator_t;
+
+/**
+ * Start a database scan.
+ *
+ * Creates an iterator for iterating over all entries in the database.
+ * Takes ownership of start_path and end_path.
+ *
+ * @param db         Database to scan
+ * @param start_path Optional start path (NULL = beginning)
+ * @param end_path   Optional end path (NULL = no upper bound)
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_scan_start(database_t* db,
+                                         path_t* start_path,
+                                         path_t* end_path);
+
+/**
+ * Get next entry from iterator.
+ *
+ * Caller takes ownership of returned path and identifier.
+ *
+ * @param iter      Iterator handle
+ * @param out_path  Output: path key (caller must destroy)
+ * @param out_value Output: value (caller must destroy)
+ * @return 0 on success, -1 on end, -2 on error
+ */
+int database_scan_next(database_iterator_t* iter,
+                        path_t** out_path,
+                        identifier_t** out_value);
+
+/**
+ * End a database scan and free resources.
+ *
+ * @param iter  Iterator to destroy
+ */
+void database_scan_end(database_iterator_t* iter);
+
 #ifdef __cplusplus
 }
 #endif
