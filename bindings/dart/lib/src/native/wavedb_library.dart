@@ -20,8 +20,14 @@ class WaveDBLibrary {
 
     // Try custom path first
     if (_libPath != null) {
-      _lib = DynamicLibrary.open(_libPath!);
-      return _lib!;
+      try {
+        _lib = DynamicLibrary.open(_libPath!);
+        return _lib!;
+      } catch (e) {
+        throw WaveDBException.libraryNotFound(
+          'Failed to load library from $_libPath: $e',
+        );
+      }
     }
 
     // Platform-specific loading
