@@ -81,17 +81,21 @@ class WaveDBIterator {
       }
 
       // Create native iterator
-      // NOTE: database_scan_start function does not exist in C API yet
-      // This will throw NOT_SUPPORTED or symbol not found error when used
-      // TODO: Implement database_scan_* in C API for full iterator support
-      _nativeIterator = WaveDBNative.databaseScanStart(
-        _db,
-        startNative ?? nullptr,
-        endNative ?? nullptr,
-      );
+      // NOTE: database_scan_start function may not exist in all builds
+      // If the symbol is not found, we throw NOT_SUPPORTED
+      try {
+        _nativeIterator = WaveDBNative.databaseScanStart(
+          _db,
+          startNative ?? nullptr,
+          endNative ?? nullptr,
+        );
+      } on ArgumentError catch (_) {
+        // Symbol not found - scan API not available
+        throw WaveDBException.notSupported('createReadStream');
+      }
 
       if (_nativeIterator == nullptr) {
-        throw WaveDBException.ioError('scan_start', 'Failed to create iterator');
+        throw WaveDBException.notSupported('createReadStream');
       }
 
       // If we reach here, the scan API exists and takes ownership of paths

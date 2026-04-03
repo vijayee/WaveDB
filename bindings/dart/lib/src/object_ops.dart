@@ -44,8 +44,8 @@ class ObjectOps {
           newPath.add(k.toString());
           stack.add(MapEntry(map[k], newPath));
         }
-      } else if (value is Uint8List || value is List<int>) {
-        // Binary data - treat as leaf value, not as array to flatten
+      } else if (value is Uint8List) {
+        // Binary data (Uint8List) - treat as leaf value, not as array to flatten
         operations.add({
           'type': 'put',
           'key': pathParts,

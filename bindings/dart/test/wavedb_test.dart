@@ -213,11 +213,14 @@ void main() {
     group('createReadStream', () {
       test('should throw NOT_SUPPORTED without native scan API', () async {
         // Note: createReadStream requires database_scan API which may not be available
-        // This test verifies the iterator throws appropriately
+        // This test verifies the iterator throws appropriately when consumed
         await fixture.db!.put('key1', 'value1');
 
+        // The stream throws when consumed, not when created
+        final stream = fixture.db!.createReadStream();
+
         expect(
-          () => fixture.db!.createReadStream(),
+          () => stream.toList(),
           throwsA(isA<WaveDBException>()),
         );
       });
