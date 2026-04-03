@@ -25,3 +25,8 @@ benchmark_*.txt
 !CMakeLists.txt
 !bindings/nodejs/*.json
 
+
+# Dart bindings
+bindings/dart/.dart_tool/
+bindings/dart/libwavedb.so
+bindings/dart/pubspec.lock
