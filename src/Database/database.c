@@ -566,158 +566,34 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
                             uint8_t enable_persist, size_t storage_cache_size,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
                             int* error_code) {
-    if (error_code) *error_code = 0;
-
-    // Create directory if needed
-    if (mkdir_p((char*)location) != 0) {
-        if (error_code) *error_code = errno;
-        return NULL;
-    }
-
-    // Initialize transaction ID generator (call once per process)
-    transaction_id_init();
-
-    database_t* db = get_clear_memory(sizeof(database_t));
-    if (db == NULL) {
+    // Create config from parameters
+    database_config_t* config = database_config_default();
+    if (config == NULL) {
         if (error_code) *error_code = ENOMEM;
         return NULL;
     }
 
-    db->location = strdup(location);
-    db->lru_size = (lru_memory_mb == 0) ? DATABASE_DEFAULT_LRU_MEMORY_MB : lru_memory_mb;
-    db->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
-    db->btree_node_size = btree_node_size;
-    db->pool = pool;
-    db->wheel = wheel;
-    db->is_rebuilding = 0;
+    // Set values from parameters
+    if (lru_memory_mb > 0) config->lru_memory_mb = lru_memory_mb;
+    if (chunk_size > 0) config->chunk_size = chunk_size;
+    if (btree_node_size > 0) config->btree_node_size = btree_node_size;
+    config->enable_persist = enable_persist;
+    if (storage_cache_size > 0) config->storage_cache_size = storage_cache_size;
 
-    // Convert MB to bytes
-    size_t lru_memory_bytes = (lru_memory_mb == 0) ?
-        DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024 :
-        lru_memory_mb * 1024 * 1024;
-
-    // Create LRU cache with memory budget
-    db->lru = database_lru_cache_create(lru_memory_bytes);
-    if (db->lru == NULL) {
-        free(db->location);
-        free(db);
-        if (error_code) *error_code = ENOMEM;
-        return NULL;
+    // Set WAL config if provided
+    if (wal_config != NULL) {
+        config->wal_config = *wal_config;
     }
 
-    // Initialize write lock shards
-    for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        platform_lock_init(&db->write_locks[i]);
-    }
+    // Set external resources
+    config->external_pool = pool;
+    config->external_wheel = wheel;
+    if (pool != NULL) config->worker_threads = 0;  // Using external pool
+    if (wheel != NULL) config->timer_resolution_ms = 0;  // Using external wheel
 
-    // Initialize storage if persistence is enabled
-    if (enable_persist) {
-        // Create data and meta directories for sections
-        char* data_path = path_join(location, "data");
-        char* meta_path = path_join(location, "meta");
-        mkdir_p(data_path);
-        mkdir_p(meta_path);
+    database_t* db = database_create_with_config(location, config, error_code);
+    database_config_destroy(config);
 
-        // Determine storage parameters
-        size_t cache_size = (storage_cache_size == 0) ? 64 : storage_cache_size;  // Default: 64 sections in cache
-        size_t section_concurrency = 8;  // Keep 8 sections open at once
-        size_t sections_size = 1024 * 1024;  // 1MB per section
-
-        db->storage = sections_create(location, sections_size, cache_size, section_concurrency,
-                                      wheel, DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
-
-        free(data_path);
-        free(meta_path);
-
-        if (db->storage == NULL) {
-            // Storage initialization failed, continue in-memory only
-            log_warn("Failed to initialize persistent storage, continuing in-memory only");
-        } else {
-            db->storage_cache_size = cache_size;
-            db->storage_max_tuple = section_concurrency;
-        }
-    } else {
-        db->storage = NULL;
-    }
-
-    // Load or create trie
-    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
-    if (db->trie == NULL) {
-        db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
-    }
-
-    // If using storage, attach it to trie
-    if (db->storage != NULL && db->trie->root != NULL) {
-        db->trie->root->storage = db->storage;
-    }
-
-    if (db->trie == NULL) {
-        if (db->storage) sections_destroy(db->storage);
-        database_lru_cache_destroy(db->lru);
-        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
-        }
-        free(db->location);
-        free(db);
-        if (error_code) *error_code = ENOMEM;
-        return NULL;
-    }
-
-    // Create transaction manager for MVCC
-    db->tx_manager = tx_manager_create(db->trie, pool, wheel, 100);  // 100ms GC interval
-    if (db->tx_manager == NULL) {
-        hbtrie_destroy(db->trie);
-        if (db->storage) sections_destroy(db->storage);
-        database_lru_cache_destroy(db->lru);
-        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
-        }
-        free(db->location);
-        free(db);
-        if (error_code) *error_code = ENOMEM;
-        return NULL;
-    }
-
-    // Create WAL manager (use default config if none provided)
-    if (wal_config == NULL) {
-        // Use default config
-        wal_config_t default_config;
-        default_config.sync_mode = WAL_SYNC_DEBOUNCED;
-        default_config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
-        default_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
-        default_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
-        default_config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
-        db->wal_manager = wal_manager_create(db->location, &default_config, db->wheel, error_code);
-    } else {
-        db->wal_manager = wal_manager_create(db->location, wal_config, db->wheel, error_code);
-    }
-
-    if (db->wal_manager == NULL) {
-        // Cleanup and return error
-        tx_manager_destroy(db->tx_manager);
-        hbtrie_destroy(db->trie);
-        if (db->storage) sections_destroy(db->storage);
-        database_lru_cache_destroy(db->lru);
-        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
-        }
-        free(db->location);
-        free(db);
-        if (error_code && *error_code == 0) {
-            *error_code = ENOMEM;
-        }
-        return NULL;
-    }
-
-    // Set legacy WAL to NULL (migration complete)
-    db->wal = NULL;
-
-    // Replay WAL for recovery
-    db->is_rebuilding = 1;
-    wal_manager_recover(db->wal_manager, db);
-    db->is_rebuilding = 0;
-
-    refcounter_init((refcounter_t*)db);
     return db;
 }
 
