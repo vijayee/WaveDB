@@ -76,13 +76,13 @@ int database_config_save(const char* location, const database_config_t* config) 
         return -1;
     }
 
-    // Build path: <location>/config.cbor
-    size_t path_len = strlen(location) + strlen("/config.cbor") + 1;
+    // Build path: <location>/.config
+    size_t path_len = strlen(location) + strlen("/.config") + 1;
     char* config_path = malloc(path_len);
     if (config_path == NULL) {
         return -1;
     }
-    snprintf(config_path, path_len, "%s/config.cbor", location);
+    snprintf(config_path, path_len, "%s/.config", location);
 
     // Create CBOR map
     cbor_item_t* root = cbor_new_definite_map(10);
@@ -222,13 +222,13 @@ database_config_t* database_config_load(const char* location) {
         return NULL;
     }
 
-    // Build path: <location>/config.cbor
-    size_t path_len = strlen(location) + strlen("/config.cbor") + 1;
+    // Build path: <location>/.config
+    size_t path_len = strlen(location) + strlen("/.config") + 1;
     char* config_path = malloc(path_len);
     if (config_path == NULL) {
         return NULL;
     }
-    snprintf(config_path, path_len, "%s/config.cbor", location);
+    snprintf(config_path, path_len, "%s/.config", location);
 
     // Check if file exists
     struct stat st;

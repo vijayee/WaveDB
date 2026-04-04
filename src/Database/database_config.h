@@ -88,7 +88,7 @@ database_config_t* database_config_load(const char* location);
 /**
  * Save configuration to database directory.
  *
- * Saves to <location>/config.cbor
+ * Saves to <location>/.config
  *
  * @param location  Database directory path
  * @param config    Configuration to save

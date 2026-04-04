@@ -110,7 +110,7 @@ TEST(DatabaseConfig, SaveAndLoadPreservesValues) {
 
     // Cleanup
     char config_path[256];
-    snprintf(config_path, sizeof(config_path), "%s/config.cbor", temp_dir);
+    snprintf(config_path, sizeof(config_path), "%s/.config", temp_dir);
     unlink(config_path);
     rmdir(temp_dir);
 }

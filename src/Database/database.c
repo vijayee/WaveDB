@@ -341,7 +341,7 @@ database_t* database_create_with_config(const char* location,
 
     // Check if database already exists
     char config_path[1024];
-    snprintf(config_path, sizeof(config_path), "%s/config.cbor", location);
+    snprintf(config_path, sizeof(config_path), "%s/.config", location);
     struct stat st;
     bool db_exists = (stat(config_path, &st) == 0);
 
