@@ -4,11 +4,17 @@
 
 #include "path.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include <cbor.h>
 #include <string.h>
 
 path_t* path_create(void) {
-  path_t* path = get_clear_memory(sizeof(path_t));
+  path_t* path = (path_t*)memory_pool_alloc(sizeof(path_t));
+  if (path == NULL) {
+    path = get_clear_memory(sizeof(path_t));
+  } else {
+    memset(path, 0, sizeof(path_t));
+  }
   vec_init(&path->identifiers);
   refcounter_init((refcounter_t*)path);
   return path;
@@ -39,7 +45,7 @@ void path_destroy(path_t* path) {
     vec_deinit(&path->identifiers);
 
     refcounter_destroy_lock((refcounter_t*)path);
-    free(path);
+    memory_pool_free(path, sizeof(path_t));
   }
 }
 
