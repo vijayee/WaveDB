@@ -303,7 +303,6 @@ Benchmarks run on Linux x86_64 with the following configuration:
 ### Performance Features
 
 - **Memory Pool**: Thread-local caches for lock-free allocation
-- **xxHash**: Fast path hashing (3-5x improvement)
 - **MVCC Fast-Path**: 90%+ visibility check hit rate
 - **Fragment Re-sorting**: Maintains O(log n) lookup
 
