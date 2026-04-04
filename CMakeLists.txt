@@ -217,6 +217,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_batch wavedb gtest gtest_main)
     add_test(NAME test_batch COMMAND test_batch)
 
+    # Test for database_config
+    add_executable(test_database_config tests/test_database_config.cpp)
+    target_link_libraries(test_database_config wavedb gtest gtest_main)
+    add_test(NAME test_database_config COMMAND test_database_config)
+
     # Test for HBTrie visualization
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
     target_link_libraries(test_hbtrie_viz wavedb gtest gtest_main)
