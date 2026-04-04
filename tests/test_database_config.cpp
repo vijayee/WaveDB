@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <cstdio>
+#include <unistd.h>
+#include <sys/stat.h>
 extern "C" {
 #include "Database/database_config.h"
 }
@@ -64,4 +67,114 @@ TEST(DatabaseConfig, WalConfigDefaults) {
     EXPECT_GT(config->wal_config.max_file_size, 0u);
 
     database_config_destroy(config);
+}
+
+// Test: Save and load preserves values
+TEST(DatabaseConfig, SaveAndLoadPreservesValues) {
+    // Create temp directory
+    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    mkdtemp(temp_dir);
+
+    // Create config with custom values
+    database_config_t* original = database_config_default();
+    original->lru_memory_mb = 100;
+    original->worker_threads = 8;
+    original->wal_config.sync_mode = WAL_SYNC_DEBOUNCED;
+    original->wal_config.debounce_ms = 200;
+
+    // Save
+    int result = database_config_save(temp_dir, original);
+    ASSERT_EQ(result, 0);
+
+    // Load
+    database_config_t* loaded = database_config_load(temp_dir);
+    ASSERT_NE(loaded, nullptr);
+
+    // Verify
+    EXPECT_EQ(loaded->lru_memory_mb, 100u);
+    EXPECT_EQ(loaded->worker_threads, 8u);
+    EXPECT_EQ(loaded->wal_config.sync_mode, WAL_SYNC_DEBOUNCED);
+    EXPECT_EQ(loaded->wal_config.debounce_ms, 200u);
+
+    // Verify immutable settings preserved
+    EXPECT_EQ(loaded->chunk_size, original->chunk_size);
+    EXPECT_EQ(loaded->btree_node_size, original->btree_node_size);
+    EXPECT_EQ(loaded->enable_persist, original->enable_persist);
+
+    database_config_destroy(original);
+    database_config_destroy(loaded);
+
+    // Cleanup
+    char config_path[256];
+    snprintf(config_path, sizeof(config_path), "%s/config.cbor", temp_dir);
+    unlink(config_path);
+    rmdir(temp_dir);
+}
+
+// Test: Load returns NULL for non-existent config
+TEST(DatabaseConfig, LoadNonExistentReturnsNull) {
+    database_config_t* config = database_config_load("/nonexistent/path/12345");
+    EXPECT_EQ(config, nullptr);
+}
+
+// Test: Merge uses saved for immutable, passed for mutable
+TEST(DatabaseConfig, MergeRules) {
+    database_config_t* saved = database_config_default();
+    saved->chunk_size = 8;  // Different immutable
+    saved->lru_memory_mb = 50;  // Original mutable
+
+    database_config_t* passed = database_config_default();
+    passed->chunk_size = 4;  // Different immutable
+    passed->lru_memory_mb = 100;  // New mutable
+
+    database_config_t* merged = database_config_merge(saved, passed);
+    ASSERT_NE(merged, nullptr);
+
+    // Immutable: use saved
+    EXPECT_EQ(merged->chunk_size, 8u);
+
+    // Mutable: use passed
+    EXPECT_EQ(merged->lru_memory_mb, 100u);
+
+    database_config_destroy(saved);
+    database_config_destroy(passed);
+    database_config_destroy(merged);
+}
+
+// Test: Merge handles NULL saved
+TEST(DatabaseConfig, MergeNullSaved) {
+    database_config_t* passed = database_config_default();
+    passed->lru_memory_mb = 100;
+
+    database_config_t* merged = database_config_merge(nullptr, passed);
+    ASSERT_NE(merged, nullptr);
+    EXPECT_EQ(merged->lru_memory_mb, 100u);
+
+    database_config_destroy(passed);
+    database_config_destroy(merged);
+}
+
+// Test: Merge handles NULL passed
+TEST(DatabaseConfig, MergeNullPassed) {
+    database_config_t* saved = database_config_default();
+    saved->lru_memory_mb = 100;
+
+    database_config_t* merged = database_config_merge(saved, nullptr);
+    ASSERT_NE(merged, nullptr);
+    EXPECT_EQ(merged->lru_memory_mb, 100u);
+
+    database_config_destroy(saved);
+    database_config_destroy(merged);
+}
+
+// Test: Merge handles both NULL
+TEST(DatabaseConfig, MergeBothNull) {
+    database_config_t* merged = database_config_merge(nullptr, nullptr);
+    ASSERT_NE(merged, nullptr);
+
+    // Should return defaults
+    EXPECT_EQ(merged->chunk_size, DATABASE_CONFIG_DEFAULT_CHUNK_SIZE);
+    EXPECT_EQ(merged->lru_memory_mb, DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB);
+
+    database_config_destroy(merged);
 }
