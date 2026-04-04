@@ -77,9 +77,9 @@ typedef struct {
 
 static CacheMetrics get_cache_metrics(database_t* db) {
     CacheMetrics metrics;
-    metrics.current_memory = db->lru->current_memory;
-    metrics.entry_count = db->lru->entry_count;
-    metrics.max_memory = db->lru->max_memory;
+    metrics.current_memory = database_lru_cache_memory(db->lru);
+    metrics.entry_count = database_lru_cache_size(db->lru);
+    metrics.max_memory = db->lru->total_max_memory;
     return metrics;
 }
 

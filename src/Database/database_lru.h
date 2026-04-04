@@ -17,6 +17,9 @@
 extern "C" {
 #endif
 
+// Number of LRU cache shards - should match NUM_WRITE_LOCK_SHARDS
+#define NUM_LRU_SHARDS 16
+
 /**
  * LRU cache node for database entries.
  *
@@ -32,19 +35,30 @@ struct database_lru_node_t {
 };
 
 /**
- * LRU cache for database path -> identifier lookups.
+ * Single shard of the LRU cache.
  *
- * Thread-safe via lock. Uses hashmap for O(1) lookup
- * and doubly-linked list for O(1) LRU ordering.
+ * Each shard has its own lock for reduced contention.
  */
-typedef struct {
-    PLATFORMLOCKTYPE(lock);
+typedef struct database_lru_shard database_lru_shard_t;
+struct database_lru_shard {
     HASHMAP(path_t, database_lru_node_t) cache;  // Path -> node mapping
     database_lru_node_t* first;     // Most recently used
     database_lru_node_t* last;      // Least recently used
     size_t current_memory;          // Current memory usage in bytes
-    size_t max_memory;              // Maximum memory budget in bytes
-    size_t entry_count;             // Current number of entries
+    size_t max_memory;              // Max memory for this shard
+    size_t entry_count;             // Number of entries in this shard
+    PLATFORMLOCKTYPE(lock);          // Lock for this shard only
+};
+
+/**
+ * Sharded LRU cache for database path -> identifier lookups.
+ *
+ * Thread-safe via per-shard locks. Uses hashmap for O(1) lookup
+ * and doubly-linked list for O(1) LRU ordering.
+ */
+typedef struct {
+    database_lru_shard_t shards[NUM_LRU_SHARDS];
+    size_t total_max_memory;      // Total memory budget across all shards
 } database_lru_cache_t;
 
 /**
@@ -79,12 +93,12 @@ identifier_t* database_lru_cache_get(database_lru_cache_t* lru, path_t* path);
  * Put a value into the cache.
  *
  * Replaces existing value if path already exists.
- * May evict LRU entry if cache is full.
+ * May evict LRU entries if cache is full (evicted values are destroyed internally).
  *
  * @param lru   Cache to update
  * @param path  Path key (takes ownership of reference)
  * @param value Value to store (takes ownership of reference)
- * @return Evicted value if any (caller must destroy), NULL otherwise
+ * @return Old value if path already existed (caller must destroy), NULL otherwise
  */
 identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, identifier_t* value);
 
@@ -121,6 +135,14 @@ void database_lru_cache_clear(database_lru_cache_t* lru);
  * @return Number of entries
  */
 size_t database_lru_cache_size(database_lru_cache_t* lru);
+
+/**
+ * Get current total memory usage across all shards.
+ *
+ * @param lru Cache to query
+ * @return Total memory usage in bytes
+ */
+size_t database_lru_cache_memory(database_lru_cache_t* lru);
 
 #ifdef __cplusplus
 }

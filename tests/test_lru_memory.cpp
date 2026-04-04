@@ -88,9 +88,9 @@ TEST(LRUMemoryTest, MemoryBasedEviction) {
     }
 
     // Cache should have some entries (LRU eviction occurred)
-    EXPECT_GT(lru->entry_count, 0u);
-    EXPECT_GT(lru->current_memory, 0u);
-    size_t entries_after_100 = lru->entry_count;
+    EXPECT_GT(database_lru_cache_size(lru), 0u);
+    EXPECT_GT(database_lru_cache_memory(lru), 0u);
+    size_t entries_after_100 = database_lru_cache_size(lru);
 
     // Add more entries to trigger more evictions
     for (int i = 100; i < 200; i++) {
@@ -107,8 +107,8 @@ TEST(LRUMemoryTest, MemoryBasedEviction) {
 
     // Entry count should be similar (memory-based eviction working)
     // The exact count depends on entry sizes, but should be bounded
-    EXPECT_GT(lru->entry_count, 0u);
-    EXPECT_LE(lru->current_memory, 50 * 1024u);  // Should not exceed budget
+    EXPECT_GT(database_lru_cache_size(lru), 0u);
+    EXPECT_LE(database_lru_cache_memory(lru), 50 * 1024u);  // Should not exceed budget
 
     database_lru_cache_destroy(lru);
 }
@@ -117,7 +117,7 @@ TEST(LRUMemoryTest, MemoryBasedEviction) {
 TEST(LRUMemoryTest, ZeroMemoryBudget) {
     database_lru_cache_t* lru = database_lru_cache_create(0);
     ASSERT_NE(lru, nullptr);
-    EXPECT_EQ(lru->max_memory, DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024);
+    EXPECT_EQ(lru->total_max_memory, DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024);
     database_lru_cache_destroy(lru);
 }
 
@@ -131,20 +131,20 @@ TEST(LRUMemoryTest, MemoryTracking) {
     identifier_t* value1 = make_simple_value("value");
 
     database_lru_cache_put(lru, path1, value1);
-    size_t after_put = lru->current_memory;
+    size_t after_put = database_lru_cache_memory(lru);
     EXPECT_GT(after_put, 0u);
 
     // Get entry (should not change memory)
     path_t* path1_copy = path_copy(path1);
     identifier_t* cached = database_lru_cache_get(lru, path1_copy);
     EXPECT_NE(cached, nullptr);
-    EXPECT_EQ(lru->current_memory, after_put);
+    EXPECT_EQ(database_lru_cache_memory(lru), after_put);
     identifier_destroy(cached);
 
     // Delete entry
     database_lru_cache_delete(lru, path1);
-    EXPECT_EQ(lru->current_memory, 0u);
-    EXPECT_EQ(lru->entry_count, 0u);
+    EXPECT_EQ(database_lru_cache_memory(lru), 0u);
+    EXPECT_EQ(database_lru_cache_size(lru), 0u);
 
     database_lru_cache_destroy(lru);
 }
