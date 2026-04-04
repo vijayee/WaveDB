@@ -107,8 +107,11 @@ TEST_F(BatchTest, MultipleDestroyCalls) {
     // First destroy
     batch_destroy(batch);
 
-    // Second destroy - should be safe due to reference counting
-    batch_destroy(batch);
+    // Second destroy on NULL is safe (batch_destroy handles NULL)
+    // Note: Calling batch_destroy twice on the same pointer is a use-after-free,
+    // not a reference counting feature. To properly test reference counting,
+    // use batch_reference() before the second destroy.
+    batch_destroy(nullptr);
 
     EXPECT_TRUE(true);  // If we get here, the test passed
 }
@@ -914,6 +917,8 @@ TEST_F(BatchTest, SerializeDeserializeEmptyBatch) {
     EXPECT_EQ(op_count, 0);
 
     // Cleanup
+    // Note: Caller must free ops array even when op_count is 0
+    free(ops);
     buffer_destroy(serialized);
     batch_destroy(batch);
 }

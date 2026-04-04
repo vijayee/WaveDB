@@ -43,6 +43,8 @@ protected:
         if (manager) {
             wal_manager_destroy(manager);
         }
+        // Clear thread-local WAL reference to avoid memory leak reports in tests
+        clear_thread_wal_reference();
         // Remove temporary directory
         char cmd[512];
         snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
@@ -218,6 +220,16 @@ TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
     transaction_id_t txn2 = transaction_id_get_next();
     thread_wal_write(twal2, txn2, WAL_PUT, data2);
     buffer_destroy(data2);
+
+    // Clean up twal2 manually since it's not registered with the manager
+    if (twal2 != nullptr) {
+        if (twal2->fd >= 0) {
+            fsync(twal2->fd);
+            close(twal2->fd);
+        }
+        free(twal2->file_path);
+        free(twal2);
+    }
 
     // Close manager
     wal_manager_destroy(manager);

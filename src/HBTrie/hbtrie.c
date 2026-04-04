@@ -515,7 +515,15 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
         identifier_t* result = entry->value;
 
         // Remove the entry entirely from the current node
-        bnode_remove_at(current->btree, index);
+        bnode_entry_t removed = bnode_remove_at(current->btree, index);
+
+        // Clean up the removed entry's resources (chunk key and path_chunk_counts)
+        if (removed.key != NULL) {
+          chunk_destroy(removed.key);
+        }
+        if (removed.path_chunk_counts.data != NULL) {
+          vec_deinit(&removed.path_chunk_counts);
+        }
 
         // Clean up empty nodes along the path (in reverse order)
         // Start from the last tracked parent and work up
@@ -530,7 +538,13 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
             hbtrie_node_destroy(cleanup_node);
 
             // Remove the entry from parent's bnode that pointed to this child
-            bnode_remove_at(parent_node->btree, parent_entry_index);
+            bnode_entry_t parent_removed = bnode_remove_at(parent_node->btree, parent_entry_index);
+
+            // Clean up the removed entry's resources (chunk key)
+            // Note: parent entries don't have values or path_chunk_counts, only keys and child pointers
+            if (parent_removed.key != NULL) {
+              chunk_destroy(parent_removed.key);
+            }
 
             // Move up to parent for next iteration
             cleanup_node = parent_node;

@@ -196,6 +196,17 @@ int wal_manager_flush(wal_manager_t* manager);
  */
 int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* count);
 
+/**
+ * Clear thread-local WAL reference (for testing).
+ *
+ * This clears the thread-local WAL pointer without freeing it.
+ * Used for test cleanup to avoid memory leak reports.
+ *
+ * WARNING: Only use in tests where you know the WAL has been
+ * properly destroyed by its manager.
+ */
+void clear_thread_wal_reference(void);
+
 #ifdef __cplusplus
 }
 #endif

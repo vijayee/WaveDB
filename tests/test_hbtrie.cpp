@@ -389,9 +389,15 @@ TEST_F(HbtrieTest, SubtreeDeletion) {
     EXPECT_GT(nodes_after_insert, 1) << "Should have multiple nodes";
 
     // Verify all values exist
-    EXPECT_NE(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    identifier_t* found1 = hbtrie_find(trie, path1);
+    identifier_t* found2 = hbtrie_find(trie, path2);
+    identifier_t* found3 = hbtrie_find(trie, path3);
+    EXPECT_NE(found1, nullptr);
+    EXPECT_NE(found2, nullptr);
+    EXPECT_NE(found3, nullptr);
+    if (found1) identifier_destroy(found1);
+    if (found2) identifier_destroy(found2);
+    if (found3) identifier_destroy(found3);
 
     // Remove path1 - should NOT delete "c" subtree since we still have path2 under "b"
     identifier_t* removed1 = hbtrie_remove(trie, path1);
@@ -400,8 +406,12 @@ TEST_F(HbtrieTest, SubtreeDeletion) {
 
     // Verify path1 is gone but path2 and path3 still exist
     EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    found2 = hbtrie_find(trie, path2);
+    found3 = hbtrie_find(trie, path3);
+    EXPECT_NE(found2, nullptr);
+    EXPECT_NE(found3, nullptr);
+    if (found2) identifier_destroy(found2);
+    if (found3) identifier_destroy(found3);
 
     // Remove path2 - should clean up "b" subtree entirely
     identifier_t* removed2 = hbtrie_remove(trie, path2);
@@ -410,7 +420,9 @@ TEST_F(HbtrieTest, SubtreeDeletion) {
 
     // Verify path2 is gone but path3 still exists
     EXPECT_EQ(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    found3 = hbtrie_find(trie, path3);
+    EXPECT_NE(found3, nullptr);
+    if (found3) identifier_destroy(found3);
 
     // Count nodes - should be fewer now
     int nodes_after_partial_delete = count_hbtrie_nodes(trie->root);

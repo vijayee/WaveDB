@@ -146,6 +146,11 @@ TEST(LRUMemoryTest, MemoryTracking) {
     EXPECT_EQ(database_lru_cache_memory(lru), 0u);
     EXPECT_EQ(database_lru_cache_size(lru), 0u);
 
+    // Cleanup
+    // Note: path1 was destroyed by database_lru_cache_delete (the cache owned it)
+    // path1_copy is still owned by us
+    path_destroy(path1_copy);
+
     database_lru_cache_destroy(lru);
 }
 

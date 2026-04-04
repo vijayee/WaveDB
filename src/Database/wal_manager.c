@@ -752,7 +752,8 @@ void wal_manager_destroy(wal_manager_t* manager) {
                 thread_wal_t* twal = manager->threads[i];
                 if (twal != NULL) {
                     // Clear thread-local reference if this is the current thread's WAL
-                    if (thread_local_wal == twal) {
+                    bool is_current_thread = (thread_local_wal == twal);
+                    if (is_current_thread) {
                         thread_local_wal = NULL;
                     }
 
@@ -774,8 +775,13 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     // Destroy lock
                     platform_lock_destroy(&twal->lock);
 
-                    // Note: twal struct itself is NOT freed to avoid potential use-after-free
-                    // by worker threads that may still reference it
+                    // Free the struct if this is the current thread's WAL (safe, no other thread using it)
+                    // For other threads, we don't free to avoid use-after-free by worker threads
+                    if (is_current_thread) {
+                        free(twal);
+                    }
+                    // Note: For non-current thread WALs, twal struct is NOT freed to avoid
+                    // potential use-after-free by worker threads that may still reference it
                 }
             }
             free(manager->threads);
@@ -1523,4 +1529,22 @@ int wal_manager_flush(wal_manager_t* manager) {
     platform_unlock(&manager->threads_lock);
 
     return 0;
+}
+
+void clear_thread_wal_reference(void) {
+    // Free the thread-local WAL if it exists
+    if (thread_local_wal != NULL) {
+        // Close file descriptor if open
+        if (thread_local_wal->fd >= 0) {
+            fsync(thread_local_wal->fd);
+            close(thread_local_wal->fd);
+        }
+        // Free file path
+        free(thread_local_wal->file_path);
+        // Destroy lock
+        platform_lock_destroy(&thread_local_wal->lock);
+        // Free the struct
+        free(thread_local_wal);
+        thread_local_wal = NULL;
+    }
 }
