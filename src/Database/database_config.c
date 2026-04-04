@@ -327,3 +327,47 @@ database_config_t* database_config_load(const char* location) {
     cbor_decref(&root);
     return config;
 }
+
+database_config_t* database_config_merge(const database_config_t* saved,
+                                         const database_config_t* passed) {
+    // Both NULL: return defaults
+    if (saved == NULL && passed == NULL) {
+        return database_config_default();
+    }
+
+    // Saved NULL: return copy of passed
+    if (saved == NULL) {
+        return database_config_copy(passed);
+    }
+
+    // Passed NULL: return copy of saved
+    if (passed == NULL) {
+        return database_config_copy(saved);
+    }
+
+    // Both present: merge according to rules
+    database_config_t* merged = database_config_default();
+    if (merged == NULL) {
+        return NULL;
+    }
+
+    // IMMUTABLE: Always use saved values (database was created with these)
+    merged->chunk_size = saved->chunk_size;
+    merged->btree_node_size = saved->btree_node_size;
+    merged->enable_persist = saved->enable_persist;
+
+    // MUTABLE: Use passed values (user can change these)
+    merged->lru_memory_mb = passed->lru_memory_mb;
+    merged->storage_cache_size = passed->storage_cache_size;
+    merged->wal_config = passed->wal_config;
+
+    // THREADING: Use passed values
+    merged->worker_threads = passed->worker_threads;
+    merged->timer_resolution_ms = passed->timer_resolution_ms;
+
+    // EXTERNAL: Use passed values (runtime only)
+    merged->external_pool = passed->external_pool;
+    merged->external_wheel = passed->external_wheel;
+
+    return merged;
+}
