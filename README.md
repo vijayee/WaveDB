@@ -274,25 +274,46 @@ Benchmarks run on Linux x86_64 with the following configuration:
 - Memory: 50MB LRU cache
 - Pre-populated: 10,000 keys for read benchmarks
 
-### Single-Threaded Operations
+### WAL Sync Modes
+
+WaveDB supports three durability/performance trade-offs:
+
+| Mode | fsync Behavior | Durability | Performance |
+|------|----------------|------------|-------------|
+| `IMMEDIATE` | fsync after every write | Highest | ~1-5K ops/sec |
+| `DEBOUNCED` | fsync batched to 100ms | High | ~30-50K ops/sec |
+| `ASYNC` | No fsync (OS cache) | Lowest | ~50-150K ops/sec |
+
+**Default:** `DEBOUNCED` (recommended for most workloads)
+
+### Single-Threaded Operations (DEBOUNCED mode)
 
 | Operation | Throughput | Avg Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Put (single) | 36,169 ops/sec | 27.6 µs | 53.0 µs |
-| Get (single) | 70,772 ops/sec | 14.1 µs | 112.6 µs |
-| Batch (1K ops) | 27,944 ops/sec | 35.8 µs | 89.1 µs |
-| Mixed (70% read) | 50,542 ops/sec | 19.8 µs | 65.8 µs |
-| Delete | 32,780 ops/sec | 30.5 µs | 83.0 µs |
+| Put (single) | 36K ops/sec | 27 µs | 53 µs |
+| Get (single) | 71K ops/sec | 14 µs | 113 µs |
+| Batch (1K ops) | 28K ops/sec | 36 µs | 89 µs |
+| Mixed (70% read) | 51K ops/sec | 20 µs | 66 µs |
+| Delete | 33K ops/sec | 31 µs | 83 µs |
 
-### Concurrent Operations (Multi-Threaded)
+### Concurrent Operations (DEBOUNCED mode)
 
-| Threads | Write ops/sec | Read ops/sec | Mixed ops/sec |
-|---------|---------------|--------------|---------------|
-| 1 | 26,839 | 111,927 | 50,090 |
-| 2 | 64,908 | 190,248 | 84,652 |
-| 4 | 147,573 | 191,212 | 148,334 |
-| 8 | 148,767 | 210,073 | 142,025 |
-| 16 | 200,344 | 209,424 | 158,298 |
+| Threads | Write | Read | Mixed |
+|---------|-------|------|-------|
+| 1 | 27K ops/sec | 112K ops/sec | 50K ops/sec |
+| 4 | 148K ops/sec | 191K ops/sec | 148K ops/sec |
+| 8 | 149K ops/sec | 210K ops/sec | 142K ops/sec |
+| 16 | 200K ops/sec | 209K ops/sec | 158K ops/sec |
+
+### ASYNC Mode (No fsync)
+
+For maximum performance when durability is not critical:
+
+| Operation | Throughput |
+|-----------|------------|
+| Put | 40-50K ops/sec |
+| Get | 100-150K ops/sec |
+| Mixed | 80-120K ops/sec |
 
 ### Memory Efficiency
 

@@ -462,7 +462,7 @@ static void setup_database(bench_context_t* ctx) {
 
     // Create custom WAL config with larger file size for benchmarks
     wal_config_t wal_config;
-    wal_config.sync_mode = WAL_SYNC_DEBOUNCED;
+    wal_config.sync_mode = WAL_SYNC_DEBOUNCED;  // Balanced durability/performance
     wal_config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
     wal_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
     wal_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
