@@ -757,6 +757,19 @@ void database_destroy(database_t* db) {
             platform_lock_destroy(&db->write_locks[i]);
         }
 
+        // Destroy active config
+        if (db->active_config != NULL) {
+            database_config_destroy(db->active_config);
+        }
+
+        // Destroy owned pool/wheel
+        if (db->owns_pool && db->pool != NULL) {
+            work_pool_destroy(db->pool);
+        }
+        if (db->owns_wheel && db->wheel != NULL) {
+            hierarchical_timing_wheel_destroy(db->wheel);
+        }
+
         free(db->location);
         refcounter_destroy_lock((refcounter_t*)db);
         free(db);
