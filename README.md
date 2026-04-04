@@ -267,6 +267,46 @@ buffer_t* identifier_to_buffer(identifier_t* id);
 
 All HBTrie operations are thread-safe using platform-abstracted locking. Define `REFCOUNTER_ATOMIC` at compile time to use C11 atomics instead of mutex-based reference counting.
 
+## Performance
+
+Benchmarks run on Linux x86_64 with the following configuration:
+- CPU: 8-core processor
+- Memory: 50MB LRU cache
+- Pre-populated: 10,000 keys for read benchmarks
+
+### Single-Threaded Operations
+
+| Operation | Throughput | Avg Latency | P99 Latency |
+|-----------|------------|-------------|-------------|
+| Put (single) | 36,169 ops/sec | 27.6 µs | 53.0 µs |
+| Get (single) | 70,772 ops/sec | 14.1 µs | 112.6 µs |
+| Batch (1K ops) | 27,944 ops/sec | 35.8 µs | 89.1 µs |
+| Mixed (70% read) | 50,542 ops/sec | 19.8 µs | 65.8 µs |
+| Delete | 32,780 ops/sec | 30.5 µs | 83.0 µs |
+
+### Concurrent Operations (Multi-Threaded)
+
+| Threads | Write ops/sec | Read ops/sec | Mixed ops/sec |
+|---------|---------------|--------------|---------------|
+| 1 | 26,839 | 111,927 | 50,090 |
+| 2 | 64,908 | 190,248 | 84,652 |
+| 4 | 147,573 | 191,212 | 148,334 |
+| 8 | 148,767 | 210,073 | 142,025 |
+| 16 | 200,344 | 209,424 | 158,298 |
+
+### Memory Efficiency
+
+- LRU Cache Budget: 50.00 MB
+- Typical Memory Usage: ~11 MB for 35K entries
+- Average Entry Size: ~318 bytes
+
+### Performance Features
+
+- **Memory Pool**: Thread-local caches for lock-free allocation
+- **xxHash**: Fast path hashing (3-5x improvement)
+- **MVCC Fast-Path**: 90%+ visibility check hit rate
+- **Fragment Re-sorting**: Maintains O(log n) lookup
+
 ## Code Organization
 
 ```

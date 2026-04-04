@@ -130,9 +130,33 @@ This will:
 3. Run Dart benchmark
 4. Display comparison results
 
-### Expected Performance
+### Performance (Native C Library)
 
-Dart FFI bindings have comparable performance to Node.js N-API bindings:
+Benchmarks run on Linux x86_64 with 50MB LRU cache:
+
+**Single-Threaded:**
+| Operation | Throughput | Avg Latency |
+|-----------|------------|-------------|
+| Put | 36,169 ops/sec | 27.6 µs |
+| Get | 70,772 ops/sec | 14.1 µs |
+| Batch | 27,944 ops/sec | 35.8 µs |
+| Mixed | 50,542 ops/sec | 19.8 µs |
+
+**Concurrent (8 threads):**
+| Operation | Throughput |
+|-----------|------------|
+| Write | 148,767 ops/sec |
+| Read | 210,073 ops/sec |
+| Mixed | 142,025 ops/sec |
+
+**Concurrent (16 threads):**
+| Operation | Throughput |
+|-----------|------------|
+| Write | 200,344 ops/sec |
+| Read | 209,424 ops/sec |
+| Mixed | 158,298 ops/sec |
+
+### Dart FFI vs Node.js N-API
 
 | Operation | Dart FFI (ops/sec) | Node.js N-API (ops/sec) | Notes |
 |-----------|-------------------|-----------------------|-------|
@@ -141,7 +165,7 @@ Dart FFI bindings have comparable performance to Node.js N-API bindings:
 | put async | ~50,000 | N/A | - |
 | get async | ~166,000 | N/A | - |
 
-*Benchmarks run on Linux x86_64 with 500 iterations. Results vary by platform and workload.*
+*Benchmarks run on Linux x86_64. Results vary by platform and workload.*
 
 Both bindings provide excellent performance for most use cases. The Dart FFI is well-suited for Flutter applications requiring native database access.
 

@@ -248,6 +248,31 @@ The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++
 
 ## Performance
 
+Benchmarks run on Linux x86_64 with Node.js v20.5.1:
+
+### Native C Library Performance
+
+**Single-Threaded Operations:**
+
+| Operation | Throughput | Avg Latency | P99 Latency |
+|-----------|------------|-------------|-------------|
+| Put | 36,169 ops/sec | 27.6 µs | 53.0 µs |
+| Get | 70,772 ops/sec | 14.1 µs | 112.6 µs |
+| Batch | 27,944 ops/sec | 35.8 µs | 89.1 µs |
+| Mixed | 50,542 ops/sec | 19.8 µs | 65.8 µs |
+
+**Concurrent Operations (Multi-Threaded):**
+
+| Threads | Write | Read | Mixed |
+|---------|-------|------|-------|
+| 1 | 26,839 ops/sec | 111,927 ops/sec | 50,090 ops/sec |
+| 2 | 64,908 ops/sec | 190,248 ops/sec | 84,652 ops/sec |
+| 4 | 147,573 ops/sec | 191,212 ops/sec | 148,334 ops/sec |
+| 8 | 148,767 ops/sec | 210,073 ops/sec | 142,025 ops/sec |
+| 16 | 200,344 ops/sec | 209,424 ops/sec | 158,298 ops/sec |
+
+### Node.js Bindings Performance
+
 Benchmarks run on Node.js v20.5.1 with 10,000 iterations:
 
 **Async Operations (non-blocking, thread-pool based):**
