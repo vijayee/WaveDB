@@ -4,6 +4,7 @@
 
 #include "identifier.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -18,7 +19,11 @@ identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
   size_t length = (buf != NULL) ? buf->size : 0;
   const uint8_t* data = (buf != NULL) ? buf->data : NULL;
 
-  identifier_t* id = get_clear_memory(sizeof(identifier_t));
+  // Use memory pool for identifier_t (typically ~40-60 bytes)
+  identifier_t* id = (identifier_t*)memory_pool_alloc(sizeof(identifier_t));
+  if (id == NULL) {
+    id = get_clear_memory(sizeof(identifier_t));
+  }
   id->length = length;
   id->chunk_size = chunk_size;
 
@@ -69,7 +74,7 @@ void identifier_destroy(identifier_t* id) {
     vec_deinit(&id->chunks);
 
     refcounter_destroy_lock((refcounter_t*)id);
-    free(id);
+    memory_pool_free(id, sizeof(identifier_t));
   }
 }
 
@@ -201,7 +206,11 @@ identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
   }
 
   // Create identifier and calculate total length
-  identifier_t* id = get_clear_memory(sizeof(identifier_t));
+  // Use memory pool
+  identifier_t* id = (identifier_t*)memory_pool_alloc(sizeof(identifier_t));
+  if (id == NULL) {
+    id = get_clear_memory(sizeof(identifier_t));
+  }
   if (id == NULL) return NULL;
 
   id->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
@@ -219,7 +228,7 @@ identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
         chunk_destroy(id->chunks.data[j]);
       }
       vec_deinit(&id->chunks);
-      free(id);
+      memory_pool_free(id, sizeof(identifier_t));
       return NULL;
     }
     size_t chunk_len = cbor_bytestring_length(chunk_item);
@@ -250,7 +259,7 @@ identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
         chunk_destroy(id->chunks.data[j]);
       }
       vec_deinit(&id->chunks);
-      free(id);
+      memory_pool_free(id, sizeof(identifier_t));
       return NULL;
     }
 
