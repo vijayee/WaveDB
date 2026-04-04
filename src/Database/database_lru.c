@@ -6,16 +6,14 @@
 #include "database.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
-#include "../Util/xxhash.h"
 #include <stdlib.h>
 #include <string.h>
 
-// Hash function for path_t* using xxHash
+// Hash function for path_t*
 static size_t hash_path(const path_t* path) {
     if (path == NULL) return 0;
 
-    // Use xxHash with a fixed seed for deterministic hashing
-    uint64_t hash = 0x9E3779B97F4A7C15ULL;  // Prime constant seed
+    size_t hash = 0;
     size_t len = path_length((path_t*)path);
 
     for (size_t i = 0; i < len; i++) {
@@ -25,14 +23,16 @@ static size_t hash_path(const path_t* path) {
             for (int j = 0; j < id->chunks.length; j++) {
                 chunk_t* chunk = id->chunks.data[j];
                 if (chunk != NULL && chunk->data != NULL) {
-                    // Use xxHash for each chunk
-                    hash ^= xxhash64(chunk->data->data, chunk->data->size, hash);
+                    // Simple hash combining - faster for short keys than xxHash
+                    for (size_t k = 0; k < chunk->data->size; k++) {
+                        hash = hash * 31 + chunk->data->data[k];
+                    }
                 }
             }
         }
     }
 
-    return (size_t)hash;
+    return hash;
 }
 
 // Compare function for path_t*
