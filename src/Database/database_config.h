@@ -77,6 +77,41 @@ database_config_t* database_config_copy(const database_config_t* config);
  */
 void database_config_destroy(database_config_t* config);
 
+/**
+ * Load configuration from database directory.
+ *
+ * @param location  Database directory path
+ * @return Config or NULL if not found or on error
+ */
+database_config_t* database_config_load(const char* location);
+
+/**
+ * Save configuration to database directory.
+ *
+ * Saves to <location>/config.cbor
+ *
+ * @param location  Database directory path
+ * @param config    Configuration to save
+ * @return 0 on success, -1 on failure
+ */
+int database_config_save(const char* location, const database_config_t* config);
+
+/**
+ * Merge two configurations.
+ *
+ * Merge rules:
+ * - If saved is NULL: return passed (or defaults if both NULL)
+ * - If passed is NULL: return copy of saved
+ * - Immutable settings: use saved values (ignore passed)
+ * - Mutable settings: use passed values (override saved)
+ *
+ * @param saved  Config loaded from disk (may be NULL)
+ * @param passed Config passed by user (may be NULL)
+ * @return Merged config (caller must destroy)
+ */
+database_config_t* database_config_merge(const database_config_t* saved,
+                                         const database_config_t* passed);
+
 #ifdef __cplusplus
 }
 #endif
