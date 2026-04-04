@@ -6,12 +6,18 @@
 #include <stdlib.h>
 #include "buffer.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include <string.h>
 
 
 
 buffer_t* buffer_create(size_t size) {
-  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
+  buffer_t* buf = (buffer_t*)memory_pool_alloc(sizeof(buffer_t));
+  if (buf == NULL) {
+    buf = get_clear_memory(sizeof(buffer_t));
+  } else {
+    memset(buf, 0, sizeof(buffer_t));
+  }
   buf->data = get_clear_memory(size);
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
@@ -19,7 +25,12 @@ buffer_t* buffer_create(size_t size) {
 }
 
 buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size) {
-  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
+  buffer_t* buf = (buffer_t*)memory_pool_alloc(sizeof(buffer_t));
+  if (buf == NULL) {
+    buf = get_clear_memory(sizeof(buffer_t));
+  } else {
+    memset(buf, 0, sizeof(buffer_t));
+  }
   buf->size = size;
   buf->data = get_memory(size);
   buffer_copy_from_pointer(buf, data, size);
@@ -28,7 +39,12 @@ buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size) {
 }
 
 buffer_t* buffer_create_from_existing_memory(uint8_t* data, size_t size) {
-  buffer_t* buf = get_clear_memory(sizeof(buffer_t));
+  buffer_t* buf = (buffer_t*)memory_pool_alloc(sizeof(buffer_t));
+  if (buf == NULL) {
+    buf = get_clear_memory(sizeof(buffer_t));
+  } else {
+    memset(buf, 0, sizeof(buffer_t));
+  }
   buf->data = data;
   buf->size = size;
   refcounter_init((refcounter_t*) buf);
@@ -59,7 +75,7 @@ void buffer_destroy(buffer_t* buf) {
   if (refcounter_count((refcounter_t*)buf) == 0) {
     free(buf->data);
     refcounter_destroy_lock(&buf->refcounter);
-    free(buf);
+    memory_pool_free(buf, sizeof(buffer_t));
   }
 }
 
