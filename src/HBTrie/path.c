@@ -76,6 +76,9 @@ path_t* path_copy(path_t* path) {
   path_t* copy = path_create();
   if (copy == NULL) return NULL;
 
+  // Reserve exact capacity
+  vec_reserve(&copy->identifiers, path->identifiers.length);
+
   for (int i = 0; i < path->identifiers.length; i++) {
     identifier_t* id = path->identifiers.data[i];
     identifier_t* id_copy = (identifier_t*)refcounter_reference((refcounter_t*)id);
@@ -144,6 +147,10 @@ path_t* cbor_to_path(cbor_item_t* item, size_t chunk_size) {
   if (path == NULL) return NULL;
 
   size_t num_ids = cbor_array_size(item);
+
+  // Reserve exact capacity
+  vec_reserve(&path->identifiers, (int)num_ids);
+
   for (size_t i = 0; i < num_ids; i++) {
     cbor_item_t* id_item = cbor_array_get(item, i);
     identifier_t* id = cbor_to_identifier(id_item, chunk_size);

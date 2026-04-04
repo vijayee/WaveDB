@@ -60,7 +60,7 @@ typedef struct bnode_entry_t {
     // Stores the number of chunks per identifier in the path
     // NULL for entries inserted before this field was added (treat as single identifier)
     // Example: path ['users', 'alice'] with chunk_size=4 might have chunk_counts = [2, 2]
-    //          meaning 'users' has 2 chunks, 'alice' has 2 chunks
+    //         meaning 'users' has 2 chunks, 'alice' has 2 chunks
     vec_t(size_t) path_chunk_counts;
 
     // Storage location for lazy-loaded children
