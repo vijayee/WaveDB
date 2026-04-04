@@ -3,6 +3,7 @@
 //
 
 #include "database.h"
+#include "database_config.h"
 #include "wal_manager.h"
 #include "batch.h"
 #include "../Util/allocator.h"
@@ -320,6 +321,243 @@ static hbtrie_t* load_index(const char* location, uint8_t chunk_size, uint32_t b
     free(buf);
 
     return trie ? trie : hbtrie_create(chunk_size, btree_node_size);
+}
+
+database_t* database_create_with_config(const char* location,
+                                        database_config_t* config,
+                                        int* error_code) {
+    if (error_code) *error_code = 0;
+
+    // Use defaults if no config provided
+    database_config_t* effective_config = NULL;
+    bool owns_config = false;
+
+    if (config == NULL) {
+        effective_config = database_config_default();
+        owns_config = true;
+    } else {
+        effective_config = config;
+    }
+
+    // Check if database already exists
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/config.cbor", location);
+    struct stat st;
+    bool db_exists = (stat(config_path, &st) == 0);
+
+    if (db_exists) {
+        // Load saved config and merge
+        database_config_t* saved_config = database_config_load(location);
+        if (saved_config != NULL) {
+            database_config_t* merged = database_config_merge(saved_config, effective_config);
+            if (owns_config) {
+                database_config_destroy(effective_config);
+            }
+            database_config_destroy(saved_config);
+            effective_config = merged;
+            owns_config = true;
+        }
+    }
+
+    // Create directory if needed
+    if (mkdir_p((char*)location) != 0) {
+        if (error_code) *error_code = errno;
+        if (owns_config) database_config_destroy(effective_config);
+        return NULL;
+    }
+
+    // Initialize transaction ID generator (call once per process)
+    transaction_id_init();
+
+    database_t* db = get_clear_memory(sizeof(database_t));
+    if (db == NULL) {
+        if (error_code) *error_code = ENOMEM;
+        if (owns_config) database_config_destroy(effective_config);
+        return NULL;
+    }
+
+    db->location = strdup(location);
+    db->lru_size = effective_config->lru_memory_mb;
+    db->chunk_size = effective_config->chunk_size;
+    db->btree_node_size = effective_config->btree_node_size;
+    db->is_rebuilding = 0;
+
+    // Handle pool ownership
+    if (effective_config->external_pool != NULL) {
+        db->pool = effective_config->external_pool;
+        db->owns_pool = false;
+    } else if (effective_config->worker_threads > 0) {
+        db->pool = work_pool_create(effective_config->worker_threads);
+        db->owns_pool = (db->pool != NULL);
+        if (db->pool == NULL) {
+            if (error_code) *error_code = ENOMEM;
+            free(db->location);
+            free(db);
+            if (owns_config) database_config_destroy(effective_config);
+            return NULL;
+        }
+    } else {
+        // No pool available
+        if (error_code) *error_code = EINVAL;
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        return NULL;
+    }
+
+    // Handle wheel ownership
+    if (effective_config->external_wheel != NULL) {
+        db->wheel = effective_config->external_wheel;
+        db->owns_wheel = false;
+    } else if (effective_config->timer_resolution_ms > 0) {
+        db->wheel = hierarchical_timing_wheel_create(effective_config->timer_resolution_ms, db->pool);
+        db->owns_wheel = (db->wheel != NULL);
+        if (db->wheel == NULL) {
+            if (db->owns_pool) work_pool_destroy(db->pool);
+            free(db->location);
+            free(db);
+            if (owns_config) database_config_destroy(effective_config);
+            if (error_code) *error_code = ENOMEM;
+            return NULL;
+        }
+    } else {
+        // No wheel available
+        if (error_code) *error_code = EINVAL;
+        if (db->owns_pool) work_pool_destroy(db->pool);
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        return NULL;
+    }
+
+    // Create LRU cache
+    db->lru = database_lru_cache_create(db->lru_size * 1024 * 1024);
+    if (db->lru == NULL) {
+        if (db->owns_pool) work_pool_destroy(db->pool);
+        if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
+    }
+
+    // Initialize write locks
+    for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+        platform_lock_init(&db->write_locks[i]);
+    }
+
+    // Create storage if persistent
+    if (effective_config->enable_persist) {
+        char* data_path = path_join(location, "data");
+        char* meta_path = path_join(location, "meta");
+        mkdir_p(data_path);
+        mkdir_p(meta_path);
+
+        size_t cache_size = effective_config->storage_cache_size;
+        size_t section_concurrency = 8;
+        size_t sections_size = 1024 * 1024;
+
+        db->storage = sections_create(location, sections_size, cache_size, section_concurrency,
+                                      db->wheel, DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
+
+        free(data_path);
+        free(meta_path);
+
+        if (db->storage == NULL) {
+            log_warn("Failed to initialize persistent storage, continuing in-memory only");
+        } else {
+            db->storage_cache_size = cache_size;
+            db->storage_max_tuple = section_concurrency;
+        }
+    }
+
+    // Load or create trie
+    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
+    if (db->trie == NULL) {
+        db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
+    }
+
+    // If using storage, attach it to trie
+    if (db->storage != NULL && db->trie->root != NULL) {
+        db->trie->root->storage = db->storage;
+    }
+
+    if (db->trie == NULL) {
+        if (db->storage) sections_destroy(db->storage);
+        database_lru_cache_destroy(db->lru);
+        if (db->owns_pool) work_pool_destroy(db->pool);
+        if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
+    }
+
+    // Create transaction manager
+    db->tx_manager = tx_manager_create(db->trie, db->pool, db->wheel, 100);
+    if (db->tx_manager == NULL) {
+        hbtrie_destroy(db->trie);
+        if (db->storage) sections_destroy(db->storage);
+        database_lru_cache_destroy(db->lru);
+        if (db->owns_pool) work_pool_destroy(db->pool);
+        if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        if (error_code) *error_code = ENOMEM;
+        return NULL;
+    }
+
+    // Create WAL manager
+    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, error_code);
+    if (db->wal_manager == NULL) {
+        tx_manager_destroy(db->tx_manager);
+        hbtrie_destroy(db->trie);
+        if (db->storage) sections_destroy(db->storage);
+        database_lru_cache_destroy(db->lru);
+        if (db->owns_pool) work_pool_destroy(db->pool);
+        if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            platform_lock_destroy(&db->write_locks[i]);
+        }
+        free(db->location);
+        free(db);
+        if (owns_config) database_config_destroy(effective_config);
+        if (error_code && *error_code == 0) {
+            *error_code = ENOMEM;
+        }
+        return NULL;
+    }
+
+    // Set legacy WAL to NULL
+    db->wal = NULL;
+
+    // Store active config
+    db->active_config = database_config_copy(effective_config);
+
+    // Save config
+    database_config_save(location, effective_config);
+
+    // Replay WAL for recovery
+    db->is_rebuilding = 1;
+    wal_manager_recover(db->wal_manager, db);
+    db->is_rebuilding = 0;
+
+    refcounter_init((refcounter_t*)db);
+
+    if (owns_config) {
+        database_config_destroy(effective_config);
+    }
+
+    return db;
 }
 
 database_t* database_create(const char* location, size_t lru_memory_mb,
