@@ -189,10 +189,20 @@ int fragment_list_find_fit(fragment_list_t* list, size_t size, size_t* offset) {
         list->count--;
     } else {
         // Shrink fragment (keep remaining space)
-        frag->start += size;
-        // Note: fragment size changed, may need re-sorting
-        // For simplicity, we'll leave it in place (sub-optimal but safe)
-        // TODO: Re-sort if needed
+        // Fragment size changed - need to re-sort to maintain sorted order
+        size_t new_start = frag->start + size;
+        size_t new_end = frag->end;
+
+        // Remove fragment from current position
+        if (left < list->count - 1) {
+            memmove(&list->fragments[left], &list->fragments[left + 1],
+                    (list->count - left - 1) * sizeof(fragment_t));
+        }
+        list->count--;
+
+        // Re-insert with new size to maintain sorted order
+        fragment_t* new_frag = fragment_create(new_start, new_end);
+        fragment_list_insert(list, new_frag);
     }
 
     return 0;  // Success
