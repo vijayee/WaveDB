@@ -379,6 +379,11 @@ int bnode_entry_set_path_chunk_counts(bnode_entry_t* entry,
     vec_init(&entry->path_chunk_counts);
   }
 
+  // Reserve exact capacity to avoid overallocation
+  if (vec_reserve(&entry->path_chunk_counts, (int)count) != 0) {
+    return -1;
+  }
+
   // Copy the counts
   vec_clear(&entry->path_chunk_counts);
   for (size_t i = 0; i < count; i++) {
