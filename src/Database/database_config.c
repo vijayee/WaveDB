@@ -5,6 +5,10 @@
 
 #include "database_config.h"
 #include "../Util/allocator.h"
+#include <cbor.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <errno.h>
 #include <string.h>
 
 database_config_t* database_config_default(void) {
@@ -65,4 +69,123 @@ void database_config_destroy(database_config_t* config) {
 
     // No internal allocations to free - just the struct itself
     free(config);
+}
+
+int database_config_save(const char* location, const database_config_t* config) {
+    if (location == NULL || config == NULL) {
+        return -1;
+    }
+
+    // Build path: <location>/config.cbor
+    size_t path_len = strlen(location) + strlen("/config.cbor") + 1;
+    char* config_path = malloc(path_len);
+    if (config_path == NULL) {
+        return -1;
+    }
+    snprintf(config_path, path_len, "%s/config.cbor", location);
+
+    // Create CBOR map
+    cbor_item_t* root = cbor_new_definite_map(10);
+    if (root == NULL) {
+        free(config_path);
+        return -1;
+    }
+
+    // Add version
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("version")),
+        .value = cbor_move(cbor_build_uint8(1))
+    });
+
+    // Add immutable settings
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("chunk_size")),
+        .value = cbor_move(cbor_build_uint8(config->chunk_size))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("btree_node_size")),
+        .value = cbor_move(cbor_build_uint32(config->btree_node_size))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("enable_persist")),
+        .value = cbor_move(cbor_build_uint8(config->enable_persist))
+    });
+
+    // Add mutable settings
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("lru_memory_mb")),
+        .value = cbor_move(cbor_build_uint64(config->lru_memory_mb))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("storage_cache_size")),
+        .value = cbor_move(cbor_build_uint64(config->storage_cache_size))
+    });
+
+    // Add WAL config as nested map
+    cbor_item_t* wal = cbor_new_definite_map(5);
+    cbor_map_add(wal, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("sync_mode")),
+        .value = cbor_move(cbor_build_uint8(config->wal_config.sync_mode))
+    });
+    cbor_map_add(wal, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("debounce_ms")),
+        .value = cbor_move(cbor_build_uint64(config->wal_config.debounce_ms))
+    });
+    cbor_map_add(wal, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("idle_threshold_ms")),
+        .value = cbor_move(cbor_build_uint64(config->wal_config.idle_threshold_ms))
+    });
+    cbor_map_add(wal, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("compact_interval_ms")),
+        .value = cbor_move(cbor_build_uint64(config->wal_config.compact_interval_ms))
+    });
+    cbor_map_add(wal, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("max_file_size")),
+        .value = cbor_move(cbor_build_uint64(config->wal_config.max_file_size))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("wal")),
+        .value = cbor_move(wal)
+    });
+
+    // Add threading settings
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("worker_threads")),
+        .value = cbor_move(cbor_build_uint8(config->worker_threads))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("timer_resolution_ms")),
+        .value = cbor_move(cbor_build_uint16(config->timer_resolution_ms))
+    });
+
+    // Serialize to bytes
+    unsigned char* buffer = NULL;
+    size_t buffer_size = 0;
+    size_t bytes_written = cbor_serialize_alloc(root, &buffer, &buffer_size);
+    cbor_decref(&root);
+
+    if (bytes_written == 0 || buffer == NULL) {
+        free(config_path);
+        return -1;
+    }
+
+    // Write to file
+    FILE* fp = fopen(config_path, "wb");
+    if (fp == NULL) {
+        free(buffer);
+        free(config_path);
+        return -1;
+    }
+
+    size_t written = fwrite(buffer, 1, bytes_written, fp);
+    fclose(fp);
+    free(buffer);
+    free(config_path);
+
+    return (written == bytes_written) ? 0 : -1;
 }
