@@ -2,8 +2,12 @@
 #include <cstdio>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <cstring>
 extern "C" {
 #include "Database/database_config.h"
+#include "Database/database.h"
+#include "Workers/pool.h"
+#include "Time/wheel.h"
 }
 
 // Test: database_config_default creates valid config
@@ -177,4 +181,103 @@ TEST(DatabaseConfig, MergeBothNull) {
     EXPECT_EQ(merged->lru_memory_mb, DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB);
 
     database_config_destroy(merged);
+}
+
+// Test: Create database with config
+TEST(DatabaseConfig, CreateWithConfig) {
+    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    mkdtemp(temp_dir);
+
+    database_config_t* config = database_config_default();
+    config->lru_memory_mb = 10;
+    config->worker_threads = 2;
+
+    int error = 0;
+    database_t* db = database_create_with_config(temp_dir, config, &error);
+    ASSERT_NE(db, nullptr);
+    EXPECT_EQ(error, 0);
+
+    // Verify owns_pool is true (created own)
+    EXPECT_TRUE(db->owns_pool);
+    EXPECT_TRUE(db->owns_wheel);
+
+    database_destroy(db);
+    database_config_destroy(config);
+
+    // Cleanup
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+    system(cmd);
+}
+
+// Test: Reopen preserves immutable settings
+TEST(DatabaseConfig, ReopenPreservesImmutable) {
+    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    mkdtemp(temp_dir);
+
+    // Create with chunk_size=8
+    database_config_t* config1 = database_config_default();
+    config1->chunk_size = 8;
+    config1->worker_threads = 2;
+
+    int error = 0;
+    database_t* db1 = database_create_with_config(temp_dir, config1, &error);
+    ASSERT_NE(db1, nullptr);
+    database_destroy(db1);
+    database_config_destroy(config1);
+
+    // Reopen with chunk_size=4 (should be ignored)
+    database_config_t* config2 = database_config_default();
+    config2->chunk_size = 4;  // Different - should be ignored
+    config2->lru_memory_mb = 100;  // Mutable - should change
+    config2->worker_threads = 2;
+
+    database_t* db2 = database_create_with_config(temp_dir, config2, &error);
+    ASSERT_NE(db2, nullptr);
+
+    // Verify immutable setting preserved
+    EXPECT_EQ(db2->chunk_size, 8u);  // Original value preserved
+
+    database_destroy(db2);
+    database_config_destroy(config2);
+
+    // Cleanup
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+    system(cmd);
+}
+
+// Test: External pool/wheel not owned
+TEST(DatabaseConfig, ExternalResourcesNotOwned) {
+    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    mkdtemp(temp_dir);
+
+    // Create external resources
+    work_pool_t* pool = work_pool_create(2);
+    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(10, pool);
+
+    database_config_t* config = database_config_default();
+    config->external_pool = pool;
+    config->external_wheel = wheel;
+
+    int error = 0;
+    database_t* db = database_create_with_config(temp_dir, config, &error);
+    ASSERT_NE(db, nullptr);
+
+    // Verify not owned
+    EXPECT_FALSE(db->owns_pool);
+    EXPECT_FALSE(db->owns_wheel);
+
+    database_destroy(db);
+    database_config_destroy(config);
+
+    // External resources still valid after database destroy
+    // (Cleaned up below)
+    work_pool_destroy(pool);
+    hierarchical_timing_wheel_destroy(wheel);
+
+    // Cleanup
+    char cmd[256];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+    system(cmd);
 }
