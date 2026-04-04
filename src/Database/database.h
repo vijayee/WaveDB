@@ -107,6 +107,25 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
                             int* error_code);
 
 /**
+ * Create a database with configuration.
+ *
+ * @param location    Directory path for database files
+ * @param config      Configuration (NULL for defaults)
+ * @param error_code  Output error code (0 on success)
+ * @return Database or NULL on failure
+ *
+ * Behavior:
+ * - If database doesn't exist: use config (or defaults)
+ * - If database exists: load saved config, merge with passed config
+ * - Immutable settings from passed config are ignored for existing DB
+ * - If config->worker_threads > 0 and external_pool/wheel are NULL,
+ *   creates its own pool and wheel
+ */
+database_t* database_create_with_config(const char* location,
+                                        database_config_t* config,
+                                        int* error_code);
+
+/**
  * Destroy a database.
  *
  * Flushes pending writes, closes files, and frees resources.
