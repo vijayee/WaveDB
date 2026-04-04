@@ -212,7 +212,7 @@ static uint64_t get_map_uint(cbor_item_t* map, const char* key, uint64_t default
     }
 
     if (cbor_isa_uint(value)) {
-        return cbor_get_uint64(value);
+        return cbor_get_int(value);
     }
     return default_val;
 }
