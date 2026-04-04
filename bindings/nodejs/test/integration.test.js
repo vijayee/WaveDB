@@ -53,6 +53,12 @@ describe('WaveDB Integration', () => {
     });
 
     it('should handle mixed concurrent operations', async () => {
+      // First, set up data for delete test sequentially
+      for (let i = 30; i < 40; i++) {
+        await db.put(`delkey${i}`, `value${i}`);
+      }
+
+      // Now do concurrent writes and reads
       const operations = [];
 
       // Writes
@@ -65,9 +71,8 @@ describe('WaveDB Integration', () => {
         operations.push(db.get(`key${i}`));
       }
 
-      // Deletes
+      // Concurrent deletes (data already set up above)
       for (let i = 30; i < 40; i++) {
-        operations.push(db.put(`delkey${i}`, `value${i}`));
         operations.push(db.del(`delkey${i}`));
       }
 
