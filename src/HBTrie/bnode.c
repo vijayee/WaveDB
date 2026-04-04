@@ -275,12 +275,29 @@ void version_entry_destroy(version_entry_t* entry) {
 
 version_entry_t* version_entry_find_visible(version_entry_t* versions,
                                              transaction_id_t read_txn_id) {
-  version_entry_t* current = versions;
+  if (versions == NULL) return NULL;
 
-  log_info("MVCC Visibility: read_txn_id=%lu.%09lu.%lu",
+  // FAST PATH: Most reads want the latest committed version
+  // Check if the newest version is visible (common case ~90%+ hit rate)
+  if (transaction_id_compare(&versions->txn_id, &read_txn_id) <= 0) {
+    // Newest version is visible
+    if (!versions->is_deleted) {
+      log_info("MVCC Visibility: FAST PATH hit for read_txn_id=%lu.%09lu.%lu",
+              read_txn_id.time, read_txn_id.nanos, read_txn_id.count);
+      return versions;  // Fast path hit
+    }
+    // Newest version is a deletion visible to us
+    log_info("MVCC Visibility: FAST PATH deleted for read_txn_id=%lu.%09lu.%lu",
+            read_txn_id.time, read_txn_id.nanos, read_txn_id.count);
+    return NULL;
+  }
+
+  // SLOW PATH: Walk the chain (newest first)
+  log_info("MVCC Visibility: SLOW PATH for read_txn_id=%lu.%09lu.%lu",
           read_txn_id.time, read_txn_id.nanos, read_txn_id.count);
 
-  // Walk the chain (newest first)
+  version_entry_t* current = versions->next;  // Skip the head we already checked
+
   while (current != NULL) {
     log_info("  Checking version: txn_id=%lu.%09lu.%lu, compare=%d",
             current->txn_id.time, current->txn_id.nanos, current->txn_id.count,
