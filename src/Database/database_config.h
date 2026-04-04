@@ -9,16 +9,12 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "wal_manager.h"
+#include "../Workers/pool.h"
+#include "../Time/wheel.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-// Forward declarations
-struct work_pool;
-struct hierarchical_timing_wheel;
-typedef struct work_pool work_pool_t;
-typedef struct hierarchical_timing_wheel hierarchical_timing_wheel_t;
 
 /**
  * Default values
