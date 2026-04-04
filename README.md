@@ -323,9 +323,11 @@ For maximum performance when durability is not critical:
 
 ### Performance Features
 
-- **Memory Pool**: Thread-local caches for lock-free allocation
-- **MVCC Fast-Path**: 90%+ visibility check hit rate
-- **Fragment Re-sorting**: Maintains O(log n) lookup
+- **Memory Pool**: Thread-local caches for lock-free allocation of hot path objects
+- **Sharded LRU Cache**: 16-way sharded cache reduces lock contention for concurrent reads
+- **MVCC Fast-Path**: 90%+ visibility check hit rate for lock-free reads
+- **Fragment Re-sorting**: Maintains O(log n) lookup after partial allocations
+- **Cached Debug Flags**: Environment variable checks cached at first use (no per-call overhead)
 
 ## Code Organization
 
