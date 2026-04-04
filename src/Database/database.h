@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 #include "../RefCounter/refcounter.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/mvcc.h"
@@ -18,6 +19,7 @@
 #include "wal.h"
 #include "wal_manager.h"
 #include "batch.h"
+#include "database_config.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -61,6 +63,13 @@ typedef struct {
     sections_t* storage;              // Section pool for persistent storage
     size_t storage_cache_size;         // LRU cache size for sections
     size_t storage_max_tuple;          // Max open sections
+
+    // Config ownership tracking
+    bool owns_pool;                     // True if database created the pool
+    bool owns_wheel;                   // True if database created the wheel
+
+    // Active configuration
+    database_config_t* active_config;   // Current config (for runtime queries)
 } database_t;
 
 /**
