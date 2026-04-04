@@ -76,6 +76,16 @@ typedef struct {
     uint8_t initialized;
 } memory_pool_t;
 
+// Thread-local cache configuration
+#define TLS_CACHE_SIZE 32
+
+// Thread-local cache for fast allocation without locks
+typedef struct {
+    void* cache[TLS_CACHE_SIZE];
+    size_t count;
+    size_t block_size;
+} tls_cache_t;
+
 // Initialize global memory pool
 // Must be called once before any allocations
 void memory_pool_init(void);

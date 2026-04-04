@@ -15,6 +15,14 @@ static uint8_t g_small_pool[MEMORY_POOL_SMALL_SIZE * MEMORY_POOL_SMALL_COUNT];
 static uint8_t g_medium_pool[MEMORY_POOL_MEDIUM_SIZE * MEMORY_POOL_MEDIUM_COUNT];
 static uint8_t g_large_pool[MEMORY_POOL_LARGE_SIZE * MEMORY_POOL_LARGE_COUNT];
 
+// Thread-local caches for each size class
+static __thread tls_cache_t tls_small = {0};
+static __thread tls_cache_t tls_medium = {0};
+static __thread tls_cache_t tls_large = {0};
+
+// Track if TLS caches are initialized for this thread
+static __thread int tls_initialized = 0;
+
 // Initialize a size class pool
 static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
                                    size_t block_size, size_t total_blocks) {
@@ -38,6 +46,22 @@ static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
 // Destroy a size class pool
 static void memory_pool_class_destroy(memory_pool_class_t* cls) {
     platform_lock_destroy(&cls->lock);
+}
+
+// Initialize thread-local caches
+static void tls_cache_init(void) {
+    if (tls_initialized) return;
+
+    tls_small.count = 0;
+    tls_small.block_size = MEMORY_POOL_SMALL_SIZE;
+
+    tls_medium.count = 0;
+    tls_medium.block_size = MEMORY_POOL_MEDIUM_SIZE;
+
+    tls_large.count = 0;
+    tls_large.block_size = MEMORY_POOL_LARGE_SIZE;
+
+    tls_initialized = 1;
 }
 
 // Determine size class for allocation
@@ -155,11 +179,24 @@ void* memory_pool_alloc(size_t size) {
         return malloc(size);
     }
 
+    // Initialize TLS cache if needed
+    if (!tls_initialized) {
+        tls_cache_init();
+    }
+
     memory_pool_size_class_e class = memory_pool_get_class(size);
     void* ptr = NULL;
 
     switch (class) {
         case MEMORY_POOL_SMALL:
+            // Try TLS cache first (lock-free)
+            if (tls_small.count > 0) {
+                ptr = tls_small.cache[--tls_small.count];
+                g_pool.stats.small_allocs++;
+                g_pool.stats.small_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
             ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_SMALL]);
             if (ptr) {
                 g_pool.stats.small_allocs++;
@@ -171,6 +208,14 @@ void* memory_pool_alloc(size_t size) {
             break;
 
         case MEMORY_POOL_MEDIUM:
+            // Try TLS cache first (lock-free)
+            if (tls_medium.count > 0) {
+                ptr = tls_medium.cache[--tls_medium.count];
+                g_pool.stats.medium_allocs++;
+                g_pool.stats.medium_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
             ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_MEDIUM]);
             if (ptr) {
                 g_pool.stats.medium_allocs++;
@@ -182,6 +227,14 @@ void* memory_pool_alloc(size_t size) {
             break;
 
         case MEMORY_POOL_LARGE:
+            // Try TLS cache first (lock-free)
+            if (tls_large.count > 0) {
+                ptr = tls_large.cache[--tls_large.count];
+                g_pool.stats.large_allocs++;
+                g_pool.stats.large_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
             ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_LARGE]);
             if (ptr) {
                 g_pool.stats.large_allocs++;
@@ -215,10 +268,43 @@ void memory_pool_free(void* ptr, size_t size) {
         return;
     }
 
+    // Initialize TLS cache if needed
+    if (!tls_initialized) {
+        tls_cache_init();
+    }
+
     memory_pool_size_class_e class = memory_pool_get_class(size);
     int freed = 0;
 
-    // Try to free to each pool (only one will succeed)
+    // Try TLS cache first (lock-free)
+    switch (class) {
+        case MEMORY_POOL_SMALL:
+            if (tls_small.count < TLS_CACHE_SIZE) {
+                tls_small.cache[tls_small.count++] = ptr;
+                g_pool.stats.small_frees++;
+                return;
+            }
+            break;
+        case MEMORY_POOL_MEDIUM:
+            if (tls_medium.count < TLS_CACHE_SIZE) {
+                tls_medium.cache[tls_medium.count++] = ptr;
+                g_pool.stats.medium_frees++;
+                return;
+            }
+            break;
+        case MEMORY_POOL_LARGE:
+            if (tls_large.count < TLS_CACHE_SIZE) {
+                tls_large.cache[tls_large.count++] = ptr;
+                g_pool.stats.large_frees++;
+                return;
+            }
+            break;
+        case MEMORY_POOL_FALLBACK:
+        default:
+            break;
+    }
+
+    // TLS cache full or not applicable, try to free to global pool
     for (int i = 0; i < 3; i++) {
         if (memory_pool_class_free(&g_pool.classes[i], ptr)) {
             freed = 1;
