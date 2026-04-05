@@ -51,6 +51,9 @@ set(WAVEDB_SOURCES
     src/Util/concurrent_hashmap.c
     src/Util/ms_queue.c
 
+    # Database LRU
+    src/Database/lockfree_lru.c
+
     # Buffer
     src/Buffer/buffer.c
 
@@ -232,6 +235,11 @@ if(BUILD_TESTS)
     add_executable(test_ms_queue tests/test_ms_queue.cpp)
     target_link_libraries(test_ms_queue wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_ms_queue COMMAND test_ms_queue)
+
+    # Test for lock-free LRU
+    add_executable(test_lockfree_lru tests/test_lockfree_lru.cpp)
+    target_link_libraries(test_lockfree_lru wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_lockfree_lru COMMAND test_lockfree_lru)
 
     # Test for HBTrie visualization
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
