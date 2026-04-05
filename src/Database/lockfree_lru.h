@@ -140,6 +140,24 @@ size_t lockfree_lru_cache_size(lockfree_lru_cache_t* lru);
 size_t lockfree_lru_cache_memory(lockfree_lru_cache_t* lru);
 
 /**
+ * Check if a path exists in the cache.
+ *
+ * Does not update LRU ordering.
+ *
+ * @param lru Cache to query
+ * @param path Path to check
+ * @return 1 if exists, 0 if not
+ */
+uint8_t lockfree_lru_cache_contains(lockfree_lru_cache_t* lru, path_t* path);
+
+/**
+ * Clear all entries from the cache.
+ *
+ * @param lru Cache to clear
+ */
+void lockfree_lru_cache_clear(lockfree_lru_cache_t* lru);
+
+/**
  * Purge holes from the queue (background cleanup).
  *
  * @param lru Cache to purge

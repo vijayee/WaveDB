@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="wave_fuji.svg" alt="WaveDB Logo" width="200">
+</div>
+
 # WaveDB Dart Bindings
 
 Dart FFI bindings for WaveDB, a hierarchical key-value database.

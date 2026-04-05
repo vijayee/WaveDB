@@ -557,3 +557,39 @@ size_t lockfree_lru_cache_purge(lockfree_lru_cache_t* lru, size_t max_batch) {
 
     return total_purged;
 }
+
+uint8_t lockfree_lru_cache_contains(lockfree_lru_cache_t* lru, path_t* path) {
+    if (lru == NULL || path == NULL) {
+        return 0;
+    }
+
+    size_t shard_idx = get_shard_index(lru, path);
+    lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
+
+    // Lock-free check
+    lru_entry_t* entry = concurrent_hashmap_get(shard->map, path);
+    return entry != NULL ? 1 : 0;
+}
+
+void lockfree_lru_cache_clear(lockfree_lru_cache_t* lru) {
+    if (lru == NULL) return;
+
+    for (size_t i = 0; i < lru->num_shards; i++) {
+        lockfree_lru_shard_t* shard = &lru->shards[i];
+
+        // Clear the queue by destroying and reinitializing
+        lru_queue_destroy(&shard->queue);
+        lru_queue_init(&shard->queue);
+
+        // Clear the hashmap
+        concurrent_hashmap_destroy(shard->map);
+        shard->map = concurrent_hashmap_create(
+            1, 16, 0.75f,
+            hash_path, compare_path, dup_path, free_path
+        );
+
+        // Reset memory tracking
+        atomic_store(&shard->current_memory, 0);
+        atomic_store(&shard->entry_count, 0);
+    }
+}
