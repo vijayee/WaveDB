@@ -48,7 +48,7 @@ set(WAVEDB_SOURCES
     src/Util/get_dir.c
     src/Util/perf_counters.c
     src/Util/memory_pool.c
-    src/Util/memory_pool.c
+    src/Util/concurrent_hashmap.c
 
     # Buffer
     src/Buffer/buffer.c
@@ -221,6 +221,11 @@ if(BUILD_TESTS)
     add_executable(test_database_config tests/test_database_config.cpp)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
     add_test(NAME test_database_config COMMAND test_database_config)
+
+    # Test for concurrent hashmap
+    add_executable(test_concurrent_hashmap tests/test_concurrent_hashmap.cpp)
+    target_link_libraries(test_concurrent_hashmap wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_concurrent_hashmap COMMAND test_concurrent_hashmap)
 
     # Test for HBTrie visualization
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
