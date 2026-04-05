@@ -35,6 +35,7 @@ extern "C" {
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
 #include "Util/allocator.h"
+#include "Util/log.h"
 }
 
 // Context for concurrent benchmark threads
@@ -835,7 +836,7 @@ void run_database_benchmarks(void) {
     printf("========================================\n\n");
 
     // Test thread counts
-    int thread_counts[] = {1, 2, 4, 8, 16};
+    int thread_counts[] = {1, 2, 4, 8, 16, 32};
     int num_configs = sizeof(thread_counts) / sizeof(thread_counts[0]);
     int ops_per_thread = 1000;  // Operations per thread
     int prepopulate_count = 10000;  // Keys to pre-populate for read/mixed tests
@@ -911,6 +912,9 @@ void run_database_benchmarks(void) {
 }
 
 int main(int argc, char** argv) {
+    // Suppress INFO logging for cleaner benchmark output
+    log_set_level(LOG_WARN);
+
     // Initialize transaction ID system (required for WAL)
     transaction_id_init();
 

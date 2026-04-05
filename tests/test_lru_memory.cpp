@@ -71,7 +71,7 @@ TEST(LRUMemoryTest, MemoryCalculation) {
 // Test memory-based eviction
 TEST(LRUMemoryTest, MemoryBasedEviction) {
     // Create cache with 50 KB budget (default)
-    database_lru_cache_t* lru = database_lru_cache_create(50 * 1024);
+    database_lru_cache_t* lru = database_lru_cache_create(50 * 1024, 0);
     ASSERT_NE(lru, nullptr);
 
     // Add many small entries to fill cache significantly
@@ -115,7 +115,7 @@ TEST(LRUMemoryTest, MemoryBasedEviction) {
 
 // Test zero memory budget uses default
 TEST(LRUMemoryTest, ZeroMemoryBudget) {
-    database_lru_cache_t* lru = database_lru_cache_create(0);
+    database_lru_cache_t* lru = database_lru_cache_create(0, 0);
     ASSERT_NE(lru, nullptr);
     EXPECT_EQ(lru->total_max_memory, DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024);
     database_lru_cache_destroy(lru);
@@ -123,7 +123,7 @@ TEST(LRUMemoryTest, ZeroMemoryBudget) {
 
 // Test memory tracking on get/delete
 TEST(LRUMemoryTest, MemoryTracking) {
-    database_lru_cache_t* lru = database_lru_cache_create(1024 * 1024);  // 1 MB
+    database_lru_cache_t* lru = database_lru_cache_create(1024 * 1024, 0);  // 1 MB
     ASSERT_NE(lru, nullptr);
 
     // Add entry

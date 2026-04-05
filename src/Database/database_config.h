@@ -22,6 +22,7 @@ extern "C" {
 #define DATABASE_CONFIG_DEFAULT_CHUNK_SIZE 4
 #define DATABASE_CONFIG_DEFAULT_BTREE_NODE_SIZE 4096
 #define DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB 50
+#define DATABASE_CONFIG_DEFAULT_LRU_SHARDS 64  // Default LRU shard count
 #define DATABASE_CONFIG_DEFAULT_STORAGE_CACHE_SIZE 1024
 #define DATABASE_CONFIG_DEFAULT_WORKER_THREADS 4
 #define DATABASE_CONFIG_DEFAULT_TIMER_RESOLUTION_MS 10
@@ -41,6 +42,7 @@ typedef struct {
 
     // === MUTABLE SETTINGS ===
     size_t lru_memory_mb;         // LRU cache size in MB (default: 50)
+    uint16_t lru_shards;          // LRU cache shard count (default: 64, 0 = auto-scale)
     size_t storage_cache_size;    // Section cache size (default: 1024)
     wal_config_t wal_config;      // WAL settings
 

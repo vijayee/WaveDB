@@ -431,7 +431,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Create LRU cache
-    db->lru = database_lru_cache_create(db->lru_size * 1024 * 1024);
+    db->lru = database_lru_cache_create(db->lru_size * 1024 * 1024, effective_config->lru_shards);
     if (db->lru == NULL) {
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);

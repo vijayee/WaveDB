@@ -17,9 +17,6 @@
 extern "C" {
 #endif
 
-// Number of LRU cache shards - should match NUM_WRITE_LOCK_SHARDS
-#define NUM_LRU_SHARDS 16
-
 /**
  * LRU cache node for database entries.
  *
@@ -57,17 +54,19 @@ struct database_lru_shard {
  * and doubly-linked list for O(1) LRU ordering.
  */
 typedef struct {
-    database_lru_shard_t shards[NUM_LRU_SHARDS];
-    size_t total_max_memory;      // Total memory budget across all shards
+    database_lru_shard_t* shards;   // Dynamically allocated array of shards
+    uint16_t num_shards;             // Number of shards
+    size_t total_max_memory;         // Total memory budget across all shards
 } database_lru_cache_t;
 
 /**
  * Create an LRU cache.
  *
  * @param max_memory_bytes Maximum memory budget in bytes (0 for unlimited)
+ * @param num_shards       Number of shards (0 for auto-scale based on CPU cores)
  * @return New cache or NULL on failure
  */
-database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes);
+database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes, uint16_t num_shards);
 
 /**
  * Destroy an LRU cache.

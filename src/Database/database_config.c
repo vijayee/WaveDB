@@ -24,6 +24,7 @@ database_config_t* database_config_default(void) {
 
     // Mutable settings
     config->lru_memory_mb = DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB;
+    config->lru_shards = DATABASE_CONFIG_DEFAULT_LRU_SHARDS;  // 0 = auto-scale
     config->storage_cache_size = DATABASE_CONFIG_DEFAULT_STORAGE_CACHE_SIZE;
 
     // WAL config defaults (use existing defaults from wal_manager.h)
@@ -117,6 +118,11 @@ int database_config_save(const char* location, const database_config_t* config) 
     cbor_map_add(root, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("lru_memory_mb")),
         .value = cbor_move(cbor_build_uint64(config->lru_memory_mb))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("lru_shards")),
+        .value = cbor_move(cbor_build_uint16(config->lru_shards))
     });
 
     cbor_map_add(root, (struct cbor_pair) {
@@ -296,6 +302,7 @@ database_config_t* database_config_load(const char* location) {
 
     // Read mutable settings
     config->lru_memory_mb = get_map_uint(root, "lru_memory_mb", DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB);
+    config->lru_shards = (uint16_t)get_map_uint(root, "lru_shards", DATABASE_CONFIG_DEFAULT_LRU_SHARDS);
     config->storage_cache_size = get_map_uint(root, "storage_cache_size", DATABASE_CONFIG_DEFAULT_STORAGE_CACHE_SIZE);
 
     // Read threading settings

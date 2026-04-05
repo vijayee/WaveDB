@@ -57,10 +57,10 @@ static void free_path(path_t* path) {
 }
 
 // Get shard index for a path (consistent hashing)
-static size_t get_shard_index(const path_t* path) {
+static size_t get_shard_index(const database_lru_cache_t* lru, const path_t* path) {
     if (path == NULL) return 0;
     size_t hash = hash_path(path);
-    return hash % NUM_LRU_SHARDS;
+    return hash % lru->num_shards;
 }
 
 // Calculate approximate memory usage for a cache entry
@@ -195,9 +195,27 @@ static identifier_t* lru_evict(database_lru_shard_t* shard) {
     return value;
 }
 
-database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes) {
+database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes, uint16_t num_shards) {
+    // Auto-scale shard count based on CPU cores if not specified
+    if (num_shards == 0) {
+        int cores = platform_core_count();
+        // Use 4x cores for better contention distribution, minimum 64, maximum 256
+        // Higher multiplier because LRU gets heavy read/write traffic
+        num_shards = (uint16_t)(cores * 4);
+        if (num_shards < 64) num_shards = 64;
+        if (num_shards > 256) num_shards = 256;
+    }
+
     database_lru_cache_t* lru = get_clear_memory(sizeof(database_lru_cache_t));
     if (lru == NULL) return NULL;
+
+    // Allocate shards array
+    lru->shards = get_clear_memory(num_shards * sizeof(database_lru_shard_t));
+    if (lru->shards == NULL) {
+        free(lru);
+        return NULL;
+    }
+    lru->num_shards = num_shards;
 
     size_t total_memory = (max_memory_bytes == 0) ?
         DATABASE_DEFAULT_LRU_MEMORY_MB * 1024 * 1024 :
@@ -205,8 +223,8 @@ database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes) {
     lru->total_max_memory = total_memory;
 
     // Initialize each shard
-    size_t shard_memory = total_memory / NUM_LRU_SHARDS;
-    for (size_t i = 0; i < NUM_LRU_SHARDS; i++) {
+    size_t shard_memory = total_memory / num_shards;
+    for (size_t i = 0; i < num_shards; i++) {
         database_lru_shard_t* shard = &lru->shards[i];
 
         hashmap_init(&shard->cache, (size_t (*)(const path_t*))hash_path, (int (*)(const path_t*, const path_t*))compare_path);
@@ -230,7 +248,7 @@ void database_lru_cache_destroy(database_lru_cache_t* lru) {
     if (lru == NULL) return;
 
     // Free all shards
-    for (size_t i = 0; i < NUM_LRU_SHARDS; i++) {
+    for (size_t i = 0; i < lru->num_shards; i++) {
         database_lru_shard_t* shard = &lru->shards[i];
 
         platform_lock(&shard->lock);
@@ -254,6 +272,7 @@ void database_lru_cache_destroy(database_lru_cache_t* lru) {
         platform_lock_destroy(&shard->lock);
     }
 
+    free(lru->shards);
     free(lru);
 }
 
@@ -262,7 +281,7 @@ identifier_t* database_lru_cache_get(database_lru_cache_t* lru, path_t* path) {
         return NULL;
     }
 
-    size_t shard_idx = get_shard_index(path);
+    size_t shard_idx = get_shard_index(lru, path);
     database_lru_shard_t* shard = &lru->shards[shard_idx];
 
     platform_lock(&shard->lock);
@@ -290,7 +309,7 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
         return NULL;
     }
 
-    size_t shard_idx = get_shard_index(path);
+    size_t shard_idx = get_shard_index(lru, path);
     database_lru_shard_t* shard = &lru->shards[shard_idx];
 
     platform_lock(&shard->lock);
@@ -362,7 +381,7 @@ void database_lru_cache_delete(database_lru_cache_t* lru, path_t* path) {
         return;
     }
 
-    size_t shard_idx = get_shard_index(path);
+    size_t shard_idx = get_shard_index(lru, path);
     database_lru_shard_t* shard = &lru->shards[shard_idx];
 
     platform_lock(&shard->lock);
@@ -405,7 +424,7 @@ uint8_t database_lru_cache_contains(database_lru_cache_t* lru, path_t* path) {
         return 0;
     }
 
-    size_t shard_idx = get_shard_index(path);
+    size_t shard_idx = get_shard_index(lru, path);
     database_lru_shard_t* shard = &lru->shards[shard_idx];
 
     platform_lock(&shard->lock);
@@ -419,7 +438,7 @@ void database_lru_cache_clear(database_lru_cache_t* lru) {
     if (lru == NULL) return;
 
     // Clear all shards
-    for (size_t i = 0; i < NUM_LRU_SHARDS; i++) {
+    for (size_t i = 0; i < lru->num_shards; i++) {
         database_lru_shard_t* shard = &lru->shards[i];
 
         platform_lock(&shard->lock);
@@ -454,7 +473,7 @@ size_t database_lru_cache_size(database_lru_cache_t* lru) {
     if (lru == NULL) return 0;
 
     size_t total_size = 0;
-    for (size_t i = 0; i < NUM_LRU_SHARDS; i++) {
+    for (size_t i = 0; i < lru->num_shards; i++) {
         database_lru_shard_t* shard = &lru->shards[i];
         platform_lock(&shard->lock);
         total_size += shard->entry_count;
@@ -468,7 +487,7 @@ size_t database_lru_cache_memory(database_lru_cache_t* lru) {
     if (lru == NULL) return 0;
 
     size_t total_memory = 0;
-    for (size_t i = 0; i < NUM_LRU_SHARDS; i++) {
+    for (size_t i = 0; i < lru->num_shards; i++) {
         database_lru_shard_t* shard = &lru->shards[i];
         platform_lock(&shard->lock);
         total_memory += shard->current_memory;
