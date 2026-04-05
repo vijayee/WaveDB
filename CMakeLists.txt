@@ -241,6 +241,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_lockfree_lru wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_lockfree_lru COMMAND test_lockfree_lru)
 
+    # Benchmark for LRU comparison
+    add_executable(benchmark_lru_comparison tests/benchmark_lru_comparison.cpp)
+    target_link_libraries(benchmark_lru_comparison wavedb gtest gtest_main Threads::Threads)
+
     # Test for HBTrie visualization
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
     target_link_libraries(test_hbtrie_viz wavedb gtest gtest_main)
