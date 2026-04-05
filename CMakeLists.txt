@@ -49,6 +49,7 @@ set(WAVEDB_SOURCES
     src/Util/perf_counters.c
     src/Util/memory_pool.c
     src/Util/concurrent_hashmap.c
+    src/Util/ms_queue.c
 
     # Buffer
     src/Buffer/buffer.c
@@ -226,6 +227,11 @@ if(BUILD_TESTS)
     add_executable(test_concurrent_hashmap tests/test_concurrent_hashmap.cpp)
     target_link_libraries(test_concurrent_hashmap wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_concurrent_hashmap COMMAND test_concurrent_hashmap)
+
+    # Test for Michael-Scott queue
+    add_executable(test_ms_queue tests/test_ms_queue.cpp)
+    target_link_libraries(test_ms_queue wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_ms_queue COMMAND test_ms_queue)
 
     # Test for HBTrie visualization
     add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
