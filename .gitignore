@@ -1,7 +1,7 @@
 # Build directories
 build/
 build-*/
-
+build_*/
 # IDE
 .idea/
 cmake-build-debug/

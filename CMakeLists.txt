@@ -324,6 +324,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_thread_wal_simple tests/benchmark/benchmark_thread_wal_simple.cpp)
     target_link_libraries(benchmark_thread_wal_simple benchmark_base wavedb Threads::Threads)
 
+    # HBTrie write benchmark (for profiling)
+    add_executable(benchmark_hbtrie_write tests/benchmark/benchmark_hbtrie_write.cpp)
+    target_link_libraries(benchmark_hbtrie_write wavedb Threads::Threads)
+
     # Create benchmark output directory
     add_custom_target(benchmark_output_dir
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
