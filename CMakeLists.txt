@@ -29,6 +29,9 @@ target_include_directories(xxhash
 )
 
 # libcbor library - use libcbor's CMake build system
+# Disable LTO for cbor to avoid LLVM bitcode issues with static linking
+# Must set _RELEASE specifically because libcbor only checks that variable
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF CACHE BOOL "Disable LTO in Release" FORCE)
 set(CBOR_PRETTY_PRINTER ON CACHE BOOL "Include a pretty-printing routine" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build as a shared library" FORCE)
 set(WITH_TESTS OFF CACHE BOOL "Build unit tests" FORCE)
