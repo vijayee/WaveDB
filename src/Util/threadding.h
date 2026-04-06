@@ -19,6 +19,7 @@ extern "C" {
 #define PLATFORMTHREADTYPE HANDLE
 #define PLATFORMRWLOCKTYPE(N) PSRWLOCK N
 void platform_lock(CRITICAL_SECTION* lock);
+int platform_trylock(CRITICAL_SECTION* lock);  // Returns 1 if lock acquired, 0 if not
 void platform_unlock(CRITICAL_SECTION* lock);
 void platform_rw_lock_r(PSRWLOCK* lock);
 void platform_rw_lock_w(PSRWLOCK* lock);
@@ -48,6 +49,7 @@ uint64_t platform_self();
 #define PLATFORMTHREADTYPE pthread_t
 #define PLATFORMRWLOCKTYPE(N) pthread_rwlock_t N
 void platform_lock(pthread_mutex_t* lock);
+int platform_trylock(pthread_mutex_t* lock);  // Returns 1 if lock acquired, 0 if not
 void platform_unlock(pthread_mutex_t* lock);
 void platform_rw_lock_r(pthread_rwlock_t* lock);
 void platform_rw_lock_w(pthread_rwlock_t* lock);

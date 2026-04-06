@@ -13,9 +13,22 @@
 #include "../Util/threadding.h"
 #include <hashmap.h>
 
+// Enable lock-free LRU implementation
+// Uses eBay-style reference counting for safe memory reclamation
+#define USE_LOCKFREE_LRU 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#ifdef USE_LOCKFREE_LRU
+
+// Lock-free LRU wrapper - delegates to lockfree_lru
+#include "lockfree_lru.h"
+
+typedef lockfree_lru_cache_t database_lru_cache_t;
+
+#else
 
 /**
  * LRU cache node for database entries.
@@ -58,6 +71,8 @@ typedef struct {
     uint16_t num_shards;             // Number of shards
     size_t total_max_memory;         // Total memory budget across all shards
 } database_lru_cache_t;
+
+#endif // USE_LOCKFREE_LRU
 
 /**
  * Create an LRU cache.

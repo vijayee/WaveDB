@@ -50,6 +50,7 @@ set(WAVEDB_SOURCES
     src/Util/memory_pool.c
     src/Util/concurrent_hashmap.c
     src/Util/ms_queue.c
+    src/Util/hazard_pointers.c
 
     # Database LRU
     src/Database/lockfree_lru.c
@@ -240,6 +241,16 @@ if(BUILD_TESTS)
     add_executable(test_lockfree_lru tests/test_lockfree_lru.cpp)
     target_link_libraries(test_lockfree_lru wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_lockfree_lru COMMAND test_lockfree_lru)
+
+    # Test for hazard pointers
+    add_executable(test_hazard_pointers tests/test_hazard_pointers.cpp)
+    target_link_libraries(test_hazard_pointers wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_hazard_pointers COMMAND test_hazard_pointers)
+
+    # Test for concurrent lock-free LRU
+    add_executable(test_lockfree_lru_concurrent tests/test_lockfree_lru_concurrent.cpp)
+    target_link_libraries(test_lockfree_lru_concurrent wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_lockfree_lru_concurrent COMMAND test_lockfree_lru_concurrent)
 
     # Benchmark for LRU comparison
     add_executable(benchmark_lru_comparison tests/benchmark_lru_comparison.cpp)

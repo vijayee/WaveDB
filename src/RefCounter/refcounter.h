@@ -49,6 +49,17 @@ refcounter_t* refcounter_consume(refcounter_t** refcounter);
 uint16_t refcounter_count(refcounter_t* refcounter);
 void refcounter_destroy_lock(refcounter_t* refcounter);
 
+/**
+ * Try to acquire a reference only if the object is still alive.
+ * Returns true if reference was acquired, false if object is being destroyed.
+ * This is safe to call on objects that might be in the process of destruction.
+ */
+#ifdef REFCOUNTER_ATOMIC
+uint8_t refcounter_try_reference(refcounter_t* refcounter);
+#else
+uint8_t refcounter_try_reference(refcounter_t* refcounter);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

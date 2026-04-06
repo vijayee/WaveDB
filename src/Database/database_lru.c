@@ -9,6 +9,50 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef USE_LOCKFREE_LRU
+
+// Lock-free LRU wrapper - delegates to lockfree_lru implementation
+
+database_lru_cache_t* database_lru_cache_create(size_t max_memory_bytes, uint16_t num_shards) {
+    return lockfree_lru_cache_create(max_memory_bytes, num_shards);
+}
+
+void database_lru_cache_destroy(database_lru_cache_t* lru) {
+    lockfree_lru_cache_destroy(lru);
+}
+
+identifier_t* database_lru_cache_get(database_lru_cache_t* lru, path_t* path) {
+    return lockfree_lru_cache_get(lru, path);
+}
+
+identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, identifier_t* value) {
+    return lockfree_lru_cache_put(lru, path, value);
+}
+
+void database_lru_cache_delete(database_lru_cache_t* lru, path_t* path) {
+    lockfree_lru_cache_delete(lru, path);
+}
+
+uint8_t database_lru_cache_contains(database_lru_cache_t* lru, path_t* path) {
+    return lockfree_lru_cache_contains(lru, path);
+}
+
+void database_lru_cache_clear(database_lru_cache_t* lru) {
+    lockfree_lru_cache_clear(lru);
+}
+
+size_t database_lru_cache_size(database_lru_cache_t* lru) {
+    return lockfree_lru_cache_size(lru);
+}
+
+size_t database_lru_cache_memory(database_lru_cache_t* lru) {
+    return lockfree_lru_cache_memory(lru);
+}
+
+#else
+
+// Sharded LRU implementation (original)
+
 // Hash function for path_t*
 static size_t hash_path(const path_t* path) {
     if (path == NULL) return 0;
@@ -496,3 +540,5 @@ size_t database_lru_cache_memory(database_lru_cache_t* lru) {
 
     return total_memory;
 }
+
+#endif // USE_LOCKFREE_LRU

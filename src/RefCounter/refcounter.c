@@ -109,3 +109,43 @@ void refcounter_destroy_lock(refcounter_t* refcounter) {
   (void)refcounter;  // Suppress unused parameter warning
 #endif
 }
+
+uint8_t refcounter_try_reference(refcounter_t* refcounter) {
+  if (refcounter == NULL) {
+    return 0;
+  }
+#ifndef REFCOUNTER_ATOMIC
+  platform_lock(&refcounter->lock);
+  // Check if object is still alive (count > 0)
+  if (refcounter->count == 0) {
+    // Object is being destroyed
+    platform_unlock(&refcounter->lock);
+    return 0;
+  }
+  // Safely increment the count
+  if (refcounter->count < USHRT_MAX) {
+    refcounter->count++;
+  }
+  platform_unlock(&refcounter->lock);
+  return 1;
+#else
+  // Atomic implementation using CAS loop
+  // Try to increment count only if it's > 0
+  uint16_t expected = atomic_load(&refcounter->count);
+
+  while (expected > 0) {
+    // Check for overflow
+    if (expected >= USHRT_MAX) {
+      return 0;  // Ref count overflow
+    }
+    // Try to increment atomically
+    if (atomic_compare_exchange_weak(&refcounter->count, &expected, expected + 1)) {
+      return 1;  // Successfully acquired reference
+    }
+    // CAS failed, expected was updated with current value, retry
+  }
+
+  // Count was 0 or we couldn't acquire before destruction
+  return 0;
+#endif
+}

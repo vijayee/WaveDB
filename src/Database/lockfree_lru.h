@@ -2,6 +2,7 @@
 // Lock-Free LRU Cache
 //
 // Based on eBay's high-throughput LRU design with Michael-Scott lock-free queue
+// No hazard pointers needed - uses reference counting for safety
 //
 
 #ifndef WAVEDB_LOCKFREE_LRU_H
@@ -13,6 +14,7 @@
 #include "../RefCounter/refcounter.h"
 #include "../HBTrie/path.h"
 #include "../HBTrie/identifier.h"
+#include "../Util/threadding.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,7 +40,7 @@ struct lru_node_t {
  * LRU entry - lives in the concurrent hashmap
  */
 struct lru_entry_t {
-    refcounter_t refcounter;         // MUST be first
+    refcounter_t refcounter;         // MUST be first - reference counting
     path_t* path;                     // Key (immutable)
     identifier_t* value;              // Value (reference counted)
     _Atomic(lru_node_t*) node;       // Current position in LRU queue
@@ -67,6 +69,7 @@ struct lockfree_lru_shard_t {
     size_t max_memory;
 
     _Atomic(uint8_t) purging;         // Purge in progress flag
+    PLATFORMLOCKTYPE(lock);           // Lock for entry lifecycle operations
 };
 
 /**
@@ -95,9 +98,7 @@ lockfree_lru_cache_t* lockfree_lru_cache_create(size_t max_memory_bytes, uint16_
 void lockfree_lru_cache_destroy(lockfree_lru_cache_t* lru);
 
 /**
- * Get a value from the cache (lock-free).
- *
- * Updates position to most recently used if found.
+ * Get a value from the cache.
  *
  * @param lru Cache to query
  * @param path Path to look up
@@ -141,8 +142,6 @@ size_t lockfree_lru_cache_memory(lockfree_lru_cache_t* lru);
 
 /**
  * Check if a path exists in the cache.
- *
- * Does not update LRU ordering.
  *
  * @param lru Cache to query
  * @param path Path to check

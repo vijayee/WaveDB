@@ -16,6 +16,10 @@ void platform_lock(CRITICAL_SECTION* lock) {
   EnterCriticalSection(lock);
 }
 
+int platform_trylock(CRITICAL_SECTION* lock) {
+  return TryEnterCriticalSection(lock);
+}
+
 void platform_rw_lock_r(PSRW* lock) {
   AcquireSRWLockShared(lock);
 }
@@ -103,6 +107,11 @@ void platform_lock(pthread_mutex_t* lock) {
     log_trace("Failed to acquire lock at %p: error=%d (%s)", (void*)lock, result, strerror(result));
     abort();
   }
+}
+
+int platform_trylock(pthread_mutex_t* lock) {
+  int result = pthread_mutex_trylock(lock);
+  return result == 0;  // Returns 1 if lock acquired, 0 if not
 }
 
 void platform_rw_lock_r(pthread_rwlock_t* lock) {

@@ -1,17 +1,25 @@
 //
 // Lock-Free LRU Cache Implementation
+// Based on eBay's high-throughput LRU design
+//
+// Key insight from eBay: No hazard pointers needed!
+// - Reference counting on entries provides safety
+// - Remove from map BEFORE freeing
+// - Purge holes periodically in batches
 //
 
 #include "lockfree_lru.h"
 #include "Util/concurrent_hashmap.h"
 #include "Util/allocator.h"
-#include "Util/memory_pool.h"
 #include "Util/threadding.h"
 #include <stdlib.h>
 #include <string.h>
 
 // Default memory limit
 #define DEFAULT_MAX_MEMORY_MB 50
+
+// Forward declarations
+static void lru_entry_destroy(lru_entry_t* entry);
 
 // Hash function for path_t*
 static size_t hash_path(const void* key) {
@@ -74,7 +82,7 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
                 total += (size_t)id->chunks.capacity * sizeof(chunk_t*);
                 for (int j = 0; j < id->chunks.length; j++) {
                     chunk_t* chunk = id->chunks.data[j];
-                    if (chunk != NULL && chunk->data != NULL) {
+                    if (chunk != NULL) {
                         total += sizeof(chunk_t);
                         total += chunk->data->size;
                     }
@@ -89,7 +97,7 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
         total += (size_t)value->chunks.capacity * sizeof(chunk_t*);
         for (int j = 0; j < value->chunks.length; j++) {
             chunk_t* chunk = value->chunks.data[j];
-            if (chunk != NULL && chunk->data != NULL) {
+            if (chunk != NULL) {
                 total += sizeof(chunk_t);
                 total += chunk->data->size;
             }
@@ -99,10 +107,40 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
     return total;
 }
 
+// Entry lifecycle
+static void lru_entry_destroy(lru_entry_t* entry) {
+    if (entry == NULL) return;
+
+    // Free path (this is our copy)
+    if (entry->path != NULL) {
+        path_destroy(entry->path);
+    }
+
+    // Free value (we own it)
+    if (entry->value != NULL) {
+        identifier_destroy(entry->value);
+    }
+
+    // Free the entry struct itself
+    free(entry);
+}
+
+// Release a reference to an entry, destroying it if refcount reaches 0
+static void lru_entry_release(lru_entry_t* entry) {
+    if (entry == NULL) return;
+
+    refcounter_dereference(&entry->refcounter);
+
+    // Check if we should free
+    if (refcounter_count(&entry->refcounter) == 0) {
+        lru_entry_destroy(entry);
+    }
+}
+
 // Initialize LRU queue
 static void lru_queue_init(lru_queue_t* queue) {
-    // Create dummy node for empty queue
-    lru_node_t* dummy = memory_pool_alloc(sizeof(lru_node_t));
+    // Create dummy node for sentinel
+    lru_node_t* dummy = calloc(1, sizeof(lru_node_t));
     atomic_init(&dummy->entry, NULL);
     atomic_init(&dummy->next, NULL);
 
@@ -117,15 +155,13 @@ static void lru_queue_destroy(lru_queue_t* queue) {
     lru_node_t* node = atomic_load(&queue->head);
     while (node != NULL) {
         lru_node_t* next = atomic_load(&node->next);
-        memory_pool_free(node, sizeof(lru_node_t));
+        free(node);
         node = next;
     }
 }
 
-// Enqueue a node at tail (MRU position) - lock-free
+// Enqueue at tail (MRU position)
 static void lru_enqueue(lru_queue_t* queue, lru_node_t* node) {
-    atomic_store(&node->next, NULL);
-
     while (1) {
         lru_node_t* tail = atomic_load(&queue->tail);
         lru_node_t* next = atomic_load(&tail->next);
@@ -144,7 +180,7 @@ static void lru_enqueue(lru_queue_t* queue, lru_node_t* node) {
     }
 }
 
-// Dequeue from head (LRU position) - lock-free
+// Dequeue from head (LRU position)
 // Returns the old head (to be freed), or NULL if empty
 static lru_node_t* lru_dequeue(lru_queue_t* queue) {
     while (1) {
@@ -172,7 +208,9 @@ static lru_node_t* lru_dequeue(lru_queue_t* queue) {
 #define MAX_EVICTION_SCAN 100
 
 // Evict least recently used entry
-static int evict_lru_entry(lockfree_lru_shard_t* shard) {
+// Caller must hold shard->lock
+// eBay-style: No HP needed - remove from map, then dereference
+static int evict_lru_entry_locked(lockfree_lru_shard_t* shard) {
     int scanned = 0;
 
     size_t node_count = atomic_load(&shard->queue.node_count);
@@ -186,46 +224,39 @@ static int evict_lru_entry(lockfree_lru_shard_t* shard) {
             return 0;  // Queue empty
         }
 
-        // After dequeue, the new head is what was old_head->next
-        // The LRU entry is now stored in the NEW head
         lru_node_t* new_head = atomic_load(&shard->queue.head);
 
         if (new_head == NULL) {
-            // Queue is now empty
-            memory_pool_free(old_head, sizeof(lru_node_t));
+            free(old_head);
             return 0;
         }
 
         lru_entry_t* entry = atomic_load(&new_head->entry);
 
         if (entry != NULL) {
-            // Try to claim this entry for eviction
-            if (atomic_compare_exchange_strong(&new_head->entry, &entry, NULL)) {
-                // Successfully claimed, now remove from hashmap
-                concurrent_hashmap_remove(shard->map, entry->path);
+            // Mark entry as being evicted
+            atomic_store(&entry->node, NULL);
+            atomic_store(&new_head->entry, NULL);
 
-                // Update memory tracking
-                atomic_fetch_sub(&shard->current_memory, entry->memory_size);
-                atomic_fetch_sub(&shard->entry_count, 1);
+            // Remove from hashmap - no new references can be acquired
+            concurrent_hashmap_remove(shard->map, entry->path);
 
-                // Free entry resources
-                if (entry->path != NULL) {
-                    path_destroy(entry->path);
-                }
-                if (entry->value != NULL) {
-                    identifier_destroy(entry->value);
-                }
-                memory_pool_free(entry, sizeof(lru_entry_t));
+            // Update tracking
+            atomic_fetch_sub(&shard->current_memory, entry->memory_size);
+            atomic_fetch_sub(&shard->entry_count, 1);
 
-                // Free old head (was dummy/sentinel)
-                memory_pool_free(old_head, sizeof(lru_node_t));
-
-                return 1;  // Eviction successful
+            // Release our reference - if count hits 0, free immediately
+            // eBay-style: No HP, just reference counting
+            refcounter_dereference(&entry->refcounter);
+            if (refcounter_count(&entry->refcounter) == 0) {
+                lru_entry_destroy(entry);
             }
+
+            free(old_head);
+            return 1;  // Eviction successful
         }
 
-        // Entry was NULL (hole) or CAS failed
-        // Mark old head as hole and continue
+        // Entry was NULL (hole)
         atomic_store(&old_head->entry, NULL);
         atomic_fetch_add(&shard->queue.hole_count, 1);
         scanned++;
@@ -267,33 +298,32 @@ lockfree_lru_cache_t* lockfree_lru_cache_create(size_t max_memory_bytes, uint16_
 
         // Create concurrent hashmap for this shard
         shard->map = concurrent_hashmap_create(
-            1,      // Single stripe per shard (we shard at LRU level)
-            16,     // Initial buckets
-            0.75f,  // Load factor
+            16,      // num_stripes
+            64,      // initial_bucket_count
+            0.75f,   // load_factor
             hash_path,
             compare_path,
             dup_path,
             free_path
         );
-
         if (shard->map == NULL) {
-            // Cleanup on failure
+            // Cleanup
             for (size_t j = 0; j < i; j++) {
                 concurrent_hashmap_destroy(lru->shards[j].map);
                 lru_queue_destroy(&lru->shards[j].queue);
+                platform_lock_destroy(&lru->shards[j].lock);
             }
             free(lru->shards);
             free(lru);
             return NULL;
         }
 
-        // Initialize LRU queue
         lru_queue_init(&shard->queue);
-
         atomic_init(&shard->current_memory, 0);
         atomic_init(&shard->entry_count, 0);
         shard->max_memory = shard_memory;
         atomic_init(&shard->purging, 0);
+        platform_lock_init(&shard->lock);
     }
 
     return lru;
@@ -305,13 +335,30 @@ void lockfree_lru_cache_destroy(lockfree_lru_cache_t* lru) {
     for (size_t i = 0; i < lru->num_shards; i++) {
         lockfree_lru_shard_t* shard = &lru->shards[i];
 
-        // Free all entries in hashmap
-        // Note: We need to iterate and free manually
-        // For now, just destroy the hashmap
+        platform_lock(&shard->lock);
+
+        // Walk the queue and release all entries
+        lru_node_t* node = atomic_load(&shard->queue.head);
+        while (node != NULL) {
+            lru_node_t* next = atomic_load(&node->next);
+            lru_entry_t* entry = atomic_load(&node->entry);
+
+            if (entry != NULL) {
+                // Release the hashmap's reference
+                lru_entry_release(entry);
+            }
+
+            node = next;
+        }
+
+        // Now destroy the hashmap (this frees the path copies)
         concurrent_hashmap_destroy(shard->map);
 
-        // Destroy queue
+        // Destroy queue (free nodes)
         lru_queue_destroy(&shard->queue);
+
+        platform_unlock(&shard->lock);
+        platform_lock_destroy(&shard->lock);
     }
 
     free(lru->shards);
@@ -323,54 +370,49 @@ identifier_t* lockfree_lru_cache_get(lockfree_lru_cache_t* lru, path_t* path) {
         return NULL;
     }
 
-    // 1. Find shard
+    // Find shard
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
-    // 2. Lookup entry in concurrent hashmap (lock-free)
+    // eBay-style: Acquire shard lock just for the hashmap lookup and refcount increment
+    // This is safe because:
+    // 1. We hold the lock during get + try_reference
+    // 2. Eviction removes from map first (under same lock)
+    // 3. After removal, no new references can be acquired
+    platform_lock(&shard->lock);
+
+    // Lookup entry in hashmap
     lru_entry_t* entry = concurrent_hashmap_get(shard->map, path);
     if (entry == NULL) {
+        platform_unlock(&shard->lock);
         return NULL;  // Cache miss
     }
 
-    // 3. Read current node pointer atomically
+    // Try to reference the entry while holding the lock
+    // This prevents eviction from freeing it while we're accessing it
+    if (!refcounter_try_reference(&entry->refcounter)) {
+        platform_unlock(&shard->lock);
+        return NULL;  // Entry is being destroyed
+    }
+
+    // Release lock - we now have a reference, so eviction can't free it
+    platform_unlock(&shard->lock);
+
+    // Check if entry is still valid (not being evicted)
     lru_node_t* current_node = atomic_load(&entry->node);
     if (current_node == NULL) {
-        return NULL;  // Entry being purged
+        // Entry is being evicted - release reference and return
+        lru_entry_release(entry);
+        return NULL;
     }
 
-    // 4. Create new node for MRU position
-    lru_node_t* new_node = memory_pool_alloc(sizeof(lru_node_t));
-    if (new_node == NULL) {
-        // Fall back to returning value without promotion
-        return (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
-    }
+    // Return reference-counted value
+    identifier_t* result = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
 
-    atomic_init(&new_node->entry, entry);
-    atomic_init(&new_node->next, NULL);
+    // Release our reference on the entry
+    lru_entry_release(entry);
 
-    // 5. CAS loop to atomically update entry->node
-    lru_node_t* expected = current_node;
-    while (expected != NULL) {
-        if (atomic_compare_exchange_weak(&entry->node, &expected, new_node)) {
-            break;  // Success
-        }
-        if (expected == NULL) {
-            // Entry was purged
-            memory_pool_free(new_node, sizeof(lru_node_t));
-            return NULL;
-        }
-    }
-
-    // 6. Mark old node as hole (lock-free)
-    atomic_store(&current_node->entry, NULL);
-    atomic_fetch_add(&shard->queue.hole_count, 1);
-
-    // 7. Enqueue new node at tail (MRU)
-    lru_enqueue(&shard->queue, new_node);
-
-    // 8. Return reference-counted value
-    return (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+    return result;
 }
 
 identifier_t* lockfree_lru_cache_put(lockfree_lru_cache_t* lru, path_t* path, identifier_t* value) {
@@ -383,40 +425,73 @@ identifier_t* lockfree_lru_cache_put(lockfree_lru_cache_t* lru, path_t* path, id
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
+    // Acquire shard lock
+    platform_lock(&shard->lock);
+
     // Calculate memory usage
     size_t entry_memory = calculate_entry_memory(path, value);
 
     // Check memory budget and evict if needed
     size_t current_mem = atomic_load(&shard->current_memory);
-    size_t evictions = 0;
     while (current_mem + entry_memory > shard->max_memory) {
-        if (!evict_lru_entry(shard)) {
+        if (!evict_lru_entry_locked(shard)) {
             break;  // Can't evict more
         }
-        evictions++;
         current_mem = atomic_load(&shard->current_memory);
     }
-    (void)evictions;  // Suppress unused warning
 
-    // Create entry
-    lru_entry_t* entry = memory_pool_alloc(sizeof(lru_entry_t));
+    // Check if entry already exists
+    lru_entry_t* existing = concurrent_hashmap_get(shard->map, path);
+    if (existing != NULL) {
+        // Entry exists - try to update value
+        if (refcounter_try_reference(&existing->refcounter)) {
+            // Successfully referenced - we can safely update
+            identifier_t* old_value = existing->value;
+            existing->value = value;
+
+            // Update memory tracking
+            size_t new_memory = calculate_entry_memory(existing->path, value);
+            if (new_memory > existing->memory_size) {
+                atomic_fetch_add(&shard->current_memory, new_memory - existing->memory_size);
+            } else if (existing->memory_size > new_memory) {
+                atomic_fetch_sub(&shard->current_memory, existing->memory_size - new_memory);
+            }
+            existing->memory_size = new_memory;
+
+            // Release our reference
+            lru_entry_release(existing);
+
+            // Free the input path since existing entry has its own copy
+            path_destroy(path);
+
+            platform_unlock(&shard->lock);
+            return old_value;  // Caller must destroy old value
+        }
+        // try_reference failed - entry is being destroyed
+        // Fall through to create new entry
+    }
+
+    // Create new entry
+    lru_entry_t* entry = calloc(1, sizeof(lru_entry_t));
     if (entry == NULL) {
+        platform_unlock(&shard->lock);
         path_destroy(path);
         identifier_destroy(value);
         return NULL;
     }
 
-    // Initialize entry
+    // Initialize entry with refcount = 1 (held by hashmap)
     entry->path = path;
     entry->value = value;
     entry->memory_size = entry_memory;
     atomic_init(&entry->node, NULL);
-    refcounter_init((refcounter_t*)entry);
+    refcounter_init(&entry->refcounter);  // Starts at 1
 
     // Create LRU node
-    lru_node_t* node = memory_pool_alloc(sizeof(lru_node_t));
+    lru_node_t* node = calloc(1, sizeof(lru_node_t));
     if (node == NULL) {
-        memory_pool_free(entry, sizeof(lru_entry_t));
+        free(entry);
+        platform_unlock(&shard->lock);
         path_destroy(path);
         identifier_destroy(value);
         return NULL;
@@ -426,25 +501,15 @@ identifier_t* lockfree_lru_cache_put(lockfree_lru_cache_t* lru, path_t* path, id
     atomic_init(&node->next, NULL);
     atomic_store(&entry->node, node);
 
-    // Try to put in hashmap
-    lru_entry_t* existing = concurrent_hashmap_put_if_absent(shard->map, path, entry);
+    // Put in hashmap
+    concurrent_hashmap_put(shard->map, path, entry);
 
-    if (existing != NULL) {
-        // Entry already exists, free our new entry and use existing
-        memory_pool_free(node, sizeof(lru_node_t));
-        memory_pool_free(entry, sizeof(lru_entry_t));
-        path_destroy(path);
-
-        // Update existing entry's value
-        // TODO: Handle value replacement with CAS
-        return NULL;
-    }
-
-    // Successfully inserted, add to LRU queue
+    // Add to LRU queue
     lru_enqueue(&shard->queue, node);
     atomic_fetch_add(&shard->current_memory, entry->memory_size);
     atomic_fetch_add(&shard->entry_count, 1);
 
+    platform_unlock(&shard->lock);
     return NULL;  // No old value for new entry
 }
 
@@ -456,14 +521,16 @@ void lockfree_lru_cache_delete(lockfree_lru_cache_t* lru, path_t* path) {
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
+    platform_lock(&shard->lock);
+
     // Remove from hashmap
     lru_entry_t* entry = concurrent_hashmap_remove(shard->map, path);
     if (entry == NULL) {
-        path_destroy(path);
-        return;
+        platform_unlock(&shard->lock);
+        return;  // Entry not found, caller keeps path ownership
     }
 
-    // Mark node as hole (lock-free)
+    // Mark node as hole
     lru_node_t* node = atomic_load(&entry->node);
     if (node != NULL) {
         atomic_store(&node->entry, NULL);
@@ -474,17 +541,14 @@ void lockfree_lru_cache_delete(lockfree_lru_cache_t* lru, path_t* path) {
     atomic_fetch_sub(&shard->current_memory, entry->memory_size);
     atomic_fetch_sub(&shard->entry_count, 1);
 
-    // Free entry resources
-    if (entry->path != NULL) {
-        path_destroy(entry->path);
+    // Release our reference - if count hits 0, free immediately
+    // eBay-style: No HP, just reference counting
+    refcounter_dereference(&entry->refcounter);
+    if (refcounter_count(&entry->refcounter) == 0) {
+        lru_entry_destroy(entry);
     }
-    if (entry->value != NULL) {
-        identifier_destroy(entry->value);
-    }
-    memory_pool_free(entry, sizeof(lru_entry_t));
 
-    // Free the input path since we took ownership
-    path_destroy(path);
+    platform_unlock(&shard->lock);
 }
 
 size_t lockfree_lru_cache_size(lockfree_lru_cache_t* lru) {
@@ -507,67 +571,16 @@ size_t lockfree_lru_cache_memory(lockfree_lru_cache_t* lru) {
     return total;
 }
 
-// Maximum holes to purge per call
-#define MAX_PURGE_BATCH 100
-
-size_t lockfree_lru_cache_purge(lockfree_lru_cache_t* lru, size_t max_batch) {
-    if (lru == NULL) return 0;
-
-    if (max_batch == 0) {
-        max_batch = MAX_PURGE_BATCH;
-    }
-
-    size_t total_purged = 0;
-
-    for (size_t i = 0; i < lru->num_shards; i++) {
-        lockfree_lru_shard_t* shard = &lru->shards[i];
-
-        // Try to claim purge ownership
-        uint8_t expected = 0;
-        if (!atomic_compare_exchange_strong(&shard->purging, &expected, 1)) {
-            continue;  // Another thread is purging this shard
-        }
-
-        // Drain holes from head of queue
-        size_t holes_purged = 0;
-        while (atomic_load(&shard->queue.hole_count) > 0 && holes_purged < max_batch) {
-            lru_node_t* head = atomic_load(&shard->queue.head);
-            lru_node_t* next = atomic_load(&head->next);
-
-            if (next == NULL) {
-                break;  // Queue empty (only dummy left)
-            }
-
-            lru_entry_t* entry = atomic_load(&next->entry);
-            if (entry == NULL) {
-                // This is a hole, advance head
-                if (atomic_compare_exchange_strong(&shard->queue.head, &head, next)) {
-                    memory_pool_free(head, sizeof(lru_node_t));
-                    atomic_fetch_sub(&shard->queue.hole_count, 1);
-                    holes_purged++;
-                    total_purged++;
-                }
-            } else {
-                break;  // Non-hole entry, stop draining
-            }
-        }
-
-        atomic_store(&shard->purging, 0);
-    }
-
-    return total_purged;
-}
-
 uint8_t lockfree_lru_cache_contains(lockfree_lru_cache_t* lru, path_t* path) {
-    if (lru == NULL || path == NULL) {
-        return 0;
-    }
+    if (lru == NULL || path == NULL) return 0;
 
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
-    // Lock-free check
+    platform_lock(&shard->lock);
     lru_entry_t* entry = concurrent_hashmap_get(shard->map, path);
+    platform_unlock(&shard->lock);
+
     return entry != NULL ? 1 : 0;
 }
 
@@ -576,20 +589,77 @@ void lockfree_lru_cache_clear(lockfree_lru_cache_t* lru) {
 
     for (size_t i = 0; i < lru->num_shards; i++) {
         lockfree_lru_shard_t* shard = &lru->shards[i];
+        platform_lock(&shard->lock);
 
-        // Clear the queue by destroying and reinitializing
+        // Release all entries
+        lru_node_t* node = atomic_load(&shard->queue.head);
+        while (node != NULL) {
+            lru_entry_t* entry = atomic_load(&node->entry);
+            if (entry != NULL) {
+                lru_entry_release(entry);
+            }
+            node = atomic_load(&node->next);
+        }
+
+        // Clear hashmap
+        concurrent_hashmap_destroy(shard->map);
+        shard->map = concurrent_hashmap_create(
+            16, 64, 0.75f, hash_path, compare_path, dup_path, free_path);
+
+        // Reinitialize queue
         lru_queue_destroy(&shard->queue);
         lru_queue_init(&shard->queue);
 
-        // Clear the hashmap
-        concurrent_hashmap_destroy(shard->map);
-        shard->map = concurrent_hashmap_create(
-            1, 16, 0.75f,
-            hash_path, compare_path, dup_path, free_path
-        );
-
-        // Reset memory tracking
         atomic_store(&shard->current_memory, 0);
         atomic_store(&shard->entry_count, 0);
+
+        platform_unlock(&shard->lock);
     }
+}
+
+size_t lockfree_lru_cache_purge(lockfree_lru_cache_t* lru, size_t max_batch) {
+    if (lru == NULL) return 0;
+
+    size_t total_purged = 0;
+
+    for (size_t i = 0; i < lru->num_shards; i++) {
+        lockfree_lru_shard_t* shard = &lru->shards[i];
+
+        // Try to acquire purge lock
+        uint8_t expected = 0;
+        if (!atomic_compare_exchange_strong(&shard->purging, &expected, 1)) {
+            continue;  // Another purge in progress
+        }
+
+        size_t holes_purged = 0;
+        size_t to_purge = (max_batch == 0) ? SIZE_MAX : max_batch;
+
+        // Try to remove holes from the head of the queue
+        while (holes_purged < to_purge) {
+            lru_node_t* head = atomic_load(&shard->queue.head);
+            lru_node_t* next = atomic_load(&head->next);
+
+            if (next == NULL) {
+                break;  // Queue is empty (only dummy node)
+            }
+
+            lru_entry_t* entry = atomic_load(&next->entry);
+            if (entry != NULL) {
+                break;  // Not a hole
+            }
+
+            // Try to move head forward (this is a hole)
+            if (atomic_compare_exchange_weak(&shard->queue.head, &head, next)) {
+                atomic_fetch_sub(&shard->queue.node_count, 1);
+                atomic_fetch_sub(&shard->queue.hole_count, 1);
+                free(head);  // Free the hole node
+                holes_purged++;
+            }
+        }
+
+        atomic_store(&shard->purging, 0);
+        total_purged += holes_purged;
+    }
+
+    return total_purged;
 }
