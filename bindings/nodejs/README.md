@@ -86,6 +86,7 @@ const db = new WaveDB('/path/to/db', {
     debounceMs: 50
   }
 });
+```
 
 ## Configuration
 
