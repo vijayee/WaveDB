@@ -62,75 +62,77 @@ const db = new WaveDB(path, options);
 - `path` (string): Path to database directory
 - `options` (object):
   - `delimiter` (string): Key path delimiter (default: '/')
+  - `chunkSize` (number): HBTrie chunk size in bytes (default: 4)
+  - `btreeNodeSize` (number): B+tree node size in bytes (default: 4096)
+  - `enablePersist` (boolean): Enable persistence (default: true)
+  - `lruMemoryMb` (number): LRU cache size in megabytes (default: 50)
+  - `lruShards` (number): LRU cache shard count, 0 for auto-scale (default: 64)
+  - `storageCacheSize` (number): Section cache size (default: 1024)
+  - `workerThreads` (number): Number of worker threads (default: 4)
+  - `wal` (object): WAL configuration
+    - `syncMode` (string): 'immediate', 'debounced', or 'async' (default: 'debounced')
+    - `debounceMs` (number): Debounce window in ms (default: 100)
+    - `maxFileSize` (number): Max WAL file size before sealing (default: 131072)
+
+#### Example with Configuration
+
+```javascript
+const db = new WaveDB('/path/to/db', {
+  delimiter: '/',
+  lruMemoryMb: 100,      // 100 MB cache
+  lruShards: 0,         // auto-scale to CPU cores
+  wal: {
+    syncMode: 'debounced',
+    debounceMs: 50
+  }
+});
 
 ## Configuration
 
-WaveDB uses sensible defaults for most use cases. The current bindings use these default settings:
+WaveDB uses sensible defaults for most use cases.
 
 ### Database Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `chunk_size` | 4 | HBTrie chunk size in bytes (atomic comparison unit) |
-| `btree_node_size` | 4096 | B+tree node size in bytes |
-| `enable_persist` | true | Persistence enabled (data saved to disk) |
+| `chunkSize` | 4 | HBTrie chunk size in bytes (atomic comparison unit) |
+| `btreeNodeSize` | 4096 | B+tree node size in bytes |
+| `enablePersist` | true | Persistence enabled (data saved to disk) |
 
 ### Cache Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `lru_memory_mb` | 50 | LRU cache size in megabytes |
-| `lru_shards` | 64 | LRU cache shard count (0 = auto-scale to CPU cores) |
-| `storage_cache_size` | 1024 | Section cache size (number of sections) |
+| `lruMemoryMb` | 50 | LRU cache size in megabytes |
+| `lruShards` | 64 | LRU cache shard count (0 = auto-scale to CPU cores) |
+| `storageCacheSize` | 1024 | Section cache size (number of sections) |
 
 ### WAL (Write-Ahead Log) Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `sync_mode` | DEBOUNCED | Durability mode: IMMEDIATE, DEBOUNCED, or ASYNC |
-| `debounce_ms` | 100 | Debounce window for fsync (DEBOUNCED mode) |
-| `idle_threshold_ms` | 10000 | Idle time before compaction (10 seconds) |
-| `compact_interval_ms` | 60000 | Compaction interval (60 seconds) |
-| `max_file_size` | 131072 | Max WAL file size before sealing (128KB) |
+| `wal.syncMode` | 'debounced' | Durability mode: 'immediate', 'debounced', or 'async' |
+| `wal.debounceMs` | 100 | Debounce window for fsync (debounced mode) |
+| `wal.maxFileSize` | 131072 | Max WAL file size before sealing (128KB) |
 
 ### Threading Configuration
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `worker_threads` | 4 | Number of background worker threads |
-| `timer_resolution_ms` | 10 | Timer wheel resolution in milliseconds |
+| `workerThreads` | 4 | Number of background worker threads |
 
 ### Sync Modes Explained
 
-- **IMMEDIATE**: Each write calls `fsync()` - maximum durability, lowest performance
-- **DEBOUNCED** (default): Batches fsync calls within debounce window - good balance
-- **ASYNC**: No fsync guarantees - highest performance, potential data loss on crash
+- **'immediate'**: Each write calls `fsync()` - maximum durability, lowest performance
+- **'debounced'** (default): Batches fsync calls within debounce window - good balance
+- **'async'**: No fsync guarantees - highest performance, potential data loss on crash
 
 ### Performance Tuning Tips
 
-1. **High write throughput**: Use `ASYNC` mode for bulk imports
-2. **Low latency reads**: Increase `lru_memory_mb` (50-500MB typical)
-3. **Many CPU cores**: Set `lru_shards` to 0 for auto-scaling
-4. **Large datasets**: Increase `storage_cache_size` for better section locality
-
-### Future API
-
-The bindings will expose full configuration in a future release:
-
-```javascript
-// Planned API (not yet available)
-const db = new WaveDB('/path/to/db', {
-  delimiter: '/',
-  config: {
-    lru_memory_mb: 100,
-    lru_shards: 0,  // auto-scale
-    wal: {
-      sync_mode: 'DEBOUNCED',
-      debounce_ms: 50
-    }
-  }
-});
-```
+1. **High write throughput**: Use `'async'` mode for bulk imports
+2. **Low latency reads**: Increase `lruMemoryMb` (50-500MB typical)
+3. **Many CPU cores**: Set `lruShards` to 0 for auto-scaling
+4. **Large datasets**: Increase `storageCacheSize` for better section locality
 
 ### Async Operations
 

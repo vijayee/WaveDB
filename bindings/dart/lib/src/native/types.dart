@@ -17,6 +17,21 @@ base class identifier_t extends Opaque {}
 /// Maps to database_iterator_t in C
 base class database_iterator_t extends Opaque {}
 
+/// Opaque handle to a database configuration
+/// Maps to database_config_t in C
+base class database_config_t extends Opaque {}
+
+/// WAL sync mode enumeration
+/// Maps to wal_sync_mode_e in C
+enum WalSyncMode {
+  immediate(0),
+  debounced(1),
+  async(2);
+
+  final int value;
+  const WalSyncMode(this.value);
+}
+
 /// Buffer structure for raw data
 /// Maps to buffer_t in C
 ///
