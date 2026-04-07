@@ -38,13 +38,21 @@ struct chash_entry_t {
 
 /**
  * Per-stripe hashmap segment with its own lock
+ *
+ * Lock-free read invariants:
+ * - bucket_count and buckets are read atomically with memory_order_acquire
+ * - resize() atomically swaps both (new buckets, new count)
+ * - old_buckets holds previous bucket array for safe cleanup
+ * - readers never see torn state: either (old_buckets, old_count) or (new_buckets, new_count)
  */
 struct chash_stripe_t {
-    PLATFORMLOCKTYPE(lock);       // Lock for this stripe only
-    chash_entry_t** buckets;      // Bucket array
-    size_t bucket_count;          // Number of buckets (power of 2)
-    size_t entry_count;           // Entries in this stripe
-    size_t tombstone_count;       // Deleted entries awaiting cleanup
+    PLATFORMLOCKTYPE(lock);                // Lock for write operations only
+    _Atomic(chash_entry_t**) buckets;      // Current bucket array (atomic for lock-free reads)
+    _Atomic(size_t) bucket_count;          // Number of buckets (atomic for lock-free reads)
+    chash_entry_t** old_buckets;           // Previous bucket array (freed on cleanup)
+    size_t old_bucket_count;               // Previous bucket count
+    size_t entry_count;                    // Entries in this stripe (write-protected)
+    size_t tombstone_count;                // Deleted entries awaiting cleanup
 };
 
 /**

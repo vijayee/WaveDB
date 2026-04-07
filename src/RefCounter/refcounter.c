@@ -131,7 +131,7 @@ uint8_t refcounter_try_reference(refcounter_t* refcounter) {
 #else
   // Atomic implementation using CAS loop
   // Try to increment count only if it's > 0
-  uint16_t expected = atomic_load(&refcounter->count);
+  uint_fast16_t expected = atomic_load(&refcounter->count);
 
   while (expected > 0) {
     // Check for overflow

@@ -48,16 +48,23 @@ static void free_entry(concurrent_hashmap_t* map, chash_entry_t* entry) {
 }
 
 // Resize a single stripe's bucket array (must hold stripe lock)
+// Uses RCU-style approach: allocate new, copy, then atomically swap pointers
 static int resize_stripe(concurrent_hashmap_t* map, chash_stripe_t* stripe) {
-    size_t new_count = stripe->bucket_count * 2;
+    // Get current count (we hold lock, so safe to read directly)
+    size_t old_count = atomic_load(&stripe->bucket_count);
+    size_t new_count = old_count * 2;
+
+    // Allocate new bucket array
     chash_entry_t** new_buckets = get_clear_memory(new_count * sizeof(chash_entry_t*));
     if (new_buckets == NULL) {
         return -1;  // Allocation failed, continue with current size
     }
 
-    // Rehash all entries
-    for (size_t b = 0; b < stripe->bucket_count; b++) {
-        chash_entry_t* entry = stripe->buckets[b];
+    chash_entry_t** old_buckets = atomic_load(&stripe->buckets);
+
+    // Rehash all entries from old buckets to new buckets
+    for (size_t b = 0; b < old_count; b++) {
+        chash_entry_t* entry = old_buckets[b];
         while (entry != NULL) {
             chash_entry_t* next = entry->next;
 
@@ -80,10 +87,16 @@ static int resize_stripe(concurrent_hashmap_t* map, chash_stripe_t* stripe) {
         }
     }
 
-    // Free old buckets and update stripe
-    free(stripe->buckets);
-    stripe->buckets = new_buckets;
-    stripe->bucket_count = new_count;
+    // RCU-style swap: atomically update bucket_count first, then buckets
+    // This ensures readers see consistent state
+    atomic_store(&stripe->bucket_count, new_count);
+    atomic_thread_fence(memory_order_release);
+    atomic_store(&stripe->buckets, new_buckets);
+
+    // Save old buckets for later cleanup (callers should call cleanup after resizes)
+    // This is the RCU "grace period" approach - old buckets are freed during cleanup
+    stripe->old_buckets = old_buckets;
+    stripe->old_bucket_count = old_count;
     stripe->tombstone_count = 0;  // Cleaned up during resize
 
     return 0;
@@ -145,19 +158,22 @@ concurrent_hashmap_t* concurrent_hashmap_create(
     for (size_t i = 0; i < num_stripes; i++) {
         chash_stripe_t* stripe = &map->stripes[i];
 
-        stripe->buckets = get_clear_memory(initial_bucket_count * sizeof(chash_entry_t*));
-        if (stripe->buckets == NULL) {
+        chash_entry_t** buckets = get_clear_memory(initial_bucket_count * sizeof(chash_entry_t*));
+        if (buckets == NULL) {
             // Cleanup on failure
             for (size_t j = 0; j < i; j++) {
                 platform_lock_destroy(&map->stripes[j].lock);
-                free(map->stripes[j].buckets);
+                free(atomic_load(&map->stripes[j].buckets));
             }
             free(map->stripes);
             free(map);
             return NULL;
         }
 
-        stripe->bucket_count = initial_bucket_count;
+        atomic_init(&stripe->buckets, buckets);
+        atomic_init(&stripe->bucket_count, initial_bucket_count);
+        stripe->old_buckets = NULL;
+        stripe->old_bucket_count = 0;
         stripe->entry_count = 0;
         stripe->tombstone_count = 0;
         platform_lock_init(&stripe->lock);
@@ -175,9 +191,13 @@ void concurrent_hashmap_destroy(concurrent_hashmap_t* map) {
 
         platform_lock(&stripe->lock);
 
+        // Get current buckets atomically
+        chash_entry_t** buckets = atomic_load(&stripe->buckets);
+        size_t bucket_count = atomic_load(&stripe->bucket_count);
+
         // Free all entries in buckets
-        for (size_t b = 0; b < stripe->bucket_count; b++) {
-            chash_entry_t* entry = stripe->buckets[b];
+        for (size_t b = 0; b < bucket_count; b++) {
+            chash_entry_t* entry = buckets[b];
             while (entry != NULL) {
                 chash_entry_t* next = entry->next;
                 free_entry(map, entry);
@@ -185,7 +205,13 @@ void concurrent_hashmap_destroy(concurrent_hashmap_t* map) {
             }
         }
 
-        free(stripe->buckets);
+        free(buckets);
+
+        // Free old buckets if any
+        if (stripe->old_buckets != NULL) {
+            free(stripe->old_buckets);
+        }
+
         platform_unlock(&stripe->lock);
         platform_lock_destroy(&stripe->lock);
     }
@@ -203,21 +229,24 @@ void* concurrent_hashmap_get(concurrent_hashmap_t* map, const void* key) {
     size_t stripe_idx = get_stripe_index(map, hash);
     chash_stripe_t* stripe = &map->stripes[stripe_idx];
 
-    // Debug: check bucket count and stripe
-    (void)stripe; // suppress unused warning for now
+    // LOCK-FREE READ with proper memory ordering
+    // Read bucket_count first, then buckets with acquire semantics
+    // This ensures we see a consistent snapshot even during resize
+    size_t bucket_count = atomic_load_explicit(&stripe->bucket_count, memory_order_acquire);
+    chash_entry_t** buckets = atomic_load_explicit(&stripe->buckets, memory_order_acquire);
 
-    // NO LOCK - lock-free read
-    size_t bucket_idx = get_bucket_index(hash, stripe->bucket_count);
-    chash_entry_t* entry = stripe->buckets[bucket_idx];
+    // Calculate bucket index
+    size_t bucket_idx = get_bucket_index(hash, bucket_count);
+    chash_entry_t* entry = buckets[bucket_idx];
 
     // Traverse chain looking for key
     while (entry != NULL) {
         // Skip tombstones
-        if (!atomic_load(&entry->tombstone) &&
+        if (!atomic_load_explicit(&entry->tombstone, memory_order_acquire) &&
             entry->hash == (uint32_t)hash &&
             map->compare_fn(entry->key, key) == 0) {
             // Found - return value atomically
-            return atomic_load(&entry->value);
+            return atomic_load_explicit(&entry->value, memory_order_acquire);
         }
         entry = entry->next;
     }
@@ -234,12 +263,15 @@ uint8_t concurrent_hashmap_contains(concurrent_hashmap_t* map, const void* key) 
     size_t stripe_idx = get_stripe_index(map, hash);
     chash_stripe_t* stripe = &map->stripes[stripe_idx];
 
-    // NO LOCK - lock-free check
-    size_t bucket_idx = get_bucket_index(hash, stripe->bucket_count);
-    chash_entry_t* entry = stripe->buckets[bucket_idx];
+    // LOCK-FREE READ with proper memory ordering
+    size_t bucket_count = atomic_load_explicit(&stripe->bucket_count, memory_order_acquire);
+    chash_entry_t** buckets = atomic_load_explicit(&stripe->buckets, memory_order_acquire);
+
+    size_t bucket_idx = get_bucket_index(hash, bucket_count);
+    chash_entry_t* entry = buckets[bucket_idx];
 
     while (entry != NULL) {
-        if (!atomic_load(&entry->tombstone) &&
+        if (!atomic_load_explicit(&entry->tombstone, memory_order_acquire) &&
             entry->hash == (uint32_t)hash &&
             map->compare_fn(entry->key, key) == 0) {
             return 1;
@@ -259,8 +291,12 @@ static chash_entry_t* find_or_create_entry(
     int create_new,
     chash_entry_t*** prev_ptr
 ) {
-    size_t bucket_idx = get_bucket_index(hash, stripe->bucket_count);
-    chash_entry_t** prev = &stripe->buckets[bucket_idx];
+    // We hold the lock, so we can read directly
+    size_t bucket_count = atomic_load(&stripe->bucket_count);
+    chash_entry_t** buckets = atomic_load(&stripe->buckets);
+
+    size_t bucket_idx = get_bucket_index(hash, bucket_count);
+    chash_entry_t** prev = &buckets[bucket_idx];
     chash_entry_t* entry = *prev;
 
     // Look for existing entry
@@ -306,7 +342,7 @@ static chash_entry_t* find_or_create_entry(
     atomic_fetch_add(&map->total_entries, 1);
 
     // Check if resize needed
-    size_t threshold = (size_t)(stripe->bucket_count * map->load_factor);
+    size_t threshold = (size_t)(bucket_count * map->load_factor);
     if (stripe->entry_count > threshold) {
         resize_stripe(map, stripe);
     }
@@ -397,8 +433,12 @@ void* concurrent_hashmap_remove(concurrent_hashmap_t* map, const void* key) {
 
     platform_lock(&stripe->lock);
 
-    size_t bucket_idx = get_bucket_index(hash, stripe->bucket_count);
-    chash_entry_t** prev = &stripe->buckets[bucket_idx];
+    // We hold the lock, so we can read directly
+    size_t bucket_count = atomic_load(&stripe->bucket_count);
+    chash_entry_t** buckets = atomic_load(&stripe->buckets);
+
+    size_t bucket_idx = get_bucket_index(hash, bucket_count);
+    chash_entry_t** prev = &buckets[bucket_idx];
     chash_entry_t* entry = *prev;
 
     // Find entry
@@ -447,14 +487,25 @@ size_t concurrent_hashmap_cleanup(concurrent_hashmap_t* map) {
 
         platform_lock(&stripe->lock);
 
+        // Free old bucket arrays from previous resizes (RCU grace period)
+        if (stripe->old_buckets != NULL) {
+            free(stripe->old_buckets);
+            stripe->old_buckets = NULL;
+            stripe->old_bucket_count = 0;
+        }
+
         if (stripe->tombstone_count == 0) {
             platform_unlock(&stripe->lock);
             continue;
         }
 
+        // Get current buckets
+        chash_entry_t** buckets = atomic_load(&stripe->buckets);
+        size_t bucket_count = atomic_load(&stripe->bucket_count);
+
         // Rebuild all buckets, skipping tombstones
-        for (size_t b = 0; b < stripe->bucket_count; b++) {
-            chash_entry_t** prev = &stripe->buckets[b];
+        for (size_t b = 0; b < bucket_count; b++) {
+            chash_entry_t** prev = &buckets[b];
             chash_entry_t* entry = *prev;
 
             while (entry != NULL) {

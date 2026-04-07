@@ -209,7 +209,6 @@ static lru_node_t* lru_dequeue(lru_queue_t* queue) {
 
 // Evict least recently used entry
 // Caller must hold shard->lock
-// eBay-style: No HP needed - remove from map, then dereference
 static int evict_lru_entry_locked(lockfree_lru_shard_t* shard) {
     int scanned = 0;
 
@@ -246,7 +245,6 @@ static int evict_lru_entry_locked(lockfree_lru_shard_t* shard) {
             atomic_fetch_sub(&shard->entry_count, 1);
 
             // Release our reference - if count hits 0, free immediately
-            // eBay-style: No HP, just reference counting
             refcounter_dereference(&entry->refcounter);
             if (refcounter_count(&entry->refcounter) == 0) {
                 lru_entry_destroy(entry);
@@ -374,11 +372,13 @@ identifier_t* lockfree_lru_cache_get(lockfree_lru_cache_t* lru, path_t* path) {
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
-    // eBay-style: Acquire shard lock just for the hashmap lookup and refcount increment
-    // This is safe because:
-    // 1. We hold the lock during get + try_reference
-    // 2. Eviction removes from map first (under same lock)
-    // 3. After removal, no new references can be acquired
+    // MINIMAL LOCK: Hold lock only for lookup + try_reference
+    // The concurrent_hashmap_get is lock-free, but we need the lock
+    // to prevent race between lookup and entry removal.
+    //
+    // This is still faster than sharded LRU because:
+    // 1. The hashmap lookup is lock-free (no lock during traversal)
+    // 2. Lock is held for minimal time (just refcount increment)
     platform_lock(&shard->lock);
 
     // Lookup entry in hashmap
@@ -389,19 +389,17 @@ identifier_t* lockfree_lru_cache_get(lockfree_lru_cache_t* lru, path_t* path) {
     }
 
     // Try to reference the entry while holding the lock
-    // This prevents eviction from freeing it while we're accessing it
     if (!refcounter_try_reference(&entry->refcounter)) {
         platform_unlock(&shard->lock);
         return NULL;  // Entry is being destroyed
     }
 
-    // Release lock - we now have a reference, so eviction can't free it
+    // Release lock - we now have a reference
     platform_unlock(&shard->lock);
 
     // Check if entry is still valid (not being evicted)
     lru_node_t* current_node = atomic_load(&entry->node);
     if (current_node == NULL) {
-        // Entry is being evicted - release reference and return
         lru_entry_release(entry);
         return NULL;
     }
@@ -542,7 +540,6 @@ void lockfree_lru_cache_delete(lockfree_lru_cache_t* lru, path_t* path) {
     atomic_fetch_sub(&shard->entry_count, 1);
 
     // Release our reference - if count hits 0, free immediately
-    // eBay-style: No HP, just reference counting
     refcounter_dereference(&entry->refcounter);
     if (refcounter_count(&entry->refcounter) == 0) {
         lru_entry_destroy(entry);
@@ -577,6 +574,7 @@ uint8_t lockfree_lru_cache_contains(lockfree_lru_cache_t* lru, path_t* path) {
     size_t shard_idx = get_shard_index(lru, path);
     lockfree_lru_shard_t* shard = &lru->shards[shard_idx];
 
+    // Minimal lock for contains check
     platform_lock(&shard->lock);
     lru_entry_t* entry = concurrent_hashmap_get(shard->map, path);
     platform_unlock(&shard->lock);

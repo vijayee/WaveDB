@@ -15,6 +15,7 @@
 
 // Enable lock-free LRU implementation
 // Uses eBay-style reference counting for safe memory reclamation
+// Atomic hashmap reads with minimal locking for entry access
 #define USE_LOCKFREE_LRU 1
 
 #ifdef __cplusplus
