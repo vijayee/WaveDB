@@ -186,7 +186,9 @@ size_t bnode_size(bnode_t* node, uint8_t chunk_size) {
 
 int bnode_needs_split(bnode_t* node, uint8_t chunk_size) {
   if (node == NULL) return 0;
-  return bnode_size(node, chunk_size) > node->node_size && node->entries.length > 1;
+  // Need at least 4 entries to split (each split node gets >= 2 entries)
+  if (node->entries.length < 4) return 0;
+  return bnode_size(node, chunk_size) > node->node_size;
 }
 
 int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
@@ -194,26 +196,35 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     return -1;
   }
 
-  if (node->entries.length < 2) {
-    return -1;  // Can't split with less than 2 entries
+  // Minimum 4 entries required for valid split (each side gets >= 2 entries)
+  if (node->entries.length < 4) {
+    return -1;
   }
 
   // Split at midpoint
   size_t mid = (size_t)node->entries.length / 2;
 
+  // The split_key is the separator that goes to parent
+  // In B+tree: left has [0, mid), right has [mid, end)
+  // The key at 'mid' becomes the separator in parent (and first entry of right)
+  bnode_entry_t* mid_entry = &node->entries.data[mid];
+
+  // COPY the split key (it will still be used in right node)
+  *split_key = chunk_create(chunk_data_const(mid_entry->key), mid_entry->key->data->size);
+  if (*split_key == NULL) return -1;
+
   // Create right node
   bnode_t* right = bnode_create(node->node_size);
-  if (right == NULL) return -1;
-
-  // Get the split key (key at midpoint - this will be promoted)
-  // In B+tree, the key at mid goes to parent, and right node starts at mid
-  bnode_entry_t* mid_entry = &node->entries.data[mid];
-  *split_key = mid_entry->key;
+  if (right == NULL) {
+    chunk_destroy(*split_key);
+    *split_key = NULL;
+    return -1;
+  }
 
   // Move entries from mid to end to right node
-  for (int i = (int)mid; i < node->entries.length; i++) {
+  // The entry at 'mid' becomes the first entry of right node
+  for (size_t i = mid; i < (size_t)node->entries.length; i++) {
     bnode_entry_t entry = node->entries.data[i];
-    // Share the key (don't take ownership - parent will manage it)
     bnode_insert(right, &entry);
   }
 
@@ -229,6 +240,26 @@ int bnode_entry_compare(bnode_entry_t* a, chunk_t* key) {
   if (a == NULL) return -1;
   if (key == NULL) return 1;
   return chunk_compare(a->key, key);
+}
+
+chunk_t* bnode_get_min_key(bnode_t* node) {
+  if (node == NULL || node->entries.length == 0) {
+    return NULL;
+  }
+  return node->entries.data[0].key;
+}
+
+int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* child) {
+  if (parent == NULL || key == NULL || child == NULL) {
+    return -1;
+  }
+
+  bnode_entry_t entry = {0};
+  entry.key = chunk_share(key);  // Share the key
+  entry.child = child;
+  entry.has_value = 0;
+
+  return bnode_insert(parent, &entry);
 }
 
 // ============================================================================

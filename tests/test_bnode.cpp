@@ -153,3 +153,142 @@ TEST_F(BnodeTest, SortedInsertion) {
     chunk_destroy(search_c);
     bnode_destroy(node);
 }
+
+TEST_F(BnodeTest, NeedsSplitMinimumEntries) {
+    // Test that nodes with less than 4 entries don't need split
+    bnode_t* node = bnode_create(128);  // Small node to trigger size limit
+
+    // Add 3 entries - should NOT need split (need at least 4)
+    for (int i = 0; i < 3; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "k%02d", i);
+        chunk_t* chunk = chunk_create(key, 3);
+        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_insert(node, &entry);
+    }
+
+    // Less than 4 entries - should not need split
+    EXPECT_EQ(bnode_needs_split(node, 4), 0);
+
+    // Add 4th entry
+    chunk_t* chunk4 = chunk_create("k03", 3);
+    bnode_entry_t entry4 = {.key = chunk4, .has_value = 0};
+    bnode_insert(node, &entry4);
+
+    // Now has 4 entries, but size might still be under limit
+    // The split check depends on size, not just entry count
+
+    bnode_destroy(node);
+}
+
+TEST_F(BnodeTest, SplitMinimumEntries) {
+    // Verify split fails with less than 4 entries
+    bnode_t* node = bnode_create(128);
+
+    // Add only 3 entries
+    for (int i = 0; i < 3; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "k%02d", i);
+        chunk_t* chunk = chunk_create(key, 3);
+        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_insert(node, &entry);
+    }
+
+    bnode_t* right = nullptr;
+    chunk_t* split_key = nullptr;
+
+    // Should fail - need at least 4 entries
+    EXPECT_EQ(bnode_split(node, &right, &split_key), -1);
+    EXPECT_EQ(right, nullptr);
+    EXPECT_EQ(split_key, nullptr);
+
+    bnode_destroy(node);
+}
+
+TEST_F(BnodeTest, SplitDistributesEvenly) {
+    bnode_t* node = bnode_create(128);
+
+    // Add 8 entries to ensure split works
+    for (int i = 0; i < 8; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "k%02d", i);
+        chunk_t* chunk = chunk_create(key, 3);
+        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_insert(node, &entry);
+    }
+
+    EXPECT_EQ(bnode_count(node), 8u);
+
+    bnode_t* right = nullptr;
+    chunk_t* split_key = nullptr;
+
+    EXPECT_EQ(bnode_split(node, &right, &split_key), 0);
+    EXPECT_NE(right, nullptr);
+    EXPECT_NE(split_key, nullptr);
+
+    // Each side should have at least 2 entries
+    EXPECT_GE(bnode_count(node), 2u);
+    EXPECT_GE(bnode_count(right), 2u);
+
+    // Total entries should be preserved
+    EXPECT_EQ(bnode_count(node) + bnode_count(right), 8u);
+
+    // Verify split_key is valid
+    EXPECT_NE(split_key->data, nullptr);
+
+    chunk_destroy(split_key);
+    bnode_destroy(right);
+    bnode_destroy(node);
+}
+
+TEST_F(BnodeTest, SplitKeyOwnership) {
+    bnode_t* node = bnode_create(128);
+
+    // Add 6 entries
+    for (int i = 0; i < 6; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "k%02d", i);
+        chunk_t* chunk = chunk_create(key, 3);
+        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_insert(node, &entry);
+    }
+
+    bnode_t* right = nullptr;
+    chunk_t* split_key = nullptr;
+
+    EXPECT_EQ(bnode_split(node, &right, &split_key), 0);
+
+    // split_key should be a COPY, not a reference to existing key
+    // We should be able to destroy it independently
+    chunk_destroy(split_key);
+
+    // Nodes should still be valid
+    EXPECT_GT(bnode_count(node), 0u);
+    EXPECT_GT(bnode_count(right), 0u);
+
+    bnode_destroy(right);
+    bnode_destroy(node);
+}
+
+TEST_F(BnodeTest, GetMinKey) {
+    bnode_t* node = bnode_create(128);
+
+    // Empty node
+    EXPECT_EQ(bnode_get_min_key(node), nullptr);
+
+    // Add entries in non-sorted order
+    chunk_t* chunk_c = chunk_create("k02", 3);
+    bnode_entry_t entry_c = {.key = chunk_c, .has_value = 0};
+    bnode_insert(node, &entry_c);
+
+    chunk_t* chunk_a = chunk_create("k00", 3);
+    bnode_entry_t entry_a = {.key = chunk_a, .has_value = 0};
+    bnode_insert(node, &entry_a);
+
+    // First key should be "k00" (sorted order)
+    chunk_t* min_key = bnode_get_min_key(node);
+    ASSERT_NE(min_key, nullptr);
+    EXPECT_EQ(chunk_compare(min_key, chunk_a), 0);
+
+    bnode_destroy(node);
+}

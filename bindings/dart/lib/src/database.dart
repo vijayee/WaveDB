@@ -10,6 +10,52 @@ import 'exceptions.dart';
 import 'iterator.dart';
 import 'object_ops.dart';
 
+/// Configuration options for WaveDB
+class WaveDBConfig {
+  /// HBTrie chunk size in bytes (default: 4)
+  final int? chunkSize;
+
+  /// B+tree node size in bytes (default: 4096)
+  final int? btreeNodeSize;
+
+  /// Enable persistent storage (default: true)
+  final bool? enablePersist;
+
+  /// LRU cache size in megabytes (default: 50)
+  final int? lruMemoryMb;
+
+  /// LRU cache shard count, 0 for auto-scale (default: 64)
+  final int? lruShards;
+
+  /// Section cache size (default: 1024)
+  final int? storageCacheSize;
+
+  /// Number of worker threads (default: 4)
+  final int? workerThreads;
+
+  /// WAL sync mode: 'immediate', 'debounced', 'async' (default: 'debounced')
+  final String? walSyncMode;
+
+  /// Debounce window for fsync in ms (default: 100)
+  final int? walDebounceMs;
+
+  /// Max WAL file size before sealing (default: 131072)
+  final int? walMaxFileSize;
+
+  const WaveDBConfig({
+    this.chunkSize,
+    this.btreeNodeSize,
+    this.enablePersist,
+    this.lruMemoryMb,
+    this.lruShards,
+    this.storageCacheSize,
+    this.workerThreads,
+    this.walSyncMode,
+    this.walDebounceMs,
+    this.walMaxFileSize,
+  });
+}
+
 /// WaveDB database instance
 ///
 /// Provides both async and sync methods for database operations.
@@ -24,10 +70,27 @@ class WaveDB {
   ///
   /// [path] - Directory path for the database
   /// [delimiter] - Path delimiter for string keys (default: '/')
-  WaveDB(String path, {String delimiter = '/'})
+  /// [config] - Optional configuration settings
+  WaveDB(String path, {String delimiter = '/', WaveDBConfig? config})
       : _path = path,
         _delimiter = delimiter {
-    _db = WaveDBNative.databaseCreate(path);
+    if (config != null) {
+      _db = WaveDBNative.databaseCreateWithConfig(
+        path,
+        chunkSize: config.chunkSize,
+        btreeNodeSize: config.btreeNodeSize,
+        enablePersist: config.enablePersist,
+        lruMemoryMb: config.lruMemoryMb,
+        lruShards: config.lruShards,
+        storageCacheSize: config.storageCacheSize,
+        workerThreads: config.workerThreads,
+        walSyncMode: config.walSyncMode,
+        walDebounceMs: config.walDebounceMs,
+        walMaxFileSize: config.walMaxFileSize,
+      );
+    } else {
+      _db = WaveDBNative.databaseCreate(path);
+    }
     if (_db == nullptr) {
       throw WaveDBException.ioError('database_create', 'Failed to create database at $path');
     }

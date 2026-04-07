@@ -191,11 +191,12 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
 
   platform_lock(&trie->lock);
 
-  // Track path for potential splitting
+  // Track path for split propagation
+  // Each entry records the HBTrie node and its parent for bottom-up propagation
   typedef struct {
-    hbtrie_node_t* node;
-    bnode_entry_t* entry;
-    chunk_t* chunk;
+    hbtrie_node_t* node;       // The HBTrie node at this level
+    hbtrie_node_t* parent;     // Parent HBTrie node (NULL for root)
+    size_t entry_index;        // Index in parent's btree where we descended
   } insert_path_item_t;
   vec_t(insert_path_item_t) insert_path;
   vec_init(&insert_path);
@@ -205,6 +206,8 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
   vec_init(&identifier_chunk_counts);
 
   hbtrie_node_t* current = trie->root;
+  hbtrie_node_t* parent = NULL;
+  size_t parent_entry_index = 0;
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
@@ -241,11 +244,23 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
         return -1;
       }
 
+      // Record current node in path before descending
+      insert_path_item_t path_item = {
+        .node = current,
+        .parent = parent,
+        .entry_index = parent_entry_index
+      };
+      vec_push(&insert_path, path_item);
+
       size_t index;
       bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
+
+      // Update parent tracking for next level
+      parent = current;
+      parent_entry_index = index;
 
       if (is_last_chunk && is_last_identifier) {
         // Final position - store the value
@@ -293,14 +308,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           new_entry.has_value = 0;
           new_entry.child = child;
           bnode_insert(current->btree, &new_entry);
-
-          // Track path for potential split
-          insert_path_item_t path_item = {
-            current,
-            &current->btree->entries.data[current->btree->entries.length - 1],
-            new_entry.key
-          };
-          vec_push(&insert_path, path_item);
 
           current = child;
         } else if (!entry->has_value) {
@@ -361,7 +368,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           // Entry has a value - can't continue
           vec_deinit(&insert_path);
           vec_deinit(&identifier_chunk_counts);
-          vec_deinit(&identifier_chunk_counts);
           platform_unlock(&trie->lock);
           return -1;
         }
@@ -370,6 +376,12 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
   }
 
   // Check if root needs splitting and update root if needed
+  // Note: This only handles root splits. Non-root B+tree node splitting
+  // within the HBTrie structure requires tracking the B+tree node hierarchy
+  // within each HBTrie node's B+tree, which is not currently implemented.
+  // The path tracking above is kept for future implementation of cascading splits.
+  (void)insert_path;  // Suppress unused variable warning for now
+
   if (bnode_needs_split(trie->root->btree, trie->chunk_size)) {
     hbtrie_node_t* new_root = hbtrie_node_split(trie->root, trie->btree_node_size, trie->chunk_size);
     if (new_root != NULL) {

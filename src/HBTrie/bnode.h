@@ -53,7 +53,7 @@ typedef struct bnode_entry_t {
     uint8_t has_value;                  // 0 = child node, 1 = value or versions
     uint8_t has_versions;               // 1 if version chain present, 0 for legacy single value
 
-    // Transaction ID for legacy mode (valid when has_value == 1 and has_versions == 0)
+    // Transactexition ID for legacy mode (valid when has_value == 1 and has_versions == 0)
     transaction_id_t value_txn_id;
 
     // Path metadata for iteration (valid when has_value == 1)
@@ -196,6 +196,25 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key);
  * @return <0 if a < b, 0 if a == b, >0 if a > b
  */
 int bnode_entry_compare(bnode_entry_t* a, chunk_t* key);
+
+/**
+ * Get the minimum key from a B+tree node.
+ *
+ * @param node  Node to get key from
+ * @return First key in the node (borrowed reference, do not free)
+ */
+chunk_t* bnode_get_min_key(bnode_t* node);
+
+/**
+ * Insert a child pointer entry into a B+tree node.
+ * Used during split propagation to add new child nodes.
+ *
+ * @param parent      Parent node to insert into
+ * @param key         Key for the entry (will be shared, not owned)
+ * @param child       Child HBTrie node pointer
+ * @return 0 on success, -1 on failure
+ */
+int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* child);
 
 // ============================================================================
 // MVCC Version Chain Functions

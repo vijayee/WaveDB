@@ -62,6 +62,78 @@ const db = new WaveDB(path, options);
 - `path` (string): Path to database directory
 - `options` (object):
   - `delimiter` (string): Key path delimiter (default: '/')
+  - `chunkSize` (number): HBTrie chunk size in bytes (default: 4)
+  - `btreeNodeSize` (number): B+tree node size in bytes (default: 4096)
+  - `enablePersist` (boolean): Enable persistence (default: true)
+  - `lruMemoryMb` (number): LRU cache size in megabytes (default: 50)
+  - `lruShards` (number): LRU cache shard count, 0 for auto-scale (default: 64)
+  - `storageCacheSize` (number): Section cache size (default: 1024)
+  - `workerThreads` (number): Number of worker threads (default: 4)
+  - `wal` (object): WAL configuration
+    - `syncMode` (string): 'immediate', 'debounced', or 'async' (default: 'debounced')
+    - `debounceMs` (number): Debounce window in ms (default: 100)
+    - `maxFileSize` (number): Max WAL file size before sealing (default: 131072)
+
+#### Example with Configuration
+
+```javascript
+const db = new WaveDB('/path/to/db', {
+  delimiter: '/',
+  lruMemoryMb: 100,      // 100 MB cache
+  lruShards: 0,         // auto-scale to CPU cores
+  wal: {
+    syncMode: 'debounced',
+    debounceMs: 50
+  }
+});
+```
+
+## Configuration
+
+WaveDB uses sensible defaults for most use cases.
+
+### Database Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `chunkSize` | 4 | HBTrie chunk size in bytes (atomic comparison unit) |
+| `btreeNodeSize` | 4096 | B+tree node size in bytes |
+| `enablePersist` | true | Persistence enabled (data saved to disk) |
+
+### Cache Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `lruMemoryMb` | 50 | LRU cache size in megabytes |
+| `lruShards` | 64 | LRU cache shard count (0 = auto-scale to CPU cores) |
+| `storageCacheSize` | 1024 | Section cache size (number of sections) |
+
+### WAL (Write-Ahead Log) Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `wal.syncMode` | 'debounced' | Durability mode: 'immediate', 'debounced', or 'async' |
+| `wal.debounceMs` | 100 | Debounce window for fsync (debounced mode) |
+| `wal.maxFileSize` | 131072 | Max WAL file size before sealing (128KB) |
+
+### Threading Configuration
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `workerThreads` | 4 | Number of background worker threads |
+
+### Sync Modes Explained
+
+- **'immediate'**: Each write calls `fsync()` - maximum durability, lowest performance
+- **'debounced'** (default): Batches fsync calls within debounce window - good balance
+- **'async'**: No fsync guarantees - highest performance, potential data loss on crash
+
+### Performance Tuning Tips
+
+1. **High write throughput**: Use `'async'` mode for bulk imports
+2. **Low latency reads**: Increase `lruMemoryMb` (50-500MB typical)
+3. **Many CPU cores**: Set `lruShards` to 0 for auto-scaling
+4. **Large datasets**: Increase `storageCacheSize` for better section locality
 
 ### Async Operations
 

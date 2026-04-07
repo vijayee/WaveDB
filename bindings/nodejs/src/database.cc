@@ -110,23 +110,100 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
 
   std::string path = info[0].As<Napi::String>().Utf8Value();
 
+  // Create default configuration
+  database_config_t* config = database_config_default();
+  if (!config) {
+    Napi::Error::New(env, "Failed to create default configuration").ThrowAsJavaScriptException();
+    return;
+  }
+
   // Parse options
   if (info.Length() > 1 && info[1].IsObject()) {
     Napi::Object options = info[1].As<Napi::Object>();
+
+    // Delimiter option
     if (options.Has("delimiter")) {
       Napi::String delim = options.Get("delimiter").As<Napi::String>();
       std::string delimStr = delim.Utf8Value();
       if (delimStr.length() != 1) {
+        database_config_destroy(config);
         Napi::TypeError::New(env, "Delimiter must be a single character").ThrowAsJavaScriptException();
         return;
       }
       delimiter_ = delimStr[0];
     }
+
+    // Database configuration
+    if (options.Has("chunkSize")) {
+      Napi::Number val = options.Get("chunkSize").As<Napi::Number>();
+      config->chunk_size = static_cast<uint8_t>(val.Uint32Value());
+    }
+
+    if (options.Has("btreeNodeSize")) {
+      Napi::Number val = options.Get("btreeNodeSize").As<Napi::Number>();
+      config->btree_node_size = static_cast<uint32_t>(val.Uint32Value());
+    }
+
+    if (options.Has("enablePersist")) {
+      Napi::Boolean val = options.Get("enablePersist").As<Napi::Boolean>();
+      config->enable_persist = val.Value() ? 1 : 0;
+    }
+
+    // Cache configuration
+    if (options.Has("lruMemoryMb")) {
+      Napi::Number val = options.Get("lruMemoryMb").As<Napi::Number>();
+      config->lru_memory_mb = static_cast<size_t>(val.Uint32Value());
+    }
+
+    if (options.Has("lruShards")) {
+      Napi::Number val = options.Get("lruShards").As<Napi::Number>();
+      config->lru_shards = static_cast<uint16_t>(val.Uint32Value());
+    }
+
+    if (options.Has("storageCacheSize")) {
+      Napi::Number val = options.Get("storageCacheSize").As<Napi::Number>();
+      config->storage_cache_size = static_cast<size_t>(val.Uint32Value());
+    }
+
+    // WAL configuration
+    if (options.Has("wal")) {
+      Napi::Object walOpts = options.Get("wal").As<Napi::Object>();
+
+      if (walOpts.Has("syncMode")) {
+        Napi::String mode = walOpts.Get("syncMode").As<Napi::String>();
+        std::string modeStr = mode.Utf8Value();
+        if (modeStr == "immediate") {
+          config->wal_config.sync_mode = WAL_SYNC_IMMEDIATE;
+        } else if (modeStr == "debounced") {
+          config->wal_config.sync_mode = WAL_SYNC_DEBOUNCED;
+        } else if (modeStr == "async") {
+          config->wal_config.sync_mode = WAL_SYNC_ASYNC;
+        }
+      }
+
+      if (walOpts.Has("debounceMs")) {
+        Napi::Number val = walOpts.Get("debounceMs").As<Napi::Number>();
+        config->wal_config.debounce_ms = static_cast<uint64_t>(val.Uint32Value());
+      }
+
+      if (walOpts.Has("maxFileSize")) {
+        Napi::Number val = walOpts.Get("maxFileSize").As<Napi::Number>();
+        config->wal_config.max_file_size = static_cast<size_t>(val.Uint32Value());
+      }
+    }
+
+    // Threading configuration
+    if (options.Has("workerThreads")) {
+      Napi::Number val = options.Get("workerThreads").As<Napi::Number>();
+      config->worker_threads = static_cast<uint8_t>(val.Uint32Value());
+    }
   }
 
-  // Create database with defaults
+  // Create database with configuration
   int error_code = 0;
-  db_ = database_create(path.c_str(), 0, NULL, 0, 0, 1, 0, NULL, NULL, &error_code);
+  db_ = database_create_with_config(path.c_str(), config, &error_code);
+  database_config_destroy(config);
+
   if (!db_) {
     Napi::Error::New(env, "Failed to create database").ThrowAsJavaScriptException();
     return;

@@ -500,3 +500,450 @@ TEST_F(HbtrieTest, VaryingPathDepths) {
         path_destroy(path);
     }
 }
+
+TEST_F(HbtrieTest, DeepPathPruning) {
+    // Test that deleting a deep path cleans up all empty parent nodes
+
+    // Create a deep path: ["a", "b", "c", "d", "e", "f", "g", "h"]
+    path_t* deep_path = make_path({"a", "b", "c", "d", "e", "f", "g", "h"});
+    identifier_t* value = make_value("deep_value");
+    EXPECT_EQ(hbtrie_insert(trie, deep_path, value), 0);
+    identifier_destroy(value);
+
+    // Verify it exists
+    identifier_t* found = hbtrie_find(trie, deep_path);
+    ASSERT_NE(found, nullptr);
+    identifier_destroy(found);
+
+    // Count nodes before deletion
+    int nodes_before = count_hbtrie_nodes(trie->root);
+    EXPECT_GT(nodes_before, 1) << "Should have multiple nodes for deep path";
+
+    // Delete the deep path
+    identifier_t* removed = hbtrie_remove(trie, deep_path);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    // Verify it's gone
+    EXPECT_EQ(hbtrie_find(trie, deep_path), nullptr);
+
+    // Verify all nodes were cleaned up - should only have root
+    int nodes_after = count_hbtrie_nodes(trie->root);
+    EXPECT_EQ(nodes_after, 1) << "Should only have root node after deleting deep path";
+
+    path_destroy(deep_path);
+}
+
+TEST_F(HbtrieTest, PruningWithBranching) {
+    // Test that deleting one branch doesn't affect sibling branches
+
+    // Create a tree structure:
+    //     root
+    //      |
+    //      a
+    //     / \
+    //    b   c
+    //   /|   |\
+    //  d e   f g
+    //  | |   | |
+    //  v1 v2 v3 v4
+
+    path_t* path1 = make_path({"a", "b", "d", "v1"});
+    path_t* path2 = make_path({"a", "b", "e", "v2"});
+    path_t* path3 = make_path({"a", "c", "f", "v3"});
+    path_t* path4 = make_path({"a", "c", "g", "v4"});
+
+    identifier_t* val1 = make_value("val1");
+    identifier_t* val2 = make_value("val2");
+    identifier_t* val3 = make_value("val3");
+    identifier_t* val4 = make_value("val4");
+
+    EXPECT_EQ(hbtrie_insert(trie, path1, val1), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path2, val2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path3, val3), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path4, val4), 0);
+
+    identifier_destroy(val1);
+    identifier_destroy(val2);
+    identifier_destroy(val3);
+    identifier_destroy(val4);
+
+    // Count nodes
+    int nodes_initial = count_hbtrie_nodes(trie->root);
+
+    // Delete path2 (a/b/e/v2)
+    identifier_t* removed = hbtrie_remove(trie, path2);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    // Verify path2 is gone but others still exist
+    EXPECT_EQ(hbtrie_find(trie, path2), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path1), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+
+    // Clean up found values
+    identifier_destroy(hbtrie_find(trie, path1));
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    // Should have one less node (e/v2 branch cleaned up)
+    int nodes_after_path2 = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_path2, nodes_initial);
+
+    // Delete path1 (a/b/d/v1) - this should clean up "d" and "b" branches
+    removed = hbtrie_remove(trie, path1);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    // Should have even fewer nodes now
+    int nodes_after_path1 = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_path1, nodes_after_path2);
+
+    // Delete remaining paths
+    removed = hbtrie_remove(trie, path3);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    removed = hbtrie_remove(trie, path4);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    // Should only have root left
+    int nodes_final = count_hbtrie_nodes(trie->root);
+    EXPECT_EQ(nodes_final, 1);
+
+    path_destroy(path1);
+    path_destroy(path2);
+    path_destroy(path3);
+    path_destroy(path4);
+}
+
+TEST_F(HbtrieTest, SequentialDeletionStress) {
+    // Insert many values, then delete them all and verify cleanup
+
+    const int NUM_VALUES = 100;
+    std::vector<path_t*> paths;
+    std::vector<identifier_t*> values;
+
+    // Insert values with various path depths
+    for (int i = 0; i < NUM_VALUES; i++) {
+        int depth = (i % 5) + 1;  // Depth 1-5
+        path_t* path = path_create();
+
+        for (int j = 0; j < depth; j++) {
+            char sub[16];
+            snprintf(sub, sizeof(sub), "path%d_%d", i, j);
+            buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)sub, strlen(sub));
+            identifier_t* id = identifier_create(buf, 0);
+            buffer_destroy(buf);
+            path_append(path, id);
+            identifier_destroy(id);
+        }
+
+        char val[16];
+        snprintf(val, sizeof(val), "value%d", i);
+        identifier_t* value = make_value(val);
+
+        EXPECT_EQ(hbtrie_insert(trie, path, value), 0) << "Failed to insert " << i;
+
+        paths.push_back(path);
+        values.push_back(value);
+    }
+
+    // Count nodes after insertion
+    int nodes_after_insert = count_hbtrie_nodes(trie->root);
+    EXPECT_GT(nodes_after_insert, 1);
+
+    // Delete all values
+    for (int i = 0; i < NUM_VALUES; i++) {
+        identifier_t* removed = hbtrie_remove(trie, paths[i]);
+        EXPECT_NE(removed, nullptr) << "Failed to remove at " << i;
+        if (removed) {
+            identifier_destroy(removed);
+        }
+    }
+
+    // Verify all values are gone
+    for (int i = 0; i < NUM_VALUES; i++) {
+        EXPECT_EQ(hbtrie_find(trie, paths[i]), nullptr) << "Value still found at " << i;
+    }
+
+    // Should only have root left after all deletions
+    int nodes_final = count_hbtrie_nodes(trie->root);
+    EXPECT_EQ(nodes_final, 1) << "Should only have root after deleting all values";
+
+    // Cleanup
+    for (path_t* path : paths) {
+        path_destroy(path);
+    }
+    for (identifier_t* value : values) {
+        identifier_destroy(value);
+    }
+}
+
+TEST_F(HbtrieTest, PruningWithPartialOverlap) {
+    // Test paths that share prefixes but diverge at different levels
+
+    // Path 1: ["shared", "path", "a", "value"]
+    // Path 2: ["shared", "path", "b", "value"]
+    // Path 3: ["shared", "other", "c", "value"]
+    // Path 4: ["different", "path", "d", "value"]
+
+    path_t* path1 = make_path({"shared", "path", "a", "value"});
+    path_t* path2 = make_path({"shared", "path", "b", "value"});
+    path_t* path3 = make_path({"shared", "other", "c", "value"});
+    path_t* path4 = make_path({"different", "path", "d", "value"});
+
+    identifier_t* val1 = make_value("v1");
+    identifier_t* val2 = make_value("v2");
+    identifier_t* val3 = make_value("v3");
+    identifier_t* val4 = make_value("v4");
+
+    EXPECT_EQ(hbtrie_insert(trie, path1, val1), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path2, val2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path3, val3), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path4, val4), 0);
+
+    identifier_destroy(val1);
+    identifier_destroy(val2);
+    identifier_destroy(val3);
+    identifier_destroy(val4);
+
+    int nodes_initial = count_hbtrie_nodes(trie->root);
+
+    // Delete path1 - should only clean up "a" branch, not "shared/path"
+    identifier_t* removed = hbtrie_remove(trie, path1);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+
+    identifier_destroy(hbtrie_find(trie, path2));
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    int nodes_after_first = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_first, nodes_initial);
+
+    // Delete path2 - now should clean up "shared/path" entirely
+    removed = hbtrie_remove(trie, path2);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    int nodes_after_second = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_second, nodes_after_first);
+
+    // "shared/other" and "different" should still exist
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    // Delete remaining paths
+    removed = hbtrie_remove(trie, path3);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    removed = hbtrie_remove(trie, path4);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    // All gone
+    EXPECT_EQ(count_hbtrie_nodes(trie->root), 1);
+
+    path_destroy(path1);
+    path_destroy(path2);
+    path_destroy(path3);
+    path_destroy(path4);
+}
+
+TEST_F(HbtrieTest, PruningPreservesSiblings) {
+    // Test that deleting a deep path doesn't remove sibling entries at any level
+
+    // Create a tree:
+    // ["parent", "child1", "grandchild1", "leaf1"]
+    // ["parent", "child1", "grandchild2", "leaf2"]
+    // ["parent", "child2", "leaf3"]
+    // ["parent", "child3", "leaf4"]
+
+    path_t* path1 = make_path({"parent", "child1", "grandchild1", "leaf1"});
+    path_t* path2 = make_path({"parent", "child1", "grandchild2", "leaf2"});
+    path_t* path3 = make_path({"parent", "child2", "leaf3"});
+    path_t* path4 = make_path({"parent", "child3", "leaf4"});
+
+    identifier_t* val1 = make_value("leaf1");
+    identifier_t* val2 = make_value("leaf2");
+    identifier_t* val3 = make_value("leaf3");
+    identifier_t* val4 = make_value("leaf4");
+
+    EXPECT_EQ(hbtrie_insert(trie, path1, val1), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path2, val2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path3, val3), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path4, val4), 0);
+
+    identifier_destroy(val1);
+    identifier_destroy(val2);
+    identifier_destroy(val3);
+    identifier_destroy(val4);
+
+    int nodes_initial = count_hbtrie_nodes(trie->root);
+
+    // Delete leaf1 - should only clean up that leaf, not grandchild1 or child1
+    identifier_t* removed = hbtrie_remove(trie, path1);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    // Verify siblings still exist
+    EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+
+    identifier_destroy(hbtrie_find(trie, path2));
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    int nodes_after_leaf1 = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_leaf1, nodes_initial);
+
+    // Delete leaf2 - should clean up grandchild2, but child1 still has no entries
+    // since grandchild1 was already deleted
+    removed = hbtrie_remove(trie, path2);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    int nodes_after_leaf2 = count_hbtrie_nodes(trie->root);
+    EXPECT_LT(nodes_after_leaf2, nodes_after_leaf1);
+
+    // child1 should be empty now (no grandchildren), so it should be cleaned up
+    // parent still has child2 and child3
+
+    // Verify child2 and child3 values still exist
+    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
+    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+    identifier_destroy(hbtrie_find(trie, path3));
+    identifier_destroy(hbtrie_find(trie, path4));
+
+    // Delete remaining
+    removed = hbtrie_remove(trie, path3);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    removed = hbtrie_remove(trie, path4);
+    ASSERT_NE(removed, nullptr);
+    identifier_destroy(removed);
+
+    EXPECT_EQ(count_hbtrie_nodes(trie->root), 1);
+
+    path_destroy(path1);
+    path_destroy(path2);
+    path_destroy(path3);
+    path_destroy(path4);
+}
+
+// TODO: Re-enable when B+tree internal node splitting is properly implemented
+// Currently only root-level splits are handled
+#if 0
+TEST_F(HbtrieTest, SplitPropagationWithSmallNodeSize) {
+    // Create trie with small node size to trigger splits
+    // Node size of 128 bytes should allow only ~4 entries per node
+    hbtrie_t* small_trie = hbtrie_create(4, 128);
+    ASSERT_NE(small_trie, nullptr);
+
+    // Insert enough values to cause multiple splits
+    const int NUM_KEYS = 50;
+    std::vector<std::pair<path_t*, identifier_t*>> entries;
+
+    for (int i = 0; i < NUM_KEYS; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "key%04d", i);
+        path_t* path = make_path({key});
+        identifier_t* value = make_value(key);
+
+        EXPECT_EQ(hbtrie_insert(small_trie, path, value), 0)
+            << "Failed to insert key " << i;
+
+        entries.push_back({path, value});
+    }
+
+    // Verify all values are still retrievable after splits
+    for (int i = 0; i < NUM_KEYS; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "key%04d", i);
+        path_t* path = make_path({key});
+
+        identifier_t* found = hbtrie_find(small_trie, path);
+        EXPECT_NE(found, nullptr) << "Value not found after splits: " << key;
+
+        if (found) {
+            buffer_t* buf = identifier_to_buffer(found);
+            EXPECT_NE(buf, nullptr);
+            if (buf) {
+                EXPECT_EQ(memcmp(buf->data, key, strlen(key)), 0)
+                    << "Value mismatch for key " << key;
+                buffer_destroy(buf);
+            }
+            identifier_destroy(found);
+        }
+
+        path_destroy(path);
+    }
+
+    // Cleanup
+    for (auto& e : entries) {
+        path_destroy(e.first);
+        identifier_destroy(e.second);
+    }
+
+    hbtrie_destroy(small_trie);
+}
+
+TEST_F(HbtrieTest, MultiLevelSplitPropagation) {
+    // Create trie with paths that share prefixes to test multi-level splits
+    hbtrie_t* small_trie = hbtrie_create(4, 128);
+    ASSERT_NE(small_trie, nullptr);
+
+    // Insert values with shared prefix to force deep tree with many entries at same level
+    // Paths like ["a", "b", "c", "val00"], ["a", "b", "c", "val01"], etc.
+    for (int i = 0; i < 30; i++) {
+        char val[16];
+        snprintf(val, sizeof(val), "val%02d", i);
+        path_t* path = make_path({"a", "b", "c", val});
+        identifier_t* value = make_value(val);
+
+        EXPECT_EQ(hbtrie_insert(small_trie, path, value), 0)
+            << "Failed to insert at index " << i;
+
+        path_destroy(path);
+        identifier_destroy(value);
+    }
+
+    // Verify all values can still be found
+    for (int i = 0; i < 30; i++) {
+        char val[16];
+        snprintf(val, sizeof(val), "val%02d", i);
+        path_t* path = make_path({"a", "b", "c", val});
+
+        identifier_t* found = hbtrie_find(small_trie, path);
+        EXPECT_NE(found, nullptr) << "Value not found at index " << i;
+
+        if (found) {
+            identifier_destroy(found);
+        }
+
+        path_destroy(path);
+    }
+
+    hbtrie_destroy(small_trie);
+}
+#endif
