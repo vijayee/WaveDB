@@ -293,14 +293,8 @@ void timing_wheel_stop(timing_wheel_t* wheel) {
 }
 
 void hierachical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
-  platform_lock(&wheel->lock);
-  wheel->stopped = 1;
-  timing_wheel_stop(wheel->milliseconds);
-  timing_wheel_stop(wheel->seconds);
-  timing_wheel_stop(wheel->minutes);
-  timing_wheel_stop(wheel->hours);
-  timing_wheel_stop(wheel->days);
-  platform_unlock(&wheel->lock);
+  // Delegate to the properly-named function which handles timer cleanup
+  hierarchical_timing_wheel_stop(wheel);
 }
 
 uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), timer_duration_t delay) {
@@ -454,11 +448,36 @@ void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel) {
   timing_wheel_run(wheel->days);
 }
 void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
+  platform_lock(&wheel->lock);
+  wheel->stopped = 1;
   timing_wheel_stop(wheel->milliseconds);
   timing_wheel_stop(wheel->seconds);
   timing_wheel_stop(wheel->minutes);
   timing_wheel_stop(wheel->hours);
   timing_wheel_stop(wheel->days);
+
+  // Cancel all remaining timers and call their abort callbacks.
+  // This ensures wait_for_idle_signal won't hang: after clearing the
+  // timer map, the idle condition is signaled below.
+  // Use hashmap_foreach_data_safe since we're removing during iteration.
+  timer_st* timer;
+  size_t* key;
+  void* pos;
+  hashmap_foreach_data_safe(timer, &wheel->timers, pos) {
+    if (timer->abort) {
+      timer->abort(timer->ctx);
+    }
+    free(timer->plan.steps);
+    free(timer);
+  }
+
+  // Reinitialize the hashmap after freeing all entries
+  hashmap_cleanup(&wheel->timers);
+  hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
+  hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
+
+  platform_signal_condition(&wheel->idle);
+  platform_unlock(&wheel->lock);
 }
 
 void hierarchical_timing_wheel_wait_for_idle_signal(hierarchical_timing_wheel_t* wheel) {
