@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef USE_LOCKFREE_LRU
+#if USE_LOCKFREE_LRU
 
 // Lock-free LRU wrapper - delegates to lockfree_lru implementation
 

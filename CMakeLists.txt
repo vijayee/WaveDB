@@ -345,6 +345,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_hbtrie_optimistic tests/benchmark/benchmark_hbtrie_optimistic.cpp)
     target_link_libraries(benchmark_hbtrie_optimistic wavedb gtest gtest_main Threads::Threads)
 
+    # Concurrent write benchmark
+    add_executable(benchmark_concurrent_write tests/benchmark_concurrent_write.cpp)
+    target_link_libraries(benchmark_concurrent_write wavedb gtest gtest_main Threads::Threads)
+
     # Create benchmark output directory
     add_custom_target(benchmark_output_dir
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
@@ -517,3 +521,4 @@ install(EXPORT WaveDBTargets
 # Test for threading fix
 # add_executable(test_threading_fix tests/test_threading_fix.cpp)
 # target_link_libraries(test_threading_fix wavedb Threads::Threads gtest gtest_main)
+
