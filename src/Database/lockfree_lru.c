@@ -456,6 +456,9 @@ identifier_t* lockfree_lru_cache_put(lockfree_lru_cache_t* lru, path_t* path, id
             }
             existing->memory_size = new_memory;
 
+            // Increment version for optimistic reads
+            atomic_fetch_add(&existing->version, 1);
+
             // Release our reference
             lru_entry_release(existing);
 
@@ -483,6 +486,7 @@ identifier_t* lockfree_lru_cache_put(lockfree_lru_cache_t* lru, path_t* path, id
     entry->value = value;
     entry->memory_size = entry_memory;
     atomic_init(&entry->node, NULL);
+    atomic_init(&entry->version, 0);
     refcounter_init(&entry->refcounter);  // Starts at 1
 
     // Create LRU node

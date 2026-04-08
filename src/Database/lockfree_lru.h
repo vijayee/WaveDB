@@ -44,6 +44,7 @@ struct lru_entry_t {
     path_t* path;                     // Key (immutable)
     identifier_t* value;              // Value (reference counted)
     _Atomic(lru_node_t*) node;       // Current position in LRU queue
+    _Atomic(uint64_t) version;          // Version for optimistic reads
     size_t memory_size;               // Memory footprint
 };
 
