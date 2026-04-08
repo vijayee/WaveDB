@@ -20,6 +20,7 @@ bnode_t* bnode_create(uint32_t node_size) {
   bnode_t* node = get_clear_memory(sizeof(bnode_t));
   node->node_size = node_size;
   vec_init(&node->entries);
+  atomic_init(&node->seq, 0);
 
   refcounter_init((refcounter_t*)node);
   platform_lock_init(&node->lock);
@@ -111,17 +112,61 @@ bnode_entry_t* bnode_find(bnode_t* node, chunk_t* key, size_t* out_index) {
   return NULL;
 }
 
+bnode_entry_t* bnode_find_optimistic(bnode_t* node, chunk_t* key, size_t* out_index) {
+  if (node == NULL || key == NULL) {
+    if (out_index) *out_index = 0;
+    return NULL;
+  }
+
+  while (1) {
+    uint64_t s1 = atomic_load(&node->seq);
+
+    // If s1 is odd, a write is in progress. Wait for it to finish.
+    if (s1 & 1) {
+      platform_cpu_relax();
+      continue;
+    }
+
+    size_t index = bnode_search(node, key);
+    bnode_entry_t* entry = NULL;
+
+    if (index < (size_t)node->entries.length) {
+      bnode_entry_t* candidate = &node->entries.data[index];
+      if (chunk_compare(candidate->key, key) == 0) {
+        entry = candidate;
+      }
+    }
+
+    uint64_t s2 = atomic_load(&node->seq);
+
+    // If sequence number hasn't changed, the read was consistent.
+    if (s1 == s2) {
+      if (out_index) *out_index = index;
+      return entry;
+    }
+    // Otherwise, a write occurred during the search. Retry.
+  }
+}
+
 int bnode_insert(bnode_t* node, bnode_entry_t* entry) {
   if (node == NULL || entry == NULL) return -1;
 
   // Find insertion point
   size_t index = bnode_search(node, entry->key);
 
+  // Sequence lock: signal start of write
+  atomic_fetch_add(&node->seq, 1);
+
   // Reference the key
   // Note: entry->key should already be allocated; we take ownership
 
   // Insert into vector
-  return vec_insert(&node->entries, (int)index, *entry);
+  int result = vec_insert(&node->entries, (int)index, *entry);
+
+  // Sequence lock: signal end of write
+  atomic_fetch_add(&node->seq, 1);
+
+  return result;
 }
 
 bnode_entry_t bnode_remove(bnode_t* node, chunk_t* key) {
@@ -143,8 +188,14 @@ bnode_entry_t bnode_remove_at(bnode_t* node, size_t index) {
     return removed;
   }
 
+  // Sequence lock: signal start of write
+  atomic_fetch_add(&node->seq, 1);
+
   removed = node->entries.data[index];
   vec_splice(&node->entries, (int)index, 1);
+
+  // Sequence lock: signal end of write
+  atomic_fetch_add(&node->seq, 1);
 
   return removed;
 }

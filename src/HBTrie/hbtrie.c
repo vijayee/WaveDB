@@ -400,13 +400,10 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
     return NULL;
   }
 
-  platform_lock(&trie->lock);
-
   hbtrie_node_t* current = trie->root;
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
-    platform_unlock(&trie->lock);
     return NULL;
   }
 
@@ -414,7 +411,6 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
-      platform_unlock(&trie->lock);
       return NULL;
     }
 
@@ -424,12 +420,11 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
-        platform_unlock(&trie->lock);
         return NULL;
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_entry_t* entry = bnode_find_optimistic(current->btree, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -438,22 +433,18 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
         // Final position - return the value if found
         if (entry != NULL && entry->has_value) {
           identifier_t* result = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
-          platform_unlock(&trie->lock);
           return result;
         }
-        platform_unlock(&trie->lock);
         return NULL;
       } else if (is_last_chunk) {
         // End of this identifier, need to move to next HBTrie level
         if (entry == NULL || entry->has_value || entry->child == NULL) {
-          platform_unlock(&trie->lock);
           return NULL;
         }
         current = entry->child;
       } else {
         // Intermediate chunk within this identifier
         if (entry == NULL || entry->has_value || entry->child == NULL) {
-          platform_unlock(&trie->lock);
           return NULL;
         }
         current = entry->child;
@@ -461,7 +452,6 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
     }
   }
 
-  platform_unlock(&trie->lock);
   return NULL;
 }
 

@@ -6,6 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Options
+option(USE_LOCKFREE_LRU "Use lock-free LRU cache implementation" ON)
+
 # Compiler flags
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror=return-type")
 set(CMAKE_C_FLAGS_DEBUG "-g -O0")
@@ -127,6 +130,13 @@ target_link_libraries(wavedb PUBLIC xxhash cbor)
 
 # Enable atomic reference counting for better performance and thread safety
 target_compile_definitions(wavedb PRIVATE REFCOUNTER_ATOMIC)
+
+# Lock-free LRU option
+if(USE_LOCKFREE_LRU)
+    target_compile_definitions(wavedb PRIVATE USE_LOCKFREE_LRU=1)
+else()
+    target_compile_definitions(wavedb PRIVATE USE_LOCKFREE_LRU=0)
+endif()
 
 # Create namespaced alias for consumers
 add_library(WaveDB::wavedb ALIAS wavedb)
@@ -330,6 +340,10 @@ if(BUILD_BENCHMARKS)
     # HBTrie write benchmark (for profiling)
     add_executable(benchmark_hbtrie_write tests/benchmark/benchmark_hbtrie_write.cpp)
     target_link_libraries(benchmark_hbtrie_write wavedb Threads::Threads)
+
+    # HBTrie optimistic reads benchmark
+    add_executable(benchmark_hbtrie_optimistic tests/benchmark/benchmark_hbtrie_optimistic.cpp)
+    target_link_libraries(benchmark_hbtrie_optimistic wavedb gtest gtest_main Threads::Threads)
 
     # Create benchmark output directory
     add_custom_target(benchmark_output_dir

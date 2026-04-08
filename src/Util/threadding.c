@@ -7,11 +7,17 @@
 #include <string.h>
 #if _WIN32
 #include <windows.h>
+#include <immintrin.h>
 #else
 #include <pthread.h>
 #include <unistd.h>
 #endif
+
 #if _WIN32
+void platform_cpu_relax() {
+  _mm_pause();
+}
+
 void platform_lock(CRITICAL_SECTION* lock) {
   EnterCriticalSection(lock);
 }
@@ -101,6 +107,10 @@ int platform_self() {
   return GetCurrentThreadId();
 }
 #else
+void platform_cpu_relax() {
+  __builtin_ia32_pause();
+}
+
 void platform_lock(pthread_mutex_t* lock) {
   int result = pthread_mutex_lock(lock);
   if (result) {

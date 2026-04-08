@@ -13,16 +13,19 @@
 #include "../Util/threadding.h"
 #include <hashmap.h>
 
-// Enable lock-free LRU implementation
-// Uses eBay-style reference counting for safe memory reclamation
-// Atomic hashmap reads with minimal locking for entry access
-#define USE_LOCKFREE_LRU 1
+// USE_LOCKFREE_LRU is defined via CMake option
+// When enabled: uses lock-free LRU with version-based optimistic reads
+// When disabled: uses sharded LRU with locks
+
+#ifndef USE_LOCKFREE_LRU
+#define USE_LOCKFREE_LRU 1  // Default to lock-free if not specified
+#endif
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#ifdef USE_LOCKFREE_LRU
+#if USE_LOCKFREE_LRU
 
 // Lock-free LRU wrapper - delegates to lockfree_lru
 #include "lockfree_lru.h"

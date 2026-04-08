@@ -77,6 +77,7 @@ typedef struct bnode_entry_t {
 typedef struct bnode_t {
     refcounter_t refcounter;          // MUST be first member
     PLATFORMLOCKTYPE(lock);           // Node-level lock
+    _Atomic(uint64_t) seq;              // Sequence lock for optimistic reads
 
     uint32_t node_size;               // Configurable max size in bytes
 
@@ -107,6 +108,19 @@ void bnode_destroy(bnode_t* node);
  * @return Entry if found, NULL if not found
  */
 bnode_entry_t* bnode_find(bnode_t* node, chunk_t* key, size_t* out_index);
+
+/**
+ * Find an entry by key (chunk) using optimistic concurrency control.
+ *
+ * This function attempts to read the node without taking a lock.
+ * If the node is modified during the read, it retries.
+ *
+ * @param node  Node to search
+ * @param key   Chunk key to find
+ * @param out_index  Output: index where found or would be inserted
+ * @return Entry if found, NULL if not found
+ */
+bnode_entry_t* bnode_find_optimistic(bnode_t* node, chunk_t* key, size_t* out_index);
 
 /**
  * Insert an entry in sorted order.
