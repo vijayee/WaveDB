@@ -18,8 +18,9 @@
 extern "C" {
 #endif
 
-// Forward declaration
+// Forward declarations
 struct hbtrie_node_t;
+struct bnode_t;
 
 /**
  * version_entry_t - Version metadata for MVCC.
@@ -39,19 +40,25 @@ typedef struct version_entry_t {
 /**
  * bnode_entry_t - Entry in a B+tree node.
  *
- * Each entry maps a single chunk to either a child HBTrie node or a leaf value.
+ * Each entry maps a single chunk to one of:
+ * - A child HBTrie node (has_value==0, is_bnode_child==0): trie descent
+ * - A child bnode (has_value==0, is_bnode_child==1): internal B+tree descent
+ * - A leaf value or version chain (has_value==1): stored data
+ *
  * When has_value == 1 (leaf entry), path_chunk_counts stores the number of chunks
  * per identifier in the path, enabling path reconstruction during iteration.
  */
 typedef struct bnode_entry_t {
     chunk_t* key;                      // Single chunk for comparison
     union {
-        struct hbtrie_node_t* child;   // Next HBTrie node (if has_value == 0)
+        struct hbtrie_node_t* child;   // Next HBTrie node (if has_value == 0, is_bnode_child == 0)
+        struct bnode_t* child_bnode;   // Child B+tree node (if has_value == 0, is_bnode_child == 1)
         identifier_t* value;            // Leaf value (if has_value == 1 and has_versions == 0)
         version_entry_t* versions;      // Version chain (if has_value == 1 and has_versions == 1)
     };
     uint8_t has_value;                  // 0 = child node, 1 = value or versions
     uint8_t has_versions;               // 1 if version chain present, 0 for legacy single value
+    uint8_t is_bnode_child;             // 1 when entry points to child bnode (internal B+tree node)
 
     // Transactexition ID for legacy mode (valid when has_value == 1 and has_versions == 0)
     transaction_id_t value_txn_id;
@@ -73,12 +80,15 @@ typedef struct bnode_entry_t {
  * bnode_t - B+tree node for HBTrie.
  *
  * Contains a sorted array of entries, each comparing chunks.
+ * Level 1 = leaf node (entries point to values or HBTrie children).
+ * Level > 1 = internal node (entries point to child bnodes for B+tree fanout).
  */
 typedef struct bnode_t {
     refcounter_t refcounter;          // MUST be first member
     PLATFORMLOCKTYPE(lock);           // Node-level lock
 
     uint32_t node_size;               // Configurable max size in bytes
+    uint16_t level;                   // B+tree level: 1 = leaf, > 1 = internal
 
     vec_t(bnode_entry_t) entries;     // Sorted by chunk key
 } bnode_t;
@@ -90,6 +100,15 @@ typedef struct bnode_t {
  * @return New node or NULL on failure
  */
 bnode_t* bnode_create(uint32_t node_size);
+
+/**
+ * Create a B+tree node with a specific level.
+ *
+ * @param node_size  Maximum node size in bytes (0 for default)
+ * @param level      B+tree level (1 = leaf, > 1 = internal)
+ * @return New node or NULL on failure
+ */
+bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level);
 
 /**
  * Destroy a B+tree node.
@@ -215,6 +234,64 @@ chunk_t* bnode_get_min_key(bnode_t* node);
  * @return 0 on success, -1 on failure
  */
 int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* child);
+
+/**
+ * Insert a child bnode pointer into an internal B+tree node.
+ * Used during B+tree split propagation within an hbtrie_node.
+ *
+ * @param parent      Internal node to insert into
+ * @param key         Separator key (will be shared, not owned)
+ * @param child       Child bnode pointer
+ * @return 0 on success, -1 on failure
+ */
+int bnode_insert_bnode_child(bnode_t* parent, chunk_t* key, struct bnode_t* child);
+
+/**
+ * Descend from root through internal B+tree nodes to reach the leaf node
+ * containing the given key.
+ *
+ * At each internal node (level > 1), uses bnode_find to locate the
+ * correct child entry. For non-exact matches, follows the entry at
+ * index-1 (or index 0 if key < all entries).
+ *
+ * @param root  Root bnode of the B+tree (can be internal or leaf)
+ * @param key   Chunk key to search for
+ * @return Leaf bnode where the key would reside
+ */
+bnode_t* bnode_descend(bnode_t* root, chunk_t* key);
+
+/**
+ * Find an entry in a multi-level B+tree by descending to the leaf
+ * and performing an exact match.
+ *
+ * @param root       Root bnode of the B+tree
+ * @param key        Chunk key to find
+ * @param out_index  Output: index in the leaf node (can be NULL)
+ * @return Entry if found, NULL if not found
+ */
+bnode_entry_t* bnode_find_leaf(bnode_t* root, chunk_t* key, size_t* out_index);
+
+/**
+ * Recursively destroy a bnode tree, including all internal child bnodes.
+ * For leaf bnodes (level == 1), behaves like bnode_destroy.
+ * For internal bnodes (level > 1), recursively destroys child bnodes
+ * where is_bnode_child == 1.
+ *
+ * @param root  Root bnode to destroy
+ */
+void bnode_destroy_tree(bnode_t* root);
+
+/**
+ * Check if a bnode tree has any leaf entries.
+ *
+ * A bnode tree is considered empty if no leaf bnode has any entries.
+ * For a single-level bnode (level == 1), this is equivalent to bnode_is_empty.
+ * For multi-level bnodes, walks through all internal nodes to find leaf entries.
+ *
+ * @param root  Root bnode of the B+tree
+ * @return 1 if the tree has no leaf entries, 0 otherwise
+ */
+int bnode_tree_is_empty(bnode_t* root);
 
 // ============================================================================
 // MVCC Version Chain Functions

@@ -30,15 +30,23 @@ typedef struct {
  * Serialize a B+tree node to a binary buffer.
  *
  * Format:
+ *   - Magic byte (0xB3 for new format with level/is_bnode_child)
+ *   - Level (uint16_t)
  *   - Number of entries (uint16_t)
  *   - For each entry:
- *     - Chunk size (uint8_t)
  *     - Chunk data (chunk_size bytes)
- *     - has_value flag (uint8_t)
- *     - If has_value:
- *       - Identifier length (uint32_t)
- *       - Identifier data (length bytes)
- *     - If !has_value:
+ *     - Flags byte: bit 0 = has_value, bit 1 = is_bnode_child, bit 2 = has_versions
+ *     - If has_value and has_versions:
+ *       - Number of versions (uint16_t)
+ *       - For each version:
+ *         - is_deleted (uint8_t)
+ *         - txn_id: time (uint64_t), nanos (uint64_t), count (uint64_t)
+ *         - If not deleted: identifier length (uint32_t) + data
+ *     - If has_value and !has_versions:
+ *       - Identifier length (uint32_t) + data
+ *     - If !has_value and is_bnode_child:
+ *       - child_level (uint16_t) placeholder for recursive bnode
+ *     - If !has_value and !is_bnode_child:
  *       - section_id (uint64_t)
  *       - block_index (uint64_t)
  *
@@ -52,6 +60,9 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
 
 /**
  * Deserialize a B+tree node from a binary buffer.
+ *
+ * Supports both old format (starting with uint16_t num_entries)
+ * and new format (starting with magic byte 0xB3).
  *
  * @param buf        Binary buffer
  * @param len        Buffer length

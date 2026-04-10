@@ -14,6 +14,224 @@
 // Each entry is roughly: sizeof(bnode_entry_t) + chunk_size for key buffer
 #define DEFAULT_ENTRIES_PER_NODE 64
 
+// Maximum B+tree height (safety limit for descent)
+#define MAX_BTREE_HEIGHT 32
+
+// Descent path through internal B+tree nodes within a single hbtrie_node.
+// Used for write operations that need to propagate splits upward.
+typedef struct {
+    bnode_t* nodes[MAX_BTREE_HEIGHT];  // Bnodes from root to leaf
+    size_t count;                        // Number of bnodes in path
+} btree_path_t;
+
+// Descend through a multi-level B+tree to the leaf node, tracking the path.
+// For single-level trees (height == 1), this is a no-op.
+static bnode_t* btree_descend_with_path(bnode_t* root, chunk_t* key, btree_path_t* path) {
+  if (path) {
+    path->count = 0;
+  }
+
+  bnode_t* current = root;
+
+  while (current->level > 1) {
+    if (path && path->count < MAX_BTREE_HEIGHT) {
+      path->nodes[path->count++] = current;
+    }
+
+    size_t index;
+    bnode_entry_t* entry = bnode_find(current, key, &index);
+
+    if (entry != NULL && entry->is_bnode_child && entry->child_bnode != NULL) {
+      current = entry->child_bnode;
+    } else {
+      // No exact match - follow greatest key <= search key
+      if (index == 0) {
+        current = current->entries.data[0].child_bnode;
+      } else {
+        current = current->entries.data[index - 1].child_bnode;
+      }
+    }
+  }
+
+  return current;
+}
+
+/**
+ * Propagate a B+tree split upward through internal nodes.
+ *
+ * When a leaf bnode overflows and splits, this function inserts the
+ * split key and right sibling into the parent bnode. If the parent
+ * also overflows, it splits recursively.
+ *
+ * If the root bnode of the hbtrie_node's B+tree splits, a new root
+ * bnode is created and the hbtrie_node's btree_height is incremented.
+ *
+ * @param hb_node     The hbtrie_node whose B+tree may need split propagation
+ * @param bnode_path  Path of internal bnodes from root to leaf (from descent)
+ * @param split_key   Key from the initial leaf split (caller retains ownership)
+ * @param right_node  Right sibling from the initial leaf split (caller gives ownership)
+ * @return 0 on success, -1 on failure
+ */
+static int btree_propagate_split(hbtrie_node_t* hb_node,
+                                  btree_path_t* bnode_path,
+                                  chunk_t* split_key,
+                                  bnode_t* right_node,
+                                  uint8_t chunk_size) {
+  if (hb_node == NULL || split_key == NULL || right_node == NULL) {
+    return -1;
+  }
+
+  chunk_t* current_split_key = split_key;
+  bnode_t* current_right = right_node;
+
+  // Walk up the bnode path, propagating splits
+  for (int i = (int)bnode_path->count - 1; i >= 0; i--) {
+    bnode_t* parent = bnode_path->nodes[i];
+
+    // Insert split key + right child into parent
+    int result = bnode_insert_bnode_child(parent, current_split_key, current_right);
+    if (result != 0) {
+      // Clean up on failure
+      if (current_split_key != split_key) chunk_destroy(current_split_key);
+      bnode_destroy_tree(current_right);
+      return -1;
+    }
+
+    // Check if parent needs splitting
+    if (!bnode_needs_split(parent, chunk_size)) {
+      // No more splits needed
+      if (current_split_key != split_key) chunk_destroy(current_split_key);
+      return 0;
+    }
+
+    // Parent also needs splitting
+    chunk_t* parent_split_key = NULL;
+    bnode_t* parent_right = NULL;
+
+    if (bnode_split(parent, &parent_right, &parent_split_key) != 0) {
+      // Split failed - data is still consistent (parent is just full)
+      return 0;
+    }
+
+    // Move up: parent's split key and right sibling become the current ones
+    if (current_split_key != split_key) chunk_destroy(current_split_key);
+    current_split_key = parent_split_key;
+    current_right = parent_right;
+  }
+
+  // We've reached the root bnode of this hbtrie_node's B+tree.
+  // The root has split: create a new root bnode.
+  bnode_t* old_root = hb_node->btree;
+
+  bnode_t* new_root = bnode_create_with_level(hb_node->btree->node_size,
+                                               old_root->level + 1);
+  if (new_root == NULL) {
+    // Failed to create new root - undo the split
+    // The old root and current_right are valid, just oversized
+    if (current_split_key != split_key) chunk_destroy(current_split_key);
+    bnode_destroy_tree(current_right);
+    return -1;
+  }
+
+  // Insert left child (old root) and right child into new root
+  bnode_entry_t* left_first = bnode_get(old_root, 0);
+  if (left_first != NULL) {
+    bnode_entry_t left_entry = {0};
+    left_entry.key = chunk_share(left_first->key);
+    left_entry.is_bnode_child = 1;
+    left_entry.child_bnode = old_root;
+    left_entry.has_value = 0;
+    bnode_insert(new_root, &left_entry);
+  }
+
+  bnode_entry_t right_entry = {0};
+  right_entry.key = current_split_key != split_key ? current_split_key : chunk_share(split_key);
+  right_entry.is_bnode_child = 1;
+  right_entry.child_bnode = current_right;
+  right_entry.has_value = 0;
+  bnode_insert(new_root, &right_entry);
+
+  // Update the hbtrie_node
+  hb_node->btree = new_root;
+  hb_node->btree_height = old_root->level + 1;
+
+  if (current_split_key != split_key) {
+    // current_split_key was already consumed by the new root entry
+    // (we shared it, so we don't need to destroy it separately)
+  }
+
+  return 0;
+}
+
+/**
+ * Check if a bnode needs splitting after an insert, and propagate the split.
+ *
+ * If the leaf bnode overflows, splits it and inserts the separator key and
+ * right sibling into the parent (from bnode_path). Cascades upward if needed.
+ *
+ * @param hb_node     The hbtrie_node containing the B+tree
+ * @param leaf        The leaf bnode that was just inserted into
+ * @param bnode_path  Path of internal bnodes from root to leaf (from descent)
+ * @param chunk_size  Chunk size for the trie (used by bnode_needs_split)
+ */
+static void btree_split_after_insert(hbtrie_node_t* hb_node,
+                                      bnode_t* leaf,
+                                      btree_path_t* bnode_path,
+                                      uint8_t chunk_size) {
+  if (!bnode_needs_split(leaf, chunk_size)) {
+    return;
+  }
+
+  // Split the leaf
+  chunk_t* split_key = NULL;
+  bnode_t* right_bnode = NULL;
+
+  if (bnode_split(leaf, &right_bnode, &split_key) != 0) {
+    return;  // Split failed, data still consistent
+  }
+
+  // Propagate the split upward
+  if (bnode_path->count == 0) {
+    // Leaf IS the root - create a new root
+    bnode_t* old_root = hb_node->btree;
+    bnode_t* new_root = bnode_create_with_level(old_root->node_size,
+                                                  old_root->level + 1);
+    if (new_root == NULL) {
+      chunk_destroy(split_key);
+      bnode_destroy_tree(right_bnode);
+      return;
+    }
+
+    // Add left child (old root)
+    bnode_entry_t* left_first = bnode_get(old_root, 0);
+    if (left_first != NULL) {
+      bnode_entry_t left_entry = {0};
+      left_entry.key = chunk_share(left_first->key);
+      left_entry.is_bnode_child = 1;
+      left_entry.child_bnode = old_root;
+      left_entry.has_value = 0;
+      bnode_insert(new_root, &left_entry);
+    }
+
+    // Add right child
+    bnode_entry_t right_entry = {0};
+    right_entry.key = split_key;  // Take ownership
+    right_entry.is_bnode_child = 1;
+    right_entry.child_bnode = right_bnode;
+    right_entry.has_value = 0;
+    bnode_insert(new_root, &right_entry);
+
+    hb_node->btree = new_root;
+    hb_node->btree_height = old_root->level + 1;
+  } else {
+    // Insert into parent and propagate
+    btree_propagate_split(hb_node, bnode_path, split_key, right_bnode, chunk_size);
+    // btree_propagate_split shares split_key into parent entries via chunk_share,
+    // so we must destroy our reference to it here
+    chunk_destroy(split_key);
+  }
+}
+
 hbtrie_t* hbtrie_create(uint8_t chunk_size, uint32_t btree_node_size) {
   if (chunk_size == 0) {
     chunk_size = DEFAULT_CHUNK_SIZE;
@@ -74,6 +292,7 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
     free(node);
     return NULL;
   }
+  node->btree_height = 1;  // Single leaf bnode
 
   // Initialize storage tracking (in-memory by default)
   node->storage = NULL;          // NULL = in-memory only
@@ -103,12 +322,28 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     for (int i = 0; i < nodes.length; i++) {
       hbtrie_node_t* current = nodes.data[i];
       if (current->btree != NULL) {
-        for (size_t j = 0; j < bnode_count(current->btree); j++) {
-          bnode_entry_t* entry = bnode_get(current->btree, j);
-          if (entry != NULL && !entry->has_value && entry->child != NULL) {
-            vec_push(&nodes, entry->child);
+        // Walk the entire bnode tree to find all child hbtrie_node pointers
+        vec_t(bnode_t*) bnode_stack;
+        vec_init(&bnode_stack);
+        vec_push(&bnode_stack, current->btree);
+
+        while (bnode_stack.length > 0) {
+          bnode_t* bn = vec_pop(&bnode_stack);
+          for (size_t j = 0; j < bnode_count(bn); j++) {
+            bnode_entry_t* entry = bnode_get(bn, j);
+            if (entry == NULL) continue;
+
+            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+              // Internal bnode child - add to bnode stack for traversal
+              vec_push(&bnode_stack, entry->child_bnode);
+            } else if (!entry->has_value && entry->child != NULL) {
+              // Child hbtrie_node - add to node collection
+              vec_push(&nodes, entry->child);
+            }
           }
         }
+
+        vec_deinit(&bnode_stack);
       }
     }
 
@@ -116,7 +351,7 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     for (int i = nodes.length - 1; i >= 0; i--) {
       hbtrie_node_t* current = nodes.data[i];
       if (current->btree != NULL) {
-        bnode_destroy(current->btree);
+        bnode_destroy_tree(current->btree);
       }
       platform_lock_destroy(&current->lock);
       refcounter_destroy_lock((refcounter_t*)current);
@@ -125,63 +360,6 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
 
     vec_deinit(&nodes);
   }
-}
-
-/**
- * Split an hbtrie_node when its bnode exceeds the size limit.
- * Creates a new intermediate node with two children (left and right halves).
- *
- * @param node            Node whose bnode needs splitting
- * @param btree_node_size Max bnode size for new nodes
- * @param chunk_size      Chunk size for the trie
- * @return New intermediate node, or NULL on failure. Original node becomes left child.
- */
-static hbtrie_node_t* hbtrie_node_split(hbtrie_node_t* node, uint32_t btree_node_size, uint8_t chunk_size) {
-  if (node == NULL || node->btree == NULL) return NULL;
-
-  chunk_t* split_key = NULL;
-  bnode_t* right_bnode = NULL;
-
-  if (bnode_split(node->btree, &right_bnode, &split_key) != 0) {
-    return NULL;
-  }
-
-  // Create right child hbtrie_node
-  hbtrie_node_t* right_child = hbtrie_node_create(btree_node_size);
-  if (right_child == NULL) {
-    bnode_destroy(right_bnode);
-    return NULL;
-  }
-  right_child->btree = right_bnode;
-
-  // Create new parent node
-  hbtrie_node_t* parent = hbtrie_node_create(btree_node_size);
-  if (parent == NULL) {
-    hbtrie_node_destroy(right_child);
-    return NULL;
-  }
-
-  // Add left child entry (first key from left bnode)
-  bnode_entry_t* left_first = bnode_get(node->btree, 0);
-  if (left_first != NULL) {
-    bnode_entry_t left_entry = {0};
-    left_entry.key = chunk_share(left_first->key);
-    left_entry.has_value = 0;
-    left_entry.child = node;
-    bnode_insert(parent->btree, &left_entry);
-  }
-
-  // Add right child entry (first key from right bnode)
-  bnode_entry_t* right_first = bnode_get(right_bnode, 0);
-  if (right_first != NULL) {
-    bnode_entry_t right_entry = {0};
-    right_entry.key = chunk_share(right_first->key);
-    right_entry.has_value = 0;
-    right_entry.child = right_child;
-    bnode_insert(parent->btree, &right_entry);
-  }
-
-  return parent;
 }
 
 int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
@@ -252,8 +430,12 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
       };
       vec_push(&insert_path, path_item);
 
+      // Descend through internal B+tree nodes to the leaf
+      btree_path_t bnode_path = {0};
+      bnode_t* leaf = btree_descend_with_path(current->btree, chunk, &bnode_path);
+
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -281,15 +463,18 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           new_entry.key = chunk_create(chunk_data_const(chunk), trie->chunk_size);
           new_entry.has_value = 1;
           new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)value);
-          bnode_insert(current->btree, &new_entry);
+          bnode_insert(leaf, &new_entry);
 
           // Set path chunk counts on the newly inserted entry
-          bnode_entry_t* inserted = bnode_get(current->btree, index);
+          bnode_entry_t* inserted = bnode_get(leaf, index);
           if (inserted != NULL) {
             bnode_entry_set_path_chunk_counts(inserted,
                 identifier_chunk_counts.data,
                 (size_t)identifier_chunk_counts.length);
           }
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
         }
       } else if (is_last_chunk) {
         // End of this identifier, need to move to next HBTrie level
@@ -307,7 +492,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           new_entry.key = chunk_create(chunk_data_const(chunk), trie->chunk_size);
           new_entry.has_value = 0;
           new_entry.child = child;
-          bnode_insert(current->btree, &new_entry);
+          bnode_insert(leaf, &new_entry);
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
           current = child;
         } else if (!entry->has_value) {
@@ -347,7 +535,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
           new_entry.key = chunk_create(chunk_data_const(chunk), trie->chunk_size);
           new_entry.has_value = 0;
           new_entry.child = child;
-          bnode_insert(current->btree, &new_entry);
+          bnode_insert(leaf, &new_entry);
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
           current = child;
         } else if (!entry->has_value) {
@@ -375,19 +566,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value) {
     }
   }
 
-  // Check if root needs splitting and update root if needed
-  // Note: This only handles root splits. Non-root B+tree node splitting
-  // within the HBTrie structure requires tracking the B+tree node hierarchy
-  // within each HBTrie node's B+tree, which is not currently implemented.
-  // The path tracking above is kept for future implementation of cascading splits.
-  (void)insert_path;  // Suppress unused variable warning for now
-
-  if (bnode_needs_split(trie->root->btree, trie->chunk_size)) {
-    hbtrie_node_t* new_root = hbtrie_node_split(trie->root, trie->btree_node_size, trie->chunk_size);
-    if (new_root != NULL) {
-      trie->root = new_root;
-    }
-  }
+  (void)insert_path;  // Splits are now handled inline after each insert
 
   vec_deinit(&insert_path);
   vec_deinit(&identifier_chunk_counts);
@@ -429,7 +608,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path) {
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -472,10 +651,13 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
 
   platform_lock(&trie->lock);
 
-  // Track path for cleanup: each entry is (parent_node, entry_in_parent)
-  // We track entries, not nodes, so we can remove entries from bnodes
+  // Track path for cleanup: each entry is (parent_node, bnode_in_parent, entry_in_bnode)
+  // We track entries, not nodes, so we can remove entries from bnodes.
+  // For multi-level B+trees, we also need to know which bnode within
+  // the parent's B+tree holds the entry pointing to the child.
   typedef struct {
     hbtrie_node_t* parent_node;
+    bnode_t* parent_leaf;      // Leaf bnode in parent's B+tree where entry was found
     size_t entry_index;
     chunk_t* chunk;
   } remove_path_item_t;
@@ -511,7 +693,8 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_t* leaf = bnode_descend(current->btree, chunk);
+      bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -526,8 +709,8 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
 
         identifier_t* result = entry->value;
 
-        // Remove the entry entirely from the current node
-        bnode_entry_t removed = bnode_remove_at(current->btree, index);
+        // Remove the entry entirely from the leaf bnode
+        bnode_entry_t removed = bnode_remove_at(leaf, index);
 
         // Clean up the removed entry's resources (chunk key and path_chunk_counts)
         if (removed.key != NULL) {
@@ -542,15 +725,16 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
         hbtrie_node_t* cleanup_node = current;
         for (int k = (int)remove_path.length - 1; k >= 0; k--) {
           hbtrie_node_t* parent_node = remove_path.data[k].parent_node;
+          bnode_t* parent_leaf = remove_path.data[k].parent_leaf;
           size_t parent_entry_index = remove_path.data[k].entry_index;
 
           // If the node we're cleaning up is empty, remove it from parent
-          if (bnode_is_empty(cleanup_node->btree)) {
+          if (bnode_tree_is_empty(cleanup_node->btree)) {
             // Destroy the empty child node
             hbtrie_node_destroy(cleanup_node);
 
-            // Remove the entry from parent's bnode that pointed to this child
-            bnode_entry_t parent_removed = bnode_remove_at(parent_node->btree, parent_entry_index);
+            // Remove the entry from the parent's leaf bnode that pointed to this child
+            bnode_entry_t parent_removed = bnode_remove_at(parent_leaf, parent_entry_index);
 
             // Clean up the removed entry's resources (chunk key)
             // Note: parent entries don't have values or path_chunk_counts, only keys and child pointers
@@ -578,7 +762,7 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
         }
 
         // Track path for potential cleanup
-        remove_path_item_t rp_item = {current, index, chunk};
+        remove_path_item_t rp_item = {current, leaf, index, chunk};
         vec_push(&remove_path, rp_item);
 
         current = entry->child;
@@ -590,7 +774,7 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
           return NULL;
         }
 
-        remove_path_item_t rp_item = {current, index, chunk};
+        remove_path_item_t rp_item = {current, leaf, index, chunk};
         vec_push(&remove_path, rp_item);
 
         current = entry->child;
@@ -603,28 +787,119 @@ identifier_t* hbtrie_remove(hbtrie_t* trie, path_t* path) {
   return NULL;
 }
 
+// Deep-copy a bnode tree recursively.
+// Copies all bnodes and their entries, following child_bnode pointers
+// for internal bnodes and child hbtrie_node pointers for trie descent.
+static bnode_t* bnode_tree_copy(bnode_t* root) {
+  if (root == NULL) return NULL;
+
+  bnode_t* copy = bnode_create_with_level(root->node_size, root->level);
+  if (copy == NULL) return NULL;
+
+  for (int i = 0; i < root->entries.length; i++) {
+    bnode_entry_t* entry = &root->entries.data[i];
+    bnode_entry_t new_entry = {0};
+
+    new_entry.key = chunk_share(entry->key);
+    new_entry.has_value = entry->has_value;
+    new_entry.is_bnode_child = entry->is_bnode_child;
+    new_entry.has_versions = entry->has_versions;
+
+    if (entry->is_bnode_child && entry->child_bnode != NULL) {
+      // Internal bnode child - deep copy the subtree
+      new_entry.child_bnode = bnode_tree_copy(entry->child_bnode);
+    } else if (entry->has_value) {
+      if (entry->has_versions && entry->versions != NULL) {
+        // Copy version chain
+        version_entry_t** tail = &new_entry.versions;
+        version_entry_t* src = entry->versions;
+        while (src != NULL) {
+          version_entry_t* vcopy = version_entry_create(src->txn_id,
+              src->value != NULL ? (identifier_t*)refcounter_reference((refcounter_t*)src->value) : NULL,
+              src->is_deleted);
+          if (vcopy == NULL) {
+            // Clean up on failure - version chain partial copy
+            version_entry_destroy(new_entry.versions);
+            bnode_destroy_tree(copy);
+            return NULL;
+          }
+          *tail = vcopy;
+          tail = &vcopy->next;
+          src = src->next;
+        }
+      } else {
+        new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+        new_entry.value_txn_id = entry->value_txn_id;
+      }
+      // Copy path chunk counts
+      if (entry->path_chunk_counts.data != NULL && entry->path_chunk_counts.length > 0) {
+        bnode_entry_set_path_chunk_counts(&new_entry,
+            entry->path_chunk_counts.data,
+            (size_t)entry->path_chunk_counts.length);
+      }
+    } else if (entry->child != NULL) {
+      // Child hbtrie_node - copy handled at the hbtrie level
+      // Set to NULL here; caller will fill in via hbtrie_node_copy
+      new_entry.child = NULL;
+    }
+
+    bnode_insert(copy, &new_entry);
+  }
+
+  return copy;
+}
+
 hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   if (node == NULL) return NULL;
 
   hbtrie_node_t* copy = hbtrie_node_create(node->btree->node_size);
   if (copy == NULL) return NULL;
+  copy->btree_height = node->btree_height;
 
-  // Copy each entry
-  for (int i = 0; i < node->btree->entries.length; i++) {
-    bnode_entry_t* entry = &node->btree->entries.data[i];
-    bnode_entry_t new_entry = {0};
-
-    new_entry.key = chunk_share(entry->key);
-    new_entry.has_value = entry->has_value;
-
-    if (entry->has_value) {
-      new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
-    } else if (entry->child != NULL) {
-      new_entry.child = hbtrie_node_copy(entry->child);
-    }
-
-    bnode_insert(copy->btree, &new_entry);
+  // Deep-copy the bnode tree
+  bnode_destroy(copy->btree);
+  copy->btree = bnode_tree_copy(node->btree);
+  if (copy->btree == NULL) {
+    platform_lock_destroy(&copy->lock);
+    refcounter_destroy_lock((refcounter_t*)copy);
+    free(copy);
+    return NULL;
   }
+
+  // Walk the copied btree to set child hbtrie_node pointers
+  // by recursively copying from the source
+  vec_t(bnode_t*) bnode_stack;
+  vec_init(&bnode_stack);
+  vec_push(&bnode_stack, node->btree);
+  vec_push(&bnode_stack, copy->btree);
+
+  while (bnode_stack.length >= 2) {
+    bnode_t* src_bn = vec_pop(&bnode_stack);
+    bnode_t* dst_bn = vec_pop(&bnode_stack);
+
+    for (size_t i = 0; i < src_bn->entries.length; i++) {
+      bnode_entry_t* src_entry = &src_bn->entries.data[i];
+      bnode_entry_t* dst_entry = &dst_bn->entries.data[i];
+
+      if (src_entry->is_bnode_child && src_entry->child_bnode != NULL) {
+        // Push child bnodes for traversal
+        vec_push(&bnode_stack, src_entry->child_bnode);
+        vec_push(&bnode_stack, dst_entry->child_bnode);
+      } else if (!src_entry->has_value && src_entry->child != NULL) {
+        // Recursively copy the child hbtrie_node
+        dst_entry->child = hbtrie_node_copy(src_entry->child);
+      }
+    }
+  }
+
+  vec_deinit(&bnode_stack);
+
+  // Copy storage metadata
+  copy->storage = node->storage;
+  copy->section_id = node->section_id;
+  copy->block_index = node->block_index;
+  copy->is_loaded = node->is_loaded;
+  copy->is_dirty = node->is_dirty;
 
   return copy;
 }
@@ -696,21 +971,38 @@ hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
 // Forward declaration for recursive serialization
 static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node);
 static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node_size);
+static bnode_t* cbor_to_bnode(cbor_item_t* item, uint32_t btree_node_size);
 
-static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
-  if (node == NULL) {
-    return cbor_new_null();
+// Helper: serialize a bnode tree to CBOR.
+// For a single-level bnode (leaf), serializes entries directly.
+// For multi-level bnodes, serializes each entry with is_bnode_child flag
+// and recursively serializes child bnodes.
+static cbor_item_t* bnode_to_cbor(bnode_t* root) {
+  if (root == NULL) return cbor_new_null();
+
+  // Create array: [level, [[key, has_value, is_bnode_child, value_or_child], ...]]
+  cbor_item_t* result = cbor_new_definite_array(2);
+  if (result == NULL) return NULL;
+
+  // Level
+  cbor_item_t* level = cbor_build_uint16(root->level);
+  cbor_array_push(result, level);
+  cbor_decref(&level);
+
+  // Entries array
+  cbor_item_t* entries = cbor_new_definite_array((size_t)root->entries.length);
+  if (entries == NULL) {
+    cbor_decref(&result);
+    return NULL;
   }
 
-  // Create array of entries
-  cbor_item_t* entries = cbor_new_definite_array((size_t)node->btree->entries.length);
-  if (entries == NULL) return NULL;
-
-  for (int i = 0; i < node->btree->entries.length; i++) {
-    bnode_entry_t* entry = &node->btree->entries.data[i];
-    cbor_item_t* entry_item = cbor_new_definite_array(3); // [key_bstr, has_value, value_or_child]
+  for (int i = 0; i < root->entries.length; i++) {
+    bnode_entry_t* entry = &root->entries.data[i];
+    // [key_bstr, has_value, is_bnode_child, value_or_child_or_bnode]
+    cbor_item_t* entry_item = cbor_new_definite_array(4);
     if (entry_item == NULL) {
       cbor_decref(&entries);
+      cbor_decref(&result);
       return NULL;
     }
 
@@ -725,11 +1017,15 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
     cbor_array_push(entry_item, has_value);
     cbor_decref(&has_value);
 
-    // Value or child
+    // is_bnode_child flag
+    cbor_item_t* is_bnode_child = entry->is_bnode_child ? cbor_build_bool(true) : cbor_build_bool(false);
+    cbor_array_push(entry_item, is_bnode_child);
+    cbor_decref(&is_bnode_child);
+
+    // Value, version chain, child hbtrie_node, or child bnode
     if (entry->has_value) {
       if (entry->has_versions) {
         // MVCC: Serialize version chain
-        // Count versions
         size_t version_count = 0;
         version_entry_t* current = entry->versions;
         while (current != NULL) {
@@ -737,11 +1033,11 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
           current = current->next;
         }
 
-        // Create array of versions: [[txn_id, is_deleted, value], ...]
         cbor_item_t* versions_array = cbor_new_definite_array(version_count);
         if (versions_array == NULL) {
           cbor_decref(&entries);
           cbor_decref(&entry_item);
+          cbor_decref(&result);
           return NULL;
         }
 
@@ -752,6 +1048,7 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
             cbor_decref(&versions_array);
             cbor_decref(&entries);
             cbor_decref(&entry_item);
+            cbor_decref(&result);
             return NULL;
           }
 
@@ -798,31 +1095,78 @@ static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
         cbor_array_push(entry_item, value_cbor);
         cbor_decref(&value_cbor);
       }
-    } else {
+    } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
+      // Internal bnode child - serialize recursively
+      cbor_item_t* child_cbor = bnode_to_cbor(entry->child_bnode);
+      cbor_array_push(entry_item, child_cbor);
+      cbor_decref(&child_cbor);
+    } else if (entry->child != NULL) {
+      // Child hbtrie_node
       cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->child);
       cbor_array_push(entry_item, child_cbor);
       cbor_decref(&child_cbor);
+    } else {
+      // Null child (serialized as null)
+      cbor_item_t* null_val = cbor_new_null();
+      cbor_array_push(entry_item, null_val);
+      cbor_decref(&null_val);
     }
 
     cbor_array_push(entries, entry_item);
     cbor_decref(&entry_item);
   }
 
-  return entries;
+  cbor_array_push(result, entries);
+  cbor_decref(&entries);
+  return result;
 }
 
-// Helper function to find a value by key in a CBOR map
-static cbor_item_t* map_get_value(cbor_item_t* map, const char* key) {
+static cbor_item_t* hbtrie_node_to_cbor(hbtrie_node_t* node) {
+  if (node == NULL) {
+    return cbor_new_null();
+  }
+
+  // Serialize as map: { "btree_height": N, "btree": [...], "entries": [...] }
+  // For backward compatibility, we also include the btree_height
+  cbor_item_t* map = cbor_new_definite_map(2);
+  if (map == NULL) return NULL;
+
+  // btree_height
+  cbor_item_t* height = cbor_build_uint16(node->btree_height);
+  cbor_item_t* height_key = cbor_build_string("btree_height");
+  cbor_map_add(map, (struct cbor_pair){
+      .key = height_key,
+      .value = height
+  });
+  cbor_decref(&height_key);
+  cbor_decref(&height);
+
+  // btree (serialized as bnode tree)
+  cbor_item_t* btree_cbor = bnode_to_cbor(node->btree);
+  cbor_item_t* btree_key = cbor_build_string("btree");
+  cbor_map_add(map, (struct cbor_pair){
+      .key = btree_key,
+      .value = btree_cbor
+  });
+  cbor_decref(&btree_key);
+  cbor_decref(&btree_cbor);
+
+  return map;
+}
+
+// Helper function to find a string key in a CBOR map
+static cbor_item_t* cbor_map_find_key(cbor_item_t* map, const char* key) {
   if (!cbor_isa_map(map)) return NULL;
 
-  struct cbor_pair* pairs = cbor_map_handle(map);
   size_t map_size = cbor_map_size(map);
+  struct cbor_pair* pairs = cbor_map_handle(map);
 
   for (size_t i = 0; i < map_size; i++) {
-    if (cbor_isa_string(pairs[i].key)) {
-      size_t key_len = cbor_string_length(pairs[i].key);
-      const char* key_str = (const char*)cbor_string_handle(pairs[i].key);
-      if (key_len == strlen(key) && memcmp(key_str, key, key_len) == 0) {
+    cbor_item_t* map_key = pairs[i].key;
+    if (cbor_isa_string(map_key)) {
+      size_t key_len = cbor_string_length(map_key);
+      const char* key_data = (const char*)cbor_string_handle(map_key);
+      if (key_len == strlen(key) && memcmp(key_data, key, key_len) == 0) {
         return pairs[i].value;
       }
     }
@@ -830,17 +1174,233 @@ static cbor_item_t* map_get_value(cbor_item_t* map, const char* key) {
   return NULL;
 }
 
+// Deserialize a bnode tree from CBOR.
+// New format: [level, [[key, has_value, is_bnode_child, value_or_child], ...]]
+// Recursively deserializes internal bnode children (bounded by btree height).
+static bnode_t* cbor_to_bnode(cbor_item_t* item, uint32_t btree_node_size) {
+  if (item == NULL || cbor_is_null(item)) return NULL;
+
+  if (!cbor_isa_array(item) || cbor_array_size(item) != 2) return NULL;
+
+  // Level
+  cbor_item_t* level_item = cbor_array_get(item, 0);
+  if (!cbor_isa_uint(level_item)) {
+    cbor_decref(&level_item);
+    return NULL;
+  }
+  uint16_t level = (uint16_t)cbor_get_uint32(level_item);
+  cbor_decref(&level_item);
+
+  // Entries array
+  cbor_item_t* entries_item = cbor_array_get(item, 1);
+  if (!cbor_isa_array(entries_item)) {
+    cbor_decref(&entries_item);
+    return NULL;
+  }
+
+  bnode_t* node = bnode_create_with_level(btree_node_size, level);
+  if (node == NULL) {
+    cbor_decref(&entries_item);
+    return NULL;
+  }
+
+  size_t num_entries = cbor_array_size(entries_item);
+  for (size_t i = 0; i < num_entries; i++) {
+    cbor_item_t* entry_item = cbor_array_get(entries_item, i);
+    // Accept both old format (3 elements) and new format (4 elements)
+    size_t entry_size = cbor_isa_array(entry_item) ? cbor_array_size(entry_item) : 0;
+    if (entry_size < 3 || entry_size > 4) {
+      cbor_decref(&entry_item);
+      cbor_decref(&entries_item);
+      bnode_destroy_tree(node);
+      return NULL;
+    }
+
+    bnode_entry_t entry = {0};
+
+    // Key
+    cbor_item_t* key_item = cbor_array_get(entry_item, 0);
+    if (!cbor_isa_bytestring(key_item)) {
+      cbor_decref(&key_item);
+      cbor_decref(&entry_item);
+      cbor_decref(&entries_item);
+      bnode_destroy_tree(node);
+      return NULL;
+    }
+    entry.key = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
+    cbor_decref(&key_item);
+    if (entry.key == NULL) {
+      cbor_decref(&entry_item);
+      cbor_decref(&entries_item);
+      bnode_destroy_tree(node);
+      return NULL;
+    }
+
+    // has_value
+    cbor_item_t* has_value_item = cbor_array_get(entry_item, 1);
+    entry.has_value = cbor_is_bool(has_value_item) && cbor_get_bool(has_value_item);
+    cbor_decref(&has_value_item);
+
+    // is_bnode_child (4th element in new format, defaults to 0 in old format)
+    if (entry_size == 4) {
+      cbor_item_t* is_bnode_child_item = cbor_array_get(entry_item, 2);
+      entry.is_bnode_child = cbor_is_bool(is_bnode_child_item) && cbor_get_bool(is_bnode_child_item);
+      cbor_decref(&is_bnode_child_item);
+    }
+
+    // Value or child (index 2 in old format, index 3 in new format)
+    size_t value_index = (entry_size == 4) ? 3 : 2;
+    cbor_item_t* value_or_child = cbor_array_get(entry_item, value_index);
+
+    if (entry.has_value) {
+      if (cbor_isa_array(value_or_child) && !cbor_isa_bytestring(value_or_child)) {
+        // Check if it's a version chain or a single identifier
+        // Version chains are arrays of arrays: [[txn_id, is_deleted, value], ...]
+        // Single identifiers serialized by identifier_to_cbor could be bytestrings or arrays
+        // We check the first element to distinguish
+        if (cbor_array_size(value_or_child) > 0) {
+          cbor_item_t* first = cbor_array_get(value_or_child, 0);
+          int is_version_chain = cbor_isa_array(first);
+          cbor_decref(&first);
+
+          if (is_version_chain) {
+            // MVCC: Deserialize version chain
+            entry.has_versions = 1;
+            entry.versions = NULL;
+            version_entry_t* prev_version = NULL;
+
+            size_t num_versions = cbor_array_size(value_or_child);
+            for (size_t j = 0; j < num_versions; j++) {
+              cbor_item_t* version_item = cbor_array_get(value_or_child, j);
+              if (!cbor_isa_array(version_item) || cbor_array_size(version_item) != 3) {
+                cbor_decref(&version_item);
+                cbor_decref(&value_or_child);
+                cbor_decref(&entry_item);
+                cbor_decref(&entries_item);
+                bnode_destroy_tree(node);
+                return NULL;
+              }
+
+              cbor_item_t* txn_id_item = cbor_array_get(version_item, 0);
+              if (!cbor_isa_array(txn_id_item) || cbor_array_size(txn_id_item) != 3) {
+                cbor_decref(&txn_id_item);
+                cbor_decref(&version_item);
+                cbor_decref(&value_or_child);
+                cbor_decref(&entry_item);
+                cbor_decref(&entries_item);
+                bnode_destroy_tree(node);
+                return NULL;
+              }
+
+              cbor_item_t* time_item = cbor_array_get(txn_id_item, 0);
+              cbor_item_t* nanos_item = cbor_array_get(txn_id_item, 1);
+              cbor_item_t* counter_item = cbor_array_get(txn_id_item, 2);
+
+              transaction_id_t txn_id;
+              txn_id.time = cbor_isa_uint(time_item) ? cbor_get_uint64(time_item) : 0;
+              txn_id.nanos = cbor_isa_uint(nanos_item) ? cbor_get_uint64(nanos_item) : 0;
+              txn_id.count = cbor_isa_uint(counter_item) ? cbor_get_uint64(counter_item) : 0;
+              cbor_decref(&time_item);
+              cbor_decref(&nanos_item);
+              cbor_decref(&counter_item);
+              cbor_decref(&txn_id_item);
+
+              cbor_item_t* is_deleted_item = cbor_array_get(version_item, 1);
+              uint8_t is_deleted = cbor_is_bool(is_deleted_item) && cbor_get_bool(is_deleted_item);
+              cbor_decref(&is_deleted_item);
+
+              cbor_item_t* val_item = cbor_array_get(version_item, 2);
+              identifier_t* val = NULL;
+              if (!cbor_is_null(val_item)) {
+                val = cbor_to_identifier(val_item, DEFAULT_CHUNK_SIZE);
+              }
+              cbor_decref(&val_item);
+
+              version_entry_t* version = version_entry_create(txn_id, val, is_deleted);
+              if (version == NULL) {
+                if (val != NULL) identifier_destroy(val);
+                cbor_decref(&version_item);
+                cbor_decref(&value_or_child);
+                cbor_decref(&entry_item);
+                cbor_decref(&entries_item);
+                bnode_destroy_tree(node);
+                return NULL;
+              }
+
+              if (entry.versions == NULL) {
+                entry.versions = version;
+              } else {
+                prev_version->next = version;
+                version->prev = prev_version;
+              }
+              prev_version = version;
+              cbor_decref(&version_item);
+            }
+          } else {
+            // Legacy single value in array format
+            entry.has_versions = 0;
+            entry.value = cbor_to_identifier(value_or_child, DEFAULT_CHUNK_SIZE);
+          }
+        } else {
+          // Empty array - treat as null value
+          entry.has_versions = 0;
+          entry.value = NULL;
+        }
+      } else {
+        // Legacy: single value (bytestring)
+        entry.has_versions = 0;
+        entry.value = cbor_to_identifier(value_or_child, DEFAULT_CHUNK_SIZE);
+      }
+    } else if (entry.is_bnode_child) {
+      // Internal bnode child - deserialize recursively
+      entry.child_bnode = cbor_to_bnode(value_or_child, btree_node_size);
+    } else {
+      // Child hbtrie_node
+      entry.child = cbor_to_hbtrie_node(value_or_child, btree_node_size);
+    }
+    cbor_decref(&value_or_child);
+
+    bnode_insert(node, &entry);
+    cbor_decref(&entry_item);
+  }
+
+  cbor_decref(&entries_item);
+  return node;
+}
+
 static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node_size) {
   if (item == NULL || cbor_is_null(item)) {
     return NULL;
   }
 
-  if (!cbor_isa_array(item)) {
-    return NULL;
-  }
-
   hbtrie_node_t* node = hbtrie_node_create(btree_node_size);
   if (node == NULL) return NULL;
+
+  // Try new format first (map with btree_height and btree)
+  if (cbor_isa_map(item)) {
+    cbor_item_t* height_item = cbor_map_find_key(item, "btree_height");
+    if (height_item != NULL && cbor_isa_uint(height_item)) {
+      node->btree_height = (uint16_t)cbor_get_uint32(height_item);
+    }
+    // Note: cbor_map_find_key returns borrowed reference, don't decref
+
+    cbor_item_t* btree_item = cbor_map_find_key(item, "btree");
+    if (btree_item != NULL && !cbor_is_null(btree_item)) {
+      bnode_destroy(node->btree);
+      node->btree = cbor_to_bnode(btree_item, btree_node_size);
+      if (node->btree == NULL) {
+        hbtrie_node_destroy(node);
+        return NULL;
+      }
+    }
+    return node;
+  }
+
+  // Old format: plain array of entries (backward compatibility)
+  if (!cbor_isa_array(item)) {
+    hbtrie_node_destroy(node);
+    return NULL;
+  }
 
   size_t num_entries = cbor_array_size(item);
   for (size_t i = 0; i < num_entries; i++) {
@@ -992,49 +1552,35 @@ cbor_item_t* hbtrie_to_cbor(hbtrie_t* trie) {
 
   // chunk_size
   cbor_item_t* chunk_size = cbor_build_uint8(trie->chunk_size);
+  cbor_item_t* chunk_size_key = cbor_build_string("chunk_size");
   cbor_map_add(root, (struct cbor_pair){
-      .key = cbor_build_string("chunk_size"),
+      .key = chunk_size_key,
       .value = chunk_size
   });
+  cbor_decref(&chunk_size_key);
   cbor_decref(&chunk_size);
 
   // btree_node_size
   cbor_item_t* btree_size = cbor_build_uint32(trie->btree_node_size);
+  cbor_item_t* btree_size_key = cbor_build_string("btree_node_size");
   cbor_map_add(root, (struct cbor_pair){
-      .key = cbor_build_string("btree_node_size"),
+      .key = btree_size_key,
       .value = btree_size
   });
+  cbor_decref(&btree_size_key);
   cbor_decref(&btree_size);
 
   // root node
   cbor_item_t* root_node = hbtrie_node_to_cbor(trie->root);
+  cbor_item_t* root_key = cbor_build_string("root");
   cbor_map_add(root, (struct cbor_pair){
-      .key = cbor_build_string("root"),
+      .key = root_key,
       .value = root_node
   });
+  cbor_decref(&root_key);
   cbor_decref(&root_node);
 
   return root;
-}
-
-// Helper function to find a string key in a CBOR map
-static cbor_item_t* cbor_map_find_key(cbor_item_t* map, const char* key) {
-  if (!cbor_isa_map(map)) return NULL;
-
-  size_t map_size = cbor_map_size(map);
-  struct cbor_pair* pairs = cbor_map_handle(map);
-
-  for (size_t i = 0; i < map_size; i++) {
-    cbor_item_t* map_key = pairs[i].key;
-    if (cbor_isa_string(map_key)) {
-      size_t key_len = cbor_string_length(map_key);
-      const char* key_data = (const char*)cbor_string_handle(map_key);
-      if (key_len == strlen(key) && memcmp(key_data, key, key_len) == 0) {
-        return pairs[i].value;
-      }
-    }
-  }
-  return NULL;
 }
 
 hbtrie_t* cbor_to_hbtrie(cbor_item_t* item) {
@@ -1182,7 +1728,7 @@ identifier_t* hbtrie_find_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t re
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -1247,8 +1793,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
     return -1;
   }
 
-  // Track path for node creation
-  vec_t(struct { hbtrie_node_t* node; size_t chunk_index; }) path_stack;
+  // Track path for node creation and split propagation
+  typedef struct { hbtrie_node_t* node; size_t chunk_index; } mvcc_path_item_t;
+  vec_t(mvcc_path_item_t) path_stack;
   vec_init(&path_stack);
 
   // Track chunk counts per identifier for path metadata
@@ -1279,7 +1826,15 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      btree_path_t bnode_path = {0};
+      bnode_t* leaf = btree_descend_with_path(current->btree, chunk, &bnode_path);
+      bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
+
+      // Track node for split propagation
+      if (path_stack.length == 0 || path_stack.data[path_stack.length - 1].node != current) {
+        mvcc_path_item_t ps_item = { current, j };
+        vec_push(&path_stack, ps_item);
+      }
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -1297,7 +1852,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)value);
           new_entry.value_txn_id = txn_id;  // Store transaction ID
 
-          if (bnode_insert(current->btree, &new_entry) != 0) {
+          if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             vec_deinit(&path_stack);
             vec_deinit(&identifier_chunk_counts);
@@ -1306,12 +1861,15 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           }
 
           // Set path chunk counts on the newly inserted entry
-          bnode_entry_t* inserted = bnode_get(current->btree, index);
+          bnode_entry_t* inserted = bnode_get(leaf, index);
           if (inserted != NULL) {
             bnode_entry_set_path_chunk_counts(inserted,
                 identifier_chunk_counts.data,
                 (size_t)identifier_chunk_counts.length);
           }
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
         } else {
           log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
                   entry->has_value, entry->has_versions,
@@ -1404,7 +1962,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           new_entry.has_value = 0;
           new_entry.child = child;
 
-          if (bnode_insert(current->btree, &new_entry) != 0) {
+          if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
             vec_deinit(&identifier_chunk_counts);
@@ -1412,6 +1970,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             platform_unlock(&trie->lock);
             return -1;
           }
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
           current = child;
         } else if (entry->has_value) {
@@ -1451,7 +2012,7 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
           new_entry.has_value = 0;
           new_entry.child = child;
 
-          if (bnode_insert(current->btree, &new_entry) != 0) {
+          if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
             vec_deinit(&identifier_chunk_counts);
@@ -1459,6 +2020,9 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
             platform_unlock(&trie->lock);
             return -1;
           }
+
+          // Check if leaf bnode needs splitting after insert
+          btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
           current = child;
         } else if (entry->has_value) {
@@ -1483,6 +2047,8 @@ int hbtrie_insert_mvcc(hbtrie_t* trie, path_t* path, identifier_t* value, transa
       }
     }
   }
+
+  (void)path_stack;  // Splits are now handled inline after each insert
 
   vec_deinit(&identifier_chunk_counts);
   vec_deinit(&path_stack);
@@ -1524,7 +2090,7 @@ identifier_t* hbtrie_delete_mvcc(hbtrie_t* trie, path_t* path, transaction_id_t 
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find(current->btree, chunk, &index);
+      bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -1617,7 +2183,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
   // Traverse all nodes and clean up version chains
   size_t total_removed = 0;
 
-  // Use a stack for iterative traversal
+  // Use a stack for iterative traversal of hbtrie_nodes
   vec_t(hbtrie_node_t*) stack;
   vec_init(&stack);
   vec_push(&stack, trie->root);
@@ -1626,32 +2192,44 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
     hbtrie_node_t* node = vec_pop(&stack);
     if (node == NULL) continue;
 
-    // Process all entries in this node
-    for (size_t i = 0; i < node->btree->entries.length; i++) {
-      bnode_entry_t* entry = &node->btree->entries.data[i];
+    // Walk the entire bnode tree to find all leaf entries
+    // Use a stack of bnodes for iterative traversal
+    vec_t(bnode_t*) bnode_stack;
+    vec_init(&bnode_stack);
+    vec_push(&bnode_stack, node->btree);
 
-      if (entry->has_value && entry->has_versions) {
-        // Clean up old versions
-        size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
-        total_removed += removed;
+    while (bnode_stack.length > 0) {
+      bnode_t* bn = vec_pop(&bnode_stack);
 
-        // If only one version remains and it's not deleted, downgrade to legacy mode
-        if (entry->versions != NULL &&
-            entry->versions->next == NULL &&
-            !entry->versions->is_deleted) {
-          // Single non-deleted version - convert to legacy
-          entry->value = (identifier_t*)refcounter_reference((refcounter_t*)entry->versions->value);
-          entry->value_txn_id = entry->versions->txn_id;
-          version_entry_destroy(entry->versions);
-          entry->has_versions = 0;
+      for (size_t i = 0; i < bn->entries.length; i++) {
+        bnode_entry_t* entry = &bn->entries.data[i];
+
+        if (entry->is_bnode_child && entry->child_bnode != NULL) {
+          // Internal bnode child - descend into it
+          vec_push(&bnode_stack, entry->child_bnode);
+        } else if (entry->has_value && entry->has_versions) {
+          // Leaf entry with version chain - clean up old versions
+          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
+          total_removed += removed;
+
+          // If only one version remains and it's not deleted, downgrade to legacy mode
+          if (entry->versions != NULL &&
+              entry->versions->next == NULL &&
+              !entry->versions->is_deleted) {
+            // Single non-deleted version - convert to legacy
+            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)entry->versions->value);
+            entry->value_txn_id = entry->versions->txn_id;
+            version_entry_destroy(entry->versions);
+            entry->has_versions = 0;
+          }
+        } else if (!entry->has_value && entry->child != NULL) {
+          // Child hbtrie_node - add to node stack for trie traversal
+          vec_push(&stack, entry->child);
         }
       }
-
-      // Add child nodes to stack for traversal
-      if (!entry->has_value && entry->child != NULL) {
-        vec_push(&stack, entry->child);
-      }
     }
+
+    vec_deinit(&bnode_stack);
   }
 
   vec_deinit(&stack);

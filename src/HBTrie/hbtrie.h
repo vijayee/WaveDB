@@ -39,7 +39,8 @@ typedef struct hbtrie_node_t {
     refcounter_t refcounter;          // MUST be first member
     PLATFORMLOCKTYPE(lock);           // Node-level lock
 
-    bnode_t* btree;                   // B+tree comparing chunks at this level
+    bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
+    uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)
 
     // Storage location tracking for incremental persistence
     struct sections_t* storage;       // Storage system (NULL if in-memory only)

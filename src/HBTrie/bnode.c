@@ -13,12 +13,17 @@
 #define DEFAULT_NODE_SIZE 4096
 
 bnode_t* bnode_create(uint32_t node_size) {
+  return bnode_create_with_level(node_size, 1);
+}
+
+bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   if (node_size == 0) {
     node_size = DEFAULT_NODE_SIZE;
   }
 
   bnode_t* node = get_clear_memory(sizeof(bnode_t));
   node->node_size = node_size;
+  node->level = level;
   vec_init(&node->entries);
 
   refcounter_init((refcounter_t*)node);
@@ -57,8 +62,11 @@ void bnode_destroy(bnode_t* node) {
         if (entry->path_chunk_counts.data != NULL) {
           vec_deinit(&entry->path_chunk_counts);
         }
+      } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
+        // Internal B+tree child - do NOT destroy here (handled by bnode_destroy_tree)
+        // bnode_destroy only frees entry resources, not child bnode subtrees
       } else if (entry->child != NULL) {
-        // Child node should be destroyed separately
+        // Child hbtrie node should be destroyed separately
         // (reference counting handles this)
       }
     }
@@ -66,6 +74,24 @@ void bnode_destroy(bnode_t* node) {
     vec_deinit(&node->entries);
     free(node);
   }
+}
+
+void bnode_destroy_tree(bnode_t* root) {
+  if (root == NULL) return;
+
+  // For internal nodes, recursively destroy child bnodes first
+  if (root->level > 1) {
+    for (int i = 0; i < root->entries.length; i++) {
+      bnode_entry_t* entry = &root->entries.data[i];
+      if (entry->is_bnode_child && entry->child_bnode != NULL) {
+        bnode_destroy_tree(entry->child_bnode);
+        entry->child_bnode = NULL;
+      }
+    }
+  }
+
+  // Now destroy this node (frees keys, values, version chains)
+  bnode_destroy(root);
 }
 
 // Binary search for key position
@@ -109,6 +135,71 @@ bnode_entry_t* bnode_find(bnode_t* node, chunk_t* key, size_t* out_index) {
   }
 
   return NULL;
+}
+
+bnode_t* bnode_descend(bnode_t* root, chunk_t* key) {
+  if (root == NULL || key == NULL) return NULL;
+
+  bnode_t* current = root;
+
+  while (current->level > 1) {
+    size_t index;
+    bnode_entry_t* entry = bnode_find(current, key, &index);
+
+    if (entry != NULL && entry->is_bnode_child && entry->child_bnode != NULL) {
+      // Exact match found - follow this child
+      current = entry->child_bnode;
+    } else {
+      // No exact match - find greatest key <= search key
+      // bnode_search returns the insertion point, so index-1 is the
+      // rightmost entry with key < search key
+      if (index == 0) {
+        // Key is smaller than all entries - follow leftmost child
+        bnode_entry_t* first = &current->entries.data[0];
+        if (first->is_bnode_child && first->child_bnode != NULL) {
+          current = first->child_bnode;
+        } else {
+          break;  // Should not happen in a valid internal node
+        }
+      } else {
+        bnode_entry_t* prev = &current->entries.data[index - 1];
+        if (prev->is_bnode_child && prev->child_bnode != NULL) {
+          current = prev->child_bnode;
+        } else {
+          break;  // Should not happen in a valid internal node
+        }
+      }
+    }
+  }
+
+  return current;
+}
+
+bnode_entry_t* bnode_find_leaf(bnode_t* root, chunk_t* key, size_t* out_index) {
+  if (root == NULL || key == NULL) {
+    if (out_index) *out_index = 0;
+    return NULL;
+  }
+
+  // Descend to leaf through internal nodes
+  bnode_t* leaf = bnode_descend(root, key);
+
+  // Exact match in the leaf
+  return bnode_find(leaf, key, out_index);
+}
+
+int bnode_insert_bnode_child(bnode_t* parent, chunk_t* key, bnode_t* child) {
+  if (parent == NULL || key == NULL || child == NULL) {
+    return -1;
+  }
+
+  bnode_entry_t entry = {0};
+  entry.key = chunk_share(key);
+  entry.child_bnode = child;
+  entry.has_value = 0;
+  entry.is_bnode_child = 1;
+
+  return bnode_insert(parent, &entry);
 }
 
 int bnode_insert(bnode_t* node, bnode_entry_t* entry) {
@@ -165,6 +256,27 @@ int bnode_is_empty(bnode_t* node) {
   return node == NULL || node->entries.length == 0;
 }
 
+int bnode_tree_is_empty(bnode_t* root) {
+  if (root == NULL) return 1;
+
+  if (root->level == 1) {
+    // Leaf bnode - check directly
+    return root->entries.length == 0;
+  }
+
+  // Internal bnode - check if any child subtree has entries
+  for (int i = 0; i < root->entries.length; i++) {
+    bnode_entry_t* entry = &root->entries.data[i];
+    if (entry->is_bnode_child && entry->child_bnode != NULL) {
+      if (!bnode_tree_is_empty(entry->child_bnode)) {
+        return 0;  // Found a non-empty subtree
+      }
+    }
+  }
+
+  return 1;  // All subtrees are empty
+}
+
 size_t bnode_size(bnode_t* node, uint8_t chunk_size) {
   if (node == NULL) return 0;
 
@@ -213,8 +325,8 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
   *split_key = chunk_create(chunk_data_const(mid_entry->key), mid_entry->key->data->size);
   if (*split_key == NULL) return -1;
 
-  // Create right node
-  bnode_t* right = bnode_create(node->node_size);
+  // Create right node (inherit level from parent)
+  bnode_t* right = bnode_create_with_level(node->node_size, node->level);
   if (right == NULL) {
     chunk_destroy(*split_key);
     *split_key = NULL;

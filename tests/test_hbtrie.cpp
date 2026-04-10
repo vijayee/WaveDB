@@ -245,10 +245,25 @@ int count_hbtrie_nodes(hbtrie_node_t* node) {
     if (node == nullptr) return 0;
     int count = 1;  // Count this node
     if (node->btree != nullptr) {
-        for (size_t i = 0; i < bnode_count(node->btree); i++) {
-            bnode_entry_t* entry = bnode_get(node->btree, i);
-            if (entry != nullptr && !entry->has_value && entry->child != nullptr) {
-                count += count_hbtrie_nodes(entry->child);
+        // Walk the entire bnode tree to find all child hbtrie_node pointers
+        std::vector<bnode_t*> bnode_stack;
+        bnode_stack.push_back(node->btree);
+
+        while (!bnode_stack.empty()) {
+            bnode_t* bn = bnode_stack.back();
+            bnode_stack.pop_back();
+
+            for (size_t i = 0; i < bnode_count(bn); i++) {
+                bnode_entry_t* entry = bnode_get(bn, i);
+                if (entry == nullptr) continue;
+
+                if (entry->is_bnode_child && entry->child_bnode != nullptr) {
+                    // Internal bnode child - add to bnode stack for traversal
+                    bnode_stack.push_back(entry->child_bnode);
+                } else if (!entry->has_value && entry->child != nullptr) {
+                    // Child hbtrie_node - recurse
+                    count += count_hbtrie_nodes(entry->child);
+                }
             }
         }
     }
@@ -578,14 +593,21 @@ TEST_F(HbtrieTest, PruningWithBranching) {
 
     // Verify path2 is gone but others still exist
     EXPECT_EQ(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
-
-    // Clean up found values
-    identifier_destroy(hbtrie_find(trie, path1));
-    identifier_destroy(hbtrie_find(trie, path3));
-    identifier_destroy(hbtrie_find(trie, path4));
+    {
+        identifier_t* found = hbtrie_find(trie, path1);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     // Should have one less node (e/v2 branch cleaned up)
     int nodes_after_path2 = count_hbtrie_nodes(trie->root);
@@ -597,10 +619,16 @@ TEST_F(HbtrieTest, PruningWithBranching) {
     identifier_destroy(removed);
 
     EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
-    identifier_destroy(hbtrie_find(trie, path3));
-    identifier_destroy(hbtrie_find(trie, path4));
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     // Should have even fewer nodes now
     int nodes_after_path1 = count_hbtrie_nodes(trie->root);
@@ -724,13 +752,21 @@ TEST_F(HbtrieTest, PruningWithPartialOverlap) {
     identifier_destroy(removed);
 
     EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
-
-    identifier_destroy(hbtrie_find(trie, path2));
-    identifier_destroy(hbtrie_find(trie, path3));
-    identifier_destroy(hbtrie_find(trie, path4));
+    {
+        identifier_t* found = hbtrie_find(trie, path2);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     int nodes_after_first = count_hbtrie_nodes(trie->root);
     EXPECT_LT(nodes_after_first, nodes_initial);
@@ -744,10 +780,16 @@ TEST_F(HbtrieTest, PruningWithPartialOverlap) {
     EXPECT_LT(nodes_after_second, nodes_after_first);
 
     // "shared/other" and "different" should still exist
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
-    identifier_destroy(hbtrie_find(trie, path3));
-    identifier_destroy(hbtrie_find(trie, path4));
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     // Delete remaining paths
     removed = hbtrie_remove(trie, path3);
@@ -804,10 +846,25 @@ TEST_F(HbtrieTest, PruningPreservesSiblings) {
     identifier_destroy(removed);
 
     // Verify siblings still exist
-    EXPECT_EQ(hbtrie_find(trie, path1), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path2), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
+    {
+        identifier_t* found = hbtrie_find(trie, path1);
+        EXPECT_EQ(found, nullptr);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path2);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     identifier_destroy(hbtrie_find(trie, path2));
     identifier_destroy(hbtrie_find(trie, path3));
@@ -829,10 +886,16 @@ TEST_F(HbtrieTest, PruningPreservesSiblings) {
     // parent still has child2 and child3
 
     // Verify child2 and child3 values still exist
-    EXPECT_NE(hbtrie_find(trie, path3), nullptr);
-    EXPECT_NE(hbtrie_find(trie, path4), nullptr);
-    identifier_destroy(hbtrie_find(trie, path3));
-    identifier_destroy(hbtrie_find(trie, path4));
+    {
+        identifier_t* found = hbtrie_find(trie, path3);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
+    {
+        identifier_t* found = hbtrie_find(trie, path4);
+        EXPECT_NE(found, nullptr);
+        if (found) identifier_destroy(found);
+    }
 
     // Delete remaining
     removed = hbtrie_remove(trie, path3);
@@ -851,9 +914,7 @@ TEST_F(HbtrieTest, PruningPreservesSiblings) {
     path_destroy(path4);
 }
 
-// TODO: Re-enable when B+tree internal node splitting is properly implemented
-// Currently only root-level splits are handled
-#if 0
+// Test that B+tree splits propagate correctly within hbtrie_nodes
 TEST_F(HbtrieTest, SplitPropagationWithSmallNodeSize) {
     // Create trie with small node size to trigger splits
     // Node size of 128 bytes should allow only ~4 entries per node
@@ -946,4 +1007,112 @@ TEST_F(HbtrieTest, MultiLevelSplitPropagation) {
 
     hbtrie_destroy(small_trie);
 }
-#endif
+
+TEST_F(HbtrieTest, CborRoundTripSingleLevel) {
+    // Insert values then serialize/deserialize and verify
+    path_t* p1 = make_path({"hello"});
+    identifier_t* v1 = make_value("world");
+    ASSERT_EQ(hbtrie_insert(trie, p1, v1), 0);
+    path_destroy(p1);
+    identifier_destroy(v1);
+
+    path_t* p2 = make_path({"foo", "bar"});
+    identifier_t* v2 = make_value("baz");
+    ASSERT_EQ(hbtrie_insert(trie, p2, v2), 0);
+    path_destroy(p2);
+    identifier_destroy(v2);
+
+    // Serialize
+    cbor_item_t* cbor = hbtrie_to_cbor(trie);
+    ASSERT_NE(cbor, nullptr);
+
+    // Deserialize
+    hbtrie_t* trie2 = cbor_to_hbtrie(cbor);
+    ASSERT_NE(trie2, nullptr);
+
+    // Verify values
+    path_t* find1 = make_path({"hello"});
+    identifier_t* found1 = hbtrie_find(trie2, find1);
+    EXPECT_NE(found1, nullptr);
+    if (found1) {
+        buffer_t* buf1 = identifier_to_buffer(found1);
+        EXPECT_NE(buf1, nullptr);
+        if (buf1) {
+            EXPECT_EQ(memcmp(buf1->data, "world", 5), 0);
+            buffer_destroy(buf1);
+        }
+        identifier_destroy(found1);
+    }
+    path_destroy(find1);
+
+    path_t* find2 = make_path({"foo", "bar"});
+    identifier_t* found2 = hbtrie_find(trie2, find2);
+    EXPECT_NE(found2, nullptr);
+    if (found2) {
+        identifier_destroy(found2);
+    }
+    path_destroy(find2);
+
+    cbor_decref(&cbor);
+    hbtrie_destroy(trie2);
+}
+
+TEST_F(HbtrieTest, CborRoundTripMultiLevelBtree) {
+    // Create trie with small node size to force multi-level B+tree splits
+    hbtrie_t* small_trie = hbtrie_create(4, 128);
+    ASSERT_NE(small_trie, nullptr);
+
+    // Insert enough single-subscript paths to force root btree split
+    // Use short keys to pack more entries into the root btree
+    for (int i = 0; i < 60; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "k%d", i);
+        path_t* path = make_path({key});
+        identifier_t* value = make_value(key);
+        EXPECT_EQ(hbtrie_insert(small_trie, path, value), 0);
+        path_destroy(path);
+        identifier_destroy(value);
+    }
+
+    // Check if multi-level B+tree was created (may or may not be depending on node fill)
+    int original_height = small_trie->root->btree_height;
+
+    // Serialize
+    cbor_item_t* cbor = hbtrie_to_cbor(small_trie);
+    ASSERT_NE(cbor, nullptr);
+
+    // Deserialize
+    hbtrie_t* trie2 = cbor_to_hbtrie(cbor);
+    ASSERT_NE(trie2, nullptr);
+
+    // Verify btree_height preserved
+    EXPECT_EQ(trie2->root->btree_height, original_height);
+
+    // Verify all values can be found
+    for (int i = 0; i < 60; i++) {
+        char key[8];
+        snprintf(key, sizeof(key), "k%d", i);
+        path_t* path = make_path({key});
+
+        identifier_t* found = hbtrie_find(trie2, path);
+        EXPECT_NE(found, nullptr) << "Value not found at index " << i;
+
+        if (found) {
+            buffer_t* buf = identifier_to_buffer(found);
+            EXPECT_NE(buf, nullptr);
+            if (buf) {
+                EXPECT_EQ(memcmp(buf->data, key, strlen(key)), 0)
+                    << "Value mismatch at index " << i << ": expected '"
+                    << key << "', got '" << std::string((char*)buf->data, buf->size) << "'";
+                buffer_destroy(buf);
+            }
+            identifier_destroy(found);
+        }
+
+        path_destroy(path);
+    }
+
+    cbor_decref(&cbor);
+    hbtrie_destroy(trie2);
+    hbtrie_destroy(small_trie);
+}
