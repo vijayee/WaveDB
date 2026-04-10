@@ -13,6 +13,7 @@ extern "C" {
 #if _WIN32
 #include <windows>
 #define PlATFORMLOCKTYPE(N) CRITICAL_SECTION N
+#define PLATFORMLOCKTYPEPTR(N) CRITICAL_SECTION* N
 #define PLATFORMCONDITIONTYPE(N) CONDITION_VARIABLE N
 #define PLATFORMCONDITIONTYPEPTR(N) CONDITION_VARIABLE* N
 #define PLATFORMBARRIERTYPE(N) SYNCHRONIZATION_BARRIER N
@@ -42,6 +43,7 @@ uint64_t platform_self();
 #else
 #include <pthread.h>
 #define PLATFORMLOCKTYPE(N) pthread_mutex_t N
+#define PLATFORMLOCKTYPEPTR(N) pthread_mutex_t* N
 #define PLATFORMCONDITIONTYPE(N) pthread_cond_t N
 #define PLATFORMCONDITIONTYPEPTR(N) pthread_cond_t* N
 #define PLATFORMBARRIERTYPE(N) pthread_barrier_t N

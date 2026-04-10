@@ -82,6 +82,7 @@ typedef vec_t(timer_list_t*) slots_t;
 struct timing_wheel_t {
   refcounter_t refcounter;
   PLATFORMLOCKTYPE(lock);
+  PLATFORMLOCKTYPEPTR(hierarchical_lock);
   PLATFORMCONDITIONTYPEPTR(idle);
   size_t position;
   timer_map_t* timers;
@@ -115,7 +116,7 @@ void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_simulate(hierarchical_timing_wheel_t* wheel);
 
-timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, PLATFORMCONDITIONTYPEPTR(idle));
+timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, PLATFORMLOCKTYPEPTR(hierarchical_lock), PLATFORMCONDITIONTYPEPTR(idle));
 void timing_wheel_destroy(timing_wheel_t* wheel);
 void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer);
 void timing_wheel_stop(timing_wheel_t* wheel);
