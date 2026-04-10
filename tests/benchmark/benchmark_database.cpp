@@ -48,8 +48,6 @@ typedef struct {
     int ops_per_thread;
     int key_range_start;
     int key_range_end;
-    work_pool_t* pool;
-    hierarchical_timing_wheel_t* wheel;
 } concurrent_bench_ctx_t;
 
 // Test configuration
@@ -100,9 +98,9 @@ extern "C" void bench_error_callback(void* ctx, async_error_t* payload) {
 
 extern "C" void bench_get_callback(void* ctx, void* payload) {
     auto bctx = static_cast<bench_ctx*>(ctx);
-    // Don't need the value for benchmark
+    // CONSUME'd values have yield=1, REFERENCE consumes the yield ticket
     if (payload) {
-        identifier_t* id = (identifier_t*)payload;
+        identifier_t* id = (identifier_t*)REFERENCE(payload, identifier_t);
         identifier_destroy(id);
     }
     bctx->promise->set_value();
@@ -140,15 +138,10 @@ static void concurrent_write_worker(concurrent_bench_ctx_t* ctx) {
         path_t* path = make_path(key);
         identifier_t* val = make_value("concurrent_value");
 
-        std::promise<void> promise;
-        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        bctx->promise = &promise;
-        promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
-
-        database_put(ctx->db, path, val, prom);
-        promise.get_future().get();
-
-        promise_destroy(prom);
+        int result = database_put_sync(ctx->db, path, val);
+        if (result != 0) {
+            ctx->total_errors->fetch_add(1);
+        }
 
         ctx->total_ops->fetch_add(1);
     }
@@ -167,16 +160,12 @@ static void concurrent_read_worker(concurrent_bench_ctx_t* ctx) {
         snprintf(key, sizeof(key), "readkey_%d", i % ctx->key_range_end);
 
         path_t* path = make_path(key);
+        identifier_t* result = NULL;
 
-        std::promise<void> promise;
-        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        bctx->promise = &promise;
-        promise_t* prom = promise_create(bench_get_callback, bench_error_callback, bctx);
-
-        database_get(ctx->db, path, prom);
-        promise.get_future().get();
-
-        promise_destroy(prom);
+        int ret = database_get_sync(ctx->db, path, &result);
+        if (ret == 0 && result != NULL) {
+            identifier_destroy(result);
+        }
 
         ctx->total_ops->fetch_add(1);
     }
@@ -198,15 +187,12 @@ static void concurrent_mixed_worker(concurrent_bench_ctx_t* ctx) {
             snprintf(key, sizeof(key), "mixedkey_%d", rand() % ctx->key_range_end);
 
             path_t* path = make_path(key);
+            identifier_t* result = NULL;
 
-            std::promise<void> promise;
-            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-            bctx->promise = &promise;
-            promise_t* prom = promise_create(bench_get_callback, bench_error_callback, bctx);
-
-            database_get(ctx->db, path, prom);
-            promise.get_future().get();
-            promise_destroy(prom);
+            int ret = database_get_sync(ctx->db, path, &result);
+            if (ret == 0 && result != NULL) {
+                identifier_destroy(result);
+            }
 
             ctx->total_ops->fetch_add(1);
         } else if (op < 90) {
@@ -218,14 +204,10 @@ static void concurrent_mixed_worker(concurrent_bench_ctx_t* ctx) {
             path_t* path = make_path(key);
             identifier_t* value = make_value(val);
 
-            std::promise<void> promise;
-            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-            bctx->promise = &promise;
-            promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
-
-            database_put(ctx->db, path, value, prom);
-            promise.get_future().get();
-            promise_destroy(prom);
+            int result = database_put_sync(ctx->db, path, value);
+            if (result != 0) {
+                ctx->total_errors->fetch_add(1);
+            }
 
             ctx->total_ops->fetch_add(1);
         } else {
@@ -235,14 +217,11 @@ static void concurrent_mixed_worker(concurrent_bench_ctx_t* ctx) {
 
             path_t* path = make_path(key);
 
-            std::promise<void> promise;
-            bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-            bctx->promise = &promise;
-            promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
-
-            database_delete(ctx->db, path, prom);
-            promise.get_future().get();
-            promise_destroy(prom);
+            int result = database_delete_sync(ctx->db, path);
+            if (result != 0 && result != -2) {
+                // -2 means key not found, which is fine
+                ctx->total_errors->fetch_add(1);
+            }
 
             ctx->total_ops->fetch_add(1);
         }
@@ -253,8 +232,7 @@ static void concurrent_mixed_worker(concurrent_bench_ctx_t* ctx) {
     ctx->total_latency_ns->fetch_add(duration_ns);
 }
 
-static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
-                                           hierarchical_timing_wheel_t* wheel,
+static void run_concurrent_write_benchmark(database_t* db,
                                            int thread_count, int ops_per_thread) {
     std::vector<std::thread> threads;
     std::atomic<uint64_t> total_ops{0};
@@ -272,8 +250,6 @@ static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
             ctx.total_latency_ns = &total_latency_ns;
             ctx.thread_id = t;
             ctx.ops_per_thread = ops_per_thread;
-            ctx.pool = pool;
-            ctx.wheel = wheel;
 
             concurrent_write_worker(&ctx);
         });
@@ -297,11 +273,10 @@ static void run_concurrent_write_benchmark(database_t* db, work_pool_t* pool,
     printf("\n");
 }
 
-static void run_concurrent_read_benchmark(database_t* db, work_pool_t* pool,
-                                          hierarchical_timing_wheel_t* wheel,
+static void run_concurrent_read_benchmark(database_t* db,
                                           int thread_count, int ops_per_thread,
                                           int prepopulate_count) {
-    // Pre-populate database with shared key space
+    // Pre-populate database with shared key space (uses sync API)
     printf("  Pre-populating %d keys for read benchmark...\n", prepopulate_count);
     for (int i = 0; i < prepopulate_count; i++) {
         char key[64];
@@ -310,14 +285,10 @@ static void run_concurrent_read_benchmark(database_t* db, work_pool_t* pool,
         path_t* path = make_path(key);
         identifier_t* val = make_value("read_value");
 
-        std::promise<void> promise;
-        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        bctx->promise = &promise;
-        promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
-
-        database_put(db, path, val, prom);
-        promise.get_future().get();
-        promise_destroy(prom);
+        int result = database_put_sync(db, path, val);
+        if (result != 0) {
+            fprintf(stderr, "ERROR: Failed to pre-populate readkey %d\n", i);
+        }
     }
 
     std::vector<std::thread> threads;
@@ -337,8 +308,6 @@ static void run_concurrent_read_benchmark(database_t* db, work_pool_t* pool,
             ctx.thread_id = t;
             ctx.ops_per_thread = ops_per_thread;
             ctx.key_range_end = prepopulate_count;
-            ctx.pool = pool;
-            ctx.wheel = wheel;
 
             concurrent_read_worker(&ctx);
         });
@@ -362,11 +331,10 @@ static void run_concurrent_read_benchmark(database_t* db, work_pool_t* pool,
     printf("\n");
 }
 
-static void run_concurrent_mixed_benchmark(database_t* db, work_pool_t* pool,
-                                           hierarchical_timing_wheel_t* wheel,
+static void run_concurrent_mixed_benchmark(database_t* db,
                                            int thread_count, int ops_per_thread,
                                            int prepopulate_count) {
-    // Pre-populate database with shared key space for read operations
+    // Pre-populate database with shared key space for read operations (uses sync API)
     printf("  Pre-populating %d keys for mixed workload benchmark...\n", prepopulate_count);
     for (int i = 0; i < prepopulate_count; i++) {
         char key[64];
@@ -375,14 +343,10 @@ static void run_concurrent_mixed_benchmark(database_t* db, work_pool_t* pool,
         path_t* path = make_path(key);
         identifier_t* val = make_value("mixed_initial_value");
 
-        std::promise<void> promise;
-        bench_ctx* bctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        bctx->promise = &promise;
-        promise_t* prom = promise_create(bench_callback, bench_error_callback, bctx);
-
-        database_put(db, path, val, prom);
-        promise.get_future().get();
-        promise_destroy(prom);
+        int result = database_put_sync(db, path, val);
+        if (result != 0) {
+            fprintf(stderr, "ERROR: Failed to pre-populate mixedkey %d\n", i);
+        }
     }
 
     std::vector<std::thread> threads;
@@ -402,8 +366,6 @@ static void run_concurrent_mixed_benchmark(database_t* db, work_pool_t* pool,
             ctx.thread_id = t;
             ctx.ops_per_thread = ops_per_thread;
             ctx.key_range_end = prepopulate_count;
-            ctx.pool = pool;
-            ctx.wheel = wheel;
 
             concurrent_mixed_worker(&ctx);
         });
@@ -507,7 +469,7 @@ static void teardown_database(bench_context_t* ctx) {
     system(cmd);
 }
 
-// Pre-populate database with test data
+// Pre-populate database with test data (uses sync API to avoid async overhead/leaks)
 static void populate_database(database_t* db, size_t count) {
     for (size_t i = 0; i < count; i++) {
         char key[32], value[32];
@@ -517,16 +479,10 @@ static void populate_database(database_t* db, size_t count) {
         path_t* path = make_path(key);
         identifier_t* val = make_value(value);
 
-        std::promise<void> promise;
-        bench_ctx* ctx = (bench_ctx*)malloc(sizeof(bench_ctx));
-        ctx->promise = &promise;
-        promise_t* prom = promise_create(bench_callback, bench_error_callback, ctx);
-
-        database_put(db, path, val, prom);
-        promise.get_future().get();
-
-        promise_destroy(prom);
-        // database_put takes ownership of path and val, so we don't destroy them here
+        int result = database_put_sync(db, path, val);
+        if (result != 0) {
+            fprintf(stderr, "ERROR: Failed to pre-populate key %lu\n", i);
+        }
     }
 }
 
@@ -849,17 +805,15 @@ void run_database_benchmarks(void) {
     // Run concurrent write benchmark for each thread count
     printf("--- Concurrent Write Benchmark ---\n");
     for (int i = 0; i < num_configs; i++) {
-        run_concurrent_write_benchmark(ctx.db, ctx.pool, ctx.wheel,
+        run_concurrent_write_benchmark(ctx.db,
                                        thread_counts[i], ops_per_thread);
-        // Store result (extracted from output parsing or passed back)
-        // For now, results are printed inline
     }
     printf("\n");
 
     // Run concurrent read benchmark for each thread count
     printf("--- Concurrent Read Benchmark ---\n");
     for (int i = 0; i < num_configs; i++) {
-        run_concurrent_read_benchmark(ctx.db, ctx.pool, ctx.wheel,
+        run_concurrent_read_benchmark(ctx.db,
                                       thread_counts[i], ops_per_thread,
                                       prepopulate_count);
     }
@@ -868,7 +822,7 @@ void run_database_benchmarks(void) {
     // Run concurrent mixed benchmark for each thread count
     printf("--- Concurrent Mixed Benchmark ---\n");
     for (int i = 0; i < num_configs; i++) {
-        run_concurrent_mixed_benchmark(ctx.db, ctx.pool, ctx.wheel,
+        run_concurrent_mixed_benchmark(ctx.db,
                                        thread_counts[i], ops_per_thread,
                                        prepopulate_count);
     }

@@ -1044,7 +1044,9 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     identifier_t* value = database_lru_cache_get(db->lru, path);
     if (value != NULL) {
         path_destroy(path);
-        *result = REFERENCE(value, identifier_t);
+        // Transfer ownership of the reference from database_lru_cache_get to the caller.
+        // database_lru_cache_get already incremented the refcount, so we pass it directly.
+        *result = value;
         return 0;
     }
 
@@ -1064,7 +1066,9 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     path_destroy(path);
 
     if (value != NULL) {
-        *result = REFERENCE(value, identifier_t);
+        // Transfer ownership of the reference from hbtrie_find_mvcc to the caller.
+        // hbtrie_find_mvcc already incremented the refcount, so we pass it directly.
+        *result = value;
         return 0;
     } else {
         return -2;  // Not found

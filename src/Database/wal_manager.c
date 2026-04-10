@@ -775,13 +775,10 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     // Destroy lock
                     platform_lock_destroy(&twal->lock);
 
-                    // Free the struct if this is the current thread's WAL (safe, no other thread using it)
-                    // For other threads, we don't free to avoid use-after-free by worker threads
-                    if (is_current_thread) {
-                        free(twal);
-                    }
-                    // Note: For non-current thread WALs, twal struct is NOT freed to avoid
-                    // potential use-after-free by worker threads that may still reference it
+                    // Free the WAL struct
+                    // Safe because database_destroy ensures all async operations
+                    // have completed before calling wal_manager_destroy
+                    free(twal);
                 }
             }
             free(manager->threads);

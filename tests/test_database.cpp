@@ -142,7 +142,10 @@ extern "C" void put_callback_err_wrapper(void* ctx, async_error_t* payload) {
 // Callback wrappers for get operations
 extern "C" void get_callback_wrapper(void* ctx, void* payload) {
     auto dbtc = static_cast<db_test_ctx*>(ctx);
-    dbtc->test->get_promise[dbtc->i].set_value((identifier_t*)payload);
+    // CONSUME'd values have yield=1, REFERENCE consumes the yield ticket
+    // and adjusts the refcount so that identifier_destroy works correctly
+    identifier_t* value = (identifier_t*)REFERENCE(payload, identifier_t);
+    dbtc->test->get_promise[dbtc->i].set_value(value);
     free(ctx);
 }
 
