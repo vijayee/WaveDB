@@ -76,10 +76,10 @@ TEST_F(MvccTest, BasicInsertRead) {
     // Get current transaction ID
     transaction_id_t txn_id = transaction_id_get_next();
 
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value, txn_id), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value, txn_id), 0);
 
     // Read with same transaction ID
-    identifier_t* found = hbtrie_find_mvcc(trie, path, txn_id);
+    identifier_t* found = hbtrie_find(trie, path, txn_id);
     verify_value(found, "test_value");
 
     identifier_destroy(found);
@@ -95,33 +95,33 @@ TEST_F(MvccTest, VersionChainBasic) {
     // Insert version 1
     identifier_t* value1 = make_value("version1");
     transaction_id_t txn1 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value1, txn1), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value1, txn1), 0);
     identifier_destroy(value1);
 
     // Insert version 2
     identifier_t* value2 = make_value("version2");
     transaction_id_t txn2 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value2, txn2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value2, txn2), 0);
     identifier_destroy(value2);
 
     // Insert version 3
     identifier_t* value3 = make_value("version3");
     transaction_id_t txn3 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value3, txn3), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value3, txn3), 0);
     identifier_destroy(value3);
 
     // Read with txn1 - should see version1
-    identifier_t* found1 = hbtrie_find_mvcc(trie, path, txn1);
+    identifier_t* found1 = hbtrie_find(trie, path, txn1);
     verify_value(found1, "version1");
     identifier_destroy(found1);
 
     // Read with txn2 - should see version2
-    identifier_t* found2 = hbtrie_find_mvcc(trie, path, txn2);
+    identifier_t* found2 = hbtrie_find(trie, path, txn2);
     verify_value(found2, "version2");
     identifier_destroy(found2);
 
     // Read with txn3 - should see version3
-    identifier_t* found3 = hbtrie_find_mvcc(trie, path, txn3);
+    identifier_t* found3 = hbtrie_find(trie, path, txn3);
     verify_value(found3, "version3");
     identifier_destroy(found3);
 
@@ -136,7 +136,7 @@ TEST_F(MvccTest, SnapshotIsolation) {
     // Insert first version
     identifier_t* value1 = make_value("first");
     transaction_id_t txn1 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value1, txn1), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value1, txn1), 0);
     identifier_destroy(value1);
 
     // Record transaction ID before second write
@@ -145,22 +145,22 @@ TEST_F(MvccTest, SnapshotIsolation) {
     // Insert second version
     identifier_t* value2 = make_value("second");
     transaction_id_t txn2 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value2, txn2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value2, txn2), 0);
     identifier_destroy(value2);
 
     // Insert third version
     identifier_t* value3 = make_value("third");
     transaction_id_t txn3 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value3, txn3), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value3, txn3), 0);
     identifier_destroy(value3);
 
     // Read with read_txn (before second write) - should see "first"
-    identifier_t* found_old = hbtrie_find_mvcc(trie, path, read_txn);
+    identifier_t* found_old = hbtrie_find(trie, path, read_txn);
     verify_value(found_old, "first");
     identifier_destroy(found_old);
 
     // Read with latest txn - should see "third"
-    identifier_t* found_latest = hbtrie_find_mvcc(trie, path, txn3);
+    identifier_t* found_latest = hbtrie_find(trie, path, txn3);
     verify_value(found_latest, "third");
     identifier_destroy(found_latest);
 
@@ -172,30 +172,31 @@ TEST_F(MvccTest, LegacyCompatibility) {
 
     path_t* path = make_path({"legacy", "key"});
 
-    // Insert using legacy insert (no transaction ID)
+    // Insert with transaction ID
     identifier_t* value1 = make_value("legacy_value");
-    EXPECT_EQ(hbtrie_insert(trie, path, value1), 0);
+    transaction_id_t txn1 = transaction_id_get_next();
+    EXPECT_EQ(hbtrie_insert(trie, path, value1, txn1), 0);
     identifier_destroy(value1);
 
     // Should be readable with any transaction ID
-    transaction_id_t txn1 = transaction_id_get_next();
-    identifier_t* found1 = hbtrie_find_mvcc(trie, path, txn1);
+    transaction_id_t read_txn1 = transaction_id_get_next();
+    identifier_t* found1 = hbtrie_find(trie, path, read_txn1);
     verify_value(found1, "legacy_value");
     identifier_destroy(found1);
 
     // Now insert MVCC version
     identifier_t* value2 = make_value("mvcc_value");
     transaction_id_t txn2 = transaction_id_get_next();
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value2, txn2), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path, value2, txn2), 0);
     identifier_destroy(value2);
 
     // Old transaction should still see legacy value
-    identifier_t* found_old = hbtrie_find_mvcc(trie, path, txn1);
+    identifier_t* found_old = hbtrie_find(trie, path, txn1);
     verify_value(found_old, "legacy_value");
     identifier_destroy(found_old);
 
     // New transaction should see MVCC value
-    identifier_t* found_new = hbtrie_find_mvcc(trie, path, txn2);
+    identifier_t* found_new = hbtrie_find(trie, path, txn2);
     verify_value(found_new, "mvcc_value");
     identifier_destroy(found_new);
 
@@ -219,7 +220,7 @@ TEST_F(MvccTest, MultipleKeys) {
         identifier_t* value = make_value(val);
         transaction_id_t txn = transaction_id_get_next();
 
-        EXPECT_EQ(hbtrie_insert_mvcc(trie, path, value, txn), 0);
+        EXPECT_EQ(hbtrie_insert(trie, path, value, txn), 0);
 
         paths.push_back(path);
         values.push_back(value);
@@ -233,7 +234,7 @@ TEST_F(MvccTest, MultipleKeys) {
         char val[32];
         snprintf(val, sizeof(val), "value%d", i);
 
-        identifier_t* found = hbtrie_find_mvcc(trie, paths[i], txns[i]);
+        identifier_t* found = hbtrie_find(trie, paths[i], txns[i]);
         verify_value(found, val);
         identifier_destroy(found);
     }
@@ -250,7 +251,7 @@ TEST_F(MvccTest, NonexistentKey) {
     path_t* path = make_path({"nonexistent", "key"});
     transaction_id_t txn = transaction_id_get_next();
 
-    identifier_t* found = hbtrie_find_mvcc(trie, path, txn);
+    identifier_t* found = hbtrie_find(trie, path, txn);
     EXPECT_EQ(found, nullptr);
 
     path_destroy(path);
@@ -268,41 +269,41 @@ TEST_F(MvccTest, VersionChainVisibility) {
     // Insert version 1
     identifier_t* value1 = make_value("v1");
     transaction_id_t txn1 = transaction_id_get_next();
-    hbtrie_insert_mvcc(trie, path, value1, txn1);
+    hbtrie_insert(trie, path, value1, txn1);
     identifier_destroy(value1);
 
     // Insert version 2
     identifier_t* value2 = make_value("v2");
     transaction_id_t txn2 = transaction_id_get_next();
-    hbtrie_insert_mvcc(trie, path, value2, txn2);
+    hbtrie_insert(trie, path, value2, txn2);
     identifier_destroy(value2);
 
     // Insert version 3
     identifier_t* value3 = make_value("v3");
     transaction_id_t txn3 = transaction_id_get_next();
-    hbtrie_insert_mvcc(trie, path, value3, txn3);
+    hbtrie_insert(trie, path, value3, txn3);
     identifier_destroy(value3);
 
     // Verify visibility rules
 
     // txn1 sees v1
-    identifier_t* f1 = hbtrie_find_mvcc(trie, path, txn1);
+    identifier_t* f1 = hbtrie_find(trie, path, txn1);
     verify_value(f1, "v1");
     identifier_destroy(f1);
 
     // txn2 sees v2 (not v1 or v3)
-    identifier_t* f2 = hbtrie_find_mvcc(trie, path, txn2);
+    identifier_t* f2 = hbtrie_find(trie, path, txn2);
     verify_value(f2, "v2");
     identifier_destroy(f2);
 
     // txn3 sees v3
-    identifier_t* f3 = hbtrie_find_mvcc(trie, path, txn3);
+    identifier_t* f3 = hbtrie_find(trie, path, txn3);
     verify_value(f3, "v3");
     identifier_destroy(f3);
 
     // Transaction older than all writes sees nothing
     transaction_id_t old_txn = {0, 0, 0};
-    identifier_t* f_old = hbtrie_find_mvcc(trie, path, old_txn);
+    identifier_t* f_old = hbtrie_find(trie, path, old_txn);
     EXPECT_EQ(f_old, nullptr);
 
     path_destroy(path);
@@ -322,7 +323,7 @@ TEST_F(MvccTest, ConcurrentWrites) {
 
         identifier_t* value = make_value(val);
         transaction_id_t txn = transaction_id_get_next();
-        hbtrie_insert_mvcc(trie, path, value, txn);
+        hbtrie_insert(trie, path, value, txn);
 
         txns.push_back(txn);
         identifier_destroy(value);
@@ -333,7 +334,7 @@ TEST_F(MvccTest, ConcurrentWrites) {
         char val[32];
         snprintf(val, sizeof(val), "value%d", check);
 
-        identifier_t* found = hbtrie_find_mvcc(trie, path, txns[check]);
+        identifier_t* found = hbtrie_find(trie, path, txns[check]);
         verify_value(found, val);
         identifier_destroy(found);
     }
@@ -507,21 +508,21 @@ TEST_F(TxManagerTest, IntegrationWithHBTrie) {
     // Transaction 1: Insert key1
     txn_desc_t* txn1 = tx_manager_begin(tx_manager);
     identifier_t* value1 = make_value("value1");
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path1, value1, txn1->txn_id), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path1, value1, txn1->txn_id), 0);
     tx_manager_commit(tx_manager, txn1);
     identifier_destroy(value1);
 
     // Transaction 2: Insert key2
     txn_desc_t* txn2 = tx_manager_begin(tx_manager);
     identifier_t* value2 = make_value("value2");
-    EXPECT_EQ(hbtrie_insert_mvcc(trie, path2, value2, txn2->txn_id), 0);
+    EXPECT_EQ(hbtrie_insert(trie, path2, value2, txn2->txn_id), 0);
     tx_manager_commit(tx_manager, txn2);
     identifier_destroy(value2);
 
     // Read with last committed transaction ID
     transaction_id_t last_committed = tx_manager_get_last_committed(tx_manager);
-    identifier_t* found1 = hbtrie_find_mvcc(trie, path1, last_committed);
-    identifier_t* found2 = hbtrie_find_mvcc(trie, path2, last_committed);
+    identifier_t* found1 = hbtrie_find(trie, path1, last_committed);
+    identifier_t* found2 = hbtrie_find(trie, path2, last_committed);
 
     EXPECT_NE(found1, nullptr);
     EXPECT_NE(found2, nullptr);

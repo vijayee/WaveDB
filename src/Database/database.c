@@ -715,7 +715,7 @@ static void _database_put(database_put_ctx_t* ctx) {
     platform_lock(&db->write_locks[shard]);
 
     // Apply to trie with MVCC
-    hbtrie_insert_mvcc(db->trie, path, value, txn->txn_id);
+    hbtrie_insert(db->trie, path, value, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_locks[shard]);
@@ -758,7 +758,7 @@ static void _database_get(database_get_ctx_t* ctx) {
     transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
 
     // Look up in trie with MVCC (lock-free!)
-    value = hbtrie_find_mvcc(db->trie, path, read_txn_id);
+    value = hbtrie_find(db->trie, path, read_txn_id);
 
     // Add to LRU cache if found
     if (value != NULL) {
@@ -805,7 +805,7 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     platform_lock(&db->write_locks[shard]);
 
     // Remove from trie with MVCC (creates tombstone)
-    identifier_t* removed = hbtrie_delete_mvcc(db->trie, path, txn->txn_id);
+    identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_locks[shard]);
@@ -1002,7 +1002,7 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
     platform_lock(&db->write_locks[shard]);
 
     // Apply to trie with MVCC
-    hbtrie_insert_mvcc(db->trie, path, value, txn->txn_id);
+    hbtrie_insert(db->trie, path, value, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_locks[shard]);
@@ -1054,7 +1054,7 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
 
     // Look up in trie with MVCC (lock-free!)
-    value = hbtrie_find_mvcc(db->trie, path, read_txn_id);
+    value = hbtrie_find(db->trie, path, read_txn_id);
 
     // Add to LRU cache if found
     if (value != NULL) {
@@ -1066,8 +1066,8 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     path_destroy(path);
 
     if (value != NULL) {
-        // Transfer ownership of the reference from hbtrie_find_mvcc to the caller.
-        // hbtrie_find_mvcc already incremented the refcount, so we pass it directly.
+        // Transfer ownership of the reference from hbtrie_find to the caller.
+        // hbtrie_find already incremented the refcount, so we pass it directly.
         *result = value;
         return 0;
     } else {
@@ -1107,7 +1107,7 @@ int database_delete_sync(database_t* db, path_t* path) {
     platform_lock(&db->write_locks[shard]);
 
     // Remove from trie with MVCC (creates tombstone)
-    identifier_t* removed = hbtrie_delete_mvcc(db->trie, path, txn->txn_id);
+    identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
 
     // Release write lock
     platform_unlock(&db->write_locks[shard]);
@@ -1211,9 +1211,9 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     for (size_t i = 0; i < batch->count; i++) {
         int op_result;
         if (batch->ops[i].type == WAL_PUT) {
-            op_result = hbtrie_insert_mvcc(db->trie, batch->ops[i].path, batch->ops[i].value, txn->txn_id);
+            op_result = hbtrie_insert(db->trie, batch->ops[i].path, batch->ops[i].value, txn->txn_id);
         } else {
-            identifier_t* removed = hbtrie_delete_mvcc(db->trie, batch->ops[i].path, txn->txn_id);
+            identifier_t* removed = hbtrie_delete(db->trie, batch->ops[i].path, txn->txn_id);
             op_result = 0; // Delete always succeeds
             if (removed) {
                 identifier_destroy(removed);

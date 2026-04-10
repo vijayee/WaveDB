@@ -70,6 +70,16 @@ int platform_core_count();
 uint64_t platform_self();
 #endif
 
+// Spin-loop hint: reduces power consumption and improves performance
+// on SMT/HT processors during busy-wait loops
+#if defined(__x86_64__) || defined(__i386__)
+#define cpu_relax() __asm__ __volatile__("pause" ::: "memory")
+#elif defined(__aarch64__)
+#define cpu_relax() __asm__ __volatile__("yield" ::: "memory")
+#else
+#define cpu_relax() ((void)0)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

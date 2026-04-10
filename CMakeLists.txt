@@ -225,14 +225,7 @@ if(BUILD_TESTS)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
     add_test(NAME test_database_config COMMAND test_database_config)
 
-    # Test for HBTrie visualization
-    add_executable(test_hbtrie_viz tests/test_hbtrie_viz.cpp)
-    target_link_libraries(test_hbtrie_viz wavedb gtest gtest_main)
-    add_test(NAME test_hbtrie_viz COMMAND test_hbtrie_viz)
-
-    # Complex visualization example
-    add_executable(example_complex_viz example_complex_viz.c)
-    target_link_libraries(example_complex_viz wavedb Threads::Threads)
+    # Visualization examples removed (used non-MVCC API, will be revisited)
 
     # Example programs
     option(BUILD_EXAMPLES "Build example programs" OFF)

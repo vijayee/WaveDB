@@ -1180,9 +1180,9 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 // Apply each operation to trie
                 for (size_t j = 0; j < op_count; j++) {
                     if (ops[j].type == WAL_PUT) {
-                        hbtrie_insert_mvcc(database->trie, ops[j].path, ops[j].value, entry->txn_id);
+                        hbtrie_insert(database->trie, ops[j].path, ops[j].value, entry->txn_id);
                     } else {
-                        hbtrie_delete_mvcc(database->trie, ops[j].path, entry->txn_id);
+                        hbtrie_delete(database->trie, ops[j].path, entry->txn_id);
                     }
 
                     // Clean up
@@ -1272,7 +1272,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                              key_str, path->identifiers.length, value ? value->length : 0,
                              entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
 
-                    hbtrie_insert_mvcc(database->trie, path, value, entry->txn_id);
+                    hbtrie_insert(database->trie, path, value, entry->txn_id);
                 } else {
                     if (path == NULL) {
                         log_error("WAL Recovery: Path is NULL for DELETE, skipping entry");
@@ -1280,7 +1280,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                         continue;
                     }
 
-                    identifier_t* removed = hbtrie_delete_mvcc(database->trie, path, entry->txn_id);
+                    identifier_t* removed = hbtrie_delete(database->trie, path, entry->txn_id);
                     if (removed) identifier_destroy(removed);
                     log_info("WAL Recovery: Applied DELETE operation (txn_id=%lu.%09lu.%lu)",
                              entry->txn_id.time, entry->txn_id.nanos, entry->txn_id.count);
