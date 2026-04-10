@@ -135,6 +135,11 @@ std::string PathToJS(path_t* path, char delimiter) {
     }
   }
 
+  // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+  while (!result.empty() && (result.back() == '\0' || result.back() == ' ')) {
+    result.pop_back();
+  }
+
   return result;
 }
 
@@ -171,6 +176,11 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
           part += hex;
         }
       }
+    }
+
+    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
+      part.pop_back();
     }
 
     arr.Set(i, Napi::String::New(env, part));

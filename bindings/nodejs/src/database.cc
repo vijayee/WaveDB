@@ -928,11 +928,11 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     path_append(startPath, id);
   }
 
+  // Start the scan (must be before path_destroy to avoid use-after-free)
+  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
+
   path_destroy(startPath);
   path_destroy(basePath);
-
-  // Start the scan
-  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
 
   if (!iter) {
     return Napi::Object::New(env);

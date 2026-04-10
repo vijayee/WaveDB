@@ -109,10 +109,7 @@ describe('WaveDB Integration', () => {
   });
 
   describe('persistence', () => {
-    // Note: Persistence test skipped due to thread-local WAL architecture
-    // Synchronous operations work but snapshot is disabled to prevent crashes
-    // after async operations. WAL recovery will restore data on next database open.
-    it.skip('should persist data across database restarts', async () => {
+    it('should persist data across database restarts', async () => {
       db.putSync('persistent/key', 'value');
       db.putSync('persistent/another', 'value2');
 

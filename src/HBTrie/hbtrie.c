@@ -1188,7 +1188,7 @@ static bnode_t* cbor_to_bnode(cbor_item_t* item, uint32_t btree_node_size) {
     cbor_decref(&level_item);
     return NULL;
   }
-  uint16_t level = (uint16_t)cbor_get_uint32(level_item);
+  uint16_t level = (uint16_t)cbor_get_int(level_item);
   cbor_decref(&level_item);
 
   // Entries array
@@ -1380,7 +1380,7 @@ static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node
   if (cbor_isa_map(item)) {
     cbor_item_t* height_item = cbor_map_find_key(item, "btree_height");
     if (height_item != NULL && cbor_isa_uint(height_item)) {
-      node->btree_height = (uint16_t)cbor_get_uint32(height_item);
+      node->btree_height = (uint16_t)cbor_get_int(height_item);
     }
     // Note: cbor_map_find_key returns borrowed reference, don't decref
 
@@ -1593,14 +1593,14 @@ hbtrie_t* cbor_to_hbtrie(cbor_item_t* item) {
   if (chunk_size_item == NULL || !cbor_isa_uint(chunk_size_item)) {
     return NULL;
   }
-  uint8_t chunk_size = (uint8_t)cbor_get_uint32(chunk_size_item);
+  uint8_t chunk_size = (uint8_t)cbor_get_int(chunk_size_item);
 
   // Get btree_node_size
   cbor_item_t* btree_size_item = cbor_map_find_key(item, "btree_node_size");
   if (btree_size_item == NULL || !cbor_isa_uint(btree_size_item)) {
     return NULL;
   }
-  uint32_t btree_node_size = cbor_get_uint32(btree_size_item);
+  uint32_t btree_node_size = (uint32_t)cbor_get_int(btree_size_item);
 
   hbtrie_t* trie = hbtrie_create(chunk_size, btree_node_size);
   if (trie == NULL) return NULL;

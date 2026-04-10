@@ -116,8 +116,7 @@ describe('WaveDB Stream', function() {
       stream.on('error', done);
     });
 
-    // TODO: Fix custom delimiter test - issue with delimiter propagation to scan
-    it.skip('should support custom delimiter', function(done) {
+    it('should support custom delimiter', function(done) {
       // Test with a separate database using colon delimiter
       const customDir = fs.mkdtempSync('/tmp/wavedb-stream-custom-');
       const customDb = new WaveDB(customDir, { delimiter: ':' });
