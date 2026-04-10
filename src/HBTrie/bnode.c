@@ -3,6 +3,7 @@
 //
 
 #include "bnode.h"
+#include <stdatomic.h>
 #include "bs_array.h"
 #include "chunk.h"
 #include "identifier.h"
@@ -27,7 +28,8 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   vec_init(&node->entries);
 
   refcounter_init((refcounter_t*)node);
-  platform_lock_init(&node->lock);
+  atomic_init(&node->seq, 0);
+  platform_lock_init(&node->write_lock);
 
   return node;
 }
@@ -37,7 +39,7 @@ void bnode_destroy(bnode_t* node) {
 
   refcounter_dereference((refcounter_t*)node);
   if (refcounter_count((refcounter_t*)node) == 0) {
-    platform_lock_destroy(&node->lock);
+    platform_lock_destroy(&node->write_lock);
 
     // Free all entries
     for (int i = 0; i < node->entries.length; i++) {

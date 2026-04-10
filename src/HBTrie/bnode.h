@@ -85,7 +85,8 @@ typedef struct bnode_entry_t {
  */
 typedef struct bnode_t {
     refcounter_t refcounter;          // MUST be first member
-    PLATFORMLOCKTYPE(lock);           // Node-level lock
+    _Atomic(uint64_t) seq;             // Seqlock: even=stable, odd=writing
+    PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
 
     uint32_t node_size;               // Configurable max size in bytes
     uint16_t level;                   // B+tree level: 1 = leaf, > 1 = internal

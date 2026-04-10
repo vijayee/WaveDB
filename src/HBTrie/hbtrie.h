@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdatomic.h>
 #include "../RefCounter/refcounter.h"
 #include "../Util/threadding.h"
 #include "chunk.h"
@@ -37,7 +38,8 @@ typedef struct txn_desc_t txn_desc_t;
  */
 typedef struct hbtrie_node_t {
     refcounter_t refcounter;          // MUST be first member
-    PLATFORMLOCKTYPE(lock);           // Node-level lock
+    _Atomic(uint64_t) seq;            // Seqlock: even=stable, odd=writing
+    PLATFORMLOCKTYPE(write_lock);      // Writer mutual exclusion
 
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
     uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)
@@ -67,12 +69,11 @@ typedef struct {
  */
 typedef struct hbtrie_t {
     refcounter_t refcounter;          // MUST be first member
-    PLATFORMLOCKTYPE(lock);           // Trie-level lock
 
     uint8_t chunk_size;               // Configurable chunk size (default: DEFAULT_CHUNK_SIZE)
     uint32_t btree_node_size;         // Max B+tree node size in bytes
 
-    hbtrie_node_t* root;              // Root HBTrie node
+    _Atomic(hbtrie_node_t*) root;     // Root HBTrie node (atomic for lock-free reads)
 } hbtrie_t;
 
 /**

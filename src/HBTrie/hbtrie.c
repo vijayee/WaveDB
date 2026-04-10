@@ -258,14 +258,14 @@ hbtrie_t* hbtrie_create(uint8_t chunk_size, uint32_t btree_node_size) {
   trie->btree_node_size = btree_node_size;
 
   // Create empty root node
-  trie->root = hbtrie_node_create(btree_node_size);
-  if (trie->root == NULL) {
+  hbtrie_node_t* root = hbtrie_node_create(btree_node_size);
+  if (root == NULL) {
     free(trie);
     return NULL;
   }
+  atomic_store(&trie->root, root);
 
   refcounter_init((refcounter_t*)trie);
-  platform_lock_init(&trie->lock);
 
   return trie;
 }
@@ -275,10 +275,10 @@ void hbtrie_destroy(hbtrie_t* trie) {
 
   refcounter_dereference((refcounter_t*)trie);
   if (refcounter_count((refcounter_t*)trie) == 0) {
-    if (trie->root != NULL) {
-      hbtrie_node_destroy(trie->root);
+    hbtrie_node_t* root = atomic_load(&trie->root);
+    if (root != NULL) {
+      hbtrie_node_destroy(root);
     }
-    platform_lock_destroy(&trie->lock);
     refcounter_destroy_lock((refcounter_t*)trie);
     free(trie);
   }
@@ -299,7 +299,8 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
   node->is_loaded = 1;           // Newly created nodes are in memory
   node->is_dirty = 0;            // Not modified yet
 
-  platform_lock_init(&node->lock);
+  atomic_init(&node->seq, 0);
+  platform_lock_init(&node->write_lock);
   refcounter_init((refcounter_t*)node);
 
   return node;
@@ -353,7 +354,7 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
       if (current->btree != NULL) {
         bnode_destroy_tree(current->btree);
       }
-      platform_lock_destroy(&current->lock);
+      platform_lock_destroy(&current->write_lock);
       refcounter_destroy_lock((refcounter_t*)current);
       free(current);
     }
@@ -436,7 +437,7 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   bnode_destroy(copy->btree);
   copy->btree = bnode_tree_copy(node->btree);
   if (copy->btree == NULL) {
-    platform_lock_destroy(&copy->lock);
+    platform_lock_destroy(&copy->write_lock);
     refcounter_destroy_lock((refcounter_t*)copy);
     free(copy);
     return NULL;
@@ -489,16 +490,16 @@ hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
   copy->chunk_size = trie->chunk_size;
   copy->btree_node_size = trie->btree_node_size;
 
-  if (trie->root != NULL) {
-    copy->root = hbtrie_node_copy(trie->root);
-    if (copy->root == NULL) {
+  hbtrie_node_t* src_root = atomic_load(&trie->root);
+  if (src_root != NULL) {
+    atomic_store(&copy->root, hbtrie_node_copy(src_root));
+    if (atomic_load(&copy->root) == NULL) {
       free(copy);
       return NULL;
     }
   }
 
   refcounter_init((refcounter_t*)copy);
-  platform_lock_init(&copy->lock);
 
   return copy;
 }
@@ -506,7 +507,7 @@ hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
 void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
   if (cursor == NULL || trie == NULL) return;
 
-  cursor->current = trie->root;
+  cursor->current = atomic_load(&trie->root);
   cursor->identifier_index = 0;
   cursor->chunk_pos = 0;
 
@@ -1147,7 +1148,7 @@ cbor_item_t* hbtrie_to_cbor(hbtrie_t* trie) {
   cbor_decref(&btree_size);
 
   // root node
-  cbor_item_t* root_node = hbtrie_node_to_cbor(trie->root);
+  cbor_item_t* root_node = hbtrie_node_to_cbor(atomic_load(&trie->root));
   cbor_item_t* root_key = cbor_build_string("root");
   cbor_map_add(root, (struct cbor_pair){
       .key = root_key,
@@ -1189,8 +1190,9 @@ hbtrie_t* cbor_to_hbtrie(cbor_item_t* item) {
       hbtrie_destroy(trie);
       return NULL;
     }
-    hbtrie_node_destroy(trie->root);
-    trie->root = root_node;
+    hbtrie_node_t* old_root = atomic_load(&trie->root);
+    hbtrie_node_destroy(old_root);
+    atomic_store(&trie->root, root_node);
   }
 
   return trie;
@@ -1279,73 +1281,120 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
     return NULL;
   }
 
-  // No lock needed for MVCC reads - lock-free!
-  hbtrie_node_t* current = trie->root;
   size_t path_len_ids = path_length(path);
-
   if (path_len_ids == 0) {
     return NULL;
   }
 
-  // Traverse through each identifier in the path
-  for (size_t i = 0; i < path_len_ids; i++) {
-    identifier_t* identifier = path_get(path, i);
-    if (identifier == NULL) {
-      return NULL;
-    }
+  // Optimistic read with seqlock validation: retry from root if seqlock changes
+  for (;;) {
+    hbtrie_node_t* current = atomic_load(&trie->root);
+    int retry_needed = 0;
 
-    size_t nchunk = identifier_chunk_count(identifier);
-
-    // Traverse through chunks of this identifier
-    for (size_t j = 0; j < nchunk; j++) {
-      chunk_t* chunk = identifier_get_chunk(identifier, j);
-      if (chunk == NULL) {
+    // Traverse through each identifier in the path
+    for (size_t i = 0; i < path_len_ids && !retry_needed; i++) {
+      identifier_t* identifier = path_get(path, i);
+      if (identifier == NULL) {
         return NULL;
       }
 
-      size_t index;
-      bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
+      size_t nchunk = identifier_chunk_count(identifier);
 
-      int is_last_chunk = (j == nchunk - 1);
-      int is_last_identifier = (i == path_len_ids - 1);
-
-      if (is_last_chunk && is_last_identifier) {
-        // Final position - check version chain for visible version
-        if (entry == NULL || !entry->has_value) {
-          return NULL;  // No entry or no value
+      // Traverse through chunks of this identifier
+      for (size_t j = 0; j < nchunk && !retry_needed; j++) {
+        chunk_t* chunk = identifier_get_chunk(identifier, j);
+        if (chunk == NULL) {
+          return NULL;
         }
 
-        if (entry->has_versions) {
-          // MVCC: Find visible version
-          version_entry_t* visible = version_entry_find_visible(entry->versions, read_txn_id);
-          if (visible == NULL || visible->value == NULL) {
-            return NULL;  // Deleted or not visible
+        // Optimistic read of this hbtrie_node with seqlock validation
+        uint64_t seq_before = atomic_load(&current->seq);
+        if (seq_before & 1) {
+          // Writer active, retry from root
+          cpu_relax();
+          retry_needed = 1;
+          break;
+        }
+
+        // Acquire fence: ensure we read btree data AFTER reading seq
+        atomic_thread_fence(memory_order_acquire);
+
+        size_t index;
+        bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
+
+        int is_last_chunk = (j == nchunk - 1);
+        int is_last_identifier = (i == path_len_ids - 1);
+
+        if (is_last_chunk && is_last_identifier) {
+          // Validate seqlock before reading value
+          atomic_thread_fence(memory_order_acquire);
+          uint64_t seq_after = atomic_load(&current->seq);
+          if (seq_after != seq_before) {
+            retry_needed = 1;
+            break;
           }
-          return (identifier_t*)refcounter_reference((refcounter_t*)visible->value);
-        } else {
-          // Legacy: single value
-          if (entry->value == NULL) {
+
+          // Final position - check version chain for visible version
+          if (entry == NULL || !entry->has_value) {
+            return NULL;  // No entry or no value
+          }
+
+          if (entry->has_versions) {
+            // MVCC: Find visible version
+            version_entry_t* visible = version_entry_find_visible(entry->versions, read_txn_id);
+            if (visible == NULL || visible->value == NULL) {
+              return NULL;  // Deleted or not visible
+            }
+            return (identifier_t*)refcounter_reference((refcounter_t*)visible->value);
+          } else {
+            // Legacy: single value
+            if (entry->value == NULL) {
+              return NULL;
+            }
+            return (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+          }
+        } else if (is_last_chunk) {
+          // End of this identifier, move to next HBTrie level
+          if (entry == NULL || entry->has_value || entry->child == NULL) {
             return NULL;
           }
-          return (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
+
+          // Validate seqlock before moving to next node
+          atomic_thread_fence(memory_order_acquire);
+          uint64_t seq_after = atomic_load(&current->seq);
+          if (seq_after != seq_before) {
+            retry_needed = 1;
+            break;
+          }
+
+          current = entry->child;
+          // Continue to next identifier
+        } else {
+          // Intermediate chunk within this identifier
+          if (entry == NULL || entry->has_value || entry->child == NULL) {
+            return NULL;
+          }
+
+          // Validate seqlock before moving to child node
+          atomic_thread_fence(memory_order_acquire);
+          uint64_t seq_after = atomic_load(&current->seq);
+          if (seq_after != seq_before) {
+            retry_needed = 1;
+            break;
+          }
+
+          current = entry->child;
+          // Continue to next chunk in this identifier
         }
-      } else if (is_last_chunk) {
-        // End of this identifier, move to next HBTrie level
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
-          return NULL;
-        }
-        current = entry->child;
-      } else {
-        // Intermediate chunk within this identifier
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
-          return NULL;
-        }
-        current = entry->child;
       }
     }
-  }
 
-  return NULL;
+    if (!retry_needed) {
+      // Traversed entire path without seqlock conflict
+      return NULL;
+    }
+    // seqlock conflict detected, retry from root
+  }
 }
 
 identifier_t* hbtrie_find_with_txn(hbtrie_t* trie, path_t* path, txn_desc_t* txn) {
@@ -1358,14 +1407,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
     return -1;
   }
 
-  // Acquire write lock (serializes writers)
-  platform_lock(&trie->lock);
-
-  hbtrie_node_t* current = trie->root;
+  hbtrie_node_t* current = atomic_load(&trie->root);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
-    platform_unlock(&trie->lock);
     return -1;
   }
 
@@ -1379,13 +1424,18 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   vec_init(&identifier_chunk_counts);
   vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
 
+  // Acquire write lock on root node and mark as writing
+  platform_lock(&current->write_lock);
+  atomic_fetch_add(&current->seq, 1);  // seq becomes odd (writing)
+
   // Traverse/create path
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
+      atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+      platform_unlock(&current->write_lock);
       vec_deinit(&path_stack);
       vec_deinit(&identifier_chunk_counts);
-      platform_unlock(&trie->lock);
       return -1;
     }
 
@@ -1395,9 +1445,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
+        atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+        platform_unlock(&current->write_lock);
         vec_deinit(&path_stack);
         vec_deinit(&identifier_chunk_counts);
-        platform_unlock(&trie->lock);
         return -1;
       }
 
@@ -1430,9 +1481,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
           if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             vec_deinit(&path_stack);
             vec_deinit(&identifier_chunk_counts);
-            platform_unlock(&trie->lock);
             return -1;
           }
 
@@ -1472,9 +1524,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               vec_deinit(&path_stack);
               vec_deinit(&identifier_chunk_counts);
-              platform_unlock(&trie->lock);
               return -1;
             }
             // Set path chunk counts
@@ -1495,9 +1548,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
                 0
             );
             if (old_version == NULL) {
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
-              platform_unlock(&trie->lock);
               return -1;
             }
 
@@ -1514,9 +1568,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               version_entry_destroy(old_version);
               entry->has_versions = 0;
               entry->versions = NULL;
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
-              platform_unlock(&trie->lock);
               return -1;
             }
           }
@@ -1527,9 +1582,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
-            platform_unlock(&trie->lock);
             return -1;
           }
 
@@ -1541,34 +1597,47 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
-            platform_unlock(&trie->lock);
             return -1;
           }
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
+          // Crab: lock child before unlocking parent
+          platform_lock(&child->write_lock);
+          atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+          platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
           // Entry exists but has value instead of child
+          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          platform_unlock(&current->write_lock);
           vec_deinit(&identifier_chunk_counts);
           vec_deinit(&path_stack);
-          platform_unlock(&trie->lock);
           return -1;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
-              platform_unlock(&trie->lock);
               return -1;
             }
             entry->child = child;
           }
+          // Crab: lock child before unlocking parent
+          platform_lock(&entry->child->write_lock);
+          atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+          platform_unlock(&current->write_lock);
           current = entry->child;
         }
       } else {
@@ -1577,9 +1646,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
-            platform_unlock(&trie->lock);
             return -1;
           }
 
@@ -1591,33 +1661,46 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           if (bnode_insert(leaf, &new_entry) != 0) {
             chunk_destroy(new_entry.key);
             hbtrie_node_destroy(child);
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
-            platform_unlock(&trie->lock);
             return -1;
           }
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
 
+          // Crab: lock child before unlocking parent
+          platform_lock(&child->write_lock);
+          atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+          platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
+          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          platform_unlock(&current->write_lock);
           vec_deinit(&identifier_chunk_counts);
           vec_deinit(&path_stack);
-          platform_unlock(&trie->lock);
           return -1;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
-              platform_unlock(&trie->lock);
               return -1;
             }
             entry->child = child;
           }
+          // Crab: lock child before unlocking parent
+          platform_lock(&entry->child->write_lock);
+          atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+          platform_unlock(&current->write_lock);
           current = entry->child;
         }
       }
@@ -1626,9 +1709,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
   (void)path_stack;  // Splits are now handled inline after each insert
 
+  atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+  platform_unlock(&current->write_lock);
   vec_deinit(&identifier_chunk_counts);
   vec_deinit(&path_stack);
-  platform_unlock(&trie->lock);
   return 0;
 }
 
@@ -1637,22 +1721,24 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
     return NULL;
   }
 
-  platform_lock(&trie->lock);
-
   // Traverse to find the entry
-  hbtrie_node_t* current = trie->root;
+  hbtrie_node_t* current = atomic_load(&trie->root);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
-    platform_unlock(&trie->lock);
     return NULL;
   }
+
+  // Acquire write lock on root node and mark as writing
+  platform_lock(&current->write_lock);
+  atomic_fetch_add(&current->seq, 1);  // seq becomes odd (writing)
 
   // Navigate to the final position
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
-      platform_unlock(&trie->lock);
+      atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+      platform_unlock(&current->write_lock);
       return NULL;
     }
 
@@ -1661,7 +1747,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
-        platform_unlock(&trie->lock);
+        atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+        platform_unlock(&current->write_lock);
         return NULL;
       }
 
@@ -1675,7 +1762,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         // Final position - create tombstone version
         if (entry == NULL || !entry->has_value) {
           // No entry or no value to delete
-          platform_unlock(&trie->lock);
+          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          platform_unlock(&current->write_lock);
           return NULL;
         }
 
@@ -1691,7 +1779,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
           // Add tombstone version
           if (version_entry_add(&entry->versions, txn_id, NULL, 1) != 0) {
             if (last_visible) identifier_destroy(last_visible);
-            platform_unlock(&trie->lock);
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
             return NULL;
           }
         } else {
@@ -1707,7 +1796,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
             );
             if (old_version == NULL) {
               if (last_visible) identifier_destroy(last_visible);
-              platform_unlock(&trie->lock);
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               return NULL;
             }
 
@@ -1721,38 +1811,57 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
               entry->has_versions = 0;
               entry->versions = NULL;
               if (last_visible) identifier_destroy(last_visible);
-              platform_unlock(&trie->lock);
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
               return NULL;
             }
           }
         }
 
-        platform_unlock(&trie->lock);
+        atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+        platform_unlock(&current->write_lock);
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
         if (entry == NULL || entry->has_value || entry->child == NULL) {
-          platform_unlock(&trie->lock);
+          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          platform_unlock(&current->write_lock);
           return NULL;
         }
+        // Crab: lock child before unlocking parent
+        platform_lock(&entry->child->write_lock);
+        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+        platform_unlock(&current->write_lock);
         current = entry->child;
       } else {
         // Intermediate chunk
         if (entry == NULL || entry->has_value || entry->child == NULL) {
-          platform_unlock(&trie->lock);
+          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          platform_unlock(&current->write_lock);
           return NULL;
         }
+        // Crab: lock child before unlocking parent
+        platform_lock(&entry->child->write_lock);
+        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
+        platform_unlock(&current->write_lock);
         current = entry->child;
       }
     }
   }
 
-  platform_unlock(&trie->lock);
+  atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+  platform_unlock(&current->write_lock);
   return NULL;
 }
 
 size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
-  if (trie == NULL || trie->root == NULL) {
+  if (trie == NULL) {
+    return 0;
+  }
+  hbtrie_node_t* root = atomic_load(&trie->root);
+  if (root == NULL) {
     return 0;
   }
 
@@ -1762,11 +1871,15 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
   // Use a stack for iterative traversal of hbtrie_nodes
   vec_t(hbtrie_node_t*) stack;
   vec_init(&stack);
-  vec_push(&stack, trie->root);
+  vec_push(&stack, root);
 
   while (stack.length > 0) {
     hbtrie_node_t* node = vec_pop(&stack);
     if (node == NULL) continue;
+
+    // Acquire write lock on this node for GC modifications
+    platform_lock(&node->write_lock);
+    atomic_fetch_add(&node->seq, 1);  // seq odd (writing)
 
     // Walk the entire bnode tree to find all leaf entries
     // Use a stack of bnodes for iterative traversal
@@ -1777,7 +1890,8 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
     while (bnode_stack.length > 0) {
       bnode_t* bn = vec_pop(&bnode_stack);
 
-      for (size_t i = 0; i < bn->entries.length; i++) {
+      // Iterate backwards so we can safely remove tombstoned entries
+      for (int i = bn->entries.length - 1; i >= 0; i--) {
         bnode_entry_t* entry = &bn->entries.data[i];
 
         if (entry->is_bnode_child && entry->child_bnode != NULL) {
@@ -1797,6 +1911,21 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
             entry->value_txn_id = entry->versions->txn_id;
             version_entry_destroy(entry->versions);
             entry->has_versions = 0;
+          } else if (entry->versions != NULL &&
+                     entry->versions->next == NULL &&
+                     entry->versions->is_deleted &&
+                     transaction_id_compare(&entry->versions->txn_id, &min_active_txn_id) < 0) {
+            // Single remaining version is a tombstone older than min_active_txn_id
+            // Remove this entry entirely
+            bnode_entry_t removed = bnode_remove_at(bn, (size_t)i);
+            // Clean up the removed entry's resources
+            if (removed.key != NULL) {
+              chunk_destroy(removed.key);
+            }
+            if (removed.has_versions && removed.versions != NULL) {
+              version_entry_destroy(removed.versions);
+            }
+            total_removed++;
           }
         } else if (!entry->has_value && entry->child != NULL) {
           // Child hbtrie_node - add to node stack for trie traversal
@@ -1805,6 +1934,8 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
       }
     }
 
+    atomic_fetch_add(&node->seq, 1);  // seq even (stable)
+    platform_unlock(&node->write_lock);
     vec_deinit(&bnode_stack);
   }
 
