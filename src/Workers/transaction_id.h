@@ -38,6 +38,23 @@ void transaction_id_deserialize(transaction_id_t* id, const uint8_t* buf);
 // This is needed after WAL recovery to prevent transaction ID collisions
 void transaction_id_advance_to(const transaction_id_t* target);
 
+// Sentinel value for "no active transactions" in shard tracking
+// Used by the sharded transaction manager to indicate an empty shard
+#define TXN_ID_SENTINEL ((transaction_id_t){UINT64_MAX, UINT64_MAX, UINT64_MAX})
+
+// Check if a transaction ID is the sentinel value
+static inline int is_txn_id_sentinel(const transaction_id_t* id) {
+    return id->time == UINT64_MAX && id->nanos == UINT64_MAX && id->count == UINT64_MAX;
+}
+
+// Compute shard index for a transaction ID (for sharded tx_manager)
+#define TX_MANAGER_SHARDS 64
+#define TX_MANAGER_SHARD_MASK (TX_MANAGER_SHARDS - 1)
+
+static inline uint32_t txn_shard_index(const transaction_id_t* txn_id) {
+    return (uint32_t)(txn_id->count & TX_MANAGER_SHARD_MASK);
+}
+
 #ifdef __cplusplus
 }
 #endif

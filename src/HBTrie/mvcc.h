@@ -43,20 +43,34 @@ typedef struct txn_desc_t {
     refcounter_t refcounter;           // MUST be first member
     transaction_id_t txn_id;             // Unique transaction ID
     txn_state_e state;                   // Current state
+    uint32_t shard_index;                // Which shard this txn belongs to
     PLATFORMLOCKTYPE(lock);              // Lock for state changes
 } txn_desc_t;
+
+/**
+ * Shard of the transaction manager.
+ *
+ * Each shard has its own lock and active transaction list,
+ * reducing contention under high concurrency.
+ */
+typedef struct tx_shard_t {
+    PLATFORMLOCKTYPE(lock);              // Per-shard lock
+    vec_t(txn_desc_t*) txns;            // Active transactions in this shard
+    _Atomic transaction_id_t min_txn_id; // Minimum txn ID in this shard (SENTINEL if empty)
+    _Atomic uint32_t count;             // Number of active transactions (for fast empty check)
+} tx_shard_t;
 
 /**
  * Transaction manager.
  *
  * Coordinates MVCC transactions, tracks active transactions,
- * and manages garbage collection.
+ * and manages garbage collection. Uses sharded tracking for
+ * reduced contention under high concurrency.
  */
 typedef struct tx_manager_t {
     refcounter_t refcounter;           // MUST be first member
-    PLATFORMLOCKTYPE(lock);              // Manager lock for active_txns list
 
-    vec_t(txn_desc_t*) active_txns;      // Active transactions
+    tx_shard_t shards[TX_MANAGER_SHARDS]; // Sharded active transaction tracking
     _Atomic transaction_id_t min_active_txn_id;  // Oldest active transaction (GC cutoff) - atomic for lock-free reads
     _Atomic transaction_id_t last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
 
