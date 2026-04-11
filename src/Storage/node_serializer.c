@@ -146,12 +146,12 @@ identifier_t* identifier_deserialize(uint8_t* buf, size_t len, size_t chunk_size
 
 // Chunk serialization
 int chunk_serialize(chunk_t* chunk, uint8_t chunk_size, uint8_t** buf) {
-    if (chunk == NULL || chunk->data == NULL || buf == NULL) {
+    if (chunk == NULL || buf == NULL) {
         return -1;
     }
 
     *buf = get_memory(chunk_size);
-    memcpy(*buf, chunk->data->data, chunk_size);
+    memcpy(*buf, chunk->data, chunk_size);
     return 0;
 }
 
@@ -161,20 +161,8 @@ chunk_t* chunk_deserialize(uint8_t* buf, uint8_t chunk_size) {
         return NULL;
     }
 
-    // Create buffer from existing memory (takes ownership)
-    uint8_t* data_copy = get_memory(chunk_size);
-    memcpy(data_copy, buf, chunk_size);
-
-    buffer_t* data_buf = buffer_create_from_existing_memory(data_copy, chunk_size);
-    if (data_buf == NULL) {
-        free(data_copy);
-        return NULL;
-    }
-
-    // Create chunk (shares buffer reference)
-    chunk_t* chunk = get_clear_memory(sizeof(chunk_t));
-    chunk->data = data_buf;
-
+    // Create chunk with inline data
+    chunk_t* chunk = chunk_create(buf, chunk_size);
     return chunk;
 }
 
@@ -274,8 +262,8 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
         bnode_entry_t* entry = &node->entries.data[i];
 
         // Write chunk
-        if (entry->key != NULL && entry->key->data != NULL) {
-            write_bytes(&ptr, entry->key->data->data, chunk_size);
+        if (entry->key != NULL) {
+            write_bytes(&ptr, entry->key->data, chunk_size);
         } else {
             memset(ptr, 0, chunk_size);
             ptr += chunk_size;

@@ -46,7 +46,7 @@ identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
 
     chunk_t* chunk = chunk_create_empty(chunk_size);
     if (data != NULL) {
-      memcpy(chunk->data->data, data + (i * chunk_size), chunk_len);
+      memcpy(chunk->data, data + (i * chunk_size), chunk_len);
       // Remaining bytes in last chunk are already zeroed by chunk_create_empty
     }
     vec_push(&id->chunks, chunk);
@@ -125,7 +125,7 @@ buffer_t* identifier_to_buffer(identifier_t* id) {
       // Last chunk: only copy up to remaining length
       copy_len = id->length - offset;
     }
-    memcpy(buf->data + offset, chunk->data->data, copy_len);
+    memcpy(buf->data + offset, chunk->data, copy_len);
     offset += copy_len;
   }
 
@@ -143,19 +143,19 @@ cbor_item_t* identifier_to_cbor(identifier_t* id) {
     chunk_t* chunk = id->chunks.data[i];
 
     // For last chunk, only serialize the actual data bytes (not padding)
-    size_t chunk_len = chunk->data->size;
+    size_t chunk_len = chunk->size;
     if (i == id->chunks.length - 1) {
       // Last chunk: calculate actual data length
       size_t nchunk = id->chunks.length;
       size_t full_chunks = (nchunk > 0) ? (nchunk - 1) : 0;
       size_t expected_full_size = full_chunks * id->chunk_size;
       chunk_len = id->length - expected_full_size;
-      if (chunk_len > chunk->data->size) {
-        chunk_len = chunk->data->size;  // Safety check
+      if (chunk_len > chunk->size) {
+        chunk_len = chunk->size;  // Safety check
       }
     }
 
-    cbor_item_t* bstr = cbor_build_bytestring(chunk->data->data, chunk_len);
+    cbor_item_t* bstr = cbor_build_bytestring(chunk->data, chunk_len);
     if (bstr == NULL) {
       cbor_decref(&array);
       return NULL;
@@ -264,7 +264,7 @@ identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
     }
 
     // Copy data (chunk_len bytes for last chunk, chunk_size for others)
-    memcpy(chunk->data->data, chunk_data, chunk_len);
+    memcpy(chunk->data, chunk_data, chunk_len);
     // Rest is already zeroed by chunk_create_empty
 
     vec_push(&id->chunks, chunk);

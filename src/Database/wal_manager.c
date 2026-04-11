@@ -1260,9 +1260,9 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                         identifier_t* id = path->identifiers.data[0];
                         if (id->chunks.length > 0) {
                             chunk_t* chunk = (chunk_t*)id->chunks.data[0];
-                            if (chunk && chunk->data) {
-                                size_t copy_len = (chunk->data->size < 255) ? chunk->data->size : 255;
-                                memcpy(key_str, chunk->data->data, copy_len);
+                            if (chunk) {
+                                size_t copy_len = (chunk->size < 255) ? chunk->size : 255;
+                                memcpy(key_str, chunk->data, copy_len);
                                 key_str[copy_len] = '\0';
                             }
                         }

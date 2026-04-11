@@ -671,9 +671,9 @@ static inline size_t get_write_lock_shard(path_t* path) {
     size_t hash = 0;
     for (size_t i = 0; i < first_id->chunks.length; i++) {
         chunk_t* chunk = first_id->chunks.data[i];
-        if (chunk != NULL && chunk->data != NULL) {
-            for (size_t j = 0; j < chunk->data->size; j++) {
-                hash = hash * 31 + chunk->data->data[j];
+        if (chunk != NULL) {
+            for (size_t j = 0; j < chunk->size; j++) {
+                hash = hash * 31 + chunk->data[j];
             }
         }
     }

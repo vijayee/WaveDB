@@ -111,7 +111,7 @@ std::string PathToJS(path_t* path, char delimiter) {
     for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->data->size;
+      size_t size = chunk->size;
 
       // Check if all bytes are printable ASCII
       bool printable = true;
@@ -155,7 +155,7 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
     for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->data->size;
+      size_t size = chunk->size;
 
       // Check if all bytes are printable ASCII
       bool printable = true;

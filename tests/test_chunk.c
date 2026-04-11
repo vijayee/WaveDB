@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include "HBTrie/chunk.h"
-#include "Buffer/buffer.h"
 
 int test_chunk_create() {
     const char* data = "test";
@@ -15,17 +14,12 @@ int test_chunk_create() {
         printf("FAIL: chunk_create returned NULL\n");
         return -1;
     }
-    if (chunk->data == NULL) {
-        printf("FAIL: chunk data is NULL\n");
+    if (chunk->size != 4) {
+        printf("FAIL: chunk size is %zu, expected 4\n", chunk->size);
         chunk_destroy(chunk);
         return -1;
     }
-    if (chunk->data->size != 4) {
-        printf("FAIL: chunk size is %zu, expected 4\n", chunk->data->size);
-        chunk_destroy(chunk);
-        return -1;
-    }
-    if (memcmp(chunk->data->data, "test", 4) != 0) {
+    if (memcmp(chunk->data, "test", 4) != 0) {
         printf("FAIL: chunk data doesn't match\n");
         chunk_destroy(chunk);
         return -1;

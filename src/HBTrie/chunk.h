@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include "../RefCounter/refcounter.h"
 #include "../Buffer/buffer.h"
 
 #ifdef __cplusplus
@@ -26,9 +27,15 @@ extern "C" {
  * - chunk[0] compared at root B+tree
  * - chunk[1] compared at next level B+tree
  * - etc.
+ *
+ * Data is stored inline (no buffer_t indirection) for cache-friendly
+ * access during comparisons. Reference-counted for efficient sharing
+ * via chunk_share().
  */
 typedef struct {
-    buffer_t* data;              // Fixed-size buffer (chunk_size bytes)
+    refcounter_t refcounter;     // MUST be first member (for refcounting)
+    size_t size;                  // Data size in bytes
+    uint8_t data[];               // Inline data (flexible array member)
 } chunk_t;
 
 /**
@@ -60,18 +67,20 @@ chunk_t* chunk_create_empty(size_t chunk_size);
 /**
  * Destroy a chunk.
  *
+ * Decrements reference count. Frees memory when count reaches 0.
+ *
  * @param chunk  Chunk to destroy
  */
 void chunk_destroy(chunk_t* chunk);
 
 /**
- * Create a chunk that shares the buffer with another chunk.
+ * Create a chunk that shares data with another chunk.
  *
- * The returned chunk references the same underlying buffer data.
- * Useful for sharing immutable chunks between data structures.
+ * Returns the same pointer with incremented reference count.
+ * Call chunk_destroy() on the result when done (decrements refcount).
  *
- * @param chunk  Chunk to share buffer with
- * @return New chunk_t sharing the same buffer, or NULL on failure
+ * @param chunk  Chunk to share
+ * @return Same chunk pointer with incremented refcount, or NULL on failure
  */
 chunk_t* chunk_share(chunk_t* chunk);
 

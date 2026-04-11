@@ -586,7 +586,7 @@ static cbor_item_t* bnode_to_cbor(bnode_t* root) {
 
     // Key as byte string
     cbor_item_t* key_bstr = cbor_build_bytestring(
-        chunk_data_const(entry->key), entry->key->data->size);
+        chunk_data_const(entry->key), entry->key->size);
     cbor_array_push(entry_item, key_bstr);
     cbor_decref(&key_bstr);
 

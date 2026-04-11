@@ -793,7 +793,7 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->data->size;
+      size_t size = chunk->size;
       part += std::string(reinterpret_cast<const char*>(data), size);
     }
     // Strip trailing null characters and whitespace (padding from chunk reconstruction)
@@ -834,7 +834,7 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
       for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
         chunk_t* chunk = id->chunks.data[j];
         const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-        size_t size = chunk->data->size;
+        size_t size = chunk->size;
         part += std::string(reinterpret_cast<const char*>(data), size);
       }
       // Strip trailing null characters and whitespace (padding from chunk reconstruction)
@@ -903,7 +903,7 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
       chunk_t* chunk = id->chunks.data[j];
       const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->data->size;
+      size_t size = chunk->size;
       part += std::string(reinterpret_cast<const char*>(data), size);
     }
     // Strip trailing null characters and whitespace (padding from chunk reconstruction)
@@ -956,7 +956,7 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
       for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
         chunk_t* chunk = id->chunks.data[j];
         const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-        size_t size = chunk->data->size;
+        size_t size = chunk->size;
         part += std::string(reinterpret_cast<const char*>(data), size);
       }
       // Strip trailing null characters and whitespace (padding from chunk reconstruction)

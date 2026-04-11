@@ -290,9 +290,9 @@ size_t bnode_size(bnode_t* node, uint8_t chunk_size) {
   for (int i = 0; i < node->entries.length; i++) {
     bnode_entry_t* entry = &node->entries.data[i];
     size += sizeof(bnode_entry_t);
-    // Chunk: struct + buffer data
-    if (entry->key != NULL && entry->key->data != NULL) {
-      size += sizeof(chunk_t) + chunk_size;
+    // Chunk: struct + inline data
+    if (entry->key != NULL) {
+      size += sizeof(chunk_t) + entry->key->size;
     }
   }
 
@@ -325,7 +325,7 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
   bnode_entry_t* mid_entry = &node->entries.data[mid];
 
   // COPY the split key (it will still be used in right node)
-  *split_key = chunk_create(chunk_data_const(mid_entry->key), mid_entry->key->data->size);
+  *split_key = chunk_create(chunk_data_const(mid_entry->key), mid_entry->key->size);
   if (*split_key == NULL) return -1;
 
   // Create right node (inherit level from parent)

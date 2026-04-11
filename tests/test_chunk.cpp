@@ -4,7 +4,6 @@
 
 #include <gtest/gtest.h>
 #include "HBTrie/chunk.h"
-#include "Buffer/buffer.h"
 
 class ChunkTest : public ::testing::Test {
 protected:
@@ -19,20 +18,18 @@ TEST_F(ChunkTest, Create) {
     const char* data = "test";
     chunk_t* chunk = chunk_create(data, 4);
     ASSERT_NE(chunk, nullptr);
-    ASSERT_NE(chunk->data, nullptr);
-    ASSERT_EQ(chunk->data->size, 4u);
-    EXPECT_EQ(memcmp(chunk->data->data, "test", 4), 0);
+    ASSERT_EQ(chunk->size, 4u);
+    EXPECT_EQ(memcmp(chunk->data, "test", 4), 0);
     chunk_destroy(chunk);
 }
 
 TEST_F(ChunkTest, CreateEmpty) {
     chunk_t* chunk = chunk_create_empty(4);
     ASSERT_NE(chunk, nullptr);
-    ASSERT_NE(chunk->data, nullptr);
-    ASSERT_EQ(chunk->data->size, 4u);
+    ASSERT_EQ(chunk->size, 4u);
     // Should be zero-initialized
     for (size_t i = 0; i < 4; i++) {
-        EXPECT_EQ(chunk->data->data[i], 0);
+        EXPECT_EQ(chunk->data[i], 0);
     }
     chunk_destroy(chunk);
 }
@@ -83,4 +80,27 @@ TEST_F(ChunkTest, DataAccess) {
     EXPECT_EQ(memcmp(data, "hello", 5), 0);
 
     chunk_destroy(chunk);
+}
+
+TEST_F(ChunkTest, ShareAndDestroy) {
+    chunk_t* original = chunk_create("test", 4);
+    ASSERT_NE(original, nullptr);
+
+    chunk_t* shared = chunk_share(original);
+    ASSERT_NE(shared, nullptr);
+
+    // Shared should be the same pointer (refcounted)
+    EXPECT_EQ(shared, original);
+
+    // Data should be accessible from both
+    EXPECT_EQ(memcmp(original->data, "test", 4), 0);
+    EXPECT_EQ(memcmp(shared->data, "test", 4), 0);
+
+    // Destroy shared - should just decrement refcount
+    chunk_destroy(shared);
+
+    // Original should still be valid
+    EXPECT_EQ(memcmp(original->data, "test", 4), 0);
+
+    chunk_destroy(original);
 }

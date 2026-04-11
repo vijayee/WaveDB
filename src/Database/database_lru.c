@@ -23,10 +23,10 @@ static size_t hash_path(const path_t* path) {
             // Hash each chunk in the identifier
             for (int j = 0; j < id->chunks.length; j++) {
                 chunk_t* chunk = id->chunks.data[j];
-                if (chunk != NULL && chunk->data != NULL) {
+                if (chunk != NULL) {
                     // Simple hash combining - faster for short keys than xxHash
-                    for (size_t k = 0; k < chunk->data->size; k++) {
-                        hash = hash * 31 + chunk->data->data[k];
+                    for (size_t k = 0; k < chunk->size; k++) {
+                        hash = hash * 31 + chunk->data[k];
                     }
                 }
             }
@@ -79,9 +79,8 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
                 total += (size_t)id->chunks.capacity * sizeof(chunk_t*);
                 for (int j = 0; j < id->chunks.length; j++) {
                     chunk_t* chunk = id->chunks.data[j];
-                    if (chunk != NULL && chunk->data != NULL) {
-                        total += sizeof(chunk_t);
-                        total += chunk->data->size;
+                    if (chunk != NULL) {
+                        total += sizeof(chunk_t) + chunk->size;
                     }
                 }
             }
@@ -94,9 +93,8 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
         total += (size_t)value->chunks.capacity * sizeof(chunk_t*);
         for (int j = 0; j < value->chunks.length; j++) {
             chunk_t* chunk = value->chunks.data[j];
-            if (chunk != NULL && chunk->data != NULL) {
-                total += sizeof(chunk_t);
-                total += chunk->data->size;
+            if (chunk != NULL) {
+                total += sizeof(chunk_t) + chunk->size;
             }
         }
     }

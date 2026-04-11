@@ -251,7 +251,7 @@ static char* bytes_to_hex(const uint8_t* data, size_t len) {
 // Helper: Convert chunk to hex string
 static char* chunk_to_hex(chunk_t* chunk) {
     if (chunk == NULL) return strdup("");
-    return bytes_to_hex(chunk_data_const(chunk), chunk->data->size);
+    return bytes_to_hex(chunk_data_const(chunk), chunk->size);
 }
 
 // Helper: Convert identifier to hex string (all chunks concatenated)
@@ -262,7 +262,7 @@ static char* identifier_to_hex(identifier_t* id) {
     size_t total_len = 0;
     for (int i = 0; i < id->chunks.length; i++) {
         chunk_t* chunk = id->chunks.data[i];
-        total_len += chunk->data->size;
+        total_len += chunk->size;
     }
 
     // Allocate buffer for all data
@@ -273,8 +273,8 @@ static char* identifier_to_hex(identifier_t* id) {
     size_t offset = 0;
     for (int i = 0; i < id->chunks.length; i++) {
         chunk_t* chunk = id->chunks.data[i];
-        memcpy(buffer + offset, chunk_data_const(chunk), chunk->data->size);
-        offset += chunk->data->size;
+        memcpy(buffer + offset, chunk_data_const(chunk), chunk->size);
+        offset += chunk->size;
     }
 
     char* hex = bytes_to_hex(buffer, total_len);

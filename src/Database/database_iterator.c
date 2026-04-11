@@ -87,8 +87,8 @@ static identifier_t* build_identifier_from_chunks(chunk_t** chunks, size_t nchun
     // Copy chunk data
     size_t offset = 0;
     for (size_t i = 0; i < nchunks; i++) {
-        if (chunks[i] != NULL && chunks[i]->data != NULL) {
-            memcpy(buf->data + offset, chunks[i]->data->data, chunk_size);
+        if (chunks[i] != NULL) {
+            memcpy(buf->data + offset, chunks[i]->data, chunk_size);
         }
         offset += chunk_size;
     }

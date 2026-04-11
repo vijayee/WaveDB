@@ -134,11 +134,11 @@ TEST_F(IdentifierTest, ChunkAccess) {
     ASSERT_NE(chunk2, nullptr);
 
     // Verify content
-    EXPECT_EQ(memcmp(chunk0->data->data, "abcd", 4), 0);
-    EXPECT_EQ(memcmp(chunk1->data->data, "efgh", 4), 0);
+    EXPECT_EQ(memcmp(chunk0->data, "abcd", 4), 0);
+    EXPECT_EQ(memcmp(chunk1->data, "efgh", 4), 0);
     // Last chunk: "ij" + 2 nulls
-    EXPECT_EQ(chunk2->data->data[0], 'i');
-    EXPECT_EQ(chunk2->data->data[1], 'j');
+    EXPECT_EQ(chunk2->data[0], 'i');
+    EXPECT_EQ(chunk2->data[1], 'j');
 
     buffer_destroy(buf);
     identifier_destroy(id);
