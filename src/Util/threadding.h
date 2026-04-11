@@ -82,6 +82,16 @@ uint64_t platform_self();
 #define cpu_relax() ((void)0)
 #endif
 
+// Cache-line-aware memory layout macros
+// Apple M-series uses 128-byte L1 cache lines; most others use 64 bytes
+#if defined(__aarch64__) && defined(__APPLE__)
+#define CACHE_LINE_SIZE 128
+#else
+#define CACHE_LINE_SIZE 64
+#endif
+
+#define CACHE_ALIGNED __attribute__((aligned(CACHE_LINE_SIZE)))
+
 #ifdef __cplusplus
 }
 #endif

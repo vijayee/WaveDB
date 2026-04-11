@@ -14,6 +14,12 @@
 #include "chunk.h"
 #include "identifier.h"
 
+// Maximum key bytes stored inline in bnode_entry_t.
+// Keys with size <= BNODE_INLINE_KEY_SIZE are stored directly in the entry,
+// eliminating pointer chasing during binary search.
+// Covers DEFAULT_CHUNK_SIZE=4 and chunk sizes up to 8.
+#define BNODE_INLINE_KEY_SIZE 8
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -45,24 +51,32 @@ typedef struct version_entry_t {
  * - A child bnode (has_value==0, is_bnode_child==1): internal B+tree descent
  * - A leaf value or version chain (has_value==1): stored data
  *
+ * Key data is stored inline for fast comparison during binary search.
+ * When key_len <= BNODE_INLINE_KEY_SIZE, the key bytes are in key_data[]
+ * and no pointer dereference is needed during comparison.
+ * The key field always holds a valid chunk_t* reference for non-comparison
+ * purposes (serialization, iteration, splitting).
+ *
  * When has_value == 1 (leaf entry), path_chunk_counts stores the number of chunks
  * per identifier in the path, enabling path reconstruction during iteration.
  */
 typedef struct bnode_entry_t {
     // Hot fields: accessed during binary search and MVCC visibility checks
-    chunk_t* key;                      // Single chunk for comparison
+    uint8_t key_data[BNODE_INLINE_KEY_SIZE]; // Inline key data for fast comparison
     union {
         struct hbtrie_node_t* child;   // Next HBTrie node (if has_value == 0, is_bnode_child == 0)
         struct bnode_t* child_bnode;   // Child B+tree node (if has_value == 0, is_bnode_child == 1)
         identifier_t* value;            // Leaf value (if has_value == 1 and has_versions == 0)
         version_entry_t* versions;      // Version chain (if has_value == 1 and has_versions == 1)
     };
+    chunk_t* key;                      // Chunk reference (always valid, for non-comparison uses)
+    uint8_t key_len;                   // Key length: 0=no key, 1-8=inline data valid, >8=use key ptr
     uint8_t has_value;                  // 0 = child node, 1 = value or versions
     uint8_t has_versions;               // 1 if version chain present, 0 for legacy single value
     uint8_t is_bnode_child;             // 1 when entry points to child bnode (internal B+tree node)
 
     // Cold fields: accessed during iteration, serialization, and lazy loading
-    // Transactexition ID for legacy mode (valid when has_value == 1 and has_versions == 0)
+    // Transaction ID for legacy mode (valid when has_value == 1 and has_versions == 0)
     transaction_id_t value_txn_id;
 
     // Path metadata for iteration (valid when has_value == 1)
@@ -84,16 +98,18 @@ typedef struct bnode_entry_t {
  * Contains a sorted array of entries, each comparing chunks.
  * Level 1 = leaf node (entries point to values or HBTrie children).
  * Level > 1 = internal node (entries point to child bnodes for B+tree fanout).
+ *
+ * Field order optimized for cache-line efficiency:
+ * - Hot fields (level, entries) placed first for binary search access
+ * - Cold fields (seq, write_lock) placed after for write-path only access
  */
 typedef struct bnode_t {
-    refcounter_t refcounter;          // MUST be first member
+    refcounter_t refcounter;          // MUST be first member (16-48 bytes)
+    _Atomic(uint16_t) level;           // B+tree level: 1 = leaf, > 1 = internal
+    uint32_t node_size;                // Configurable max size in bytes
+    vec_t(bnode_entry_t) entries;      // Sorted by chunk key
     _Atomic(uint64_t) seq;             // Seqlock: even=stable, odd=writing
     PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
-
-    uint32_t node_size;               // Configurable max size in bytes
-    uint16_t level;                   // B+tree level: 1 = leaf, > 1 = internal
-
-    vec_t(bnode_entry_t) entries;     // Sorted by chunk key
 } bnode_t;
 
 /**
@@ -226,6 +242,41 @@ int bnode_entry_compare(bnode_entry_t* a, chunk_t* key);
  * @return First key in the node (borrowed reference, do not free)
  */
 chunk_t* bnode_get_min_key(bnode_t* node);
+
+// ============================================================================
+// Inline Key Management Functions
+// ============================================================================
+
+/**
+ * Set the key on a bnode entry, copying data inline if possible.
+ *
+ * Copies key data into key_data[] if key->size <= BNODE_INLINE_KEY_SIZE.
+ * Always stores a reference to the chunk_t via chunk_share().
+ *
+ * @param entry  Entry to set key on
+ * @param key    Chunk key (shared via chunk_share)
+ */
+void bnode_entry_set_key(bnode_entry_t* entry, chunk_t* key);
+
+/**
+ * Get the chunk_t key reference from a bnode entry.
+ *
+ * Always returns the chunk_t* reference, regardless of whether
+ * the key data is stored inline or not.
+ *
+ * @param entry  Entry to get key from
+ * @return Chunk key reference
+ */
+chunk_t* bnode_entry_get_key(bnode_entry_t* entry);
+
+/**
+ * Destroy the key reference on a bnode entry.
+ *
+ * Calls chunk_destroy on the key reference. Does not modify key_data[].
+ *
+ * @param entry  Entry to destroy key on
+ */
+void bnode_entry_destroy_key(bnode_entry_t* entry);
 
 /**
  * Insert a child pointer entry into a B+tree node.

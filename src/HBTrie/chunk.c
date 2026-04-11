@@ -120,3 +120,35 @@ const void* chunk_data_const(const chunk_t* chunk) {
   if (chunk == NULL) return NULL;
   return chunk->data;
 }
+
+int inline_key_compare(const uint8_t* key_data, uint8_t key_len, const chunk_t* chunk) {
+  if (key_data == NULL && chunk == NULL) return 0;
+  if (key_data == NULL) return -1;
+  if (chunk == NULL) return 1;
+
+  size_t chunk_len = chunk->size;
+  size_t min_len = (size_t)key_len < chunk_len ? (size_t)key_len : chunk_len;
+
+  int cmp = memcmp(key_data, chunk->data, min_len);
+  if (cmp != 0) return cmp;
+
+  if ((size_t)key_len < chunk_len) return -1;
+  if ((size_t)key_len > chunk_len) return 1;
+  return 0;
+}
+
+int inline_key_compare_direct(const uint8_t* a_data, uint8_t a_len,
+                              const uint8_t* b_data, uint8_t b_len) {
+  if (a_data == NULL && b_data == NULL) return 0;
+  if (a_data == NULL) return -1;
+  if (b_data == NULL) return 1;
+
+  size_t min_len = (size_t)a_len < (size_t)b_len ? (size_t)a_len : (size_t)b_len;
+
+  int cmp = memcmp(a_data, b_data, min_len);
+  if (cmp != 0) return cmp;
+
+  if ((size_t)a_len < (size_t)b_len) return -1;
+  if ((size_t)a_len > (size_t)b_len) return 1;
+  return 0;
+}

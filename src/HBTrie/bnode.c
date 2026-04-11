@@ -24,13 +24,18 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   }
 
   bnode_t* node = memory_pool_alloc(sizeof(bnode_t));
-  node->node_size = node_size;
-  node->level = level;
-  vec_init(&node->entries);
+  if (node == NULL) return NULL;
 
-  refcounter_init((refcounter_t*)node);
+  // Zero-initialize the struct, then properly init atomic/lock fields
+  memset(node, 0, sizeof(bnode_t));
+
+  // Initialize fields that need proper initialization (not just zero)
+  atomic_init(&node->level, level);
+  node->node_size = node_size;
+  vec_init(&node->entries);
   atomic_init(&node->seq, 0);
   platform_lock_init(&node->write_lock);
+  refcounter_init((refcounter_t*)node);
 
   return node;
 }
@@ -45,9 +50,7 @@ void bnode_destroy(bnode_t* node) {
     // Free all entries
     for (int i = 0; i < node->entries.length; i++) {
       bnode_entry_t* entry = &node->entries.data[i];
-      if (entry->key != NULL) {
-        chunk_destroy(entry->key);
-      }
+      bnode_entry_destroy_key(entry);
       if (entry->has_value) {
         if (entry->has_versions && entry->versions != NULL) {
           // MVCC: destroy version chain
@@ -83,7 +86,7 @@ void bnode_destroy_tree(bnode_t* root) {
   if (root == NULL) return;
 
   // For internal nodes, recursively destroy child bnodes first
-  if (root->level > 1) {
+  if (atomic_load(&root->level) > 1) {
     for (int i = 0; i < root->entries.length; i++) {
       bnode_entry_t* entry = &root->entries.data[i];
       if (entry->is_bnode_child && entry->child_bnode != NULL) {
@@ -97,7 +100,7 @@ void bnode_destroy_tree(bnode_t* root) {
   bnode_destroy(root);
 }
 
-// Binary search for key position
+// Binary search for key position using inline key comparison
 static size_t bnode_search(bnode_t* node, chunk_t* key) {
   if (node->entries.length == 0) return 0;
 
@@ -107,7 +110,14 @@ static size_t bnode_search(bnode_t* node, chunk_t* key) {
   while (lo < hi) {
     size_t mid = lo + (hi - lo) / 2;
     bnode_entry_t* entry = &node->entries.data[mid];
-    int cmp = chunk_compare(entry->key, key);
+
+    // Use inline key comparison for fast path (no pointer chase)
+    int cmp;
+    if (entry->key_len > 0 && entry->key_len <= BNODE_INLINE_KEY_SIZE) {
+      cmp = inline_key_compare(entry->key_data, entry->key_len, key);
+    } else {
+      cmp = chunk_compare(entry->key, key);
+    }
 
     if (cmp < 0) {
       lo = mid + 1;
@@ -132,7 +142,14 @@ bnode_entry_t* bnode_find(bnode_t* node, chunk_t* key, size_t* out_index) {
   // Check if found
   if (index < (size_t)node->entries.length) {
     bnode_entry_t* entry = &node->entries.data[index];
-    if (chunk_compare(entry->key, key) == 0) {
+    // Use inline key comparison for final check
+    int cmp;
+    if (entry->key_len > 0 && entry->key_len <= BNODE_INLINE_KEY_SIZE) {
+      cmp = inline_key_compare(entry->key_data, entry->key_len, key);
+    } else {
+      cmp = chunk_compare(entry->key, key);
+    }
+    if (cmp == 0) {
       return entry;
     }
   }
@@ -145,7 +162,7 @@ bnode_t* bnode_descend(bnode_t* root, chunk_t* key) {
 
   bnode_t* current = root;
 
-  while (current->level > 1) {
+  while (atomic_load(&current->level) > 1) {
     size_t index;
     bnode_entry_t* entry = bnode_find(current, key, &index);
 
@@ -197,7 +214,7 @@ int bnode_insert_bnode_child(bnode_t* parent, chunk_t* key, bnode_t* child) {
   }
 
   bnode_entry_t entry = {0};
-  entry.key = chunk_share(key);
+  bnode_entry_set_key(&entry, key);
   entry.child_bnode = child;
   entry.has_value = 0;
   entry.is_bnode_child = 1;
@@ -208,11 +225,9 @@ int bnode_insert_bnode_child(bnode_t* parent, chunk_t* key, bnode_t* child) {
 int bnode_insert(bnode_t* node, bnode_entry_t* entry) {
   if (node == NULL || entry == NULL) return -1;
 
-  // Find insertion point
-  size_t index = bnode_search(node, entry->key);
-
-  // Reference the key
-  // Note: entry->key should already be allocated; we take ownership
+  // Find insertion point using the entry's key
+  chunk_t* key = bnode_entry_get_key(entry);
+  size_t index = bnode_search(node, key);
 
   // Insert into vector
   return vec_insert(&node->entries, (int)index, *entry);
@@ -262,7 +277,7 @@ int bnode_is_empty(bnode_t* node) {
 int bnode_tree_is_empty(bnode_t* root) {
   if (root == NULL) return 1;
 
-  if (root->level == 1) {
+  if (atomic_load(&root->level) == 1) {
     // Leaf bnode - check directly
     return root->entries.length == 0;
   }
@@ -291,8 +306,9 @@ size_t bnode_size(bnode_t* node, uint8_t chunk_size) {
     bnode_entry_t* entry = &node->entries.data[i];
     size += sizeof(bnode_entry_t);
     // Chunk: struct + inline data
-    if (entry->key != NULL) {
-      size += sizeof(chunk_t) + entry->key->size;
+    chunk_t* key = bnode_entry_get_key(entry);
+    if (key != NULL) {
+      size += sizeof(chunk_t) + key->size;
     }
   }
 
@@ -325,11 +341,12 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
   bnode_entry_t* mid_entry = &node->entries.data[mid];
 
   // COPY the split key (it will still be used in right node)
-  *split_key = chunk_create(chunk_data_const(mid_entry->key), mid_entry->key->size);
+  chunk_t* mid_key = bnode_entry_get_key(mid_entry);
+  *split_key = chunk_create(chunk_data_const(mid_key), mid_key->size);
   if (*split_key == NULL) return -1;
 
   // Create right node (inherit level from parent)
-  bnode_t* right = bnode_create_with_level(node->node_size, node->level);
+  bnode_t* right = bnode_create_with_level(node->node_size, atomic_load(&node->level));
   if (right == NULL) {
     chunk_destroy(*split_key);
     *split_key = NULL;
@@ -354,6 +371,10 @@ int bnode_entry_compare(bnode_entry_t* a, chunk_t* key) {
   if (a == NULL && key == NULL) return 0;
   if (a == NULL) return -1;
   if (key == NULL) return 1;
+  // Use inline key comparison for fast path
+  if (a->key_len > 0 && a->key_len <= BNODE_INLINE_KEY_SIZE) {
+    return inline_key_compare(a->key_data, a->key_len, key);
+  }
   return chunk_compare(a->key, key);
 }
 
@@ -361,7 +382,7 @@ chunk_t* bnode_get_min_key(bnode_t* node) {
   if (node == NULL || node->entries.length == 0) {
     return NULL;
   }
-  return node->entries.data[0].key;
+  return bnode_entry_get_key(&node->entries.data[0]);
 }
 
 int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* child) {
@@ -370,7 +391,7 @@ int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* chil
   }
 
   bnode_entry_t entry = {0};
-  entry.key = chunk_share(key);  // Share the key
+  bnode_entry_set_key(&entry, key);
   entry.child = child;
   entry.has_value = 0;
 
@@ -574,4 +595,50 @@ const size_t* bnode_entry_get_path_chunk_counts(const bnode_entry_t* entry,
   }
 
   return entry->path_chunk_counts.data;
+}
+
+// ============================================================================
+// Inline Key Management Functions
+// ============================================================================
+
+void bnode_entry_set_key(bnode_entry_t* entry, chunk_t* key) {
+  if (entry == NULL) return;
+
+  if (key == NULL) {
+    entry->key = NULL;
+    entry->key_len = 0;
+    memset(entry->key_data, 0, BNODE_INLINE_KEY_SIZE);
+    return;
+  }
+
+  // Always store the chunk_t* reference for non-comparison uses
+  entry->key = chunk_share(key);
+  entry->key_len = (uint8_t)key->size;
+
+  // Copy key data inline if it fits
+  if (key->size <= BNODE_INLINE_KEY_SIZE) {
+    memcpy(entry->key_data, key->data, key->size);
+    // Zero remaining bytes for clean comparison
+    if (key->size < BNODE_INLINE_KEY_SIZE) {
+      memset(entry->key_data + key->size, 0, BNODE_INLINE_KEY_SIZE - key->size);
+    }
+  } else {
+    // Key too large for inline storage - will use key pointer for comparison
+    memset(entry->key_data, 0, BNODE_INLINE_KEY_SIZE);
+  }
+}
+
+chunk_t* bnode_entry_get_key(bnode_entry_t* entry) {
+  if (entry == NULL) return NULL;
+  return entry->key;
+}
+
+void bnode_entry_destroy_key(bnode_entry_t* entry) {
+  if (entry == NULL) return;
+  if (entry->key != NULL) {
+    chunk_destroy(entry->key);
+    entry->key = NULL;
+  }
+  entry->key_len = 0;
+  memset(entry->key_data, 0, BNODE_INLINE_KEY_SIZE);
 }

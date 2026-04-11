@@ -34,7 +34,7 @@ static bnode_t* btree_descend_with_path(bnode_t* root, chunk_t* key, btree_path_
 
   bnode_t* current = root;
 
-  while (current->level > 1) {
+  while (atomic_load(&current->level) > 1) {
     if (path && path->count < MAX_BTREE_HEIGHT) {
       path->nodes[path->count++] = current;
     }
@@ -125,7 +125,7 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   bnode_t* old_root = hb_node->btree;
 
   bnode_t* new_root = bnode_create_with_level(hb_node->btree->node_size,
-                                               old_root->level + 1);
+                                               atomic_load(&old_root->level) + 1);
   if (new_root == NULL) {
     // Failed to create new root - undo the split
     // The old root and current_right are valid, just oversized
@@ -138,7 +138,7 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   bnode_entry_t* left_first = bnode_get(old_root, 0);
   if (left_first != NULL) {
     bnode_entry_t left_entry = {0};
-    left_entry.key = chunk_share(left_first->key);
+    bnode_entry_set_key(&left_entry, bnode_entry_get_key(left_first));
     left_entry.is_bnode_child = 1;
     left_entry.child_bnode = old_root;
     left_entry.has_value = 0;
@@ -146,7 +146,8 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   }
 
   bnode_entry_t right_entry = {0};
-  right_entry.key = current_split_key != split_key ? current_split_key : chunk_share(split_key);
+  chunk_t* right_key = current_split_key != split_key ? current_split_key : chunk_share(split_key);
+  bnode_entry_set_key(&right_entry, right_key);
   right_entry.is_bnode_child = 1;
   right_entry.child_bnode = current_right;
   right_entry.has_value = 0;
@@ -154,7 +155,7 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
 
   // Update the hbtrie_node
   hb_node->btree = new_root;
-  hb_node->btree_height = old_root->level + 1;
+  hb_node->btree_height = atomic_load(&old_root->level) + 1;
 
   if (current_split_key != split_key) {
     // current_split_key was already consumed by the new root entry
@@ -196,7 +197,7 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     // Leaf IS the root - create a new root
     bnode_t* old_root = hb_node->btree;
     bnode_t* new_root = bnode_create_with_level(old_root->node_size,
-                                                  old_root->level + 1);
+                                                  atomic_load(&old_root->level) + 1);
     if (new_root == NULL) {
       chunk_destroy(split_key);
       bnode_destroy_tree(right_bnode);
@@ -207,7 +208,7 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     bnode_entry_t* left_first = bnode_get(old_root, 0);
     if (left_first != NULL) {
       bnode_entry_t left_entry = {0};
-      left_entry.key = chunk_share(left_first->key);
+      bnode_entry_set_key(&left_entry, bnode_entry_get_key(left_first));
       left_entry.is_bnode_child = 1;
       left_entry.child_bnode = old_root;
       left_entry.has_value = 0;
@@ -216,14 +217,14 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
 
     // Add right child
     bnode_entry_t right_entry = {0};
-    right_entry.key = split_key;  // Take ownership
+    bnode_entry_set_key(&right_entry, split_key);
     right_entry.is_bnode_child = 1;
     right_entry.child_bnode = right_bnode;
     right_entry.has_value = 0;
     bnode_insert(new_root, &right_entry);
 
     hb_node->btree = new_root;
-    hb_node->btree_height = old_root->level + 1;
+    hb_node->btree_height = atomic_load(&old_root->level) + 1;
   } else {
     // Insert into parent and propagate
     btree_propagate_split(hb_node, bnode_path, split_key, right_bnode, chunk_size);
@@ -371,14 +372,14 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
 static bnode_t* bnode_tree_copy(bnode_t* root) {
   if (root == NULL) return NULL;
 
-  bnode_t* copy = bnode_create_with_level(root->node_size, root->level);
+  bnode_t* copy = bnode_create_with_level(root->node_size, atomic_load(&root->level));
   if (copy == NULL) return NULL;
 
   for (int i = 0; i < root->entries.length; i++) {
     bnode_entry_t* entry = &root->entries.data[i];
     bnode_entry_t new_entry = {0};
 
-    new_entry.key = chunk_share(entry->key);
+    bnode_entry_set_key(&new_entry, bnode_entry_get_key(entry));
     new_entry.has_value = entry->has_value;
     new_entry.is_bnode_child = entry->is_bnode_child;
     new_entry.has_versions = entry->has_versions;
@@ -538,7 +539,7 @@ chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor) {
   bnode_entry_t* entry = bnode_get(cursor->current->btree, cursor->chunk_pos);
   if (entry == NULL) return NULL;
 
-  return entry->key;
+  return bnode_entry_get_key(entry);
 }
 
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
@@ -563,7 +564,7 @@ static cbor_item_t* bnode_to_cbor(bnode_t* root) {
   if (result == NULL) return NULL;
 
   // Level
-  cbor_item_t* level = cbor_build_uint16(root->level);
+  cbor_item_t* level = cbor_build_uint16(atomic_load(&root->level));
   cbor_array_push(result, level);
   cbor_decref(&level);
 
@@ -585,8 +586,9 @@ static cbor_item_t* bnode_to_cbor(bnode_t* root) {
     }
 
     // Key as byte string
+    chunk_t* key = bnode_entry_get_key(entry);
     cbor_item_t* key_bstr = cbor_build_bytestring(
-        chunk_data_const(entry->key), entry->key->size);
+        chunk_data_const(key), key->size);
     cbor_array_push(entry_item, key_bstr);
     cbor_decref(&key_bstr);
 
@@ -805,14 +807,16 @@ static bnode_t* cbor_to_bnode(cbor_item_t* item, uint32_t btree_node_size) {
       bnode_destroy_tree(node);
       return NULL;
     }
-    entry.key = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
+    chunk_t* chunk_key = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
     cbor_decref(&key_item);
-    if (entry.key == NULL) {
+    if (chunk_key == NULL) {
       cbor_decref(&entry_item);
       cbor_decref(&entries_item);
       bnode_destroy_tree(node);
       return NULL;
     }
+    bnode_entry_set_key(&entry, chunk_key);
+    chunk_destroy(chunk_key);  // set_key shares the reference
 
     // has_value
     cbor_item_t* has_value_item = cbor_array_get(entry_item, 1);
@@ -999,13 +1003,15 @@ static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node
       hbtrie_node_destroy(node);
       return NULL;
     }
-    entry.key = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
+    chunk_t* chunk_key2 = chunk_create(cbor_bytestring_handle(key_item), cbor_bytestring_length(key_item));
     cbor_decref(&key_item);
-    if (entry.key == NULL) {
+    if (chunk_key2 == NULL) {
       cbor_decref(&entry_item);
       hbtrie_node_destroy(node);
       return NULL;
     }
+    bnode_entry_set_key(&entry, chunk_key2);
+    chunk_destroy(chunk_key2);  // set_key shares the reference
 
     // has_value
     cbor_item_t* has_value_item = cbor_array_get(entry_item, 1);
@@ -1474,14 +1480,14 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           log_info("MVCC: Creating NEW entry for path (txn=%lu.%09lu.%lu)",
                   txn_id.time, txn_id.nanos, txn_id.count);
           bnode_entry_t new_entry = {0};
-          new_entry.key = chunk_share(chunk);
+          bnode_entry_set_key(&new_entry, chunk);
           new_entry.has_value = 1;
           new_entry.has_versions = 0;  // Legacy mode for first value
           new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)value);
           new_entry.value_txn_id = txn_id;  // Store transaction ID
 
           if (bnode_insert(leaf, &new_entry) != 0) {
-            chunk_destroy(new_entry.key);
+            bnode_entry_destroy_key(&new_entry);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             platform_unlock(&current->write_lock);
             vec_deinit(&path_stack);
@@ -1591,12 +1597,12 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
 
           bnode_entry_t new_entry = {0};
-          new_entry.key = chunk_share(chunk);
+          bnode_entry_set_key(&new_entry, chunk);
           new_entry.has_value = 0;
           new_entry.child = child;
 
           if (bnode_insert(leaf, &new_entry) != 0) {
-            chunk_destroy(new_entry.key);
+            bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             platform_unlock(&current->write_lock);
@@ -1655,12 +1661,12 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
 
           bnode_entry_t new_entry = {0};
-          new_entry.key = chunk_share(chunk);
+          bnode_entry_set_key(&new_entry, chunk);
           new_entry.has_value = 0;
           new_entry.child = child;
 
           if (bnode_insert(leaf, &new_entry) != 0) {
-            chunk_destroy(new_entry.key);
+            bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             platform_unlock(&current->write_lock);

@@ -109,6 +109,31 @@ void* chunk_data(chunk_t* chunk);
  */
 const void* chunk_data_const(const chunk_t* chunk);
 
+/**
+ * Compare inline key data against a chunk.
+ *
+ * Fast comparison that avoids dereferencing the chunk_t for the entry key.
+ * Used during binary search where entry keys are stored inline.
+ *
+ * @param key_data  Inline key data bytes
+ * @param key_len   Length of inline key data
+ * @param chunk     Chunk to compare against
+ * @return <0 if key_data < chunk, 0 if equal, >0 if key_data > chunk
+ */
+int inline_key_compare(const uint8_t* key_data, uint8_t key_len, const chunk_t* chunk);
+
+/**
+ * Compare two inline key data buffers directly.
+ *
+ * @param a_data  First key data
+ * @param a_len   First key length
+ * @param b_data  Second key data
+ * @param b_len   Second key length
+ * @return <0 if a < b, 0 if equal, >0 if a > b
+ */
+int inline_key_compare_direct(const uint8_t* a_data, uint8_t a_len,
+                              const uint8_t* b_data, uint8_t b_len);
+
 #ifdef __cplusplus
 }
 #endif

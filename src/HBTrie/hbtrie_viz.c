@@ -393,7 +393,7 @@ static int serialize_bnode(bnode_t* bnode, FILE* fp, uint8_t chunk_size, size_t*
         fprintf(fp, "      {\n");
 
         // Key (chunk) as hex
-        char* key_hex = chunk_to_hex(entry->key);
+        char* key_hex = chunk_to_hex(bnode_entry_get_key(entry));
         fprintf(fp, "        \"key_hex\": \"%s\",\n", key_hex ? key_hex : "");
         free(key_hex);
 

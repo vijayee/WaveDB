@@ -31,8 +31,11 @@ void bs_array_destroy(bs_array_t* arr) {
   free(arr);
 }
 
-// Compare entry key to a chunk
+// Compare entry key to a chunk using inline key comparison
 static int bs_array_entry_cmp(bnode_entry_t* entry, chunk_t* key) {
+  if (entry->key_len > 0 && entry->key_len <= BNODE_INLINE_KEY_SIZE) {
+    return inline_key_compare(entry->key_data, entry->key_len, key);
+  }
   return chunk_compare(entry->key, key);
 }
 
@@ -81,8 +84,9 @@ bnode_entry_t* bs_array_find(bs_array_t* arr, chunk_t* key, size_t* out_index) {
 int bs_array_insert(bs_array_t* arr, bnode_entry_t* entry) {
   if (arr == NULL || entry == NULL) return -1;
 
-  // Find insertion point
-  size_t index = bs_array_search(arr, entry->key);
+  // Find insertion point using entry key
+  chunk_t* key = bnode_entry_get_key(entry);
+  size_t index = bs_array_search(arr, key);
 
   // Grow array if needed
   if (arr->count >= arr->capacity) {

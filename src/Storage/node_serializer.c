@@ -6,6 +6,7 @@
 #include "../HBTrie/identifier.h"
 #include "../Util/allocator.h"
 #include <string.h>
+#include <stdatomic.h>
 #include <arpa/inet.h>  // For htonl/ntohl
 
 // Helper: write uint16_t in network byte order
@@ -252,7 +253,7 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
     write_uint8(&ptr, BNODE_SERIALIZE_MAGIC);
 
     // Write level
-    write_uint16(&ptr, node->level);
+    write_uint16(&ptr, atomic_load(&node->level));
 
     // Write number of entries
     write_uint16(&ptr, (uint16_t)node->entries.length);
@@ -262,8 +263,9 @@ int bnode_serialize(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* le
         bnode_entry_t* entry = &node->entries.data[i];
 
         // Write chunk
-        if (entry->key != NULL) {
-            write_bytes(&ptr, entry->key->data, chunk_size);
+        chunk_t* key = bnode_entry_get_key(entry);
+        if (key != NULL) {
+            write_bytes(&ptr, key->data, chunk_size);
         } else {
             memset(ptr, 0, chunk_size);
             ptr += chunk_size;
@@ -399,8 +401,8 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
         // Read chunk
         uint8_t* chunk_buf = get_memory(chunk_size);
         read_bytes(&ptr, chunk_buf, chunk_size);
-        entry.key = chunk_deserialize(chunk_buf, chunk_size);
-        if (entry.key == NULL) {
+        chunk_t* key = chunk_deserialize(chunk_buf, chunk_size);
+        if (key == NULL) {
             free(chunk_buf);
             bnode_destroy(node);
             free(*locations);
@@ -408,6 +410,8 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
             *num_locations = 0;
             return NULL;
         }
+        bnode_entry_set_key(&entry, key);
+        chunk_destroy(key);  // set_key shares the reference
         free(chunk_buf);
 
         if (is_new_format) {
@@ -441,7 +445,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                             buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
                             if (data_buf == NULL) {
                                 free(ident_buf);
-                                chunk_destroy(entry.key);
+                                bnode_entry_destroy_key(&entry);
                                 bnode_destroy_tree(node);
                                 free(*locations);
                                 *locations = NULL;
@@ -452,7 +456,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                             val = identifier_create(data_buf, chunk_size);
                             if (val == NULL) {
                                 buffer_destroy(data_buf);
-                                chunk_destroy(entry.key);
+                                bnode_entry_destroy_key(&entry);
                                 bnode_destroy_tree(node);
                                 free(*locations);
                                 *locations = NULL;
@@ -464,7 +468,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                         version_entry_t* version = version_entry_create(txn_id, val, is_deleted);
                         if (version == NULL) {
                             if (val != NULL) identifier_destroy(val);
-                            chunk_destroy(entry.key);
+                            bnode_entry_destroy_key(&entry);
                             bnode_destroy_tree(node);
                             free(*locations);
                             *locations = NULL;
@@ -493,7 +497,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                         buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
                         if (data_buf == NULL) {
                             free(ident_buf);
-                            chunk_destroy(entry.key);
+                            bnode_entry_destroy_key(&entry);
                             bnode_destroy(node);
                             free(*locations);
                             *locations = NULL;
@@ -504,7 +508,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                         entry.value = identifier_create(data_buf, chunk_size);
                         if (entry.value == NULL) {
                             buffer_destroy(data_buf);
-                            chunk_destroy(entry.key);
+                            bnode_entry_destroy_key(&entry);
                             bnode_destroy(node);
                             free(*locations);
                             *locations = NULL;
@@ -547,7 +551,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                     buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
                     if (data_buf == NULL) {
                         free(ident_buf);
-                        chunk_destroy(entry.key);
+                        bnode_entry_destroy_key(&entry);
                         bnode_destroy(node);
                         free(*locations);
                         *locations = NULL;
@@ -558,7 +562,7 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                     entry.value = identifier_create(data_buf, chunk_size);
                     if (entry.value == NULL) {
                         buffer_destroy(data_buf);
-                        chunk_destroy(entry.key);
+                        bnode_entry_destroy_key(&entry);
                         bnode_destroy(node);
                         free(*locations);
                         *locations = NULL;
