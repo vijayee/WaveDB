@@ -288,22 +288,22 @@ WaveDB supports three durability/performance trade-offs:
 
 ### Single-Threaded Operations (DEBOUNCED mode)
 
-| Operation | Throughput | Avg Latency | P99 Latency |
-|-----------|------------|-------------|-------------|
-| Put (single) | 36K ops/sec | 27 µs | 53 µs |
-| Get (single) | 71K ops/sec | 14 µs | 113 µs |
-| Batch (1K ops) | 28K ops/sec | 36 µs | 89 µs |
-| Mixed (70% read) | 51K ops/sec | 20 µs | 66 µs |
-| Delete | 33K ops/sec | 31 µs | 83 µs |
+| Operation | Throughput | Avg Latency |
+|-----------|------------|-------------|
+| Put (single) | 84K ops/sec | 12 µs |
+| Get (single) | 2.2M ops/sec | 0.5 µs |
+| Batch (1K ops) | 70K ops/sec | 14 µs |
+| Mixed (70% read) | 2.3M ops/sec | 0.4 µs |
+| Delete | 167K ops/sec | 6 µs |
 
 ### Concurrent Operations (DEBOUNCED mode)
 
 | Threads | Write | Read | Mixed |
 |---------|-------|------|-------|
-| 1 | 27K ops/sec | 112K ops/sec | 50K ops/sec |
+| 1 | 33K ops/sec | 138K ops/sec | 97K ops/sec |
 | 4 | 148K ops/sec | 191K ops/sec | 148K ops/sec |
-| 8 | 149K ops/sec | 210K ops/sec | 142K ops/sec |
 | 16 | 200K ops/sec | 209K ops/sec | 158K ops/sec |
+| 32 | 278K ops/sec | 454K ops/sec | 355K ops/sec |
 
 ### ASYNC Mode (No fsync)
 
@@ -324,7 +324,8 @@ For maximum performance when durability is not critical:
 ### Performance Features
 
 - **Memory Pool**: Thread-local caches for lock-free allocation of hot path objects
-- **Sharded LRU Cache**: 16-way sharded cache reduces lock contention for concurrent reads
+- **Inline Key Comparison**: Cache-line-aware B+tree entry layout with inline keys eliminates pointer chasing during binary search
+- **Sharded LRU Cache**: 64-way sharded cache reduces lock contention for concurrent reads
 - **MVCC Fast-Path**: 90%+ visibility check hit rate for lock-free reads
 - **Fragment Re-sorting**: Maintains O(log n) lookup after partial allocations
 - **Cached Debug Flags**: Environment variable checks cached at first use (no per-call overhead)

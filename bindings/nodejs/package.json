@@ -1,6 +1,6 @@
 {
   "name": "@vijayee/wavedb",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Node.js bindings for WaveDB - Hierarchical B+Trie Database",
   "main": "lib/wavedb.js",
   "author": "Victor Morrow <victor.j.morrow@gmail.com>",
