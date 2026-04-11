@@ -49,6 +49,7 @@ typedef struct version_entry_t {
  * per identifier in the path, enabling path reconstruction during iteration.
  */
 typedef struct bnode_entry_t {
+    // Hot fields: accessed during binary search and MVCC visibility checks
     chunk_t* key;                      // Single chunk for comparison
     union {
         struct hbtrie_node_t* child;   // Next HBTrie node (if has_value == 0, is_bnode_child == 0)
@@ -60,6 +61,7 @@ typedef struct bnode_entry_t {
     uint8_t has_versions;               // 1 if version chain present, 0 for legacy single value
     uint8_t is_bnode_child;             // 1 when entry points to child bnode (internal B+tree node)
 
+    // Cold fields: accessed during iteration, serialization, and lazy loading
     // Transactexition ID for legacy mode (valid when has_value == 1 and has_versions == 0)
     transaction_id_t value_txn_id;
 
