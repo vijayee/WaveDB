@@ -46,6 +46,17 @@ Iterator::Iterator(const Napi::CallbackInfo& info)
   Napi::External<database_t> dbExternal = info[0].As<Napi::External<database_t>>();
   db_ = dbExternal.Data();
 
+  // Hold a reference on the database to prevent destruction while iterating
+  if (db_) {
+    REFERENCE(db_, database_t);
+  }
+
+  // Get the JS WaveDB object (info.This() is the Iterator, but we need the
+  // database wrapper). The database JS object was passed as info[2].
+  if (info.Length() >= 3 && info[2].IsObject()) {
+    databaseRef_ = Napi::Persistent(info[2].As<Napi::Object>());
+  }
+
   // Parse options
   Napi::Object options = info[1].As<Napi::Object>();
 
@@ -121,12 +132,22 @@ Iterator::~Iterator() {
     database_scan_end(scan_handle_);
     scan_handle_ = nullptr;
   }
+
+  // Release database reference
+  if (db_) {
+    DEREFERENCE(db_);
+    db_ = nullptr;
+  }
+
+  // Release JS object reference
+  databaseRef_.Reset();
 }
 
 Napi::Value Iterator::Read(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (ended_ || !scan_handle_) {
+  if (ended_ || !scan_handle_ || !db_) {
+    ended_ = true;
     return env.Null();
   }
 
@@ -136,8 +157,17 @@ Napi::Value Iterator::Read(const Napi::CallbackInfo& info) {
   int result = database_scan_next(scan_handle_, &out_path, &out_value);
 
   if (result != 0) {
-    // End of iteration or error
+    // End of iteration or error — release database reference
     ended_ = true;
+    if (scan_handle_) {
+      database_scan_end(scan_handle_);
+      scan_handle_ = nullptr;
+    }
+    if (db_) {
+      DEREFERENCE(db_);
+      db_ = nullptr;
+      databaseRef_.Reset();
+    }
     return env.Null();
   }
 
@@ -173,6 +203,13 @@ Napi::Value Iterator::End(const Napi::CallbackInfo& info) {
   if (scan_handle_) {
     database_scan_end(scan_handle_);
     scan_handle_ = nullptr;
+  }
+
+  // Release database reference when scan ends
+  if (db_) {
+    DEREFERENCE(db_);
+    db_ = nullptr;
+    databaseRef_.Reset();
   }
 
   return info.Env().Undefined();

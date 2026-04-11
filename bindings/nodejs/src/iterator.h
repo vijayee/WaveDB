@@ -18,6 +18,7 @@ private:
   Napi::Value Read(const Napi::CallbackInfo& info);
   Napi::Value End(const Napi::CallbackInfo& info);
 
+  Napi::ObjectReference databaseRef_;  // Keeps JS WaveDB object alive
   database_t* db_;
   std::string start_;
   std::string end_;

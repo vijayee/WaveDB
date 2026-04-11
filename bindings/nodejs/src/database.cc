@@ -1092,9 +1092,10 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
     options = info[0].As<Napi::Object>();
   }
 
-  // Pass database pointer as External and options
+  // Pass database pointer as External, options, and the JS WaveDB object
+  // so the Iterator can hold a persistent reference to prevent GC
   Napi::External<database_t> dbExternal = Napi::External<database_t>::New(env, db_);
-  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options });
+  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, Value() });
 
   return iterObj;
 }
