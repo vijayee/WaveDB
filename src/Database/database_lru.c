@@ -5,6 +5,7 @@
 #include "database_lru.h"
 #include "database.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include "../Util/hash.h"
 #include <stdlib.h>
 #include <string.h>
@@ -105,7 +106,7 @@ static size_t calculate_entry_memory(path_t* path, identifier_t* value) {
 
 // Create a new LRU node
 static database_lru_node_t* lru_node_create(path_t* path, identifier_t* value) {
-    database_lru_node_t* node = get_clear_memory(sizeof(database_lru_node_t));
+    database_lru_node_t* node = memory_pool_alloc(sizeof(database_lru_node_t));
     if (node == NULL) return NULL;
 
     node->path = path;
@@ -127,7 +128,7 @@ static void lru_node_destroy(database_lru_node_t* node) {
     if (node->value != NULL) {
         identifier_destroy(node->value);
     }
-    free(node);
+    memory_pool_free(node, sizeof(database_lru_node_t));
 }
 
 // Move node to front of LRU list (most recently used)
@@ -190,7 +191,7 @@ static identifier_t* lru_evict(database_lru_shard_t* shard) {
 
     // Free path and node
     path_destroy(node->path);
-    free(node);
+    memory_pool_free(node, sizeof(database_lru_node_t));
 
     return value;
 }
@@ -263,7 +264,7 @@ void database_lru_cache_destroy(database_lru_cache_t* lru) {
             if (node->value != NULL) {
                 identifier_destroy(node->value);
             }
-            free(node);
+            memory_pool_free(node, sizeof(database_lru_node_t));
             node = next;
         }
 
@@ -453,7 +454,7 @@ void database_lru_cache_clear(database_lru_cache_t* lru) {
             if (node->value != NULL) {
                 identifier_destroy(node->value);
             }
-            free(node);
+            memory_pool_free(node, sizeof(database_lru_node_t));
             node = next;
         }
 

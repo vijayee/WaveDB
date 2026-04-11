@@ -7,6 +7,7 @@
 #include "mvcc.h"
 #include "bnode.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include "../Util/log.h"
 #include <string.h>
 #include <stdatomic.h>
@@ -83,7 +84,7 @@ void tx_manager_destroy(tx_manager_t* manager) {
 txn_desc_t* tx_manager_begin(tx_manager_t* manager) {
     if (manager == NULL) return NULL;
 
-    txn_desc_t* txn = get_clear_memory(sizeof(txn_desc_t));
+    txn_desc_t* txn = memory_pool_alloc(sizeof(txn_desc_t));
     if (txn == NULL) return NULL;
 
     // Get new transaction ID (thread-safe, doesn't need any lock)
@@ -314,7 +315,7 @@ void txn_desc_destroy(txn_desc_t* txn) {
     refcounter_dereference((refcounter_t*)txn);
     if (refcounter_count((refcounter_t*)txn) == 0) {
         platform_lock_destroy(&txn->lock);
-        free(txn);
+        memory_pool_free(txn, sizeof(txn_desc_t));
     }
 }
 

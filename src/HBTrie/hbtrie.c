@@ -6,6 +6,7 @@
 #include "mvcc.h"
 #include "bnode.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include "../Util/log.h"
 #include <cbor.h>
 #include <string.h>
@@ -285,11 +286,11 @@ void hbtrie_destroy(hbtrie_t* trie) {
 }
 
 hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
-  hbtrie_node_t* node = get_clear_memory(sizeof(hbtrie_node_t));
+  hbtrie_node_t* node = memory_pool_alloc(sizeof(hbtrie_node_t));
 
   node->btree = bnode_create(btree_node_size);
   if (node->btree == NULL) {
-    free(node);
+    memory_pool_free(node, sizeof(hbtrie_node_t));
     return NULL;
   }
   node->btree_height = 1;  // Single leaf bnode
@@ -356,7 +357,7 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
       }
       platform_lock_destroy(&current->write_lock);
       refcounter_destroy_lock((refcounter_t*)current);
-      free(current);
+      memory_pool_free(current, sizeof(hbtrie_node_t));
     }
 
     vec_deinit(&nodes);

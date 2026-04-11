@@ -8,6 +8,7 @@
 #include "chunk.h"
 #include "identifier.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include "../Util/log.h"
 #include <string.h>
 
@@ -22,7 +23,7 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
     node_size = DEFAULT_NODE_SIZE;
   }
 
-  bnode_t* node = get_clear_memory(sizeof(bnode_t));
+  bnode_t* node = memory_pool_alloc(sizeof(bnode_t));
   node->node_size = node_size;
   node->level = level;
   vec_init(&node->entries);
@@ -74,7 +75,7 @@ void bnode_destroy(bnode_t* node) {
     }
 
     vec_deinit(&node->entries);
-    free(node);
+    memory_pool_free(node, sizeof(bnode_t));
   }
 }
 
@@ -383,7 +384,7 @@ int bnode_insert_child(bnode_t* parent, chunk_t* key, struct hbtrie_node_t* chil
 version_entry_t* version_entry_create(transaction_id_t txn_id,
                                        identifier_t* value,
                                        uint8_t is_deleted) {
-  version_entry_t* entry = get_clear_memory(sizeof(version_entry_t));
+  version_entry_t* entry = memory_pool_alloc(sizeof(version_entry_t));
   if (entry == NULL) return NULL;
 
   entry->txn_id = txn_id;
@@ -414,7 +415,7 @@ void version_entry_destroy(version_entry_t* entry) {
       entry->prev->next = entry->next;
     }
 
-    free(entry);
+    memory_pool_free(entry, sizeof(version_entry_t));
   }
 }
 
