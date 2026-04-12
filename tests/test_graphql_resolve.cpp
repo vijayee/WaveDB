@@ -7,8 +7,10 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <sys/stat.h>
 #include "Layers/graphql/graphql.h"
+#include "Workers/pool.h"
 
 class GraphQLResolveTest : public ::testing::Test {
 protected:
@@ -323,4 +325,196 @@ TEST_F(GraphQLResolveTest, PartialSuccessDepthExceeded) {
 
     free((void*)json);
     graphql_result_destroy(result);
+}
+
+// ============================================================
+// Async query tests
+// ============================================================
+
+// Context struct passed through the promise callback
+struct AsyncTestContext {
+    graphql_result_t* result;
+    std::atomic<bool> resolved;
+    std::atomic<bool> rejected;
+};
+
+static void async_query_resolve(void* ctx, void* payload) {
+    auto* tc = static_cast<AsyncTestContext*>(ctx);
+    tc->result = static_cast<graphql_result_t*>(payload);
+    tc->resolved.store(true, std::memory_order_release);
+}
+
+static void async_query_reject(void* ctx, async_error_t* error) {
+    auto* tc = static_cast<AsyncTestContext*>(ctx);
+    tc->rejected.store(true, std::memory_order_release);
+    if (error) error_destroy(error);
+}
+
+class GraphQLAsyncTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_async";
+    graphql_layer_t* layer = nullptr;
+    graphql_layer_config_t* config = nullptr;
+
+    void SetUp() override {
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+
+        config = graphql_layer_config_default();
+        config->path = test_dir;
+        config->enable_persist = 1;
+        config->worker_threads = 2;
+
+        layer = graphql_layer_create(test_dir, config);
+        ASSERT_NE(layer, nullptr);
+
+        // Launch worker pool threads for async execution
+        if (layer->pool) {
+            work_pool_launch(layer->pool);
+        }
+
+        const char* sdl = "type User { name: String age: Int friends: [User] }";
+        int rc = graphql_schema_parse(layer, sdl);
+        ASSERT_EQ(rc, 0);
+    }
+
+    void TearDown() override {
+        if (layer) {
+            if (layer->pool) {
+                work_pool_shutdown(layer->pool);
+                work_pool_join_all(layer->pool);
+            }
+            graphql_layer_destroy(layer);
+        }
+        if (config) graphql_layer_config_destroy(config);
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+TEST_F(GraphQLAsyncTest, AsyncQuery) {
+    const char* query = "{ User { name } }";
+    AsyncTestContext ctx = {};
+    promise_t* promise = promise_create(async_query_resolve, async_query_reject, &ctx);
+    ASSERT_NE(promise, nullptr);
+
+    graphql_query(layer, query, promise, nullptr);
+
+    // Wait for the async callback (with timeout)
+    int max_wait = 100;
+    while (!ctx.resolved.load(std::memory_order_acquire) && !ctx.rejected.load(std::memory_order_acquire) && max_wait-- > 0) {
+        usleep(10000);
+    }
+
+    EXPECT_TRUE(ctx.resolved.load(std::memory_order_acquire));
+    EXPECT_FALSE(ctx.rejected.load(std::memory_order_acquire));
+    ASSERT_NE(ctx.result, nullptr);
+
+    const char* json = graphql_result_to_json(ctx.result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"data\":"), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(ctx.result);
+    promise_destroy(promise);
+}
+
+TEST_F(GraphQLAsyncTest, AsyncMutation) {
+    const char* mutation = "mutation { createUser(name: \"Alice\") { id name } }";
+    AsyncTestContext ctx = {};
+    promise_t* promise = promise_create(async_query_resolve, async_query_reject, &ctx);
+    ASSERT_NE(promise, nullptr);
+
+    graphql_mutate(layer, mutation, promise, nullptr);
+
+    int max_wait = 100;
+    while (!ctx.resolved.load(std::memory_order_acquire) && !ctx.rejected.load(std::memory_order_acquire) && max_wait-- > 0) {
+        usleep(10000);
+    }
+
+    EXPECT_TRUE(ctx.resolved.load(std::memory_order_acquire));
+    ASSERT_NE(ctx.result, nullptr);
+
+    const char* json = graphql_result_to_json(ctx.result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"id\":"), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(ctx.result);
+    promise_destroy(promise);
+}
+
+TEST_F(GraphQLAsyncTest, ConcurrentQueries) {
+    // Submit multiple queries concurrently and verify all complete
+    const char* query = "{ User { name } }";
+    AsyncTestContext ctx1 = {}, ctx2 = {}, ctx3 = {};
+    promise_t* p1 = promise_create(async_query_resolve, async_query_reject, &ctx1);
+    promise_t* p2 = promise_create(async_query_resolve, async_query_reject, &ctx2);
+    promise_t* p3 = promise_create(async_query_resolve, async_query_reject, &ctx3);
+    ASSERT_NE(p1, nullptr);
+    ASSERT_NE(p2, nullptr);
+    ASSERT_NE(p3, nullptr);
+
+    graphql_query(layer, query, p1, nullptr);
+    graphql_query(layer, query, p2, nullptr);
+    graphql_query(layer, query, p3, nullptr);
+
+    // Wait for all to resolve
+    int max_wait = 100;
+    while ((!ctx1.resolved.load(std::memory_order_acquire) || !ctx2.resolved.load(std::memory_order_acquire) || !ctx3.resolved.load(std::memory_order_acquire)) && max_wait-- > 0) {
+        usleep(10000);
+    }
+
+    EXPECT_TRUE(ctx1.resolved.load(std::memory_order_acquire));
+    EXPECT_TRUE(ctx2.resolved.load(std::memory_order_acquire));
+    EXPECT_TRUE(ctx3.resolved.load(std::memory_order_acquire));
+
+    ASSERT_NE(ctx1.result, nullptr);
+    ASSERT_NE(ctx2.result, nullptr);
+    ASSERT_NE(ctx3.result, nullptr);
+
+    graphql_result_destroy(ctx1.result);
+    graphql_result_destroy(ctx2.result);
+    graphql_result_destroy(ctx3.result);
+    promise_destroy(p1);
+    promise_destroy(p2);
+    promise_destroy(p3);
+}
+
+TEST_F(GraphQLAsyncTest, AsyncQueryAfterMutation) {
+    // First create a user synchronously
+    const char* create = "mutation { createUser(name: \"Bob\") { id name } }";
+    graphql_result_t* create_result = graphql_mutate_sync(layer, create);
+    ASSERT_NE(create_result, nullptr);
+    EXPECT_TRUE(create_result->success);
+    graphql_result_destroy(create_result);
+
+    // Then query asynchronously
+    const char* query = "{ User { name } }";
+    AsyncTestContext ctx = {};
+    promise_t* promise = promise_create(async_query_resolve, async_query_reject, &ctx);
+    ASSERT_NE(promise, nullptr);
+
+    graphql_query(layer, query, promise, nullptr);
+
+    int max_wait = 100;
+    while (!ctx.resolved.load(std::memory_order_acquire) && !ctx.rejected.load(std::memory_order_acquire) && max_wait-- > 0) {
+        usleep(10000);
+    }
+
+    EXPECT_TRUE(ctx.resolved.load(std::memory_order_acquire));
+    ASSERT_NE(ctx.result, nullptr);
+
+    const char* json = graphql_result_to_json(ctx.result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"data\":"), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(ctx.result);
+    promise_destroy(promise);
 }

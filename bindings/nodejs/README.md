@@ -308,19 +308,21 @@ npm run test:valgrind
 
 ## Architecture
 
-The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++ wrapper for N-API) with the AsyncWorker pattern for non-blocking operations.
+The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++ wrapper for N-API) with a `Napi::ThreadSafeFunction` bridge to the C `promise_t` and worker pool infrastructure for true async operations.
 
 **Key components:**
 - `binding.cpp`: Module initialization
-- `database.cc`: WaveDB class wrapper
+- `database.cc`: WaveDB class wrapper with async operations via C promise/pool
+- `async_bridge.cc`: ThreadSafeFunction + C promise_t bridge for async operations
 - `path.cc`: JavaScript ↔ path_t conversion
 - `identifier.cc`: JavaScript ↔ identifier_t conversion
-- `*_worker.cc`: Async workers for put/get/del/batch
 - `iterator.cc`: Stream iterator
+
+Async operations dispatch work to the C worker pool via `database_put`, `database_get`, `database_delete`, and `database_write_batch`, bridging C promise callbacks back to the Node.js main thread through `napi_threadsafe_function`.
 
 ## Performance
 
-Benchmarks run on Linux x86_64 with Node.js v20.5.1:
+Benchmarks run on Linux x86_64 with Node.js v24.14.1:
 
 ### Native C Library Performance
 
@@ -345,19 +347,16 @@ Benchmarks run on Linux x86_64 with Node.js v20.5.1:
 
 ### Node.js Bindings Performance
 
-Benchmarks run on Node.js v20.5.1 with 10,000 iterations:
+Benchmarks run on Node.js v24.14.1 with 10,000 iterations:
 
-**Async Operations (non-blocking, thread-pool based):**
-- `put`: ~44,000 ops/sec
-- `get`: ~70,000 ops/sec
+**Async Operations (C promise/pool-based, non-blocking):**
+- `put`: ~1,000 ops/sec
+- `get`: ~38,000 ops/sec
+- `batch`: ~81,000 ops/sec (1,000 operations per batch)
 
 **Sync Operations (blocking, direct C++ calls):**
-- `putSync`: ~83,000 ops/sec
-- `getSync`: ~468,000 ops/sec
-
-**Batch Operations:**
-- `batch`: ~72,000 ops/sec (1,000 operations per batch)
-- Recommended for bulk inserts: 10-100x faster than individual puts
+- `putSync`: ~4,400 ops/sec
+- `getSync`: ~240,000 ops/sec
 
 **Stream Operations:**
 - Internal buffer of 100 entries
@@ -367,7 +366,7 @@ Benchmarks run on Node.js v20.5.1 with 10,000 iterations:
 **Performance Tips:**
 - Use async operations for production (non-blocking event loop)
 - Use sync operations for initialization/migration scripts
-- Batch operations for bulk data loading
+- Batch operations for bulk data loading (10-100x faster than individual puts)
 - Streams for iterating over large datasets
 
 **MVCC & WAL:**

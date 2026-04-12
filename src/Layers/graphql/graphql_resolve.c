@@ -16,6 +16,11 @@
 #include "../../Database/database.h"
 #include "../../Database/database_iterator.h"
 #include "../../Database/batch.h"
+#include "../../Workers/pool.h"
+#include "../../Workers/work.h"
+#include "../../Workers/promise.h"
+#include "../../Workers/error.h"
+#include "../../RefCounter/refcounter.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -935,10 +940,10 @@ static graphql_result_t* make_error_result(const char* message, const char* path
 }
 
 // ============================================================
-// Public API
+// Shared implementation (used by both sync and async paths)
 // ============================================================
 
-graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query) {
+static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* query) {
     if (layer == NULL || query == NULL) {
         return make_error_result("Invalid arguments", NULL);
     }
@@ -1014,13 +1019,7 @@ graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query) 
     return result;
 }
 
-graphql_result_t* graphql_query(graphql_layer_t* layer, const char* query, void* user_data) {
-    (void)user_data;
-    // For now, sync wrapper — async will be implemented later
-    return graphql_query_sync(layer, query);
-}
-
-graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutation) {
+static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char* mutation) {
     if (layer == NULL || mutation == NULL) {
         return make_error_result("Invalid arguments", NULL);
     }
@@ -1305,7 +1304,172 @@ graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutati
     return result;
 }
 
-graphql_result_t* graphql_mutate(graphql_layer_t* layer, const char* mutation, void* user_data) {
-    (void)user_data;
-    return graphql_mutate_sync(layer, mutation);
+// ============================================================
+// Public API - Synchronous
+// ============================================================
+
+graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query) {
+    return graphql_query_impl(layer, query);
+}
+
+graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutation) {
+    return graphql_mutate_impl(layer, mutation);
+}
+
+// ============================================================
+// Public API - Asynchronous (worker pool dispatch)
+// ============================================================
+
+typedef struct {
+    graphql_layer_t* layer;
+    char* query;
+    promise_t* promise;
+    void* user_data;
+} graphql_query_ctx_t;
+
+typedef struct {
+    graphql_layer_t* layer;
+    char* mutation;
+    promise_t* promise;
+    void* user_data;
+} graphql_mutate_ctx_t;
+
+static void graphql_query_execute(void* arg) {
+    graphql_query_ctx_t* ctx = (graphql_query_ctx_t*)arg;
+    graphql_result_t* result = graphql_query_impl(ctx->layer, ctx->query);
+    promise_resolve(ctx->promise, result);
+    free(ctx->query);
+    refcounter_dereference((refcounter_t*)ctx->layer);
+    refcounter_dereference((refcounter_t*)ctx->promise);
+    free(ctx);
+}
+
+static void graphql_query_abort(void* arg) {
+    graphql_query_ctx_t* ctx = (graphql_query_ctx_t*)arg;
+    async_error_t* error = ERROR("Query aborted due to shutdown");
+    promise_reject(ctx->promise, error);
+    free(ctx->query);
+    refcounter_dereference((refcounter_t*)ctx->layer);
+    refcounter_dereference((refcounter_t*)ctx->promise);
+    free(ctx);
+}
+
+static void graphql_mutate_execute(void* arg) {
+    graphql_mutate_ctx_t* ctx = (graphql_mutate_ctx_t*)arg;
+    graphql_result_t* result = graphql_mutate_impl(ctx->layer, ctx->mutation);
+    promise_resolve(ctx->promise, result);
+    free(ctx->mutation);
+    refcounter_dereference((refcounter_t*)ctx->layer);
+    refcounter_dereference((refcounter_t*)ctx->promise);
+    free(ctx);
+}
+
+static void graphql_mutate_abort(void* arg) {
+    graphql_mutate_ctx_t* ctx = (graphql_mutate_ctx_t*)arg;
+    async_error_t* error = ERROR("Mutation aborted due to shutdown");
+    promise_reject(ctx->promise, error);
+    free(ctx->mutation);
+    refcounter_dereference((refcounter_t*)ctx->layer);
+    refcounter_dereference((refcounter_t*)ctx->promise);
+    free(ctx);
+}
+
+void graphql_query(graphql_layer_t* layer, const char* query,
+                   promise_t* promise, void* user_data) {
+    if (layer == NULL || query == NULL || promise == NULL) {
+        if (promise != NULL) {
+            promise_resolve(promise, make_error_result("Invalid arguments", NULL));
+        }
+        return;
+    }
+
+    // No pool — execute synchronously and resolve inline
+    if (layer->pool == NULL) {
+        graphql_result_t* result = graphql_query_impl(layer, query);
+        promise_resolve(promise, result);
+        return;
+    }
+
+    // Dispatch to worker pool
+    graphql_query_ctx_t* ctx = get_clear_memory(sizeof(graphql_query_ctx_t));
+    if (ctx == NULL) {
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    ctx->layer = (graphql_layer_t*)refcounter_reference((refcounter_t*)layer);
+    ctx->query = strdup(query);
+    ctx->promise = (promise_t*)refcounter_reference((refcounter_t*)promise);
+    ctx->user_data = user_data;
+
+    if (ctx->query == NULL) {
+        refcounter_dereference((refcounter_t*)ctx->layer);
+        refcounter_dereference((refcounter_t*)ctx->promise);
+        free(ctx);
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    work_t* work = work_create(graphql_query_execute, graphql_query_abort, ctx);
+    if (work == NULL) {
+        free(ctx->query);
+        refcounter_dereference((refcounter_t*)ctx->layer);
+        refcounter_dereference((refcounter_t*)ctx->promise);
+        free(ctx);
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    refcounter_yield((refcounter_t*)work);
+    work_pool_enqueue(layer->pool, work);
+}
+
+void graphql_mutate(graphql_layer_t* layer, const char* mutation,
+                    promise_t* promise, void* user_data) {
+    if (layer == NULL || mutation == NULL || promise == NULL) {
+        if (promise != NULL) {
+            promise_resolve(promise, make_error_result("Invalid arguments", NULL));
+        }
+        return;
+    }
+
+    // No pool — execute synchronously and resolve inline
+    if (layer->pool == NULL) {
+        graphql_result_t* result = graphql_mutate_impl(layer, mutation);
+        promise_resolve(promise, result);
+        return;
+    }
+
+    // Dispatch to worker pool
+    graphql_mutate_ctx_t* ctx = get_clear_memory(sizeof(graphql_mutate_ctx_t));
+    if (ctx == NULL) {
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    ctx->layer = (graphql_layer_t*)refcounter_reference((refcounter_t*)layer);
+    ctx->mutation = strdup(mutation);
+    ctx->promise = (promise_t*)refcounter_reference((refcounter_t*)promise);
+    ctx->user_data = user_data;
+
+    if (ctx->mutation == NULL) {
+        refcounter_dereference((refcounter_t*)ctx->layer);
+        refcounter_dereference((refcounter_t*)ctx->promise);
+        free(ctx);
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    work_t* work = work_create(graphql_mutate_execute, graphql_mutate_abort, ctx);
+    if (work == NULL) {
+        free(ctx->mutation);
+        refcounter_dereference((refcounter_t*)ctx->layer);
+        refcounter_dereference((refcounter_t*)ctx->promise);
+        free(ctx);
+        promise_resolve(promise, make_error_result("Out of memory", NULL));
+        return;
+    }
+
+    refcounter_yield((refcounter_t*)work);
+    work_pool_enqueue(layer->pool, work);
 }

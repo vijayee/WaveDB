@@ -396,6 +396,7 @@ database_t* database_create_with_config(const char* location,
             if (owns_config) database_config_destroy(effective_config);
             return NULL;
         }
+        work_pool_launch(db->pool);
     } else {
         // No pool available
         if (error_code) *error_code = EINVAL;
@@ -640,6 +641,8 @@ void database_destroy(database_t* db) {
 
         // Destroy owned pool/wheel
         if (db->owns_pool && db->pool != NULL) {
+            work_pool_shutdown(db->pool);
+            work_pool_join_all(db->pool);
             work_pool_destroy(db->pool);
         }
         if (db->owns_wheel && db->wheel != NULL) {
@@ -750,7 +753,10 @@ static void _database_get(database_get_ctx_t* ctx) {
     if (value != NULL) {
         path_destroy(path);
         free(ctx);
-        promise_resolve(promise, CONSUME(value, identifier_t));
+        // database_lru_cache_get already REFERENCE'd the value,
+        // so we transfer that reference to the promise callback.
+        // The callback's identifier_destroy will release it.
+        promise_resolve(promise, value);
         return;
     }
 
@@ -770,7 +776,10 @@ static void _database_get(database_get_ctx_t* ctx) {
     path_destroy(path);
     free(ctx);
 
-    promise_resolve(promise, value ? CONSUME(value, identifier_t) : NULL);
+    // hbtrie_find returns a reference the caller owns.
+    // REFERENCE above created a separate reference for LRU.
+    // Transfer the caller's reference to the promise callback.
+    promise_resolve(promise, value);
 }
 
 static void _database_delete(database_delete_ctx_t* ctx) {
@@ -1388,8 +1397,9 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
 static void batch_execute_work(void* ctx) {
     batch_work_t* work = (batch_work_t*)ctx;
 
-    refcounter_reference((refcounter_t*)work->batch);
     int result = database_write_batch_sync(work->db, work->batch);
+
+    // Drop the reference taken by database_write_batch
     refcounter_dereference((refcounter_t*)work->batch);
 
     // Allocate result on heap for promise handoff
@@ -1434,5 +1444,6 @@ void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
 
     refcounter_reference((refcounter_t*)batch);
     work_t* task = work_create(batch_execute_work, NULL, work);
+    refcounter_yield((refcounter_t*) task);
     work_pool_enqueue(db->pool, task);
 }

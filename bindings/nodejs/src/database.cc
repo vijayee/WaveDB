@@ -1,15 +1,21 @@
 #include <napi.h>
 #include <string>
-#include <unistd.h>  // for usleep
+#include <unistd.h>
 #include "../../../src/Database/database.h"
+#include "../../../src/Database/batch.h"
 #include "path.h"
 #include "identifier.h"
-#include "async_worker.h"
-#include "put_worker.h"
-#include "get_worker.h"
-#include "del_worker.h"
-#include "batch_worker.h"
+#include "async_bridge.h"
 #include "iterator.h"
+
+// BatchOp struct for PutObject/FlattenObject (local use, not the C batch_t)
+enum class BatchOpType { PUT, DEL };
+
+struct BatchOp {
+  BatchOpType type;
+  path_t* path;
+  identifier_t* value;  // nullptr for DEL
+};
 
 class WaveDB : public Napi::ObjectWrap<WaveDB> {
 public:
@@ -21,6 +27,7 @@ public:
 private:
   database_t* db_;
   char delimiter_;
+  AsyncBridge bridge_;
 
   // Async operations
   Napi::Value Put(const Napi::CallbackInfo& info);
@@ -57,13 +64,15 @@ private:
   // Lifecycle
   Napi::Value Close(const Napi::CallbackInfo& info);
 
+  // Helper: create an AsyncOpContext with a JS Promise and optional callback
+  AsyncOpContext* CreateOpContext(Napi::Env env, AsyncOpType type, const Napi::CallbackInfo& info, int callbackArgIndex);
+
   static Napi::FunctionReference constructor_;
   static void Cleanup(void* arg);
 };
 
 Napi::FunctionReference WaveDB::constructor_;
 
-// Cleanup callback to release static references before Node.js shuts down
 void WaveDB::Cleanup(void* arg) {
   constructor_.Reset();
 }
@@ -90,7 +99,6 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
   constructor_ = Napi::Persistent(func);
   exports.Set("WaveDB", func);
 
-  // Register cleanup hook to reset constructor_ before environment destruction
   napi_add_env_cleanup_hook(env, Cleanup, nullptr);
 
   return exports;
@@ -110,18 +118,15 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
 
   std::string path = info[0].As<Napi::String>().Utf8Value();
 
-  // Create default configuration
   database_config_t* config = database_config_default();
   if (!config) {
     Napi::Error::New(env, "Failed to create default configuration").ThrowAsJavaScriptException();
     return;
   }
 
-  // Parse options
   if (info.Length() > 1 && info[1].IsObject()) {
     Napi::Object options = info[1].As<Napi::Object>();
 
-    // Delimiter option
     if (options.Has("delimiter")) {
       Napi::String delim = options.Get("delimiter").As<Napi::String>();
       std::string delimStr = delim.Utf8Value();
@@ -133,7 +138,6 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       delimiter_ = delimStr[0];
     }
 
-    // Database configuration
     if (options.Has("chunkSize")) {
       Napi::Number val = options.Get("chunkSize").As<Napi::Number>();
       config->chunk_size = static_cast<uint8_t>(val.Uint32Value());
@@ -149,7 +153,6 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       config->enable_persist = val.Value() ? 1 : 0;
     }
 
-    // Cache configuration
     if (options.Has("lruMemoryMb")) {
       Napi::Number val = options.Get("lruMemoryMb").As<Napi::Number>();
       config->lru_memory_mb = static_cast<size_t>(val.Uint32Value());
@@ -165,7 +168,6 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       config->storage_cache_size = static_cast<size_t>(val.Uint32Value());
     }
 
-    // WAL configuration
     if (options.Has("wal")) {
       Napi::Object walOpts = options.Get("wal").As<Napi::Object>();
 
@@ -192,14 +194,12 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       }
     }
 
-    // Threading configuration
     if (options.Has("workerThreads")) {
       Napi::Number val = options.Get("workerThreads").As<Napi::Number>();
       config->worker_threads = static_cast<uint8_t>(val.Uint32Value());
     }
   }
 
-  // Create database with configuration
   int error_code = 0;
   db_ = database_create_with_config(path.c_str(), config, &error_code);
   database_config_destroy(config);
@@ -208,6 +208,9 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
     Napi::Error::New(env, "Failed to create database").ThrowAsJavaScriptException();
     return;
   }
+
+  // Initialize the async bridge for all async operations
+  bridge_.Init(env);
 }
 
 WaveDB::~WaveDB() {
@@ -217,35 +220,32 @@ WaveDB::~WaveDB() {
   }
 }
 
-Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
-  if (db_) {
-    // Wait for all references to be released
-    // This ensures all async operations complete before we destroy
-    uint32_t count = refcounter_count((refcounter_t*)db_);
-    uint32_t max_wait_ms = 5000;  // Max 5 seconds
-    uint32_t waited_ms = 0;
-    while (count > 1 && waited_ms < max_wait_ms) {  // > 1 because we still hold a reference
-      usleep(1000);  // Wait 1ms
-      count = refcounter_count((refcounter_t*)db_);
-      waited_ms += 1;
-    }
+// --- Helper: create AsyncOpContext with JS Promise and optional callback ---
 
-    // Flush all thread-local WALs to ensure persistence
-    // WAL recovery provides data persistence across database restarts
-    if (db_->wal_manager != NULL) {
-      wal_manager_flush(db_->wal_manager);
-    }
+AsyncOpContext* WaveDB::CreateOpContext(Napi::Env env, AsyncOpType type, const Napi::CallbackInfo& info, int callbackArgIndex) {
+  AsyncOpContext* ctx = new AsyncOpContext();
+  ctx->type = type;
+  ctx->result = nullptr;
+  ctx->error = nullptr;
+  ctx->promise_c = nullptr;
+  ctx->batch = nullptr;
+  ctx->callback_ref = nullptr;
+  ctx->env = env;
 
-    // Note: Do NOT call database_snapshot() here!
-    // Snapshot saves the index file with old transaction IDs that conflict with WAL replay.
-    // Data persistence is provided by WAL recovery on next database open.
+  // Create JS Promise using raw C API
+  napi_create_promise(env, &ctx->deferred, &ctx->promise);
 
-    database_t* db = db_;
-    db_ = nullptr;  // Clear pointer first to prevent double-destroy
-    database_destroy(db);  // This just dereferences, actual destruction happens when all refs are gone
+  if (callbackArgIndex >= 0 &&
+      info.Length() > static_cast<size_t>(callbackArgIndex) &&
+      info[callbackArgIndex].IsFunction()) {
+    Napi::Function callback = info[callbackArgIndex].As<Napi::Function>();
+    napi_create_reference(env, callback, 1, &ctx->callback_ref);
   }
-  return info.Env().Undefined();
+
+  return ctx;
 }
+
+// --- Async operations using C async API + AsyncBridge ---
 
 Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -260,34 +260,35 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Null();  // Error already thrown
-  }
+  if (!path) return env.Null();
 
-  // Convert value to identifier_t
   identifier_t* value = ValueFromJS(env, info[1]);
   if (!value) {
     path_destroy(path);
-    return env.Null();  // Error already thrown
+    return env.Null();
   }
 
-  // Get optional callback
-  Napi::Function callback;
-  if (info.Length() > 2 && info[2].IsFunction()) {
-    callback = info[2].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    identifier_destroy(value);
+    return Napi::Value(env, promise_val);
   }
 
-  // Create and queue worker
-  PutWorker* worker = new PutWorker(env, Value(), callback, db_, path, value);
-  worker->Queue();
+  ctx->promise_c = promise_c;
 
-  return worker->Promise();
+  // C async API takes ownership of path and value
+  database_put(db_, path, value, promise_c);
+
+  return Napi::Value(env, ctx->promise);
 }
 
 Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
@@ -303,27 +304,27 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Null();  // Error already thrown
+  if (!path) return env.Null();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    return Napi::Value(env, promise_val);
   }
 
-  // Get optional callback
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
-  }
+  ctx->promise_c = promise_c;
 
-  // Create and queue worker
-  GetWorker* worker = new GetWorker(env, Value(), callback, db_, path);
-  worker->Queue();
+  database_get(db_, path, promise_c);
 
-  return worker->Promise();
+  return Napi::Value(env, ctx->promise);
 }
 
 Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
@@ -339,28 +340,131 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Null();  // Error already thrown
+  if (!path) return env.Null();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    return Napi::Value(env, promise_val);
   }
 
-  // Get optional callback
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
-  }
+  ctx->promise_c = promise_c;
 
-  // Create and queue worker
-  DelWorker* worker = new DelWorker(env, Value(), callback, db_, path);
-  worker->Queue();
+  database_delete(db_, path, promise_c);
 
-  return worker->Promise();
+  return Napi::Value(env, ctx->promise);
 }
+
+Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Array of operations required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Array ops = info[0].As<Napi::Array>();
+
+  // Build a C batch_t from the JS array
+  batch_t* batch = batch_create(ops.Length());
+  if (!batch) {
+    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  for (uint32_t i = 0; i < ops.Length(); i++) {
+    Napi::Object op = ops.Get(i).As<Napi::Object>();
+
+    if (!op.Has("type") || !op.Has("key")) {
+      batch_destroy(batch);
+      Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    std::string type = op.Get("type").As<Napi::String>().Utf8Value();
+    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
+    if (!path) {
+      batch_destroy(batch);
+      return env.Null();
+    }
+
+    int rc;
+    if (type == "put") {
+      if (!op.Has("value")) {
+        path_destroy(path);
+        batch_destroy(batch);
+        Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+
+      identifier_t* value = ValueFromJS(env, op.Get("value"));
+      if (!value) {
+        path_destroy(path);
+        batch_destroy(batch);
+        return env.Null();
+      }
+
+      rc = batch_add_put(batch, path, value);
+      if (rc != 0) {
+        // batch_add_put failed — ownership remains with caller
+        path_destroy(path);
+        identifier_destroy(value);
+        batch_destroy(batch);
+        Napi::Error::New(env, "Failed to add put to batch").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    } else if (type == "del") {
+      rc = batch_add_delete(batch, path);
+      if (rc != 0) {
+        path_destroy(path);
+        batch_destroy(batch);
+        Napi::Error::New(env, "Failed to add delete to batch").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    } else {
+      path_destroy(path);
+      batch_destroy(batch);
+      Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+  }
+
+  // Dispatch async batch operation
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    batch_destroy(batch);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+  ctx->batch = batch;
+
+  database_write_batch(db_, batch, promise_c);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+// --- Sync operations (unchanged) ---
 
 Napi::Value WaveDB::PutSync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -375,20 +479,15 @@ Napi::Value WaveDB::PutSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Undefined();  // Error already thrown
-  }
+  if (!path) return env.Undefined();
 
-  // Convert value to identifier_t
   identifier_t* value = ValueFromJS(env, info[1]);
   if (!value) {
     path_destroy(path);
-    return env.Undefined();  // Error already thrown
+    return env.Undefined();
   }
 
-  // Call sync function (consumes path and value)
   int rc = database_put_sync(db_, path, value);
 
   if (rc != 0) {
@@ -412,26 +511,19 @@ Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Null();  // Error already thrown
-  }
+  if (!path) return env.Null();
 
-  // Call sync function (consumes path)
   identifier_t* result = NULL;
   int rc = database_get_sync(db_, path, &result);
 
   if (rc == 0 && result != NULL) {
-    // Success - convert result to JS value
     Napi::Value value = ValueToJS(env, result);
     identifier_destroy(result);
     return value;
   } else if (rc == -2) {
-    // Not found
     return env.Null();
   } else {
-    // Error
     Napi::Error::New(env, "IO_ERROR: Failed to get value").ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -450,13 +542,9 @@ Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  // Convert key to path_t
   path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) {
-    return env.Undefined();  // Error already thrown
-  }
+  if (!path) return env.Undefined();
 
-  // Call sync function (consumes path)
   int rc = database_delete_sync(db_, path);
 
   if (rc != 0) {
@@ -465,110 +553,6 @@ Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
-}
-
-Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (!db_) {
-    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  if (info.Length() < 1 || !info[0].IsArray()) {
-    Napi::TypeError::New(env, "Array of operations required").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
-  }
-
-  Napi::Array ops = info[0].As<Napi::Array>();
-  std::vector<BatchOp> batchOps;
-
-  for (uint32_t i = 0; i < ops.Length(); i++) {
-    Napi::Object op = ops.Get(i).As<Napi::Object>();
-
-    if (!op.Has("type")) {
-      Napi::TypeError::New(env, "Operation must have 'type'").ThrowAsJavaScriptException();
-      for (auto& bop : batchOps) {
-        if (bop.path) path_destroy(bop.path);
-        if (bop.value) identifier_destroy(bop.value);
-      }
-      return env.Null();
-    }
-
-    std::string type = op.Get("type").As<Napi::String>().Utf8Value();
-    if (!op.Has("key")) {
-      Napi::TypeError::New(env, "Operation must have 'key'").ThrowAsJavaScriptException();
-      for (auto& bop : batchOps) {
-        if (bop.path) path_destroy(bop.path);
-        if (bop.value) identifier_destroy(bop.value);
-      }
-      return env.Null();
-    }
-
-    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
-    if (!path) {
-      for (auto& bop : batchOps) {
-        if (bop.path) path_destroy(bop.path);
-        if (bop.value) identifier_destroy(bop.value);
-      }
-      return env.Null();
-    }
-
-    BatchOp batchOp;
-    batchOp.path = path;
-
-    if (type == "put") {
-      if (!op.Has("value")) {
-        Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
-        path_destroy(path);
-        for (auto& bop : batchOps) {
-          if (bop.path) path_destroy(bop.path);
-          if (bop.value) identifier_destroy(bop.value);
-        }
-        return env.Null();
-      }
-
-      identifier_t* value = ValueFromJS(env, op.Get("value"));
-      if (!value) {
-        path_destroy(path);
-        for (auto& bop : batchOps) {
-          if (bop.path) path_destroy(bop.path);
-          if (bop.value) identifier_destroy(bop.value);
-        }
-        return env.Null();
-      }
-
-      batchOp.type = BatchOpType::PUT;
-      batchOp.value = value;
-    } else if (type == "del") {
-      batchOp.type = BatchOpType::DEL;
-      batchOp.value = nullptr;
-    } else {
-      Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
-      path_destroy(path);
-      for (auto& bop : batchOps) {
-        if (bop.path) path_destroy(bop.path);
-        if (bop.value) identifier_destroy(bop.value);
-      }
-      return env.Null();
-    }
-
-    batchOps.push_back(batchOp);
-  }
-
-  BatchWorker* worker = new BatchWorker(env, Value(), db_, std::move(batchOps), callback);
-  worker->Queue();
-
-  return worker->Promise();
 }
 
 Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
@@ -596,9 +580,7 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
 
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
     path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
-    if (!path) {
-      return env.Undefined();
-    }
+    if (!path) return env.Undefined();
 
     int rc;
     if (type == "put") {
@@ -615,10 +597,8 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
       }
 
       rc = database_put_sync(db_, path, value);
-      // database_put_sync takes ownership of path and value
     } else if (type == "del") {
       rc = database_delete_sync(db_, path);
-      // database_delete_sync takes ownership of path
     } else {
       Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
       path_destroy(path);
@@ -634,6 +614,8 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// --- Object operations ---
+
 void WaveDB::FlattenObject(Napi::Env env,
                           Napi::Object obj,
                           std::vector<std::string>& path_parts,
@@ -648,10 +630,8 @@ void WaveDB::FlattenObject(Napi::Env env,
     path_parts.push_back(key);
 
     if (value.IsObject() && !value.IsArray() && !value.IsBuffer()) {
-      // Nested object - recurse
       FlattenObject(env, value.As<Napi::Object>(), path_parts, ops, delimiter);
     } else if (value.IsArray()) {
-      // Array - use numeric indices
       Napi::Array arr = value.As<Napi::Array>();
       for (uint32_t j = 0; j < arr.Length(); j++) {
         path_parts.push_back(std::to_string(j));
@@ -662,7 +642,6 @@ void WaveDB::FlattenObject(Napi::Env env,
         op.value = ValueFromJS(env, arr.Get(j));
 
         if (!op.path || !op.value) {
-          // Error already thrown
           if (op.path) path_destroy(op.path);
           if (op.value) identifier_destroy(op.value);
           path_parts.pop_back();
@@ -673,7 +652,6 @@ void WaveDB::FlattenObject(Napi::Env env,
         path_parts.pop_back();
       }
     } else {
-      // Leaf value
       BatchOp op;
       op.type = BatchOpType::PUT;
       op.path = PathFromParts(path_parts);
@@ -706,15 +684,6 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
-  }
-
   Napi::Object obj = info[0].As<Napi::Object>();
   std::vector<BatchOp> ops;
   std::vector<std::string> path_parts;
@@ -722,7 +691,6 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   try {
     FlattenObject(env, obj, path_parts, ops, delimiter_);
   } catch (const std::exception& e) {
-    // Clean up operations
     for (auto& op : ops) {
       if (op.path) path_destroy(op.path);
       if (op.value) identifier_destroy(op.value);
@@ -731,10 +699,58 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  BatchWorker* worker = new BatchWorker(env, Value(), db_, std::move(ops), callback);
-  worker->Queue();
+  // Build a C batch_t from the flattened operations
+  batch_t* batch = batch_create(ops.size());
+  if (!batch) {
+    for (auto& op : ops) {
+      if (op.path) path_destroy(op.path);
+      if (op.value) identifier_destroy(op.value);
+    }
+    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
+    return env.Null();
+  }
 
-  return worker->Promise();
+  for (auto& op : ops) {
+    int rc;
+    if (op.type == BatchOpType::PUT) {
+      rc = batch_add_put(batch, op.path, op.value);
+      if (rc != 0) {
+        path_destroy(op.path);
+        identifier_destroy(op.value);
+      }
+    } else {
+      rc = batch_add_delete(batch, op.path);
+      if (rc != 0) {
+        path_destroy(op.path);
+      }
+    }
+    if (rc != 0) {
+      batch_destroy(batch);
+      Napi::Error::New(env, "Failed to add operation to batch").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+  }
+
+  // Dispatch async batch
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    batch_destroy(batch);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+  ctx->batch = batch;
+
+  database_write_batch(db_, batch, promise_c);
+
+  return Napi::Value(env, ctx->promise);
 }
 
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
@@ -760,17 +776,11 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   }
 
   path_t* basePath = PathFromJS(env, info[0], delimiter_);
-  if (!basePath) {
-    return env.Null();
-  }
+  if (!basePath) return env.Null();
 
-  // Create start path (same as base path for inclusive start)
-  // We need to scan all entries that start with this path
   path_t* startPath = nullptr;
   path_t* endPath = nullptr;
 
-  // For scanning under a path, we use the path as start
-  // and create a path that's one past the last possible key
   startPath = path_create();
   if (!startPath) {
     path_destroy(basePath);
@@ -778,14 +788,12 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Copy base path to start path
   for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
     identifier_t* id = basePath->identifiers.data[i];
     REFERENCE(id, identifier_t);
     path_append(startPath, id);
   }
 
-  // Store base path parts for filtering
   std::vector<std::string> basePathParts;
   for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
     identifier_t* id = basePath->identifiers.data[i];
@@ -796,14 +804,12 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
       size_t size = chunk->size;
       part += std::string(reinterpret_cast<const char*>(data), size);
     }
-    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
     while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
       part.pop_back();
     }
     basePathParts.push_back(part);
   }
 
-  // Start the scan
   database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
   path_destroy(startPath);
   path_destroy(basePath);
@@ -816,7 +822,6 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     return deferred.Promise();
   }
 
-  // Collect all entries that match base path
   std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
 
   while (true) {
@@ -826,7 +831,6 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     int rc = database_scan_next(iter, &outPath, &outValue);
     if (rc != 0) break;
 
-    // Convert path to vector of strings
     std::vector<std::string> pathParts;
     for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
       identifier_t* id = outPath->identifiers.data[i];
@@ -837,17 +841,14 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
         size_t size = chunk->size;
         part += std::string(reinterpret_cast<const char*>(data), size);
       }
-      // Strip trailing null characters and whitespace (padding from chunk reconstruction)
       while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
         part.pop_back();
       }
       pathParts.push_back(part);
     }
 
-    // Convert value to JS value
     Napi::Value jsValue = ValueToJS(env, outValue);
 
-    // Filter: only include entries under base path
     if (pathParts.size() >= basePathParts.size()) {
       bool matches = true;
       for (size_t i = 0; i < basePathParts.size() && matches; i++) {
@@ -866,10 +867,8 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
 
   database_scan_end(iter);
 
-  // Reconstruct object from entries
   Napi::Object result = ReconstructObject(env, entries);
 
-  // Call callback and resolve promise
   callback.Call({ env.Null(), result });
 
   Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
@@ -891,11 +890,8 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
   }
 
   path_t* basePath = PathFromJS(env, info[0], delimiter_);
-  if (!basePath) {
-    return env.Null();
-  }
+  if (!basePath) return env.Null();
 
-  // Store base path parts for filtering
   std::vector<std::string> basePathParts;
   for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
     identifier_t* id = basePath->identifiers.data[i];
@@ -906,14 +902,12 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
       size_t size = chunk->size;
       part += std::string(reinterpret_cast<const char*>(data), size);
     }
-    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
     while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
       part.pop_back();
     }
     basePathParts.push_back(part);
   }
 
-  // Create start path (same as base path for inclusive start)
   path_t* startPath = path_create();
   if (!startPath) {
     path_destroy(basePath);
@@ -921,14 +915,12 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Copy base path to start path
   for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
     identifier_t* id = basePath->identifiers.data[i];
     REFERENCE(id, identifier_t);
     path_append(startPath, id);
   }
 
-  // Start the scan (must be before path_destroy to avoid use-after-free)
   database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
 
   path_destroy(startPath);
@@ -938,7 +930,6 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     return Napi::Object::New(env);
   }
 
-  // Collect all entries that match base path
   std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
 
   while (true) {
@@ -948,7 +939,6 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     int rc = database_scan_next(iter, &outPath, &outValue);
     if (rc != 0) break;
 
-    // Convert path to vector of strings
     std::vector<std::string> pathParts;
     for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
       identifier_t* id = outPath->identifiers.data[i];
@@ -959,17 +949,14 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
         size_t size = chunk->size;
         part += std::string(reinterpret_cast<const char*>(data), size);
       }
-      // Strip trailing null characters and whitespace (padding from chunk reconstruction)
       while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
         part.pop_back();
       }
       pathParts.push_back(part);
     }
 
-    // Convert value to JS value
     Napi::Value jsValue = ValueToJS(env, outValue);
 
-    // Filter: only include entries under base path
     if (pathParts.size() >= basePathParts.size()) {
       bool matches = true;
       for (size_t i = 0; i < basePathParts.size() && matches; i++) {
@@ -988,7 +975,6 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
 
   database_scan_end(iter);
 
-  // Reconstruct object from entries
   return ReconstructObject(env, entries);
 }
 
@@ -1002,7 +988,6 @@ Napi::Object WaveDB::ReconstructObject(Napi::Env env,
 
     if (pathParts.empty()) continue;
 
-    // Navigate/create nested structure
     Napi::Object current = result;
     for (size_t i = 0; i < pathParts.size() - 1; i++) {
       const std::string& key = pathParts[i];
@@ -1013,11 +998,9 @@ Napi::Object WaveDB::ReconstructObject(Napi::Env env,
       current = current.Get(key).As<Napi::Object>();
     }
 
-    // Set final value
     current.Set(pathParts.back(), value);
   }
 
-  // Convert arrays with contiguous numeric keys
   return ConvertArrays(env, result).As<Napi::Object>();
 }
 
@@ -1029,7 +1012,6 @@ Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
   Napi::Object obj = value.As<Napi::Object>();
   Napi::Array keys = obj.GetPropertyNames();
 
-  // Check if all keys are contiguous numeric
   std::vector<uint32_t> indices;
   bool allNumeric = true;
 
@@ -1050,10 +1032,8 @@ Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
   }
 
   if (allNumeric && !indices.empty()) {
-    // Sort indices
     std::sort(indices.begin(), indices.end());
 
-    // Check if contiguous from 0
     bool contiguous = true;
     for (size_t i = 0; i < indices.size(); i++) {
       if (indices[i] != i) {
@@ -1063,7 +1043,6 @@ Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
     }
 
     if (contiguous) {
-      // Convert to array
       Napi::Array arr = Napi::Array::New(env);
       for (uint32_t i = 0; i < indices.size(); i++) {
         Napi::Value val = obj.Get(Napi::String::New(env, std::to_string(i)));
@@ -1073,7 +1052,6 @@ Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
     }
   }
 
-  // Recursively convert nested objects
   for (uint32_t i = 0; i < keys.Length(); i++) {
     Napi::Value key = keys.Get(i);
     std::string keyStr = key.As<Napi::String>().Utf8Value();
@@ -1092,10 +1070,27 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
     options = info[0].As<Napi::Object>();
   }
 
-  // Pass database pointer as External, options, and the JS WaveDB object
-  // so the Iterator can hold a persistent reference to prevent GC
   Napi::External<database_t> dbExternal = Napi::External<database_t>::New(env, db_);
   Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, Value() });
 
   return iterObj;
+}
+
+// --- Lifecycle ---
+
+Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
+  if (db_) {
+    // Shutdown the async bridge — waits for pending operations
+    bridge_.Shutdown();
+
+    // Flush all thread-local WALs
+    if (db_->wal_manager != NULL) {
+      wal_manager_flush(db_->wal_manager);
+    }
+
+    database_t* db = db_;
+    db_ = nullptr;
+    database_destroy(db);
+  }
+  return info.Env().Undefined();
 }

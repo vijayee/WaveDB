@@ -81,6 +81,7 @@ set(WAVEDB_SOURCES
     src/Workers/promise.c
     src/Workers/queue.c
     src/Workers/pool.c
+    src/Workers/join.c
 
     # Storage
     src/Storage/section.c

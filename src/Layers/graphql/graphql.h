@@ -13,6 +13,7 @@
 #include "graphql_schema.h"
 #include "graphql_result.h"
 #include "graphql_plan.h"
+#include "../../Workers/promise.h"
 #include "graphql_resolve.h"
 
 #ifdef __cplusplus
@@ -93,14 +94,19 @@ int graphql_register_resolver(graphql_layer_t* layer,
 /**
  * Execute a GraphQL query asynchronously.
  *
- * @param layer     Layer
- * @param query     GraphQL query string
- * @param user_data Context passed to async callbacks
- * @return Result (may contain partial data and errors)
+ * Dispatches query compilation and execution to the worker pool.
+ * The result is delivered via the promise's resolve callback.
+ * If no pool is available, executes synchronously and resolves inline.
+ *
+ * @param layer     Layer with registered schema
+ * @param query     GraphQL query string (copied internally)
+ * @param promise   Promise to resolve/reject with the result
+ * @param user_data Context passed through (currently unused)
  */
-graphql_result_t* graphql_query(graphql_layer_t* layer,
-                                 const char* query,
-                                 void* user_data);
+void graphql_query(graphql_layer_t* layer,
+                   const char* query,
+                   promise_t* promise,
+                   void* user_data);
 
 /**
  * Execute a GraphQL query synchronously.
@@ -119,14 +125,19 @@ graphql_result_t* graphql_query_sync(graphql_layer_t* layer,
 /**
  * Execute a GraphQL mutation asynchronously.
  *
- * @param layer     Layer
- * @param mutation  GraphQL mutation string
- * @param user_data Context passed to async callbacks
- * @return Result (may contain partial data and errors)
+ * Dispatches mutation execution to the worker pool.
+ * The result is delivered via the promise's resolve callback.
+ * If no pool is available, executes synchronously and resolves inline.
+ *
+ * @param layer     Layer with registered schema
+ * @param mutation  GraphQL mutation string (copied internally)
+ * @param promise   Promise to resolve/reject with the result
+ * @param user_data Context passed through (currently unused)
  */
-graphql_result_t* graphql_mutate(graphql_layer_t* layer,
-                                   const char* mutation,
-                                   void* user_data);
+void graphql_mutate(graphql_layer_t* layer,
+                    const char* mutation,
+                    promise_t* promise,
+                    void* user_data);
 
 /**
  * Execute a GraphQL mutation synchronously.

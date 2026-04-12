@@ -7,6 +7,7 @@
 #define WAVEDB_GRAPHQL_RESOLVE_H
 
 #include "graphql_types.h"
+#include "../../Workers/promise.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,17 +29,19 @@ graphql_result_t* graphql_query_sync(graphql_layer_t* layer,
 /**
  * Execute a GraphQL query asynchronously.
  *
- * NOTE (v1): This is currently a synchronous wrapper around graphql_query_sync.
- * True async execution with worker pool integration is planned for v2.
+ * Dispatches query compilation and execution to the worker pool.
+ * The result is delivered via the promise's resolve callback.
+ * If no pool is available, executes synchronously and resolves inline.
  *
  * @param layer     Layer with registered schema
- * @param query     GraphQL query string
- * @param user_data Context passed to async callbacks
- * @return Result (caller must destroy)
+ * @param query     GraphQL query string (copied internally)
+ * @param promise   Promise to resolve/reject with the result
+ * @param user_data Context passed through (currently unused)
  */
-graphql_result_t* graphql_query(graphql_layer_t* layer,
-                                 const char* query,
-                                 void* user_data);
+void graphql_query(graphql_layer_t* layer,
+                   const char* query,
+                   promise_t* promise,
+                   void* user_data);
 
 /**
  * Execute a GraphQL mutation synchronously.
@@ -53,17 +56,19 @@ graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer,
 /**
  * Execute a GraphQL mutation asynchronously.
  *
- * NOTE (v1): This is currently a synchronous wrapper around graphql_mutate_sync.
- * True async execution with worker pool integration is planned for v2.
+ * Dispatches mutation execution to the worker pool.
+ * The result is delivered via the promise's resolve callback.
+ * If no pool is available, executes synchronously and resolves inline.
  *
  * @param layer     Layer with registered schema
- * @param mutation  GraphQL mutation string
- * @param user_data Context passed to async callbacks
- * @return Result (caller must destroy)
+ * @param mutation  GraphQL mutation string (copied internally)
+ * @param promise   Promise to resolve/reject with the result
+ * @param user_data Context passed through (currently unused)
  */
-graphql_result_t* graphql_mutate(graphql_layer_t* layer,
-                                   const char* mutation,
-                                   void* user_data);
+void graphql_mutate(graphql_layer_t* layer,
+                    const char* mutation,
+                    promise_t* promise,
+                    void* user_data);
 
 #ifdef __cplusplus
 }

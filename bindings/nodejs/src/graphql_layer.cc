@@ -1,6 +1,8 @@
 #include <napi.h>
 #include <string>
 #include "../../../src/Layers/graphql/graphql.h"
+#include "async_bridge.h"
+#include "graphql_result_js.h"
 
 class GraphQLLayer : public Napi::ObjectWrap<GraphQLLayer> {
 public:
@@ -12,20 +14,25 @@ public:
 private:
   static Napi::FunctionReference constructor_;
   graphql_layer_t* layer_;
+  AsyncBridge bridge_;
 
   // Schema
   Napi::Value ParseSchema(const Napi::CallbackInfo& info);
 
-  // Queries
+  // Sync queries
   Napi::Value QuerySync(const Napi::CallbackInfo& info);
   Napi::Value MutateSync(const Napi::CallbackInfo& info);
+
+  // Async queries
+  Napi::Value Query(const Napi::CallbackInfo& info);
+  Napi::Value Mutate(const Napi::CallbackInfo& info);
 
   // Lifecycle
   Napi::Value Close(const Napi::CallbackInfo& info);
 
-  // Convert graphql_result_t to JS object
-  static Napi::Value ResultToJS(Napi::Env env, graphql_result_t* result);
-  static Napi::Value ResultNodeToJS(Napi::Env env, graphql_result_node_t* node);
+  // Helper: create an AsyncOpContext with a JS Promise and optional callback
+  AsyncOpContext* CreateOpContext(Napi::Env env, AsyncOpType type,
+                                   const Napi::CallbackInfo& info, int callbackArgIndex);
 };
 
 Napi::FunctionReference GraphQLLayer::constructor_;
@@ -37,6 +44,8 @@ Napi::Object GraphQLLayer::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("parseSchema", &GraphQLLayer::ParseSchema),
     InstanceMethod("querySync", &GraphQLLayer::QuerySync),
     InstanceMethod("mutateSync", &GraphQLLayer::MutateSync),
+    InstanceMethod("query", &GraphQLLayer::Query),
+    InstanceMethod("mutate", &GraphQLLayer::Mutate),
     InstanceMethod("close", &GraphQLLayer::Close),
   });
 
@@ -52,21 +61,17 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
 
   Napi::Env env = info.Env();
 
-  // Create default config
   graphql_layer_config_t* config = graphql_layer_config_default();
   if (!config) {
     Napi::Error::New(env, "Failed to create default configuration").ThrowAsJavaScriptException();
     return;
   }
 
-  // Path argument (optional - NULL for in-memory)
-  const char* path = nullptr;
   if (info.Length() > 0 && info[0].IsString()) {
     std::string pathStr = info[0].As<Napi::String>().Utf8Value();
     config->path = strdup(pathStr.c_str());
   }
 
-  // Options argument
   if (info.Length() > 1 && info[1].IsObject()) {
     Napi::Object options = info[1].As<Napi::Object>();
 
@@ -88,13 +93,13 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
 
   layer_ = graphql_layer_create(config->path, config);
   if (!layer_) {
-    // Config path is a string literal, don't free it
     graphql_layer_config_destroy(config);
     Napi::Error::New(env, "Failed to create GraphQL layer").ThrowAsJavaScriptException();
     return;
   }
 
   graphql_layer_config_destroy(config);
+  bridge_.Init(env);
 }
 
 GraphQLLayer::~GraphQLLayer() {
@@ -103,6 +108,34 @@ GraphQLLayer::~GraphQLLayer() {
     layer_ = nullptr;
   }
 }
+
+// --- Helper ---
+
+AsyncOpContext* GraphQLLayer::CreateOpContext(Napi::Env env, AsyncOpType type,
+                                               const Napi::CallbackInfo& info, int callbackArgIndex) {
+  AsyncOpContext* ctx = new AsyncOpContext();
+  ctx->type = type;
+  ctx->result = nullptr;
+  ctx->error = nullptr;
+  ctx->promise_c = nullptr;
+  ctx->batch = nullptr;
+  ctx->callback_ref = nullptr;
+  ctx->env = env;
+
+  // Create JS Promise using raw C API
+  napi_create_promise(env, &ctx->deferred, &ctx->promise);
+
+  if (callbackArgIndex >= 0 &&
+      info.Length() > static_cast<size_t>(callbackArgIndex) &&
+      info[callbackArgIndex].IsFunction()) {
+    Napi::Function callback = info[callbackArgIndex].As<Napi::Function>();
+    napi_create_reference(env, callback, 1, &ctx->callback_ref);
+  }
+
+  return ctx;
+}
+
+// --- Schema ---
 
 Napi::Value GraphQLLayer::ParseSchema(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -128,6 +161,8 @@ Napi::Value GraphQLLayer::ParseSchema(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+// --- Sync operations ---
+
 Napi::Value GraphQLLayer::QuerySync(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -149,7 +184,7 @@ Napi::Value GraphQLLayer::QuerySync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Value jsResult = ResultToJS(env, result);
+  Napi::Value jsResult = GraphQLResultToJS(env, result);
   graphql_result_destroy(result);
 
   return jsResult;
@@ -176,101 +211,93 @@ Napi::Value GraphQLLayer::MutateSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Value jsResult = ResultToJS(env, result);
+  Napi::Value jsResult = GraphQLResultToJS(env, result);
   graphql_result_destroy(result);
 
   return jsResult;
 }
 
+// --- Async operations using C async API + AsyncBridge ---
+
+Napi::Value GraphQLLayer::Query(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!layer_) {
+    Napi::Error::New(env, "LAYER_CLOSED: GraphQL layer is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Query string required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string query = info[0].As<Napi::String>().Utf8Value();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Query, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+
+  graphql_query(layer_, query.c_str(), promise_c, nullptr);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+Napi::Value GraphQLLayer::Mutate(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!layer_) {
+    Napi::Error::New(env, "LAYER_CLOSED: GraphQL layer is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Mutation string required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string mutation = info[0].As<Napi::String>().Utf8Value();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Mutate, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+
+  graphql_mutate(layer_, mutation.c_str(), promise_c, nullptr);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+// --- Lifecycle ---
+
 Napi::Value GraphQLLayer::Close(const Napi::CallbackInfo& info) {
   if (layer_) {
+    bridge_.Shutdown();
+
     graphql_layer_t* layer = layer_;
     layer_ = nullptr;
     graphql_layer_destroy(layer);
   }
   return info.Env().Undefined();
-}
-
-Napi::Value GraphQLLayer::ResultNodeToJS(Napi::Env env, graphql_result_node_t* node) {
-  if (node == nullptr) {
-    return env.Null();
-  }
-
-  switch (node->kind) {
-    case RESULT_NULL:
-      return env.Null();
-
-    case RESULT_STRING:
-      if (node->string_val) {
-        return Napi::String::New(env, node->string_val);
-      }
-      return env.Null();
-
-    case RESULT_INT:
-      return Napi::Number::New(env, static_cast<double>(node->int_val));
-
-    case RESULT_FLOAT:
-      return Napi::Number::New(env, node->float_val);
-
-    case RESULT_BOOL:
-      return Napi::Boolean::New(env, node->bool_val);
-
-    case RESULT_ID:
-      if (node->id_val) {
-        return Napi::String::New(env, node->id_val);
-      }
-      return env.Null();
-
-    case RESULT_LIST: {
-      Napi::Array arr = Napi::Array::New(env);
-      for (size_t i = 0; i < node->children.length; i++) {
-        arr.Set(i, ResultNodeToJS(env, node->children.data[i]));
-      }
-      return arr;
-    }
-
-    case RESULT_OBJECT: {
-      Napi::Object obj = Napi::Object::New(env);
-      for (size_t i = 0; i < node->children.length; i++) {
-        graphql_result_node_t* child = node->children.data[i];
-        const char* key = child->name ? child->name : "";
-        obj.Set(key, ResultNodeToJS(env, child));
-      }
-      return obj;
-    }
-
-    case RESULT_REF:
-      return env.Null();
-
-    default:
-      return env.Null();
-  }
-}
-
-Napi::Value GraphQLLayer::ResultToJS(Napi::Env env, graphql_result_t* result) {
-  if (result == nullptr) {
-    Napi::Object empty = Napi::Object::New(env);
-    empty.Set("data", env.Null());
-    empty.Set("success", Napi::Boolean::New(env, false));
-    return empty;
-  }
-
-  Napi::Object obj = Napi::Object::New(env);
-  obj.Set("success", Napi::Boolean::New(env, result->success));
-  obj.Set("data", ResultNodeToJS(env, result->data));
-
-  // Convert errors
-  if (result->errors.length > 0) {
-    Napi::Array errors = Napi::Array::New(env);
-    for (size_t i = 0; i < result->errors.length; i++) {
-      Napi::Object errObj = Napi::Object::New(env);
-      errObj.Set("message", Napi::String::New(env, result->errors.data[i].message ? result->errors.data[i].message : ""));
-      errors.Set(i, errObj);
-    }
-    obj.Set("errors", errors);
-  }
-
-  return obj;
 }
 
 // Module init
