@@ -1128,6 +1128,150 @@ int database_delete_sync(database_t* db, path_t* path) {
     return 0;
 }
 
+int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
+    if (db == NULL || path == NULL) return -1;
+
+    // Acquire sharded write lock for atomic read-modify-write
+    size_t shard = get_write_lock_shard(path);
+    platform_lock(&db->write_locks[shard]);
+
+    // Read current value
+    transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
+    identifier_t* current = hbtrie_find(db->trie, path, read_txn_id);
+    int64_t old_val = 0;
+    if (current != NULL) {
+        buffer_t* buf = identifier_to_buffer(current);
+        if (buf != NULL && buf->size > 0) {
+            // Null-terminate for strtoll
+            char* tmp = malloc(buf->size + 1);
+            if (tmp != NULL) {
+                memcpy(tmp, buf->data, buf->size);
+                tmp[buf->size] = '\0';
+                old_val = strtoll(tmp, NULL, 10);
+                free(tmp);
+            }
+            buffer_destroy(buf);
+        }
+        identifier_destroy(current);
+    }
+
+    int64_t new_val = old_val + delta;
+
+    // Write new value
+    char val_str[32];
+    snprintf(val_str, sizeof(val_str), "%lld", (long long)new_val);
+
+    // Create copies for the insert
+    path_t* ins_path = path_copy(path);
+    buffer_t* val_buf = buffer_create(strlen(val_str));
+    if (val_buf == NULL || ins_path == NULL) {
+        if (val_buf) buffer_destroy(val_buf);
+        if (ins_path) path_destroy(ins_path);
+        platform_unlock(&db->write_locks[shard]);
+        return -1;
+    }
+    memcpy(val_buf->data, val_str, strlen(val_str));
+    val_buf->size = strlen(val_str);
+    identifier_t* new_id = identifier_create(val_buf, 0);
+    buffer_destroy(val_buf);
+    if (new_id == NULL) {
+        path_destroy(ins_path);
+        platform_unlock(&db->write_locks[shard]);
+        return -1;
+    }
+
+    // Begin transaction
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        path_destroy(ins_path);
+        identifier_destroy(new_id);
+        platform_unlock(&db->write_locks[shard]);
+        return -1;
+    }
+
+    // Insert into trie
+    hbtrie_insert(db->trie, ins_path, new_id, txn->txn_id);
+
+    // Update LRU cache
+    path_t* cache_path = path_copy(ins_path);
+    identifier_t* cache_val = REFERENCE(new_id, identifier_t);
+    identifier_t* ejected = database_lru_cache_put(db->lru, cache_path, cache_val);
+    if (ejected) identifier_destroy(ejected);
+
+    // Commit and cleanup
+    tx_manager_commit(db->tx_manager, txn);
+    txn_desc_destroy(txn);
+    path_destroy(ins_path);
+    identifier_destroy(new_id);
+
+    platform_unlock(&db->write_locks[shard]);
+    return new_val;
+}
+
+database_iterator_t* database_scan_range(database_t* db,
+                                          const char* start,
+                                          const char* end) {
+    if (db == NULL) return NULL;
+
+    path_t* start_path = NULL;
+    path_t* end_path = NULL;
+
+    // Build start path from string
+    if (start != NULL) {
+        start_path = path_create();
+        if (start_path == NULL) return NULL;
+        const char* s = start;
+        while (*s) {
+            const char* e = strchr(s, '/');
+            size_t len = e ? (size_t)(e - s) : strlen(s);
+            if (len > 0) {
+                buffer_t* buf = buffer_create(len);
+                if (buf != NULL) {
+                    memcpy(buf->data, s, len);
+                    buf->size = len;
+                    identifier_t* id = identifier_create(buf, 0);
+                    buffer_destroy(buf);
+                    if (id != NULL) {
+                        path_append(start_path, id);
+                        identifier_destroy(id);
+                    }
+                }
+            }
+            if (e) { s = e + 1; } else { break; }
+        }
+    }
+
+    // Build end path from string
+    if (end != NULL) {
+        end_path = path_create();
+        if (end_path == NULL) {
+            if (start_path) path_destroy(start_path);
+            return NULL;
+        }
+        const char* s = end;
+        while (*s) {
+            const char* e = strchr(s, '/');
+            size_t len = e ? (size_t)(e - s) : strlen(s);
+            if (len > 0) {
+                buffer_t* buf = buffer_create(len);
+                if (buf != NULL) {
+                    memcpy(buf->data, s, len);
+                    buf->size = len;
+                    identifier_t* id = identifier_create(buf, 0);
+                    buffer_destroy(buf);
+                    if (id != NULL) {
+                        path_append(end_path, id);
+                        identifier_destroy(id);
+                    }
+                }
+            }
+            if (e) { s = e + 1; } else { break; }
+        }
+    }
+
+    return database_scan_start(db, start_path, end_path);
+}
+
 int database_write_batch_sync(database_t* db, batch_t* batch) {
     // Validate inputs
     if (db == NULL || batch == NULL) {

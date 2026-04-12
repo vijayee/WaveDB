@@ -96,6 +96,15 @@ set(WAVEDB_SOURCES
     src/Database/database.c
     src/Database/database_iterator.c
     src/Database/batch.c
+
+    # Layers - GraphQL
+    src/Layers/graphql/graphql_types.c
+    src/Layers/graphql/graphql_lexer.c
+    src/Layers/graphql/graphql_parser.c
+    src/Layers/graphql/graphql_schema.c
+    src/Layers/graphql/graphql_result.c
+    src/Layers/graphql/graphql_plan.c
+    src/Layers/graphql/graphql_resolve.c
 )
 
 # Create WaveDB library
@@ -224,6 +233,36 @@ if(BUILD_TESTS)
     add_executable(test_database_config tests/test_database_config.cpp)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
     add_test(NAME test_database_config COMMAND test_database_config)
+
+    # Test for GraphQL lexer
+    add_executable(test_graphql_lexer tests/test_graphql_lexer.cpp)
+    target_link_libraries(test_graphql_lexer wavedb gtest gtest_main)
+    add_test(NAME test_graphql_lexer COMMAND test_graphql_lexer)
+
+    # Test for GraphQL parser
+    add_executable(test_graphql_parser tests/test_graphql_parser.cpp)
+    target_link_libraries(test_graphql_parser wavedb gtest gtest_main)
+    add_test(NAME test_graphql_parser COMMAND test_graphql_parser)
+
+    # Test for GraphQL schema
+    add_executable(test_graphql_schema tests/test_graphql_schema.cpp)
+    target_link_libraries(test_graphql_schema wavedb gtest gtest_main)
+    add_test(NAME test_graphql_schema COMMAND test_graphql_schema)
+
+    # Test for GraphQL query parser
+    add_executable(test_graphql_query tests/test_graphql_query.cpp)
+    target_link_libraries(test_graphql_query wavedb gtest gtest_main)
+    add_test(NAME test_graphql_query COMMAND test_graphql_query)
+
+    # Test for GraphQL plan compilation
+    add_executable(test_graphql_plan tests/test_graphql_plan.cpp)
+    target_link_libraries(test_graphql_plan wavedb gtest gtest_main)
+    add_test(NAME test_graphql_plan COMMAND test_graphql_plan)
+
+    # Test for GraphQL resolve (queries and mutations)
+    add_executable(test_graphql_resolve tests/test_graphql_resolve.cpp)
+    target_link_libraries(test_graphql_resolve wavedb gtest gtest_main)
+    add_test(NAME test_graphql_resolve COMMAND test_graphql_resolve)
 
     # Visualization examples removed (used non-MVCC API, will be revisited)
 

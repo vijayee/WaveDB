@@ -70,3 +70,19 @@ base class refcounter_t extends Struct {
   // For FFI purposes, refcounter_t structs are typically accessed through
   // opaque handles, so the full layout is not required.
 }
+
+/// Opaque handle to a GraphQL layer
+/// Maps to graphql_layer_t in C
+base class graphql_layer_t extends Opaque {}
+
+/// Opaque handle to a GraphQL layer configuration
+/// Maps to graphql_layer_config_t in C
+base class graphql_layer_config_t extends Opaque {}
+
+/// Opaque handle to a GraphQL result
+/// Maps to graphql_result_t in C
+base class graphql_result_t extends Opaque {}
+
+/// Opaque handle to a GraphQL result node
+/// Maps to graphql_result_node_t in C
+base class graphql_result_node_t extends Opaque {}

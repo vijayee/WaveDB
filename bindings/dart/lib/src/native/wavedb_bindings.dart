@@ -311,6 +311,91 @@ typedef DatabaseScanEndC = Void Function(Pointer<database_iterator_t> iter);
 typedef DatabaseScanEnd = void Function(Pointer<database_iterator_t> iter);
 
 // ============================================================
+// C TYPEDEFS - GraphQL Layer
+// ============================================================
+
+/// C signature: graphql_layer_t* graphql_layer_create(
+///   const char* path,
+///   const graphql_layer_config_t* config
+/// )
+typedef GraphQLLayerCreateC = Pointer<graphql_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<graphql_layer_config_t> config,
+);
+
+/// Dart signature for graphql_layer_create
+typedef GraphQLLayerCreate = Pointer<graphql_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<graphql_layer_config_t> config,
+);
+
+/// C signature: void graphql_layer_destroy(graphql_layer_t* layer)
+typedef GraphQLLayerDestroyC = Void Function(Pointer<graphql_layer_t> layer);
+
+/// Dart signature for graphql_layer_destroy
+typedef GraphQLLayerDestroy = void Function(Pointer<graphql_layer_t> layer);
+
+/// C signature: graphql_layer_config_t* graphql_layer_config_default()
+typedef GraphQLLayerConfigDefaultC = Pointer<graphql_layer_config_t> Function();
+
+/// Dart signature for graphql_layer_config_default
+typedef GraphQLLayerConfigDefault = Pointer<graphql_layer_config_t> Function();
+
+/// C signature: void graphql_layer_config_destroy(graphql_layer_config_t* config)
+typedef GraphQLLayerConfigDestroyC = Void Function(Pointer<graphql_layer_config_t> config);
+
+/// Dart signature for graphql_layer_config_destroy
+typedef GraphQLLayerConfigDestroy = void Function(Pointer<graphql_layer_config_t> config);
+
+/// C signature: int graphql_schema_parse(graphql_layer_t* layer, const char* sdl)
+typedef GraphQLSchemaParseC = Int32 Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> sdl,
+);
+
+/// Dart signature for graphql_schema_parse
+typedef GraphQLSchemaParse = int Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> sdl,
+);
+
+/// C signature: graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query)
+typedef GraphQLQuerySyncC = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+);
+
+/// Dart signature for graphql_query_sync
+typedef GraphQLQuerySync = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+);
+
+/// C signature: graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutation)
+typedef GraphQLMutateSyncC = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+);
+
+/// Dart signature for graphql_mutate_sync
+typedef GraphQLMutateSync = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+);
+
+/// C signature: void graphql_result_destroy(graphql_result_t* result)
+typedef GraphQLResultDestroyC = Void Function(Pointer<graphql_result_t> result);
+
+/// Dart signature for graphql_result_destroy
+typedef GraphQLResultDestroy = void Function(Pointer<graphql_result_t> result);
+
+/// C signature: const char* graphql_result_to_json(graphql_result_t* result)
+typedef GraphQLResultToJsonC = Pointer<Utf8> Function(Pointer<graphql_result_t> result);
+
+/// Dart signature for graphql_result_to_json
+typedef GraphQLResultToJson = Pointer<Utf8> Function(Pointer<graphql_result_t> result);
+
+// ============================================================
 // WAVEDB NATIVE - FFI Bindings Wrapper
 // ============================================================
 
@@ -400,6 +485,34 @@ class WaveDBNative {
 
   static late final DatabaseScanEnd _databaseScanEnd = WaveDBLibrary.load()
       .lookupFunction<DatabaseScanEndC, DatabaseScanEnd>('database_scan_end');
+
+  // GraphQL layer operations
+  static late final GraphQLLayerCreate _graphQLLayerCreate = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerCreateC, GraphQLLayerCreate>('graphql_layer_create');
+
+  static late final GraphQLLayerDestroy _graphQLLayerDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerDestroyC, GraphQLLayerDestroy>('graphql_layer_destroy');
+
+  static late final GraphQLLayerConfigDefault _graphQLLayerConfigDefault = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerConfigDefaultC, GraphQLLayerConfigDefault>('graphql_layer_config_default');
+
+  static late final GraphQLLayerConfigDestroy _graphQLLayerConfigDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerConfigDestroyC, GraphQLLayerConfigDestroy>('graphql_layer_config_destroy');
+
+  static late final GraphQLSchemaParse _graphQLSchemaParse = WaveDBLibrary.load()
+      .lookupFunction<GraphQLSchemaParseC, GraphQLSchemaParse>('graphql_schema_parse');
+
+  static late final GraphQLQuerySync _graphQLQuerySync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLQuerySyncC, GraphQLQuerySync>('graphql_query_sync');
+
+  static late final GraphQLMutateSync _graphQLMutateSync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLMutateSyncC, GraphQLMutateSync>('graphql_mutate_sync');
+
+  static late final GraphQLResultDestroy _graphQLResultDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLResultDestroyC, GraphQLResultDestroy>('graphql_result_destroy');
+
+  static late final GraphQLResultToJson _graphQLResultToJson = WaveDBLibrary.load()
+      .lookupFunction<GraphQLResultToJsonC, GraphQLResultToJson>('graphql_result_to_json');
 
   // ============================================================
   // PUBLIC API - Database Lifecycle
@@ -751,5 +864,109 @@ class WaveDBNative {
   /// [iter] - Iterator handle to destroy
   static void databaseScanEnd(Pointer<database_iterator_t> iter) {
     _databaseScanEnd(iter);
+  }
+
+  // ============================================================
+  // PUBLIC API - GraphQL Layer
+  // ============================================================
+
+  /// Create a GraphQL layer with its own database
+  ///
+  /// [path] - Database storage path (null for in-memory)
+  /// [config] - Configuration (nullptr for defaults)
+  ///
+  /// Returns a pointer to the GraphQL layer handle.
+  static Pointer<graphql_layer_t> graphQLLayerCreate(
+    String? path, {
+    Pointer<graphql_layer_config_t>? config,
+  }) {
+    final pathPtr = path != null ? path.toNativeUtf8() : nullptr;
+    try {
+      final layer = _graphQLLayerCreate(
+        pathPtr.cast(),
+        config ?? nullptr,
+      );
+      if (layer == nullptr) {
+        throw WaveDBException.ioError('graphql_layer_create', 'Failed to create GraphQL layer');
+      }
+      return layer;
+    } finally {
+      if (pathPtr != nullptr) {
+        calloc.free(pathPtr);
+      }
+    }
+  }
+
+  /// Destroy a GraphQL layer and free all resources
+  static void graphQLLayerDestroy(Pointer<graphql_layer_t> layer) {
+    _graphQLLayerDestroy(layer);
+  }
+
+  /// Get default GraphQL layer configuration
+  static Pointer<graphql_layer_config_t> graphQLLayerConfigDefault() {
+    return _graphQLLayerConfigDefault();
+  }
+
+  /// Destroy a GraphQL layer configuration
+  static void graphQLLayerConfigDestroy(Pointer<graphql_layer_config_t> config) {
+    _graphQLLayerConfigDestroy(config);
+  }
+
+  /// Parse a GraphQL schema definition (SDL)
+  ///
+  /// Returns 0 on success, non-zero on error.
+  static int graphQLSchemaParse(
+    Pointer<graphql_layer_t> layer,
+    String sdl,
+  ) {
+    final sdlPtr = sdl.toNativeUtf8();
+    try {
+      return _graphQLSchemaParse(layer, sdlPtr.cast());
+    } finally {
+      calloc.free(sdlPtr);
+    }
+  }
+
+  /// Execute a GraphQL query synchronously
+  ///
+  /// Returns a pointer to the result. Caller must destroy with graphQLResultDestroy.
+  static Pointer<graphql_result_t> graphQLQuerySync(
+    Pointer<graphql_layer_t> layer,
+    String query,
+  ) {
+    final queryPtr = query.toNativeUtf8();
+    try {
+      return _graphQLQuerySync(layer, queryPtr.cast());
+    } finally {
+      calloc.free(queryPtr);
+    }
+  }
+
+  /// Execute a GraphQL mutation synchronously
+  ///
+  /// Returns a pointer to the result. Caller must destroy with graphQLResultDestroy.
+  static Pointer<graphql_result_t> graphQLMutateSync(
+    Pointer<graphql_layer_t> layer,
+    String mutation,
+  ) {
+    final mutationPtr = mutation.toNativeUtf8();
+    try {
+      return _graphQLMutateSync(layer, mutationPtr.cast());
+    } finally {
+      calloc.free(mutationPtr);
+    }
+  }
+
+  /// Destroy a GraphQL result
+  static void graphQLResultDestroy(Pointer<graphql_result_t> result) {
+    _graphQLResultDestroy(result);
+  }
+
+  /// Convert a GraphQL result to a JSON string
+  ///
+  /// Returns a pointer to a null-terminated UTF-8 string.
+  /// Caller must call malloc.free() on the returned pointer.
+  static Pointer<Utf8> graphQLResultToJson(Pointer<graphql_result_t> result) {
+    return _graphQLResultToJson(result);
   }
 }

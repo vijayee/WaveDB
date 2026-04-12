@@ -11,3 +11,5 @@ export 'src/object_ops.dart';
 // Phase 3: Public API
 export 'src/database.dart';
 export 'src/iterator.dart';
+// Phase 4: GraphQL Layer
+export 'src/graphql_layer.dart';

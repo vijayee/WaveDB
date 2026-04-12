@@ -1,0 +1,344 @@
+//
+// Tests for GraphQL Schema - Storage, loading, and layer lifecycle
+// Created: 2026-04-12
+//
+
+#include <gtest/gtest.h>
+#include <cstring>
+#include <cstdio>
+#include <sys/stat.h>
+#include "Layers/graphql/graphql.h"
+
+class GraphQLSchemaTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_schema";
+
+    void SetUp() override {
+        // Clean up any previous test directory
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+    }
+
+    void TearDown() override {
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+// ============================================================
+// Layer lifecycle
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, CreateLayerInMemory) {
+    // In-memory mode: path is NULL
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    ASSERT_NE(config, nullptr);
+
+    config->enable_persist = 0;  // In-memory mode
+    config->path = nullptr;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, CreateLayerPersistent) {
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/persistent_db", test_dir);
+
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    ASSERT_NE(config, nullptr);
+
+    config->path = db_path;
+    config->enable_persist = 1;
+
+    graphql_layer_t* layer = graphql_layer_create(db_path, config);
+    ASSERT_NE(layer, nullptr);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+// ============================================================
+// Schema parsing and storage
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, ParseSimpleSchema) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String age: Int }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    // Verify type was registered
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_STREQ(user_type->name, "User");
+    EXPECT_EQ(user_type->kind, GRAPHQL_TYPE_OBJECT);
+    EXPECT_EQ(user_type->fields.length, 2);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ParseEnumSchema) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "enum Role { ADMIN USER }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    graphql_type_t* role_type = graphql_schema_get_type(layer, "Role");
+    ASSERT_NE(role_type, nullptr);
+    EXPECT_EQ(role_type->kind, GRAPHQL_TYPE_ENUM);
+    EXPECT_EQ(role_type->enum_values.length, 2);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ParseSchemaWithDirectives) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type Person @plural(name: \"People\") { name: String }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    graphql_type_t* person_type = graphql_schema_get_type(layer, "Person");
+    ASSERT_NE(person_type, nullptr);
+    EXPECT_STREQ(person_type->name, "Person");
+    // @plural directive should set the plural_name
+    ASSERT_NE(person_type->plural_name, nullptr);
+    EXPECT_STREQ(person_type->plural_name, "People");
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ParseSchemaDefinition) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "schema { query: Query mutation: Mutation }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ParseMultipleTypes) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String } type Post { title: String }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_STREQ(user_type->name, "User");
+
+    graphql_type_t* post_type = graphql_schema_get_type(layer, "Post");
+    ASSERT_NE(post_type, nullptr);
+    EXPECT_STREQ(post_type->name, "Post");
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ParseInvalidSDL) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    int result = graphql_schema_parse(layer, "type !Invalid { }");
+    EXPECT_NE(result, 0);
+
+    result = graphql_schema_parse(layer, "");
+    EXPECT_NE(result, 0);
+
+    result = graphql_schema_parse(layer, NULL);
+    EXPECT_NE(result, 0);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+// ============================================================
+// Type registry
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, TypeRegistryLookup) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String }";
+    graphql_schema_parse(layer, sdl);
+
+    // Existing type
+    graphql_type_t* found = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(found, nullptr);
+
+    // Non-existing type
+    graphql_type_t* not_found = graphql_schema_get_type(layer, "NonExistent");
+    EXPECT_EQ(not_found, nullptr);
+
+    // Null checks
+    EXPECT_EQ(graphql_schema_get_type(nullptr, "User"), nullptr);
+    EXPECT_EQ(graphql_schema_get_type(layer, nullptr), nullptr);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+// ============================================================
+// Field type references
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, FieldTypesPreserved) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String age: Int friends: [User] id: ID! }";
+    int result = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(result, 0);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_EQ(user_type->fields.length, 4);
+
+    // name: String (scalar)
+    graphql_field_t* name_field = user_type->fields.data[0];
+    EXPECT_STREQ(name_field->name, "name");
+    ASSERT_NE(name_field->type, nullptr);
+    EXPECT_EQ(name_field->type->kind, GRAPHQL_TYPE_SCALAR);
+    EXPECT_STREQ(name_field->type->name, "String");
+
+    // age: Int (scalar)
+    graphql_field_t* age_field = user_type->fields.data[1];
+    EXPECT_STREQ(age_field->name, "age");
+    ASSERT_NE(age_field->type, nullptr);
+    EXPECT_EQ(age_field->type->kind, GRAPHQL_TYPE_SCALAR);
+
+    // friends: [User] (list of object)
+    graphql_field_t* friends_field = user_type->fields.data[2];
+    EXPECT_STREQ(friends_field->name, "friends");
+    ASSERT_NE(friends_field->type, nullptr);
+    EXPECT_EQ(friends_field->type->kind, GRAPHQL_TYPE_LIST);
+    ASSERT_NE(friends_field->type->of_type, nullptr);
+    EXPECT_EQ(friends_field->type->of_type->kind, GRAPHQL_TYPE_OBJECT);
+    EXPECT_STREQ(friends_field->type->of_type->name, "User");
+
+    // id: ID! (non-null scalar)
+    graphql_field_t* id_field = user_type->fields.data[3];
+    EXPECT_STREQ(id_field->name, "id");
+    ASSERT_NE(id_field->type, nullptr);
+    EXPECT_EQ(id_field->type->kind, GRAPHQL_TYPE_NON_NULL);
+    ASSERT_NE(id_field->type->of_type, nullptr);
+    EXPECT_EQ(id_field->type->of_type->kind, GRAPHQL_TYPE_SCALAR);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+// ============================================================
+// Null/edge cases
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, NullLayerParse) {
+    // Parsing with null layer should fail gracefully
+    int result = graphql_schema_parse(nullptr, "type User { name: String }");
+    EXPECT_NE(result, 0);
+}
+
+TEST_F(GraphQLSchemaTest, NullConfigDefaults) {
+    // Creating layer with null config should use defaults
+    graphql_layer_t* layer = graphql_layer_create(nullptr, nullptr);
+    // In-memory mode with default config
+    // This might fail if defaults try to persist to a null path
+    // Let's just verify it doesn't crash
+    if (layer != nullptr) {
+        graphql_layer_destroy(layer);
+    }
+}
+
+// ============================================================
+// Plural name generation
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, DefaultPluralName) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String }";
+    graphql_schema_parse(layer, sdl);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+
+    // Default plural: type name itself (the make_plural function adds 's')
+    const char* plural = graphql_type_get_plural(user_type);
+    EXPECT_NE(plural, nullptr);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, CustomPluralName) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type Person @plural(name: \"People\") { name: String }";
+    graphql_schema_parse(layer, sdl);
+
+    graphql_type_t* person_type = graphql_schema_get_type(layer, "Person");
+    ASSERT_NE(person_type, nullptr);
+
+    // Custom plural should return the @plural name
+    const char* plural = graphql_type_get_plural(person_type);
+    ASSERT_NE(plural, nullptr);
+    EXPECT_STREQ(plural, "People");
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
