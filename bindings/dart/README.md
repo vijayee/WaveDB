@@ -249,6 +249,120 @@ db.createReadStream(
 
 Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALID_ARGUMENT`, `NOT_SUPPORTED`, `CORRUPTION`, `CONFLICT`, `LIBRARY_NOT_FOUND`, `UNSUPPORTED_PLATFORM`
 
+## GraphQL Schema Layer
+
+WaveDB includes a GraphQL layer that provides schema definition, queries, and mutations on top of the hierarchical key-value store.
+
+### Setup
+
+```dart
+import 'package:wavedb/graphql_layer.dart';
+
+final layer = GraphQLLayer();
+layer.create(GraphQLLayerConfig(
+  path: '/path/to/db',
+  enablePersist: true,
+));
+```
+
+Pass `path: null` for an in-memory database.
+
+### Define a Schema
+
+Use GraphQL Schema Definition Language (SDL) to define types:
+
+```dart
+layer.parseSchema('''
+  type User {
+    name: String
+    age: Int
+    friends: [User]
+  }
+''');
+```
+
+### Queries
+
+**Sync:**
+
+```dart
+final result = layer.querySync('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: null}}, errors: [])
+```
+
+**Async (non-blocking, uses C worker pool):**
+
+```dart
+final result = await layer.query('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: null}}, errors: [])
+```
+
+### Mutations
+
+Create records with auto-generated IDs:
+
+```dart
+// Sync
+final result = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// GraphQLResult(success: true, data: {createUser: {id: "abc123", name: "Alice"}})
+
+// Async
+final result = await layer.mutate('mutation { createUser(name: "Bob") { id name } }');
+```
+
+Then query the data:
+
+```dart
+final result = await layer.query('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: "Alice"}})
+```
+
+### Introspection
+
+```dart
+// List all types
+final schema = await layer.query('{ __schema { types { name kind } } }');
+
+// Inspect a specific type
+final userType = await layer.query('{ __type(name: "User") { name kind fields { name } } }');
+```
+
+### Field Aliases
+
+```dart
+final result = await layer.query('{ admin: User { name } }');
+// GraphQLResult(success: true, data: {admin: {name: "Alice"}})
+```
+
+### Error Handling
+
+```dart
+try {
+  final result = await layer.query('{ InvalidType { name } }');
+  if (!result.success) {
+    print('GraphQL errors: ${result.errors}');
+  }
+} on GraphQLLayerException catch (e) {
+  print('Layer error: ${e.message}');
+}
+```
+
+### GraphQLResult Class
+
+- `bool success` - Whether the operation succeeded
+- `dynamic data` - The data returned by the operation
+- `List<String> errors` - Error messages, if any
+
+### GraphQLLayerException Class
+
+Thrown on layer-level errors (e.g., closed layer, failed promise).
+
+### Cleanup
+
+```dart
+layer.close();
+```
+
 ## Testing
 
 Tests require the native WaveDB library (`libwavedb.so`, `libwavedb.dylib`, or `wavedb.dll`).

@@ -268,6 +268,110 @@ db.get('key', (err, value) => {
 });
 ```
 
+## GraphQL Schema Layer
+
+WaveDB includes a GraphQL layer that provides schema definition, queries, and mutations on top of the hierarchical key-value store.
+
+### Setup
+
+```javascript
+const { GraphQLLayer } = require('wavedb');
+
+const layer = new GraphQLLayer('/path/to/db', {
+  enablePersist: true,
+  chunkSize: 4,
+  workerThreads: 4,
+});
+```
+
+Pass `null` as the path for an in-memory database.
+
+### Define a Schema
+
+Use GraphQL Schema Definition Language (SDL) to define types:
+
+```javascript
+layer.parseSchema(`
+  type User {
+    name: String
+    age: Int
+    friends: [User]
+  }
+`);
+```
+
+### Queries
+
+**Sync:**
+
+```javascript
+const result = layer.querySync('{ User { name } }');
+// { success: true, data: { User: { name: null } }, errors: [] }
+```
+
+**Async:**
+
+```javascript
+const result = await layer.query('{ User { name } }');
+// { success: true, data: { User: { name: null } }, errors: [] }
+```
+
+### Mutations
+
+Create records with auto-generated IDs:
+
+```javascript
+// Sync
+const result = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// { success: true, data: { createUser: { id: "abc123", name: "Alice" } } }
+
+// Async
+const result = await layer.mutate('mutation { createUser(name: "Bob") { id name } }');
+```
+
+Then query the data:
+
+```javascript
+const result = await layer.query('{ User { name } }');
+// { success: true, data: { User: { name: "Alice" } } }
+```
+
+### Introspection
+
+```javascript
+// List all types
+const schema = await layer.query('{ __schema { types { name kind } } }');
+
+// Inspect a specific type
+const userType = await layer.query('{ __type(name: "User") { name kind fields { name } } }');
+```
+
+### Field Aliases
+
+```javascript
+const result = await layer.query('{ admin: User { name } }');
+// { admin: { name: "Alice" } }
+```
+
+### Error Handling
+
+```javascript
+try {
+  const result = await layer.query('{ InvalidType { name } }');
+  if (!result.success) {
+    console.error('GraphQL errors:', result.errors);
+  }
+} catch (err) {
+  console.error('Layer error:', err.message);
+}
+```
+
+### Cleanup
+
+```javascript
+layer.close();
+```
+
 ## Building from Source
 
 ### Prerequisites
