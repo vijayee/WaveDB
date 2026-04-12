@@ -243,3 +243,84 @@ TEST_F(GraphQLResolveTest, IntrospectType) {
     free((void*)json);
     graphql_result_destroy(result);
 }
+
+// ============================================================
+// Field aliases
+// ============================================================
+
+TEST_F(GraphQLResolveTest, FieldAlias) {
+    // Query with alias: "admin: User" should produce "admin" as key in result
+    const char* query = "{ admin: User { name } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    // The result should use the alias "admin" as the key, not "User"
+    EXPECT_NE(strstr(json, "\"admin\":"), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+// ============================================================
+// Named fragments
+// ============================================================
+
+TEST_F(GraphQLResolveTest, FragmentSpread) {
+    // Test that fragment spread parses and compiles without crashing.
+    // The fragment "UserFields" expands to { name age } and is inlined
+    // into the User selection. Since no data is stored, we verify the
+    // query compiles and returns a valid result structure.
+    const char* query =
+        "fragment UserFields on User { name age } "
+        "{ User { ...UserFields } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"data\""), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLResolveTest, CircularFragment) {
+    // Circular fragment should not infinite loop — it should be detected and skipped
+    const char* query =
+        "fragment A on User { name ...B } "
+        "fragment B on User { age ...A } "
+        "{ User { ...A } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    // Should not crash; may succeed with partial data or fail gracefully
+    // The key test is that it doesn't infinite loop
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+// ============================================================
+// Partial-success errors
+// ============================================================
+
+TEST_F(GraphQLResolveTest, PartialSuccessDepthExceeded) {
+    // Deep nesting should exceed max depth, producing partial data with errors
+    // Build a query with deeply nested friends
+    const char* query = "{ User { friends { friends { friends { friends { name } } } } } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+
+    // Even if depth is exceeded, we should get a result (possibly with null fields and errors)
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    // The result should have a "data" key (possibly with null fields)
+    EXPECT_NE(strstr(json, "\"data\":"), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}

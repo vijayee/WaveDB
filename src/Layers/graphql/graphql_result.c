@@ -188,6 +188,21 @@ const char* graphql_result_to_json(graphql_result_t* result) {
                 json_builder_append_escaped(&b, err->path);
                 json_builder_append_char(&b, '"');
             }
+            if (err->locations.length > 0) {
+                json_builder_append(&b, ",\"locations\":[");
+                for (int li = 0; li < err->locations.length; li++) {
+                    if (li > 0) json_builder_append(&b, ",");
+                    json_builder_append(&b, "{\"line\":");
+                    char loc_buf[32];
+                    snprintf(loc_buf, sizeof(loc_buf), "%zu", err->locations.data[li].line);
+                    json_builder_append(&b, loc_buf);
+                    json_builder_append(&b, ",\"column\":");
+                    snprintf(loc_buf, sizeof(loc_buf), "%zu", err->locations.data[li].column);
+                    json_builder_append(&b, loc_buf);
+                    json_builder_append(&b, "}");
+                }
+                json_builder_append(&b, "]");
+            }
             json_builder_append(&b, "}");
         }
         json_builder_append(&b, "]");

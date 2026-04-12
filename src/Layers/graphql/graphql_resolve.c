@@ -26,6 +26,34 @@
 
 #define MAX_RESOLVE_DEPTH 15
 
+// Effective name for result nodes: prefer alias over type_name
+#define PLAN_NAME(p) ((p)->alias ? (p)->alias : (p)->type_name)
+
+// ============================================================
+// Error collection helpers
+// ============================================================
+
+static void push_error(graphql_result_t* result, const char* message, const char* path) {
+    if (result == NULL) return;
+    graphql_error_t error;
+    memset(&error, 0, sizeof(error));
+    error.message = strdup(message);
+    error.path = path ? strdup(path) : NULL;
+    vec_push(&result->errors, error);
+}
+
+static char* build_error_path(const char* parent, const char* child) {
+    if (parent == NULL || parent[0] == '\0') {
+        return child ? strdup(child) : strdup("");
+    }
+    if (child == NULL || child[0] == '\0') return strdup(parent);
+    size_t len = strlen(parent) + 1 + strlen(child) + 1;
+    char* path = malloc(len);
+    if (path == NULL) return strdup(child ? child : "");
+    snprintf(path, len, "%s.%s", parent, child);
+    return path;
+}
+
 // ============================================================
 // Forward declarations
 // ============================================================
@@ -34,12 +62,27 @@ static graphql_result_node_t* execute_plan(graphql_layer_t* layer,
                                             graphql_plan_t* plan,
                                             graphql_type_t* type,
                                             const char* parent_id,
-                                            int depth);
+                                            int depth,
+                                            graphql_result_t* result,
+                                            const char* path_prefix);
 static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                                              graphql_plan_t* plan,
                                              graphql_type_t* parent_type,
                                              const char* parent_id,
-                                             int depth);
+                                             int depth,
+                                             graphql_result_t* result,
+                                             const char* path_prefix);
+static graphql_result_node_t* execute_get(graphql_layer_t* layer,
+                                           graphql_plan_t* plan,
+                                           graphql_type_t* type,
+                                           graphql_result_t* result,
+                                           const char* path_prefix);
+static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
+                                            graphql_plan_t* plan,
+                                            graphql_type_t* type,
+                                            int depth,
+                                            graphql_result_t* result,
+                                            const char* path_prefix);
 static char* db_get_string(database_t* db, const char* path_str);
 static int db_put_string(database_t* db, const char* path_str, const char* value);
 
@@ -159,9 +202,11 @@ static int local_db_put_string(database_t* db, const char* path_str, const char*
 
 static graphql_result_node_t* execute_get(graphql_layer_t* layer,
                                            graphql_plan_t* plan,
-                                           graphql_type_t* type) {
+                                           graphql_type_t* type,
+                                           graphql_result_t* result,
+                                           const char* path_prefix) {
     if (plan->get_path == NULL) {
-        graphql_result_node_t* null_node = graphql_result_node_create(RESULT_NULL, plan->type_name);
+        graphql_result_node_t* null_node = graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
         return null_node;
     }
 
@@ -180,7 +225,7 @@ static graphql_result_node_t* execute_get(graphql_layer_t* layer,
 
     char* value = local_db_get_string(layer->db, path_buf);
     if (value == NULL) {
-        return graphql_result_node_create(RESULT_NULL, plan->type_name);
+        return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 
     // Determine result kind based on type
@@ -189,7 +234,7 @@ static graphql_result_node_t* execute_get(graphql_layer_t* layer,
         kind = RESULT_STRING;  // Enums serialize as strings
     }
 
-    graphql_result_node_t* node = graphql_result_node_create(kind, plan->type_name);
+    graphql_result_node_t* node = graphql_result_node_create(kind, PLAN_NAME(plan));
     if (node != NULL) {
         node->string_val = value;
     } else {
@@ -201,8 +246,10 @@ static graphql_result_node_t* execute_get(graphql_layer_t* layer,
 static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
                                             graphql_plan_t* plan,
                                             graphql_type_t* type,
-                                            int depth) {
-    graphql_result_node_t* list = graphql_result_node_create(RESULT_LIST, plan->type_name);
+                                            int depth,
+                                            graphql_result_t* result,
+                                            const char* path_prefix) {
+    graphql_result_node_t* list = graphql_result_node_create(RESULT_LIST, PLAN_NAME(plan));
     if (list == NULL) return NULL;
 
     if (depth > MAX_RESOLVE_DEPTH) {
@@ -274,7 +321,7 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
 
         if (plan->children.length == 0) {
             // No child selections — return just the ID
-            graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+            graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
             if (obj != NULL) {
                 graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                 if (id_node != NULL) {
@@ -285,7 +332,7 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
             }
         } else {
             // Resolve child plans for this entity
-            graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+            graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
             if (obj != NULL) {
                 // Always include the entity ID
                 graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
@@ -301,7 +348,9 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
                         child_type = graphql_schema_get_type(layer, child->type_name);
                     }
 
-                    graphql_result_node_t* child_result = resolve_field(layer, child, type, entity_id, depth + 1);
+                    char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+                    graphql_result_node_t* child_result = resolve_field(layer, child, type, entity_id, depth + 1, result, child_path);
+                    free(child_path);
                     if (child_result != NULL) {
                         graphql_result_node_add_child(obj, child_result);
                     }
@@ -324,18 +373,20 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                                              graphql_plan_t* plan,
                                              graphql_type_t* parent_type,
                                              const char* parent_id,
-                                             int depth) {
+                                             int depth,
+                                             graphql_result_t* result,
+                                             const char* path_prefix) {
     if (depth > MAX_RESOLVE_DEPTH) {
-        return graphql_result_node_create(RESULT_NULL, plan->type_name);
+        return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 
     switch (plan->kind) {
         case PLAN_GET:
-            return execute_get(layer, plan, parent_type);
+            return execute_get(layer, plan, parent_type, result, path_prefix);
 
 
         case PLAN_SCAN:
-            return execute_scan(layer, plan, parent_type, depth);
+            return execute_scan(layer, plan, parent_type, depth, result, path_prefix);
 
         case PLAN_RESOLVE_FIELD: {
             // Resolve a single field from a parent object
@@ -349,7 +400,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
 
             char* value = local_db_get_string(layer->db, path_buf);
             if (value == NULL) {
-                return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
             }
 
             // If this field has child selections and resolves to a reference type,
@@ -361,7 +412,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                     ref_type = graphql_schema_get_type(layer, plan->type_name);
                 }
 
-                graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+                graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
                 if (obj != NULL) {
                     // Include the referenced ID
                     graphql_result_node_t* ref_id_node = graphql_result_node_create(RESULT_STRING, "id");
@@ -378,7 +429,9 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                             child_type = graphql_schema_get_type(layer, child->type_name);
                         }
 
-                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, value, depth + 1);
+                        char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, value, depth + 1, result, child_path);
+                        free(child_path);
                         if (child_result != NULL) {
                             graphql_result_node_add_child(obj, child_result);
                         }
@@ -389,7 +442,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             }
 
             // Scalar field — return the value directly
-            graphql_result_node_t* node = graphql_result_node_create(RESULT_STRING, plan->type_name);
+            graphql_result_node_t* node = graphql_result_node_create(RESULT_STRING, PLAN_NAME(plan));
             if (node != NULL) {
                 node->string_val = value;
             } else {
@@ -403,7 +456,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             // The reference field value is stored as an ID in the parent
             // Look up the referenced type and resolve its fields
             if (plan->ref_type == NULL || parent_id == NULL) {
-                return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
             }
 
             graphql_type_t* ref_type = NULL;
@@ -416,19 +469,19 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             if (plan->ref_id != NULL) {
                 buffer_t* buf = identifier_to_buffer(plan->ref_id);
                 if (buf == NULL) {
-                    return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                    return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
                 }
                 char* ref_id_str = malloc(buf->size + 1);
                 if (ref_id_str == NULL) {
                     buffer_destroy(buf);
-                    return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                    return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
                 }
                 memcpy(ref_id_str, buf->data, buf->size);
                 ref_id_str[buf->size] = '\0';
                 buffer_destroy(buf);
 
                 // Build object with referenced entity's fields
-                graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+                graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
                 if (obj != NULL) {
                     graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                     if (id_node != NULL) {
@@ -443,7 +496,9 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                             child_type = graphql_schema_get_type(layer, child->type_name);
                         }
 
-                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_id_str, depth + 1);
+                        char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_id_str, depth + 1, result, child_path);
+                        free(child_path);
                         if (child_result != NULL) {
                             graphql_result_node_add_child(obj, child_result);
                         }
@@ -463,7 +518,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             char* ref_value = local_db_get_string(layer->db, scan_path);
             if (ref_value != NULL) {
                 // Single reference — resolve it
-                graphql_result_node_t* ref_result = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+                graphql_result_node_t* ref_result = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
                 if (ref_result != NULL) {
                     graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                     if (id_node != NULL) {
@@ -480,7 +535,9 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                             child_type = graphql_schema_get_type(layer, child->type_name);
                         }
 
-                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_value, depth + 1);
+                        char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+                        graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_value, depth + 1, result, child_path);
+                        free(child_path);
                         if (child_result != NULL) {
                             graphql_result_node_add_child(ref_result, child_result);
                         }
@@ -492,7 +549,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             // Try scanning for multiple references under the field path
             path_t* field_path = path_create();
             if (field_path == NULL) {
-                return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
             }
             const char* s = scan_path;
             while (*s) {
@@ -518,10 +575,10 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             // field_path consumed by scan_start
 
             if (iter == NULL) {
-                return graphql_result_node_create(RESULT_NULL, plan->type_name);
+                return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
             }
 
-            graphql_result_node_t* list = graphql_result_node_create(RESULT_LIST, plan->type_name);
+            graphql_result_node_t* list = graphql_result_node_create(RESULT_LIST, PLAN_NAME(plan));
             path_t* out_path = NULL;
             identifier_t* out_val = NULL;
 
@@ -537,7 +594,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                             memcpy(ref_id, val_buf->data, val_buf->size);
                             ref_id[val_buf->size] = '\0';
 
-                            graphql_result_node_t* ref_obj = graphql_result_node_create(RESULT_OBJECT, plan->type_name);
+                            graphql_result_node_t* ref_obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
                             if (ref_obj != NULL) {
                                 graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                                 if (id_node != NULL) {
@@ -552,7 +609,9 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                                         child_type = graphql_schema_get_type(layer, child->type_name);
                                     }
 
-                                    graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_id, depth + 1);
+                                    char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+                                    graphql_result_node_t* child_result = resolve_field(layer, child, ref_type, ref_id, depth + 1, result, child_path);
+                                    free(child_path);
                                     if (child_result != NULL) {
                                         graphql_result_node_add_child(ref_obj, child_result);
                                     }
@@ -591,18 +650,18 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
 
                 return plan->resolver(layer, NULL, parent_path, NULL, args_buf, plan->resolver_ctx);
             }
-            return graphql_result_node_create(RESULT_NULL, plan->type_name);
+            return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
 
         case PLAN_FILTER:
             // Filter is already applied during compilation (@skip/@include)
-            return graphql_result_node_create(RESULT_NULL, plan->type_name);
+            return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
 
         case PLAN_BATCH_GET:
             // Batch get: resolve each argument ID individually
-            return execute_scan(layer, plan, parent_type, depth);
+            return execute_scan(layer, plan, parent_type, depth, result, path_prefix);
 
         default:
-            return graphql_result_node_create(RESULT_NULL, plan->type_name);
+            return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 }
 
@@ -610,22 +669,47 @@ static graphql_result_node_t* execute_plan(graphql_layer_t* layer,
                                             graphql_plan_t* plan,
                                             graphql_type_t* type,
                                             const char* parent_id,
-                                            int depth) {
+                                            int depth,
+                                            graphql_result_t* result,
+                                            const char* path_prefix) {
     if (plan == NULL) return NULL;
 
     if (depth > MAX_RESOLVE_DEPTH) {
-        return graphql_result_node_create(RESULT_NULL, plan->type_name);
+        return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 
     // For SCAN and RESOLVE_REF, resolve_field handles child resolution internally
     // (since scan iterates per-entity and resolves children for each)
     if (plan->kind == PLAN_SCAN || plan->kind == PLAN_RESOLVE_REF) {
-        return resolve_field(layer, plan, type, parent_id, depth);
+        return resolve_field(layer, plan, type, parent_id, depth, result, path_prefix);
     }
 
     // For other plan kinds, resolve the field and then attach child results
-    graphql_result_node_t* result = resolve_field(layer, plan, type, parent_id, depth);
-    if (result == NULL) return NULL;
+    graphql_result_node_t* node_result = resolve_field(layer, plan, type, parent_id, depth, result, path_prefix);
+
+    // If resolve_field returned NULL or a non-container type but we have children,
+    // upgrade to an object node so children can be attached
+    if (node_result != NULL && plan->children.length > 0 &&
+        node_result->kind != RESULT_OBJECT && node_result->kind != RESULT_LIST) {
+        graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
+        if (obj != NULL) {
+            // Transfer the name from the original node
+            if (node_result->name) {
+                free(obj->name);
+                obj->name = node_result->name;
+                node_result->name = NULL;
+            }
+            graphql_result_node_destroy(node_result);
+            node_result = obj;
+        }
+    }
+    if (node_result == NULL) {
+        if (plan->children.length > 0) {
+            node_result = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
+        } else {
+            return NULL;
+        }
+    }
 
     // Execute child plans and attach to result
     for (int i = 0; i < plan->children.length; i++) {
@@ -635,15 +719,28 @@ static graphql_result_node_t* execute_plan(graphql_layer_t* layer,
             child_type = graphql_schema_get_type(layer, child->type_name);
         }
 
-        graphql_result_node_t* child_result = resolve_field(layer, child, child_type, parent_id, depth + 1);
-        if (child_result != NULL && result != NULL) {
-            if (result->kind == RESULT_OBJECT || result->kind == RESULT_LIST) {
-                graphql_result_node_add_child(result, child_result);
+        char* child_path = build_error_path(path_prefix, PLAN_NAME(child));
+        graphql_result_node_t* child_result = resolve_field(layer, child, child_type, parent_id, depth + 1, result, child_path);
+        if (child_result == NULL) {
+            push_error(result, "Failed to resolve field", child_path);
+            free(child_path);
+            graphql_result_node_t* null_node = graphql_result_node_create(RESULT_NULL, PLAN_NAME(child));
+            if (null_node != NULL && node_result != NULL) {
+                if (node_result->kind == RESULT_OBJECT || node_result->kind == RESULT_LIST) {
+                    graphql_result_node_add_child(node_result, null_node);
+                }
+            }
+            continue;
+        }
+        free(child_path);
+        if (node_result != NULL) {
+            if (node_result->kind == RESULT_OBJECT || node_result->kind == RESULT_LIST) {
+                graphql_result_node_add_child(node_result, child_result);
             }
         }
     }
 
-    return result;
+    return node_result;
 }
 
 // ============================================================
@@ -910,7 +1007,7 @@ graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query) 
         return make_error_result("Out of memory", NULL);
     }
 
-    result->data = execute_plan(layer, plan, NULL, NULL, 0);
+    result->data = execute_plan(layer, plan, NULL, NULL, 0, result, "data");
     result->success = true;
 
     graphql_plan_destroy(plan);

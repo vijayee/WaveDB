@@ -223,6 +223,7 @@ graphql_plan_t* graphql_plan_create(graphql_plan_kind_t kind) {
 void graphql_plan_destroy(graphql_plan_t* plan) {
     if (plan == NULL) return;
     free(plan->type_name);
+    free(plan->alias);
     if (plan->base_path) path_destroy(plan->base_path);
     if (plan->scan_start) path_destroy(plan->scan_start);
     if (plan->scan_end) path_destroy(plan->scan_end);

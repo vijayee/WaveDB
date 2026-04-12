@@ -1198,11 +1198,14 @@ static graphql_ast_node_t* parse_inline_fragment(graphql_parser_state_t* state) 
 
     graphql_ast_node_t* inline_frag = graphql_ast_node_create(GRAPHQL_AST_INLINE_FRAGMENT,
                                                                 type_name, 0, 0);
-    free(type_name);
-    if (inline_frag == NULL) return NULL;
+    if (inline_frag == NULL) {
+        free(type_name);
+        return NULL;
+    }
 
     if (type_name != NULL) {
         inline_frag->type_ref = graphql_type_ref_create_named(GRAPHQL_TYPE_OBJECT, type_name);
+        free(type_name);
     }
 
     // Parse optional directives

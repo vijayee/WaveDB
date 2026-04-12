@@ -28,6 +28,9 @@ graphql_result_t* graphql_query_sync(graphql_layer_t* layer,
 /**
  * Execute a GraphQL query asynchronously.
  *
+ * NOTE (v1): This is currently a synchronous wrapper around graphql_query_sync.
+ * True async execution with worker pool integration is planned for v2.
+ *
  * @param layer     Layer with registered schema
  * @param query     GraphQL query string
  * @param user_data Context passed to async callbacks
@@ -49,6 +52,9 @@ graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer,
 
 /**
  * Execute a GraphQL mutation asynchronously.
+ *
+ * NOTE (v1): This is currently a synchronous wrapper around graphql_mutate_sync.
+ * True async execution with worker pool integration is planned for v2.
  *
  * @param layer     Layer with registered schema
  * @param mutation  GraphQL mutation string

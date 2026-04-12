@@ -19,14 +19,23 @@
 // Forward declarations
 // ============================================================
 
-static graphql_plan_t* compile_selection(graphql_layer_t* layer,
-                                          graphql_ast_node_t* field_node,
-                                          graphql_type_t* parent_type,
-                                          const char* parent_path);
+// Fragment lookup table
+typedef struct {
+    const char* name;            // Fragment name (points into AST, not owned)
+    graphql_ast_node_t* node;    // AST node for the fragment definition
+} fragment_entry_t;
+
+typedef vec_t(fragment_entry_t) fragment_table_t;
+
+#define MAX_FRAGMENT_DEPTH 10
+
 static graphql_plan_t* compile_field(graphql_layer_t* layer,
                                       graphql_ast_node_t* field_node,
                                       graphql_type_t* parent_type,
-                                      const char* parent_path);
+                                      const char* parent_path,
+                                      fragment_table_t* fragments,
+                                      const char** visited,
+                                      int visited_depth);
 static bool should_skip_field(graphql_ast_node_t* field_node);
 
 // ============================================================
@@ -84,7 +93,10 @@ static char* build_path(const char* parent, const char* child) {
 static graphql_plan_t* compile_field(graphql_layer_t* layer,
                                       graphql_ast_node_t* field_node,
                                       graphql_type_t* parent_type,
-                                      const char* parent_path) {
+                                      const char* parent_path,
+                                      fragment_table_t* fragments,
+                                      const char** visited,
+                                      int visited_depth) {
     if (field_node == NULL) return NULL;
 
     // Check @skip/@include
@@ -151,6 +163,7 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
     }
 
     plan->type_name = target_type_name ? strdup(target_type_name) : NULL;
+    plan->alias = field_node->alias ? strdup(field_node->alias) : NULL;
 
     // Set up the path for this plan
     if (field_path != NULL) {
@@ -247,7 +260,59 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
 
         if (child->kind == GRAPHQL_AST_FRAGMENT_SPREAD) {
             // Fragment spread: look up the fragment definition and inline it
-            // For now, skip - fragments are resolved during planning
+            const char* spread_name = child->name;
+            graphql_ast_node_t* frag_def = NULL;
+
+            if (fragments != NULL) {
+                for (int fi = 0; fi < fragments->length; fi++) {
+                    if (strcmp(fragments->data[fi].name, spread_name) == 0) {
+                        frag_def = fragments->data[fi].node;
+                        break;
+                    }
+                }
+            }
+
+            if (frag_def == NULL) {
+                // Unknown fragment - skip silently
+                continue;
+            }
+
+            // Cycle detection
+            bool is_cycle = false;
+            for (int vi = 0; vi < visited_depth; vi++) {
+                if (strcmp(visited[vi], spread_name) == 0) {
+                    is_cycle = true;
+                    break;
+                }
+            }
+            if (is_cycle) continue;
+
+            // Build new visited stack for recursive calls
+            const char* new_visited[MAX_FRAGMENT_DEPTH];
+            for (int vi = 0; vi < visited_depth && vi < MAX_FRAGMENT_DEPTH; vi++) {
+                new_visited[vi] = visited[vi];
+            }
+            int new_depth = visited_depth < MAX_FRAGMENT_DEPTH ? visited_depth + 1 : visited_depth;
+            if (visited_depth < MAX_FRAGMENT_DEPTH) {
+                new_visited[visited_depth] = spread_name;
+            }
+
+            // Determine fragment's type condition
+            graphql_type_t* frag_type = NULL;
+            if (frag_def->type_ref && frag_def->type_ref->name && layer != NULL) {
+                frag_type = graphql_schema_get_type(layer, frag_def->type_ref->name);
+            }
+            graphql_type_t* frag_parent_type = frag_type ? frag_type : target_type;
+
+            // Inline fragment's selection fields
+            for (int j = 0; j < frag_def->children.length; j++) {
+                graphql_plan_t* child_plan = compile_field(layer, frag_def->children.data[j],
+                                                            frag_parent_type, parent_path,
+                                                            fragments, new_visited, new_depth);
+                if (child_plan != NULL) {
+                    vec_push(&plan->children, child_plan);
+                }
+            }
             continue;
         }
 
@@ -267,7 +332,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                 char* inline_path_str = build_path(parent_path, inline_plural);
                 for (int j = 0; j < child->children.length; j++) {
                     graphql_plan_t* child_plan = compile_field(layer, child->children.data[j],
-                                                                inline_parent_type, inline_path_str);
+                                                                inline_parent_type, inline_path_str,
+                                                                fragments, visited, visited_depth);
                     if (child_plan != NULL) {
                         vec_push(&plan->children, child_plan);
                     }
@@ -276,7 +342,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
             } else {
                 for (int j = 0; j < child->children.length; j++) {
                     graphql_plan_t* child_plan = compile_field(layer, child->children.data[j],
-                                                                NULL, parent_path);
+                                                                NULL, parent_path,
+                                                                fragments, visited, visited_depth);
                     if (child_plan != NULL) {
                         vec_push(&plan->children, child_plan);
                     }
@@ -287,7 +354,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
 
         if (child->kind == GRAPHQL_AST_FIELD) {
             graphql_plan_t* child_plan = compile_field(layer, child,
-                                                        target_type, plural);
+                                                        target_type, plural,
+                                                        fragments, visited, visited_depth);
             if (child_plan != NULL) {
                 vec_push(&plan->children, child_plan);
             }
@@ -314,6 +382,19 @@ graphql_plan_t* graphql_compile_query(graphql_layer_t* layer, const char* query)
     // Parse the query
     graphql_ast_node_t* ast = graphql_parse(query, strlen(query));
     if (ast == NULL) return NULL;
+
+    // Collect fragment definitions
+    fragment_table_t fragments;
+    vec_init(&fragments);
+    for (int i = 0; i < ast->children.length; i++) {
+        graphql_ast_node_t* child = ast->children.data[i];
+        if (child->kind == GRAPHQL_AST_FRAGMENT) {
+            fragment_entry_t entry;
+            entry.name = child->name;
+            entry.node = child;
+            vec_push(&fragments, entry);
+        }
+    }
 
     graphql_plan_t* root_plan = NULL;
 
@@ -352,7 +433,8 @@ graphql_plan_t* graphql_compile_query(graphql_layer_t* layer, const char* query)
                     const char* path_prefix = root_type ? graphql_type_get_plural(root_type) : field_name;
 
                     graphql_plan_t* child_plan = compile_field(layer, field,
-                                                                root_type, path_prefix);
+                                                                root_type, path_prefix,
+                                                                &fragments, NULL, 0);
                     if (child_plan != NULL) {
                         if (root_plan == NULL) {
                             root_plan = graphql_plan_create(PLAN_GET);
@@ -370,6 +452,7 @@ graphql_plan_t* graphql_compile_query(graphql_layer_t* layer, const char* query)
         }
     }
 
+    vec_deinit(&fragments);
     graphql_ast_destroy(ast);
     return root_plan;
 }
@@ -380,6 +463,19 @@ graphql_plan_t* graphql_compile_mutation(graphql_layer_t* layer, const char* mut
     // Parse the mutation
     graphql_ast_node_t* ast = graphql_parse(mutation, strlen(mutation));
     if (ast == NULL) return NULL;
+
+    // Collect fragment definitions
+    fragment_table_t fragments;
+    vec_init(&fragments);
+    for (int i = 0; i < ast->children.length; i++) {
+        graphql_ast_node_t* child = ast->children.data[i];
+        if (child->kind == GRAPHQL_AST_FRAGMENT) {
+            fragment_entry_t entry;
+            entry.name = child->name;
+            entry.node = child;
+            vec_push(&fragments, entry);
+        }
+    }
 
     graphql_plan_t* root_plan = NULL;
 
@@ -413,7 +509,8 @@ graphql_plan_t* graphql_compile_mutation(graphql_layer_t* layer, const char* mut
 
                     const char* path_prefix = root_type ? graphql_type_get_plural(root_type) : field_name;
                     graphql_plan_t* child_plan = compile_field(layer, field,
-                                                                root_type, path_prefix);
+                                                                root_type, path_prefix,
+                                                                &fragments, NULL, 0);
                     if (child_plan != NULL) {
                         vec_push(&root_plan->children, child_plan);
                     }
@@ -423,6 +520,7 @@ graphql_plan_t* graphql_compile_mutation(graphql_layer_t* layer, const char* mut
         }
     }
 
+    vec_deinit(&fragments);
     graphql_ast_destroy(ast);
     return root_plan;
 }
