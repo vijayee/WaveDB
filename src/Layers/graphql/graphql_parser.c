@@ -629,6 +629,18 @@ static graphql_ast_node_t* parse_field_definition(graphql_parser_state_t* state)
         field->is_required = true;
     }
 
+    // Parse optional default value: = literal
+    if (graphql_lexer_accept(state->lexer, GRAPHQL_TOKEN_EQUALS)) {
+        graphql_literal_t* default_val = parse_literal(state);
+        if (default_val != NULL) {
+            field->literal = default_val;
+        } else {
+            parser_error(state, "Expected default value after '='");
+            graphql_ast_destroy(field);
+            return NULL;
+        }
+    }
+
     // Parse optional directives
     while (graphql_lexer_peek(state->lexer).kind == GRAPHQL_TOKEN_AT) {
         graphql_directive_t* dir = parse_directive(state);

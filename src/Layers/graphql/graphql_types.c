@@ -51,6 +51,93 @@ void graphql_type_ref_destroy(graphql_type_ref_t* ref) {
 }
 
 // ============================================================
+// Literal functions
+// ============================================================
+
+void graphql_literal_destroy(graphql_literal_t* literal) {
+    if (literal == NULL) return;
+    switch (literal->kind) {
+        case GRAPHQL_LITERAL_STRING:
+        case GRAPHQL_LITERAL_ENUM:
+            free(literal->string_val);
+            break;
+        case GRAPHQL_LITERAL_OBJECT: {
+            int i;
+            graphql_object_field_t* f;
+            vec_foreach(&literal->object_fields, f, i) {
+                free(f->name);
+                graphql_literal_destroy(f->value);
+                free(f);
+            }
+            vec_deinit(&literal->object_fields);
+            break;
+        }
+        case GRAPHQL_LITERAL_LIST: {
+            int i;
+            graphql_literal_t* item;
+            vec_foreach(&literal->list_items, item, i) {
+                graphql_literal_destroy(item);
+            }
+            vec_deinit(&literal->list_items);
+            break;
+        }
+        default:
+            break;
+    }
+    free(literal);
+}
+
+graphql_literal_t* graphql_literal_copy(const graphql_literal_t* literal) {
+    if (literal == NULL) return NULL;
+
+    graphql_literal_t* copy = get_clear_memory(sizeof(graphql_literal_t));
+    if (copy == NULL) return NULL;
+    copy->kind = literal->kind;
+
+    switch (literal->kind) {
+        case GRAPHQL_LITERAL_STRING:
+        case GRAPHQL_LITERAL_ENUM:
+            if (literal->string_val) {
+                copy->string_val = strdup(literal->string_val);
+            }
+            break;
+        case GRAPHQL_LITERAL_INT:
+            copy->int_val = literal->int_val;
+            break;
+        case GRAPHQL_LITERAL_FLOAT:
+            copy->float_val = literal->float_val;
+            break;
+        case GRAPHQL_LITERAL_BOOL:
+            copy->bool_val = literal->bool_val;
+            break;
+        case GRAPHQL_LITERAL_OBJECT: {
+            int i;
+            graphql_object_field_t* f;
+            vec_foreach(&literal->object_fields, f, i) {
+                graphql_object_field_t* fcopy = get_clear_memory(sizeof(graphql_object_field_t));
+                if (fcopy == NULL) break;
+                fcopy->name = f->name ? strdup(f->name) : NULL;
+                fcopy->value = graphql_literal_copy(f->value);
+                vec_push(&copy->object_fields, fcopy);
+            }
+            break;
+        }
+        case GRAPHQL_LITERAL_LIST: {
+            int i;
+            graphql_literal_t* item;
+            vec_foreach(&literal->list_items, item, i) {
+                graphql_literal_t* itemcopy = graphql_literal_copy(item);
+                if (itemcopy) vec_push(&copy->list_items, itemcopy);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    return copy;
+}
+
+// ============================================================
 // Field functions
 // ============================================================
 
@@ -75,6 +162,7 @@ void graphql_field_destroy(graphql_field_t* field) {
     if (field == NULL) return;
     free(field->name);
     graphql_type_ref_destroy(field->type);
+    graphql_literal_destroy(field->default_value);
     int i;
     graphql_directive_t* d;
     vec_foreach(&field->directives, d, i) {

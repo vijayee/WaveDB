@@ -112,6 +112,7 @@ typedef struct graphql_field_t {
     char* name;                              // "name", "friends", etc.
     graphql_type_ref_t* type;               // Type reference for this field
     bool is_required;                        // Non-null (!) modifier
+    graphql_literal_t* default_value;        // Default value (NULL if none)
     vec_t(graphql_directive_t*) directives;  // Directives on this field
     // Custom resolver (NULL = auto-resolve)
     struct graphql_result_node_t* (*resolver)(
@@ -331,6 +332,20 @@ graphql_field_t* graphql_field_create(const char* name,
  * Destroy a field definition.
  */
 void graphql_field_destroy(graphql_field_t* field);
+
+// ============================================================
+// Literal functions
+// ============================================================
+
+/**
+ * Destroy a literal value.
+ */
+void graphql_literal_destroy(graphql_literal_t* literal);
+
+/**
+ * Deep-copy a literal value.
+ */
+graphql_literal_t* graphql_literal_copy(const graphql_literal_t* literal);
 
 // ============================================================
 // Type functions

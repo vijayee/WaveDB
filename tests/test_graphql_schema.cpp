@@ -501,3 +501,84 @@ TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
     snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
     (void)system(cmd);
 }
+
+// ============================================================
+// Default value tests
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, ParseDefaultValue) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String = \"Anonymous\" age: Int = 0 active: Boolean = true }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_EQ(user_type->fields.length, 3);
+
+    // name field should have default value "Anonymous"
+    graphql_field_t* name_field = user_type->fields.data[0];
+    EXPECT_STREQ(name_field->name, "name");
+    ASSERT_NE(name_field->default_value, nullptr);
+    EXPECT_EQ(name_field->default_value->kind, GRAPHQL_LITERAL_STRING);
+    EXPECT_STREQ(name_field->default_value->string_val, "Anonymous");
+
+    // age field should have default value 0
+    graphql_field_t* age_field = user_type->fields.data[1];
+    EXPECT_STREQ(age_field->name, "age");
+    ASSERT_NE(age_field->default_value, nullptr);
+    EXPECT_EQ(age_field->default_value->kind, GRAPHQL_LITERAL_INT);
+    EXPECT_EQ(age_field->default_value->int_val, 0);
+
+    // active field should have default value true
+    graphql_field_t* active_field = user_type->fields.data[2];
+    EXPECT_STREQ(active_field->name, "active");
+    ASSERT_NE(active_field->default_value, nullptr);
+    EXPECT_EQ(active_field->default_value->kind, GRAPHQL_LITERAL_BOOL);
+    EXPECT_EQ(active_field->default_value->bool_val, true);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, DefaultValuesPersistAndLoad) {
+    const char* test_dir = "/tmp/wavedb_test_default_persist";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
+    (void)system(cmd);
+    mkdir(test_dir, 0755);
+
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->path = test_dir;
+    config->enable_persist = 1;
+
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type Config { name: String = \"default\" count: Int = 10 }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    // Verify default values are present
+    graphql_type_t* config_type = graphql_schema_get_type(layer, "Config");
+    ASSERT_NE(config_type, nullptr);
+
+    graphql_field_t* name_field = config_type->fields.data[0];
+    ASSERT_NE(name_field->default_value, nullptr);
+    EXPECT_STREQ(name_field->default_value->string_val, "default");
+
+    graphql_field_t* count_field = config_type->fields.data[1];
+    ASSERT_NE(count_field->default_value, nullptr);
+    EXPECT_EQ(count_field->default_value->int_val, 10);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
+    (void)system(cmd);
+}

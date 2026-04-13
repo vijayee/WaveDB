@@ -48,6 +48,46 @@ static bool is_list_type(graphql_type_ref_t* type_ref) {
     return is_list_type(type_ref->of_type);
 }
 
+// Helper: parse a type-prefixed default value string back to a graphql_literal_t
+// Format: s:hello, i:42, f:3.14, b:true, n:null, e:ENUMVAL
+static graphql_literal_t* parse_default_value(const char* str) {
+    if (str == NULL || str[0] == '\0' || str[1] != ':') return NULL;
+
+    graphql_literal_t* lit = get_clear_memory(sizeof(graphql_literal_t));
+    if (lit == NULL) return NULL;
+
+    const char* val = str + 2;
+    switch (str[0]) {
+        case 's':
+            lit->kind = GRAPHQL_LITERAL_STRING;
+            lit->string_val = strdup(val);
+            break;
+        case 'i':
+            lit->kind = GRAPHQL_LITERAL_INT;
+            lit->int_val = strtoll(val, NULL, 10);
+            break;
+        case 'f':
+            lit->kind = GRAPHQL_LITERAL_FLOAT;
+            lit->float_val = strtod(val, NULL);
+            break;
+        case 'b':
+            lit->kind = GRAPHQL_LITERAL_BOOL;
+            lit->bool_val = (strcmp(val, "true") == 0);
+            break;
+        case 'n':
+            lit->kind = GRAPHQL_LITERAL_NULL;
+            break;
+        case 'e':
+            lit->kind = GRAPHQL_LITERAL_ENUM;
+            lit->string_val = strdup(val);
+            break;
+        default:
+            free(lit);
+            return NULL;
+    }
+    return lit;
+}
+
 // Simple pluralization: add 's' to the name
 
 // Helper: write a path/value pair to the database
@@ -397,6 +437,38 @@ static int store_type_to_database(graphql_layer_t* layer, graphql_type_t* type) 
             // Store directive as a simple presence marker for now
             if (db_put_string(layer->db, path_buf, "true") != 0) return -1;
         }
+
+        // Store default value if present (type-prefixed: s:hello, i:42, b:true, n:null, f:3.14, e:ENUMVAL)
+        if (field->default_value != NULL) {
+            char val_buf[256];
+            switch (field->default_value->kind) {
+                case GRAPHQL_LITERAL_STRING:
+                    snprintf(val_buf, sizeof(val_buf), "s:%s", field->default_value->string_val ? field->default_value->string_val : "");
+                    break;
+                case GRAPHQL_LITERAL_INT:
+                    snprintf(val_buf, sizeof(val_buf), "i:%lld", (long long)field->default_value->int_val);
+                    break;
+                case GRAPHQL_LITERAL_FLOAT:
+                    snprintf(val_buf, sizeof(val_buf), "f:%g", field->default_value->float_val);
+                    break;
+                case GRAPHQL_LITERAL_BOOL:
+                    snprintf(val_buf, sizeof(val_buf), "b:%s", field->default_value->bool_val ? "true" : "false");
+                    break;
+                case GRAPHQL_LITERAL_NULL:
+                    snprintf(val_buf, sizeof(val_buf), "n:null");
+                    break;
+                case GRAPHQL_LITERAL_ENUM:
+                    snprintf(val_buf, sizeof(val_buf), "e:%s", field->default_value->string_val ? field->default_value->string_val : "");
+                    break;
+                default:
+                    val_buf[0] = '\0';
+                    break;
+            }
+            if (val_buf[0] != '\0') {
+                snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/default_value", plural, field->name);
+                if (db_put_string(layer->db, path_buf, val_buf) != 0) return -1;
+            }
+        }
     }
 
     // Store enum values
@@ -667,6 +739,13 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                     // Create field
                                     graphql_field_t* field = graphql_field_create(fname, type_ref, is_required);
                                     if (field != NULL) {
+                                        // Load default value if present
+                                        snprintf(field_path, sizeof(field_path), "%s/__schema/fields/%s/default_value", plural, fname);
+                                        char* default_val_str = db_get_string(layer->db, field_path);
+                                        if (default_val_str != NULL) {
+                                            field->default_value = parse_default_value(default_val_str);
+                                            free(default_val_str);
+                                        }
                                         vec_push(&type->fields, field);
                                     }
 
@@ -898,6 +977,12 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
 
                     // Transfer type_ref ownership (don't destroy it in AST)
                     field_node->type_ref = NULL;
+
+                    // Copy default value if present
+                    if (field_node->literal != NULL) {
+                        field->default_value = graphql_literal_copy(field_node->literal);
+                    }
+
                     vec_push(&existing->fields, field);
                 }
                 break;
@@ -988,6 +1073,12 @@ static graphql_type_t* convert_type_definition(graphql_ast_node_t* node) {
 
         // Transfer type_ref ownership (don't destroy it)
         field_node->type_ref = NULL;
+
+        // Copy default value if present
+        if (field_node->literal != NULL) {
+            field->default_value = graphql_literal_copy(field_node->literal);
+        }
+
         vec_push(&type->fields, field);
     }
 
