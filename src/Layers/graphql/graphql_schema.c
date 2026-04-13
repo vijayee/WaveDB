@@ -863,6 +863,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                         // Find the "name" argument
                         for (int k = 0; k < dir->arg_names.length; k++) {
                             if (strcmp(dir->arg_names.data[k], "name") == 0) {
+                                free(type->plural_name);  // Free the default make_plural() result
                                 type->plural_name = strdup(dir->arg_values.data[k]);
                             }
                         }
