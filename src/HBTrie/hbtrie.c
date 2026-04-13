@@ -509,42 +509,103 @@ hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
 void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
   if (cursor == NULL || trie == NULL) return;
 
-  cursor->current = atomic_load(&trie->root);
-  cursor->identifier_index = 0;
-  cursor->chunk_pos = 0;
+  cursor->trie = trie;
+  cursor->stack_depth = 0;
+  cursor->finished = 0;
 
-  (void)path; // Path is for future use in more complex traversals
+  // Push root node onto stack
+  hbtrie_node_t* root = atomic_load(&trie->root);
+  if (root != NULL) {
+    cursor->stack[0].node = root;
+    cursor->stack[0].entry_index = 0;
+    cursor->stack_depth = 1;
+  } else {
+    cursor->finished = 1;
+  }
+
+  (void)path; // Path is for future seek support
+}
+
+hbtrie_cursor_t* hbtrie_cursor_create(hbtrie_t* trie, path_t* path) {
+  hbtrie_cursor_t* cursor = get_clear_memory(sizeof(hbtrie_cursor_t));
+  if (cursor == NULL) return NULL;
+  hbtrie_cursor_init(cursor, trie, path);
+  return cursor;
+}
+
+void hbtrie_cursor_destroy(hbtrie_cursor_t* cursor) {
+  if (cursor == NULL) return;
+  // Stack nodes are referenced by the trie; no dereference needed here
+  free(cursor);
 }
 
 int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return -1;
+  if (cursor == NULL || cursor->finished) return -1;
 
-  // For now, this is a simple placeholder
-  // Full implementation would iterate through all chunks in the current node
-  cursor->chunk_pos++;
+  while (cursor->stack_depth > 0) {
+    hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+    hbtrie_node_t* node = frame->node;
 
-  return 0;
+    if (node == NULL || node->btree == NULL) {
+      // Empty node, pop and continue
+      cursor->stack_depth--;
+      continue;
+    }
+
+    bnode_t* btree = node->btree;
+    size_t count = bnode_count(btree);
+
+    while (frame->entry_index < count) {
+      bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
+      frame->entry_index++;
+
+      if (entry == NULL) continue;
+
+      if (entry->has_value) {
+        // Found an entry with a value — return it
+        return 0;
+      }
+
+      if (entry->child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        // Descend into child node
+        cursor->stack[cursor->stack_depth].node = entry->child;
+        cursor->stack[cursor->stack_depth].entry_index = 0;
+        cursor->stack_depth++;
+        // Will process child on next outer loop iteration
+        break;
+      }
+      // No value and no child — skip
+    }
+
+    // If inner loop didn't push a child, pop this frame
+    if (frame->entry_index >= count) {
+      cursor->stack_depth--;
+    }
+  }
+
+  cursor->finished = 1;
+  return -1;
 }
 
 int hbtrie_cursor_at_end(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return 1;
-
-  // Check if we've processed all chunks
-  return cursor->chunk_pos >= bnode_count(cursor->current->btree);
+  if (cursor == NULL) return 1;
+  return cursor->finished;
 }
 
-chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return NULL;
+bnode_entry_t* hbtrie_cursor_get_entry(hbtrie_cursor_t* cursor) {
+  if (cursor == NULL || cursor->stack_depth == 0 || cursor->finished) return NULL;
 
-  bnode_entry_t* entry = bnode_get(cursor->current->btree, cursor->chunk_pos);
-  if (entry == NULL) return NULL;
+  hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+  if (frame->entry_index == 0) return NULL;
 
-  return bnode_entry_get_key(entry);
+  // entry_index was already advanced by next(), so look at previous
+  bnode_entry_t* entry = bnode_get(frame->node->btree, frame->entry_index - 1);
+  return entry;
 }
 
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL) return NULL;
-  return cursor->current;
+  if (cursor == NULL || cursor->stack_depth == 0) return NULL;
+  return cursor->stack[cursor->stack_depth - 1].node;
 }
 
 // Forward declaration for recursive serialization

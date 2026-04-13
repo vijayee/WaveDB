@@ -132,6 +132,29 @@ buffer_t* identifier_to_buffer(identifier_t* id) {
   return buf;
 }
 
+uint8_t* identifier_get_data(identifier_t* id, size_t* out_len) {
+  if (id == NULL || out_len == NULL) return NULL;
+
+  *out_len = id->length;
+  if (id->length == 0) return NULL;
+
+  uint8_t* data = malloc(id->length);
+  if (data == NULL) return NULL;
+
+  size_t offset = 0;
+  for (size_t i = 0; i < (size_t)id->chunks.length; i++) {
+    chunk_t* chunk = id->chunks.data[i];
+    size_t copy_len = id->chunk_size;
+    if (i == (size_t)id->chunks.length - 1) {
+      copy_len = id->length - offset;
+    }
+    memcpy(data + offset, chunk->data, copy_len);
+    offset += copy_len;
+  }
+
+  return data;
+}
+
 cbor_item_t* identifier_to_cbor(identifier_t* id) {
   if (id == NULL) return NULL;
 

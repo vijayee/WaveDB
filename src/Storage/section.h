@@ -185,12 +185,25 @@ int section_deallocate(section_t* section, size_t offset, size_t data_size);
 void section_flush_metadata(section_t* section);
 
 /**
- * Check if section is full.
+ * Check if section is full (has no free fragments at all).
  *
  * @param section  Section to check
  * @return 1 if full, 0 otherwise
  */
 uint8_t section_full(section_t* section);
+
+/**
+ * Check if section can fit a write of the given size.
+ *
+ * Unlike section_full(), this checks actual fragment sizes, not just
+ * whether any fragments exist. A section may have fragments that are
+ * all too small for the requested write.
+ *
+ * @param section         Section to check
+ * @param required_bytes  Minimum contiguous bytes needed
+ * @return 1 if the section can fit the write, 0 otherwise
+ */
+uint8_t section_can_fit(section_t* section, size_t required_bytes);
 
 /**
  * Flush dirty metadata to disk if needed.

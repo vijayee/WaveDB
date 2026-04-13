@@ -53,18 +53,6 @@ typedef struct hbtrie_node_t {
 } hbtrie_node_t;
 
 /**
- * hbtrie_cursor_t - Cursor for HBTrie traversal.
- *
- * Tracks position during traversal of a path through the HBTrie.
- * Used for both reading and inserting (creating nodes as needed).
- */
-typedef struct {
-    hbtrie_node_t* current;           // Current HBTrie node
-    size_t identifier_index;          // Which identifier in the path we're on
-    size_t chunk_pos;                 // Current chunk position within identifier
-} hbtrie_cursor_t;
-
-/**
  * hbtrie_t - Top-level HBTrie structure.
  */
 typedef struct hbtrie_t {
@@ -75,6 +63,29 @@ typedef struct hbtrie_t {
 
     _Atomic(hbtrie_node_t*) root;     // Root HBTrie node (atomic for lock-free reads)
 } hbtrie_t;
+
+/**
+ * hbtrie_cursor_frame_t - Stack frame for DFS traversal of HBTrie.
+ */
+typedef struct {
+    hbtrie_node_t* node;              // Current HBTrie node at this level
+    size_t entry_index;               // Current entry index in the B+tree
+} hbtrie_cursor_frame_t;
+
+#define HBTRIE_CURSOR_MAX_DEPTH 32
+
+/**
+ * hbtrie_cursor_t - Cursor for HBTrie traversal.
+ *
+ * Performs depth-first traversal yielding entries with values.
+ * Maintains a stack for backtracking from child nodes to parents.
+ */
+typedef struct {
+    hbtrie_t* trie;                    // The HBTrie being traversed
+    hbtrie_cursor_frame_t stack[HBTRIE_CURSOR_MAX_DEPTH];
+    size_t stack_depth;                // Current depth in the trie
+    int finished;                      // 1 when traversal is complete
+} hbtrie_cursor_t;
 
 /**
  * Create an HBTrie.
@@ -130,24 +141,43 @@ void hbtrie_node_destroy(hbtrie_node_t* node);
 hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node);
 
 /**
- * Initialize a cursor for path traversal.
+ * Initialize a cursor for DFS traversal of the HBTrie.
  *
  * @param cursor  Cursor to initialize
  * @param trie    HBTrie to traverse
- * @param path    Path to traverse (or NULL for root-only)
+ * @param path    Optional path for future seek support (currently unused)
  */
 void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path);
 
 /**
- * Move cursor to next position in the path.
+ * Create and initialize a heap-allocated cursor.
+ *
+ * @param trie    HBTrie to traverse
+ * @param path    Optional path for seek (currently unused)
+ * @return New cursor, or NULL on failure
+ */
+hbtrie_cursor_t* hbtrie_cursor_create(hbtrie_t* trie, path_t* path);
+
+/**
+ * Destroy a heap-allocated cursor.
+ *
+ * @param cursor  Cursor to destroy
+ */
+void hbtrie_cursor_destroy(hbtrie_cursor_t* cursor);
+
+/**
+ * Advance cursor to the next entry with a value (DFS traversal).
+ *
+ * Skips internal entries (no value), descends into child nodes,
+ * and backtracks when a level is exhausted.
  *
  * @param cursor  Cursor to advance
- * @return 0 on success, -1 at end of path
+ * @return 0 on success, -1 at end of traversal
  */
 int hbtrie_cursor_next(hbtrie_cursor_t* cursor);
 
 /**
- * Check if cursor is at end of path.
+ * Check if cursor has finished traversal.
  *
  * @param cursor  Cursor to check
  * @return 1 if at end, 0 otherwise
@@ -155,12 +185,22 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor);
 int hbtrie_cursor_at_end(hbtrie_cursor_t* cursor);
 
 /**
- * Get current chunk at cursor position.
+ * Get current entry at cursor position.
+ *
+ * Valid after a successful hbtrie_cursor_next() call.
  *
  * @param cursor  Cursor position
- * @return Current chunk, or NULL if none
+ * @return Current bnode entry, or NULL if none
  */
-chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor);
+bnode_entry_t* hbtrie_cursor_get_entry(hbtrie_cursor_t* cursor);
+
+/**
+ * Get current node at cursor position.
+ *
+ * @param cursor  Cursor position
+ * @return Current hbtrie node, or NULL if none
+ */
+hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor);
 
 /**
  * Get current HBTrie node at cursor position.

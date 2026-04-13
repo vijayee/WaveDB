@@ -347,6 +347,16 @@ uint8_t section_full(section_t* section) {
     return result;
 }
 
+uint8_t section_can_fit(section_t* section, size_t required_bytes) {
+    uint8_t result;
+    platform_lock(&section->lock);
+    // Check if any fragment can accommodate the required size
+    size_t offset;
+    result = fragment_list_find_fit(section->fragments, required_bytes, &offset) == 0;
+    platform_unlock(&section->lock);
+    return result;
+}
+
 // Write variable-size record: [transaction_id (24B)] [data_size (8B)] [data]
 int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, size_t* offset, uint8_t* full) {
     platform_lock(&section->lock);
@@ -356,7 +366,9 @@ int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, s
 
     // Find space
     if (section_next_offset(section, total_bytes, offset)) {
-        *full = section->fragments->count == 0;
+        // Section cannot fit this write. Check if it's truly full
+        // (no fragments at all) or just fragmented (fragments too small).
+        *full = section->fragments->count == 0 || section->fragments->total_free_space < total_bytes;
         platform_unlock(&section->lock);
         return 1;  // No space
     }
@@ -370,7 +382,7 @@ int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, s
 #endif
         if (section->fd < 0) {
             _section_deallocate(section, *offset, total_bytes);
-            *full = section->fragments->count == 0;
+            *full = section->fragments->count == 0 || section->fragments->total_free_space < total_bytes;
             platform_unlock(&section->lock);
             return 2;
         }

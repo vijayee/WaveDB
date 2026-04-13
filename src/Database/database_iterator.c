@@ -53,12 +53,29 @@ static void pop_frame(database_iterator_t* iter) {
 }
 
 /**
- * Check if we're within bounds (start_path <= current < end_path)
- * TODO: Implement path comparison for bound checking
- * For now, allow all paths
+ * Check if a path is within the scan bounds.
+ * Returns:
+ *   1  if start_path <= path < end_path (within bounds)
+ *   0  if path is before start_path (skip, but keep scanning)
+ *  -1  if path >= end_path (past upper bound, stop iteration)
  */
-static int within_bounds(database_iterator_t* iter) {
-    (void)iter;  // Suppress unused parameter warning
+static int within_bounds(database_iterator_t* iter, path_t* path) {
+    if (path == NULL) return 0;
+
+    // Check upper bound: if path >= end_path, iteration is done
+    if (iter->end_path != NULL) {
+        if (path_compare(path, iter->end_path) >= 0) {
+            return -1;
+        }
+    }
+
+    // Check lower bound: if path < start_path, skip this entry
+    if (iter->start_path != NULL) {
+        if (path_compare(path, iter->start_path) < 0) {
+            return 0;
+        }
+    }
+
     return 1;
 }
 
@@ -332,6 +349,22 @@ int database_scan_next(database_iterator_t* iter,
                     }
 
                     if (chunks) free(chunks);
+
+                    // Check bounds on the result path
+                    int bounds = within_bounds(iter, result_path);
+                    if (bounds < 0) {
+                        // Past upper bound — stop iteration entirely
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        iter->finished = 1;
+                        return -1;
+                    }
+                    if (bounds == 0) {
+                        // Before lower bound — skip this entry, keep scanning
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        continue;
+                    }
 
                     *out_path = result_path;
                     *out_value = value;
