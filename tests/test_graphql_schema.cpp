@@ -342,3 +342,162 @@ TEST_F(GraphQLSchemaTest, CustomPluralName) {
     graphql_layer_destroy(layer);
     graphql_layer_config_destroy(config);
 }
+
+// ============================================================
+// Scalar definition tests
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, ParseScalarDefinition) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "scalar Date\nscalar DateTime\ntype User { name: String }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    // Check Date scalar was registered
+    graphql_type_t* date_type = graphql_schema_get_type(layer, "Date");
+    ASSERT_NE(date_type, nullptr);
+    EXPECT_EQ(date_type->kind, GRAPHQL_TYPE_SCALAR);
+    EXPECT_STREQ(date_type->name, "Date");
+
+    // Check DateTime scalar was registered
+    graphql_type_t* datetime_type = graphql_schema_get_type(layer, "DateTime");
+    ASSERT_NE(datetime_type, nullptr);
+    EXPECT_EQ(datetime_type->kind, GRAPHQL_TYPE_SCALAR);
+    EXPECT_STREQ(datetime_type->name, "DateTime");
+
+    // User type should still be an object
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_EQ(user_type->kind, GRAPHQL_TYPE_OBJECT);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ScalarTypePersistAndLoad) {
+    const char* test_dir = "/tmp/wavedb_test_scalar_persist";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
+    (void)system(cmd);
+    mkdir(test_dir, 0755);
+
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->path = test_dir;
+    config->enable_persist = 1;
+
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "scalar Date\ntype Event { title: String date: Date }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    // Verify Date is a scalar after schema parse
+    graphql_type_t* date_type = graphql_schema_get_type(layer, "Date");
+    ASSERT_NE(date_type, nullptr);
+    EXPECT_EQ(date_type->kind, GRAPHQL_TYPE_SCALAR);
+    EXPECT_STREQ(date_type->name, "Date");
+
+    // Verify Event is an object type with fields
+    graphql_type_t* event_type = graphql_schema_get_type(layer, "Event");
+    ASSERT_NE(event_type, nullptr);
+    EXPECT_EQ(event_type->kind, GRAPHQL_TYPE_OBJECT);
+    EXPECT_EQ(event_type->fields.length, 2);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
+    (void)system(cmd);
+}
+
+// ============================================================
+// Type extension tests
+// ============================================================
+
+TEST_F(GraphQLSchemaTest, ParseTypeExtension) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String }\nextend type User { age: Int email: String }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_EQ(user_type->kind, GRAPHQL_TYPE_OBJECT);
+
+    // Should have 3 fields: name (original) + age, email (extension)
+    EXPECT_EQ(user_type->fields.length, 3);
+
+    // Verify original field
+    bool found_name = false, found_age = false, found_email = false;
+    for (int i = 0; i < user_type->fields.length; i++) {
+        if (strcmp(user_type->fields.data[i]->name, "name") == 0) found_name = true;
+        if (strcmp(user_type->fields.data[i]->name, "age") == 0) found_age = true;
+        if (strcmp(user_type->fields.data[i]->name, "email") == 0) found_email = true;
+    }
+    EXPECT_TRUE(found_name);
+    EXPECT_TRUE(found_age);
+    EXPECT_TRUE(found_email);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ExtendTypeMergesFields) {
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->enable_persist = 0;
+
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    ASSERT_NE(layer, nullptr);
+
+    // Extension before definition — should create type first
+    const char* sdl = "extend type Post { title: String }\ntype Post { content: String }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    graphql_type_t* post_type = graphql_schema_get_type(layer, "Post");
+    ASSERT_NE(post_type, nullptr);
+    EXPECT_EQ(post_type->fields.length, 2);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+}
+
+TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
+    const char* test_dir = "/tmp/wavedb_test_extend_persist";
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
+    (void)system(cmd);
+    mkdir(test_dir, 0755);
+
+    graphql_layer_config_t* config = graphql_layer_config_default();
+    config->path = test_dir;
+    config->enable_persist = 1;
+
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    ASSERT_NE(layer, nullptr);
+
+    const char* sdl = "type User { name: String }\nextend type User { age: Int }";
+    int rc = graphql_schema_parse(layer, sdl);
+    EXPECT_EQ(rc, 0);
+
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+    EXPECT_EQ(user_type->fields.length, 2);
+
+    graphql_layer_destroy(layer);
+    graphql_layer_config_destroy(config);
+
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
+    (void)system(cmd);
+}

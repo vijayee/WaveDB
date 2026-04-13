@@ -771,3 +771,100 @@ TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesResolveFieldForScalarChild
     free(plan_str);
     graphql_plan_destroy(plan);
 }
+
+// ============================================================
+// __typename tests
+// ============================================================
+
+class GraphQLTypenameTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_typename";
+    graphql_layer_t* layer = nullptr;
+    graphql_layer_config_t* config = nullptr;
+
+    void SetUp() override {
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+
+        config = graphql_layer_config_default();
+        config->path = test_dir;
+        config->enable_persist = 1;
+
+        layer = graphql_layer_create(test_dir, config);
+        ASSERT_NE(layer, nullptr);
+
+        const char* sdl = "type User { name: String age: Int }";
+        int rc = graphql_schema_parse(layer, sdl);
+        ASSERT_EQ(rc, 0);
+    }
+
+    void TearDown() override {
+        if (layer) graphql_layer_destroy(layer);
+        if (config) graphql_layer_config_destroy(config);
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+TEST_F(GraphQLTypenameTest, TypenameOnQueryResult) {
+    // Create a user first
+    const char* create = "mutation { createUser(name: \"Alice\", age: \"30\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    const char* query = "{ User { name __typename } }";
+
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "__typename"), nullptr) << "Should contain __typename: " << json;
+    EXPECT_NE(strstr(json, "User"), nullptr) << "Should contain User type name: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLTypenameTest, TypenameOnIntrospection) {
+    const char* query = "{ __schema { types { name __typename } } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "__Type"), nullptr) << "Should contain __Type: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLTypenameTest, TypenameWithAlias) {
+    const char* create = "mutation { createUser(name: \"Bob\", age: \"25\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    const char* query = "{ User { t: __typename } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"t\""), nullptr) << "Should contain alias 't': " << json;
+    EXPECT_NE(strstr(json, "User"), nullptr) << "Should contain User type name: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}

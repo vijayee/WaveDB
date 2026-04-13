@@ -26,6 +26,8 @@ typedef struct {
 static graphql_ast_node_t* parse_document(graphql_parser_state_t* state);
 static graphql_ast_node_t* parse_definition(graphql_parser_state_t* state);
 static graphql_ast_node_t* parse_type_definition(graphql_parser_state_t* state);
+static graphql_ast_node_t* parse_type_extension(graphql_parser_state_t* state);
+static graphql_ast_node_t* parse_scalar_definition(graphql_parser_state_t* state);
 static graphql_ast_node_t* parse_enum_definition(graphql_parser_state_t* state);
 static graphql_ast_node_t* parse_schema_definition(graphql_parser_state_t* state);
 static graphql_ast_node_t* parse_operation_definition(graphql_parser_state_t* state);
@@ -264,6 +266,12 @@ static graphql_ast_node_t* parse_definition(graphql_parser_state_t* state) {
         if (token.length == 4 && strncmp(token.start, "enum", 4) == 0) {
             return parse_enum_definition(state);
         }
+        if (token.length == 6 && strncmp(token.start, "scalar", 6) == 0) {
+            return parse_scalar_definition(state);
+        }
+        if (token.length == 6 && strncmp(token.start, "extend", 6) == 0) {
+            return parse_type_extension(state);
+        }
         if (token.length == 6 && strncmp(token.start, "schema", 6) == 0) {
             return parse_schema_definition(state);
         }
@@ -351,6 +359,89 @@ static graphql_ast_node_t* parse_type_definition(graphql_parser_state_t* state) 
     }
 
     return type_def;
+}
+
+// ============================================================
+// Type extension: extend type Name { fields... }
+// ============================================================
+
+static graphql_ast_node_t* parse_type_extension(graphql_parser_state_t* state) {
+    graphql_token_t extend_kw = graphql_lexer_expect(state->lexer, GRAPHQL_TOKEN_NAME);
+    if (strncmp(extend_kw.start, "extend", 6) != 0) {
+        parser_error(state, "Expected 'extend' keyword");
+        return NULL;
+    }
+
+    // Expect "type" keyword after "extend"
+    graphql_token_t type_kw = graphql_lexer_expect(state->lexer, GRAPHQL_TOKEN_NAME);
+    if (type_kw.kind != GRAPHQL_TOKEN_NAME || strncmp(type_kw.start, "type", 4) != 0) {
+        parser_error(state, "Expected 'type' after 'extend'");
+        return NULL;
+    }
+
+    graphql_token_t name_tok = graphql_lexer_expect(state->lexer, GRAPHQL_TOKEN_NAME);
+    if (name_tok.kind != GRAPHQL_TOKEN_NAME) {
+        parser_error(state, "Expected type name after 'extend type'");
+        return NULL;
+    }
+
+    char* name = token_to_string(&name_tok);
+    graphql_ast_node_t* ext_def = graphql_ast_node_create(GRAPHQL_AST_TYPE_EXTENSION,
+                                                            name, name_tok.line, name_tok.column);
+    free(name);
+
+    if (ext_def == NULL) return NULL;
+
+    // Parse { fields }
+    if (!graphql_lexer_accept(state->lexer, GRAPHQL_TOKEN_LBRACE)) {
+        parser_error(state, "Expected '{' after extend type name");
+        graphql_ast_destroy(ext_def);
+        return NULL;
+    }
+
+    while (graphql_lexer_peek(state->lexer).kind != GRAPHQL_TOKEN_RBRACE &&
+           graphql_lexer_peek(state->lexer).kind != GRAPHQL_TOKEN_EOF) {
+        graphql_ast_node_t* field = parse_field_definition(state);
+        if (field == NULL) {
+            graphql_ast_destroy(ext_def);
+            return NULL;
+        }
+        field->parent = ext_def;
+        vec_push(&ext_def->children, field);
+    }
+
+    if (!graphql_lexer_accept(state->lexer, GRAPHQL_TOKEN_RBRACE)) {
+        parser_error(state, "Expected '}' after extend type fields");
+        graphql_ast_destroy(ext_def);
+        return NULL;
+    }
+
+    return ext_def;
+}
+
+// ============================================================
+// Scalar definition: scalar Name
+// ============================================================
+
+static graphql_ast_node_t* parse_scalar_definition(graphql_parser_state_t* state) {
+    graphql_token_t scalar_kw = graphql_lexer_expect(state->lexer, GRAPHQL_TOKEN_NAME);
+    if (strncmp(scalar_kw.start, "scalar", 6) != 0) {
+        parser_error(state, "Expected 'scalar' keyword");
+        return NULL;
+    }
+
+    graphql_token_t name_tok = graphql_lexer_expect(state->lexer, GRAPHQL_TOKEN_NAME);
+    if (name_tok.kind != GRAPHQL_TOKEN_NAME) {
+        parser_error(state, "Expected scalar name");
+        return NULL;
+    }
+
+    char* name = token_to_string(&name_tok);
+    graphql_ast_node_t* scalar_def = graphql_ast_node_create(GRAPHQL_AST_SCALAR_DEFINITION,
+                                                              name, name_tok.line, name_tok.column);
+    free(name);
+
+    return scalar_def;
 }
 
 // ============================================================

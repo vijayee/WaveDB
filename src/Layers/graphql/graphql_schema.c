@@ -519,14 +519,21 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
     char* plural_name = db_get_string(layer->db, path_buf);
     const char* plural = plural_name ? plural_name : make_plural(type_name);
 
-    // Check if there's a type at type_name/__schema/type
-    snprintf(path_buf, sizeof(path_buf), "%s/__schema/type", type_name);
+    // Check if there's a type at plural/__schema/type
+    // (schema data is stored using the plural form as the path prefix)
+    snprintf(path_buf, sizeof(path_buf), "%s/__schema/type", plural);
     char* kind_str = db_get_string(layer->db, path_buf);
 
-    // If not found, the type_name might be the plural form
+    // If not found, try using type_name directly (backward compat)
+    if (kind_str == NULL) {
+        snprintf(path_buf, sizeof(path_buf), "%s/__schema/type", type_name);
+        kind_str = db_get_string(layer->db, path_buf);
+    }
+
+    // If still not found, unknown type
     if (kind_str == NULL) {
         free(plural_name);
-        return NULL;  // Unknown type
+        return NULL;
     }
 
     graphql_type_kind_t kind = GRAPHQL_TYPE_OBJECT;
@@ -540,11 +547,11 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
         return NULL;
     }
 
-    type->plural_name = plural_name;  // May be NULL, that's OK
+    type->plural_name = plural_name ? plural_name : make_plural(type_name);
 
     // Load fields by scanning __schema/fields/* paths
     // Build scan path: {PluralType}/__schema/fields/
-    snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields", plural);
+    snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields", type->plural_name);
     path_t* fields_start = path_create();
     if (fields_start != NULL) {
         const char* s = path_buf;
@@ -783,7 +790,46 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                     }
                 }
 
-                graphql_type_registry_register(layer->registry, type);
+                // If type already exists (from a prior extension), merge fields instead of duplicating
+                graphql_type_t* existing = graphql_type_registry_get(layer->registry, type->name);
+                if (existing != NULL) {
+                    // Merge new fields into existing type
+                    for (int j = 0; j < type->fields.length; j++) {
+                        graphql_field_t* new_field = type->fields.data[j];
+                        // Skip if field already exists
+                        bool already_exists = false;
+                        for (int k = 0; k < existing->fields.length; k++) {
+                            if (strcmp(existing->fields.data[k]->name, new_field->name) == 0) {
+                                already_exists = true;
+                                break;
+                            }
+                        }
+                        if (!already_exists) {
+                            vec_push(&existing->fields, new_field);
+                        } else {
+                            graphql_field_destroy(new_field);
+                        }
+                    }
+                    // Transfer plural_name if new definition has one
+                    if (type->plural_name != NULL) {
+                        if (existing->plural_name != NULL) {
+                            free(existing->plural_name);
+                        }
+                        existing->plural_name = type->plural_name;
+                        type->plural_name = NULL;  // Prevent double-free
+                    }
+                    // Clear fields vector to prevent double-free since we transferred ownership
+                    type->fields.length = 0;
+                    // Handle enum values similarly
+                    for (int j = 0; j < type->enum_values.length; j++) {
+                        vec_push(&existing->enum_values, type->enum_values.data[j]);
+                    }
+                    type->enum_values.length = 0;
+                    // Destroy the new type (fields were transferred or destroyed)
+                    graphql_type_destroy(type);
+                } else {
+                    graphql_type_registry_register(layer->registry, type);
+                }
                 break;
             }
             case GRAPHQL_AST_ENUM_DEFINITION: {
@@ -794,6 +840,66 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
             }
             case GRAPHQL_AST_SCHEMA_DEFINITION: {
                 if (convert_schema_definition(layer, def) != 0) return -1;
+                break;
+            }
+            case GRAPHQL_AST_SCALAR_DEFINITION: {
+                graphql_type_t* type = graphql_type_create(def->name, GRAPHQL_TYPE_SCALAR);
+                if (type == NULL) return -1;
+                type->plural_name = make_plural(def->name);
+                graphql_type_registry_register(layer->registry, type);
+                break;
+            }
+            case GRAPHQL_AST_TYPE_EXTENSION: {
+                // Look up existing type and merge new fields into it
+                graphql_type_t* existing = graphql_type_registry_get(layer->registry, def->name);
+                if (existing == NULL) {
+                    // Extension before definition — create the type first
+                    existing = graphql_type_create(def->name, GRAPHQL_TYPE_OBJECT);
+                    if (existing == NULL) return -1;
+                    existing->plural_name = make_plural(def->name);
+                    graphql_type_registry_register(layer->registry, existing);
+                }
+                // Merge fields from the extension into the existing type
+                for (int i = 0; i < def->children.length; i++) {
+                    graphql_ast_node_t* field_node = def->children.data[i];
+                    if (field_node->kind != GRAPHQL_AST_FIELD_DEFINITION) continue;
+
+                    // Check if field already exists (skip duplicates)
+                    bool already_exists = false;
+                    for (int j = 0; j < existing->fields.length; j++) {
+                        if (strcmp(existing->fields.data[j]->name, field_node->name) == 0) {
+                            already_exists = true;
+                            break;
+                        }
+                    }
+                    if (already_exists) continue;
+
+                    graphql_field_t* field = graphql_field_create(
+                        field_node->name,
+                        field_node->type_ref,
+                        field_node->is_required
+                    );
+                    if (field == NULL) continue;
+
+                    // Copy directives from AST to field
+                    for (int d = 0; d < field_node->directives.length; d++) {
+                        graphql_directive_t* dir = field_node->directives.data[d];
+                        graphql_directive_t* field_dir = graphql_directive_create(dir->name);
+                        if (field_dir == NULL) {
+                            graphql_field_destroy(field);
+                            continue;
+                        }
+                        for (int a = 0; a < dir->arg_names.length; a++) {
+                            vec_push(&field_dir->arg_names, strdup(dir->arg_names.data[a]));
+                            vec_push(&field_dir->arg_values, strdup(dir->arg_values.data[a]));
+                        }
+                        vec_push(&field->directives, field_dir);
+                    }
+
+                    // Transfer type_ref ownership (don't destroy it in AST)
+                    field_node->type_ref = NULL;
+                    vec_push(&existing->fields, field);
+                }
                 break;
             }
             default:
@@ -842,6 +948,9 @@ static graphql_type_t* convert_type_definition(graphql_ast_node_t* node) {
 
     graphql_type_t* type = graphql_type_create(node->name, GRAPHQL_TYPE_OBJECT);
     if (type == NULL) return NULL;
+
+    // Set default plural name (TypeName + "s") if not overridden by @plural
+    type->plural_name = make_plural(node->name);
 
     // Convert field definitions
     for (int i = 0; i < node->children.length; i++) {

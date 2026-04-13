@@ -30,6 +30,8 @@ typedef enum {
     GRAPHQL_AST_SCHEMA_DEFINITION, // schema { query: Query }
     GRAPHQL_AST_FIELD_DEFINITION, // field in a type definition
     GRAPHQL_AST_TYPE_REFERENCE,    // Type, [Type], Type!
+    GRAPHQL_AST_SCALAR_DEFINITION, // scalar Date
+    GRAPHQL_AST_TYPE_EXTENSION,   // extend type User { ... }
 } graphql_ast_kind_t;
 
 // ============================================================

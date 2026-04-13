@@ -300,22 +300,29 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
                         memcpy(id_str, buf->data, buf->size);
                         id_str[buf->size] = '\0';
 
-                        // Check for duplicates
-                        bool found = false;
-                        for (size_t i = 0; i < ids.length; i++) {
-                            if (strcmp(ids.data[i], id_str) == 0) {
-                                found = true;
-                                break;
-                            }
-                        }
-
-                        if (!found) {
-                            vec_push(&ids, id_str);
-                        } else {
+                        // Skip internal/schema entries (prefixed with __)
+                        if (id_str[0] == '_' && id_str[1] == '_') {
                             free(id_str);
+                            buffer_destroy(buf);
+                            // Skip this entry, clean up below
+                        } else {
+                            // Check for duplicates
+                            bool found = false;
+                            for (size_t i = 0; i < ids.length; i++) {
+                                if (strcmp(ids.data[i], id_str) == 0) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+
+                            if (!found) {
+                                vec_push(&ids, id_str);
+                            } else {
+                                free(id_str);
+                            }
+                            buffer_destroy(buf);
                         }
                     }
-                    buffer_destroy(buf);
                 }
             }
         }
@@ -400,6 +407,16 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             return execute_scan(layer, plan, parent_type, depth, result, path_prefix);
 
         case PLAN_RESOLVE_FIELD: {
+            // __typename: return parent type name without DB lookup
+            if (plan->field_name && strcmp(plan->field_name, "__typename") == 0) {
+                const char* type_name = plan->type_name ? plan->type_name : "Unknown";
+                graphql_result_node_t* node = graphql_result_node_create(RESULT_STRING, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->string_val = strdup(type_name);
+                }
+                return node;
+            }
+
             // Resolve a single field from a parent object
             char path_buf[512];
             const char* plural = parent_type ? graphql_type_get_plural(parent_type) : "Unknown";
@@ -842,6 +859,13 @@ static graphql_result_node_t* introspect_schema(graphql_layer_t* layer) {
                     graphql_result_node_add_child(type_obj, kind_node);
                 }
 
+                // __typename on introspection type objects
+                graphql_result_node_t* typename_node = graphql_result_node_create(RESULT_STRING, "__typename");
+                if (typename_node != NULL) {
+                    typename_node->string_val = strdup("__Type");
+                    graphql_result_node_add_child(type_obj, typename_node);
+                }
+
                 // fields: list of field objects
                 if (type->fields.length > 0) {
                     graphql_result_node_t* fields_list = graphql_result_node_create(RESULT_LIST, "fields");
@@ -1002,7 +1026,8 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
 
     // Check for introspection queries before compiling
     // __schema and __type are handled directly without plan compilation
-    if (strstr(query, "__schema") != NULL || strstr(query, "__type") != NULL) {
+    // Use "__type(" to avoid matching __typename
+    if (strstr(query, "__schema") != NULL || strstr(query, "__type(") != NULL) {
         graphql_result_t* result = get_clear_memory(sizeof(graphql_result_t));
         if (result == NULL) return make_error_result("Out of memory", NULL);
 
@@ -1022,7 +1047,7 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
         }
 
         // Check for __type(name: "...")
-        const char* type_pos = strstr(query, "__type");
+        const char* type_pos = strstr(query, "__type(");
         if (type_pos != NULL) {
             // Extract the name argument from __type(name: "...")
             const char* name_start = strstr(type_pos, "name:");

@@ -109,6 +109,16 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
     const char* field_name = field_node->name;
     if (field_name == NULL) return NULL;
 
+    // __typename is a virtual field — does not resolve from the database
+    if (strcmp(field_name, "__typename") == 0) {
+        graphql_plan_t* plan = graphql_plan_create(PLAN_RESOLVE_FIELD);
+        if (plan == NULL) return NULL;
+        plan->field_name = strdup("__typename");
+        plan->type_name = parent_type ? strdup(parent_type->name) : NULL;
+        plan->alias = field_node->alias ? strdup(field_node->alias) : NULL;
+        return plan;
+    }
+
     // Look up field in parent type
     graphql_field_t* type_field = NULL;
     graphql_type_ref_t* field_type_ref = NULL;
@@ -157,8 +167,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                 strcmp(t->name, field_name) == 0) {
                 target_type = t;
                 target_type_name = t->name;
-                // Matching the plural form means scanning a list of entities
-                is_list = (plural != NULL && strcmp(plural, field_name) == 0);
+                // Root query fields that reference types always return a list
+                is_list = true;
                 break;
             }
         }
@@ -168,7 +178,14 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
     const char* plural = target_type ? graphql_type_get_plural(target_type) : field_name;
 
     // Build the path for this field
-    char* field_path = build_path(parent_path, field_name);
+    // For root query fields that reference a type (fallback lookup), use the
+    // type's plural directly as the path prefix, not parent_path/field_name
+    char* field_path;
+    if (type_field == NULL && field_type_ref == NULL && target_type != NULL) {
+        field_path = strdup(plural);
+    } else {
+        field_path = build_path(parent_path, field_name);
+    }
 
     // Determine if the target type is a scalar (no nested fields to resolve)
     bool is_scalar = (target_type == NULL) || (target_type->kind == GRAPHQL_TYPE_SCALAR) || (target_type->kind == GRAPHQL_TYPE_ENUM);
