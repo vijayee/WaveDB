@@ -215,6 +215,47 @@ uint8_t section_can_fit(section_t* section, size_t required_bytes);
  */
 void section_flush_metadata(section_t* section);
 
+/**
+ * Offset remapping entry for defragmentation.
+ */
+typedef struct {
+    size_t old_offset;
+    size_t new_offset;
+} section_remap_entry_t;
+
+/**
+ * Defragment a section by compacting live records contiguously.
+ *
+ * Reads all live (non-deallocated) records from the section file,
+ * writes them contiguously at the beginning, and replaces the
+ * fragment list with a single free fragment covering the tail.
+ *
+ * The caller must provide a callback to update external references
+ * (e.g., bnode child pointers) that reference offsets within this section.
+ *
+ * @param section      Section to defragment (caller must hold exclusive access)
+ * @param remap_cb     Callback invoked for each moved record (old_offset, new_offset, ctx)
+ * @param remap_ctx    Context passed to remap_cb
+ * @param remap_count  Output: number of entries remapped
+ * @return 0 on success, negative error code on failure
+ */
+int section_defragment(section_t* section,
+                       void (*remap_cb)(size_t old_offset, size_t new_offset, void* ctx),
+                       void* remap_ctx,
+                       size_t* remap_count);
+
+/**
+ * Check if a section meets the fragmentation threshold.
+ *
+ * A section is considered fragmented when its free space ratio
+ * exceeds the given threshold.
+ *
+ * @param section          Section to check
+ * @param threshold_ratio  Free space ratio threshold (0.0 - 1.0, e.g., 0.5 = 50%)
+ * @return 1 if fragmented, 0 if not
+ */
+uint8_t section_is_fragmented(section_t* section, double threshold_ratio);
+
 #ifdef __cplusplus
 }
 #endif

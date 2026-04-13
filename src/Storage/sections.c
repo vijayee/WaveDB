@@ -26,6 +26,7 @@ static void round_robin_save(void* ctx);
 static void sections_full(sections_t* sections, size_t section_id);
 static size_t sections_get_next_id(sections_t* sections);
 static void sections_free(sections_t* sections, size_t section_id);
+static void sections_defrag_check(void* ctx);
 
 // Helper: Get shard index for section_id
 static inline size_t get_shard(size_t section_id) {
@@ -338,6 +339,11 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
     sections->max_wait = max_wait;
     sections->section_concurrency = section_concurrency;
     sections->size = size;
+    sections->defrag_threshold = SECTIONS_DEFAULT_DEFRAG_THRESHOLD;
+
+    // Initialize defragmentation debouncer (fires after idle period with no write/dealloc activity)
+    sections->defrag_debouncer = debouncer_create(wheel, sections, sections_defrag_check, NULL,
+                                                   SECTIONS_DEFAULT_DEFRAG_IDLE_MS, 0);
 
     // Initialize transaction range
     sections->oldest_txn_id = (transaction_id_t){0, 0, 0};
@@ -430,6 +436,12 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
 }
 
 void sections_destroy(sections_t* sections) {
+    // Flush and destroy defrag debouncer
+    if (sections->defrag_debouncer) {
+        debouncer_flush(sections->defrag_debouncer);
+        debouncer_destroy(sections->defrag_debouncer);
+    }
+
     // Cleanup sharded checkout locks
     for (size_t i = 0; i < CHECKOUT_LOCK_SHARDS; i++) {
         platform_lock_destroy(&sections->checkout_shards[i].lock);
@@ -476,6 +488,11 @@ int sections_write(sections_t* sections, transaction_id_t txn_id, buffer_t* data
         sections_update_txn_range(sections, txn_id);
     }
 
+    // Reset defrag idle timer — section is actively being written to
+    if (sections->defrag_debouncer) {
+        debouncer_debounce(sections->defrag_debouncer);
+    }
+
     return result;
 }
 
@@ -494,6 +511,12 @@ int sections_deallocate(sections_t* sections, size_t section_id, size_t offset, 
         sections_free(sections, section_id);
     }
     sections_checkin(sections, section);
+
+    // Reset defrag idle timer — section is actively being deallocated
+    if (sections->defrag_debouncer) {
+        debouncer_debounce(sections->defrag_debouncer);
+    }
+
     return result;
 }
 
@@ -567,9 +590,11 @@ static void sections_full(sections_t* sections, size_t section_id) {
 }
 
 static void sections_free(sections_t* sections, size_t section_id) {
-    // Currently no-op - could implement section cleanup here
-    (void)sections;
-    (void)section_id;
+    // Re-add section to round-robin if it has free space and isn't already listed.
+    // This allows deallocated space to be reused for future writes.
+    if (!round_robin_contains(sections->robin, section_id)) {
+        round_robin_add(sections->robin, section_id);
+    }
 }
 
 void sections_update_txn_range(sections_t* sections, transaction_id_t txn_id) {
@@ -640,4 +665,35 @@ int sections_load_txn_range(sections_t* sections) {
 
     cbor_decref(&cbor);
     return 0;
+}
+
+/**
+ * Idle-triggered defragmentation check.
+ *
+ * Called by the defrag debouncer after a period of inactivity
+ * (no writes or deallocations). Scans all cached sections
+ * and defragments any that exceed the fragmentation threshold.
+ */
+static void sections_defrag_check(void* ctx) {
+    sections_t* sections = (sections_t*) ctx;
+    if (sections == NULL || sections->lru == NULL) return;
+
+    // Walk the LRU cache and check each section for fragmentation
+    sections_lru_node_t* current = sections->lru->first;
+    while (current != NULL) {
+        section_t* section = current->value;
+        if (section != NULL && section_is_fragmented(section, sections->defrag_threshold)) {
+            // Section meets fragmentation threshold — defragment it.
+            // No remap callback for now since sections_deallocate is not yet
+            // wired to the database index. When it is, the caller should
+            // provide a remap callback to update bnode child pointers.
+            size_t remap_count = 0;
+            int rc = section_defragment(section, NULL, NULL, &remap_count);
+            if (rc == 0 && remap_count > 0) {
+                log_info("Defragmented section %zu: %zu records relocated",
+                         section->id, remap_count);
+            }
+        }
+        current = current->next;
+    }
 }
