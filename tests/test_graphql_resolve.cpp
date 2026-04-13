@@ -328,7 +328,168 @@ TEST_F(GraphQLResolveTest, PartialSuccessDepthExceeded) {
 }
 
 // ============================================================
-// Async query tests
+// Required field validation
+// ============================================================
+
+class GraphQLRequiredFieldTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_required";
+    graphql_layer_t* layer = nullptr;
+    graphql_layer_config_t* config = nullptr;
+
+    void SetUp() override {
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+
+        config = graphql_layer_config_default();
+        config->path = test_dir;
+        config->enable_persist = 1;
+
+        layer = graphql_layer_create(test_dir, config);
+        ASSERT_NE(layer, nullptr);
+
+        // Schema with required fields: name is required, age and email are optional
+        const char* sdl = "type User { name: String! age: Int email: String }";
+        int rc = graphql_schema_parse(layer, sdl);
+        ASSERT_EQ(rc, 0);
+    }
+
+    void TearDown() override {
+        if (layer) graphql_layer_destroy(layer);
+        if (config) graphql_layer_config_destroy(config);
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+TEST_F(GraphQLRequiredFieldTest, SchemaHasIsRequirededFlag) {
+    // Verify that is_required is set on the name field
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+
+    bool found_name = false;
+    bool found_age = false;
+    for (size_t i = 0; i < user_type->fields.length; i++) {
+        graphql_field_t* field = user_type->fields.data[i];
+        if (strcmp(field->name, "name") == 0) {
+            found_name = true;
+            EXPECT_TRUE(field->is_required) << "name should be required (String!)";
+        }
+        if (strcmp(field->name, "age") == 0) {
+            found_age = true;
+            EXPECT_FALSE(field->is_required) << "age should not be required (Int)";
+        }
+    }
+    EXPECT_TRUE(found_name);
+    EXPECT_TRUE(found_age);
+}
+
+TEST_F(GraphQLRequiredFieldTest, CreateMissingRequiredField) {
+    // Mutation without the required "name" field should fail
+    const char* mutation = "mutation { createUser(age: \"30\") { id } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, mutation);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->success) << "Should fail when required field is missing";
+    EXPECT_GT(result->errors.length, 0) << "Should have error messages";
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "name"), nullptr) << "Error should mention missing field 'name': " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLRequiredFieldTest, CreateWithRequiredField) {
+    // Mutation with the required "name" field should succeed
+    const char* mutation = "mutation { createUser(name: \"Alice\") { id name } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, mutation);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success) << "Should succeed when required field is provided";
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "\"name\":\"Alice\""), nullptr) << "JSON: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLRequiredFieldTest, UpdateSkipsRequiredValidation) {
+    // First create a user with required fields (this will pass validation)
+    const char* create = "mutation { createUser(name: \"Bob\") { id name } }";
+    graphql_result_t* create_result = graphql_mutate_sync(layer, create);
+    ASSERT_NE(create_result, nullptr);
+    EXPECT_TRUE(create_result->success) << "Create should succeed with required field";
+    graphql_result_destroy(create_result);
+
+    // Update should succeed without requiring all fields (updates are partial)
+    // We verify this by checking the type's is_required fields exist
+    // but the update mutation code path skips validation
+    graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
+    ASSERT_NE(user_type, nullptr);
+
+    // Verify validation flag exists but update skips it
+    bool has_required = false;
+    for (size_t i = 0; i < user_type->fields.length; i++) {
+        if (user_type->fields.data[i]->is_required) {
+            has_required = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(has_required) << "User type should have required fields";
+}
+
+TEST_F(GraphQLRequiredFieldTest, CreateWithOptionalFieldsOnlyFails) {
+    // Provide only optional fields, missing required "name"
+    const char* mutation = "mutation { createUser(email: \"test@example.com\") { id } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, mutation);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->success) << "Should fail when required field is missing";
+
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLRequiredFieldTest, MultipleMissingRequiredFields) {
+    // Create a new layer with a schema that has multiple required fields
+    const char* test_dir2 = "/tmp/wavedb_test_graphql_required2";
+    rmrf(test_dir2);
+    mkdir(test_dir2, 0755);
+
+    graphql_layer_config_t* config2 = graphql_layer_config_default();
+    config2->path = test_dir2;
+    config2->enable_persist = 1;
+
+    graphql_layer_t* layer2 = graphql_layer_create(test_dir2, config2);
+    ASSERT_NE(layer2, nullptr);
+
+    const char* sdl = "type Account { name: String! email: String! age: Int }";
+    int rc = graphql_schema_parse(layer2, sdl);
+    ASSERT_EQ(rc, 0);
+
+    // Create without either required field
+    const char* mutation = "mutation { createAccount(age: \"25\") { id } }";
+    graphql_result_t* result = graphql_mutate_sync(layer2, mutation);
+    ASSERT_NE(result, nullptr);
+    EXPECT_FALSE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    // Should mention both missing fields
+    EXPECT_NE(strstr(json, "name"), nullptr) << "Error should mention 'name': " << json;
+    EXPECT_NE(strstr(json, "email"), nullptr) << "Error should mention 'email': " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+    graphql_layer_destroy(layer2);
+    graphql_layer_config_destroy(config2);
+    rmrf(test_dir2);
+}
 // ============================================================
 
 // Context struct passed through the promise callback

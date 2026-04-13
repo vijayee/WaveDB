@@ -533,6 +533,11 @@ static graphql_ast_node_t* parse_field_definition(graphql_parser_state_t* state)
     }
     field->type_ref = type_ref;
 
+    // Propagate NON_NULL modifier to is_required flag
+    if (type_ref->kind == GRAPHQL_TYPE_NON_NULL) {
+        field->is_required = true;
+    }
+
     // Parse optional directives
     while (graphql_lexer_peek(state->lexer).kind == GRAPHQL_TOKEN_AT) {
         graphql_directive_t* dir = parse_directive(state);

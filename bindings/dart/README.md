@@ -347,6 +347,29 @@ try {
 }
 ```
 
+### Required Fields
+
+Fields marked with `!` in the schema are required for create mutations. Providing a create mutation without a required field returns an error:
+
+```dart
+layer.parseSchema('''
+  type User {
+    name: String!
+    age: Int
+  }
+''');
+
+// Missing required field "name" — fails with error
+final result = layer.mutateSync('mutation { createUser(age: "30") { id } }');
+// GraphQLResult(success: false, data: null, errors: ['Missing required fields: name'])
+
+// Providing required field — succeeds
+final result2 = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// GraphQLResult(success: true, data: {...}, errors: [])
+```
+
+Update mutations skip required field validation since updates are partial.
+
 ### GraphQLResult Class
 
 - `bool success` - Whether the operation succeeded

@@ -1019,6 +1019,65 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
     return result;
 }
 
+// Check whether a type's required fields are present in a mutation's arguments.
+// Returns NULL if validation passes, or an error result listing missing fields.
+static graphql_result_t* validate_required_fields(graphql_type_t* type, graphql_ast_node_t* field) {
+    if (type == NULL || type->kind != GRAPHQL_TYPE_OBJECT) return NULL;
+
+    // Build list of missing required fields
+    vec_t(char*) missing = {0};
+
+    for (size_t i = 0; i < type->fields.length; i++) {
+        graphql_field_t* f = type->fields.data[i];
+        if (!f->is_required && !(f->type && f->type->kind == GRAPHQL_TYPE_NON_NULL)) continue;
+
+        // Check if this required field is provided in the mutation arguments
+        bool found = false;
+        for (int j = 0; j < field->arguments.length; j++) {
+            graphql_ast_node_t* arg = field->arguments.data[j];
+            if (arg->name && strcmp(arg->name, f->name) == 0) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            char* name_copy = strdup(f->name);
+            vec_push(&missing, name_copy);
+        }
+    }
+
+    if (missing.length == 0) return NULL;
+
+    // Build error message
+    size_t msg_len = 64 + missing.length * 64;
+    for (size_t i = 0; i < missing.length; i++) msg_len += strlen(missing.data[i]);
+    char* msg = get_memory(msg_len);
+    if (msg == NULL) {
+        for (size_t i = 0; i < missing.length; i++) free(missing.data[i]);
+        return make_error_result("Out of memory", NULL);
+    }
+
+    strcpy(msg, "Missing required fields: ");
+    size_t pos = strlen(msg);
+    for (size_t i = 0; i < missing.length; i++) {
+        if (i > 0) {
+            msg[pos++] = ',';
+            msg[pos++] = ' ';
+        }
+        size_t name_len = strlen(missing.data[i]);
+        memcpy(msg + pos, missing.data[i], name_len);
+        pos += name_len;
+    }
+    msg[pos] = '\0';
+
+    for (size_t i = 0; i < missing.length; i++) free(missing.data[i]);
+
+    graphql_result_t* result = make_error_result(msg, NULL);
+    free(msg);
+    return result;
+}
+
 static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char* mutation) {
     if (layer == NULL || mutation == NULL) {
         return make_error_result("Invalid arguments", NULL);
@@ -1082,6 +1141,19 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
         const char* plural = type ? graphql_type_get_plural(type) : type_name;
 
         if (is_create) {
+            // Validate required fields for create mutations
+            graphql_result_t* validation_error = validate_required_fields(type, field);
+            if (validation_error != NULL) {
+                // Copy error messages to the mutation result
+                for (size_t ei = 0; ei < validation_error->errors.length; ei++) {
+                    graphql_error_t src = validation_error->errors.data[ei];
+                    graphql_error_t new_err = graphql_error_create(src.message, src.path);
+                    vec_push(&result->errors, new_err);
+                }
+                result->success = false;
+                graphql_result_destroy(validation_error);
+                continue;
+            }
             // Generate next ID
             char path_buf[512];
             snprintf(path_buf, sizeof(path_buf), "%s/__meta/next_id", plural);

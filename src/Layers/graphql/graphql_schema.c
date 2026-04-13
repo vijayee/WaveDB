@@ -650,6 +650,11 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                             type_ref = graphql_type_ref_create_list(inner);
                                             // Inner is consumed by create_list
                                         }
+                                        if (is_required) {
+                                            graphql_type_ref_t* inner = type_ref;
+                                            type_ref = graphql_type_ref_create_non_null(inner);
+                                            // Inner is consumed by create_non_null
+                                        }
                                     }
 
                                     // Create field
