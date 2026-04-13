@@ -912,3 +912,87 @@ TEST_F(GraphQLResolveTest, MutationUpdateWithSelection) {
     free((void*)json);
     graphql_result_destroy(result);
 }
+
+// Atomic batch mutation tests
+
+TEST_F(GraphQLResolveTest, AtomicCreateMutation) {
+    // Create should use atomic increment for ID generation
+    const char* create = "mutation { createUser(name: \"Eve\", age: \"28\") { id name age } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, create);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "Eve"), nullptr) << "Should contain name: " << json;
+    EXPECT_NE(strstr(json, "28"), nullptr) << "Should contain age: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+
+    // Verify the entity was actually written by querying it
+    const char* query = "{ User { name } }";
+    graphql_result_t* qr = graphql_query_sync(layer, query);
+    ASSERT_NE(qr, nullptr);
+    EXPECT_TRUE(qr->success);
+
+    const char* qjson = graphql_result_to_json(qr);
+    EXPECT_NE(strstr(qjson, "Eve"), nullptr) << "Query should find created user: " << qjson;
+
+    free((void*)qjson);
+    graphql_result_destroy(qr);
+}
+
+TEST_F(GraphQLResolveTest, AtomicUpdateMutation) {
+    // Create first, then update atomically
+    const char* create = "mutation { createUser(name: \"Frank\", age: \"35\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    const char* update = "mutation { updateUser(id: \"1\", name: \"Francis\") { id name } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, update);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "Francis"), nullptr) << "Should contain updated name: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+
+    // Verify update persisted
+    const char* query = "{ User { name } }";
+    graphql_result_t* qr = graphql_query_sync(layer, query);
+    ASSERT_NE(qr, nullptr);
+    EXPECT_TRUE(qr->success);
+
+    const char* qjson = graphql_result_to_json(qr);
+    EXPECT_NE(strstr(qjson, "Francis"), nullptr) << "Query should find updated user: " << qjson;
+
+    free((void*)qjson);
+    graphql_result_destroy(qr);
+}
+
+TEST_F(GraphQLResolveTest, AtomicDeleteMutation) {
+    // Create, then delete, verify the delete result is returned
+    const char* create = "mutation { createUser(name: \"Grace\", age: \"42\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    // Delete
+    const char* del = "mutation { deleteUser(id: \"1\") { id } }";
+    graphql_result_t* dr = graphql_mutate_sync(layer, del);
+    ASSERT_NE(dr, nullptr);
+    EXPECT_TRUE(dr->success);
+
+    const char* djson = graphql_result_to_json(dr);
+    EXPECT_NE(djson, nullptr);
+    EXPECT_NE(strstr(djson, "1"), nullptr) << "Delete result should contain id";
+    free((void*)djson);
+    graphql_result_destroy(dr);
+}

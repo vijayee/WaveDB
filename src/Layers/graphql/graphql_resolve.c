@@ -93,7 +93,6 @@ static int db_put_string(database_t* db, const char* path_str, const char* value
 
 // Re-declare from schema.c — these are static there, so we implement local versions
 static char* local_db_get_string(database_t* db, const char* path_str);
-static int local_db_put_string(database_t* db, const char* path_str, const char* value);
 
 // ============================================================
 // Database helpers (local copies for resolve module)
@@ -151,9 +150,10 @@ static char* local_db_get_string(database_t* db, const char* path_str) {
     return result;
 }
 
-static int local_db_put_string(database_t* db, const char* path_str, const char* value) {
+// Build a path_t* from a "/"-delimited string (caller owns the result)
+static path_t* path_from_string(const char* path_str) {
     path_t* path = path_create();
-    if (path == NULL) return -1;
+    if (path == NULL) return NULL;
 
     const char* start = path_str;
     while (*start) {
@@ -163,7 +163,7 @@ static int local_db_put_string(database_t* db, const char* path_str, const char*
             buffer_t* buf = buffer_create(len);
             if (buf == NULL) {
                 path_destroy(path);
-                return -1;
+                return NULL;
             }
             memcpy(buf->data, start, len);
             buf->size = len;
@@ -171,17 +171,47 @@ static int local_db_put_string(database_t* db, const char* path_str, const char*
             buffer_destroy(buf);
             if (id == NULL) {
                 path_destroy(path);
-                return -1;
+                return NULL;
             }
             path_append(path, id);
             identifier_destroy(id);
         }
-        if (end) {
-            start = end + 1;
-        } else {
-            break;
-        }
+        if (end) { start = end + 1; } else { break; }
     }
+    return path;
+}
+
+// Convert a graphql_literal_t to a heap-allocated string
+static char* literal_to_string(graphql_literal_t* literal) {
+    if (literal == NULL) return strdup("");
+    switch (literal->kind) {
+        case GRAPHQL_LITERAL_STRING:
+            return strdup(literal->string_val ? literal->string_val : "");
+        case GRAPHQL_LITERAL_INT: {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", (long long)literal->int_val);
+            return strdup(buf);
+        }
+        case GRAPHQL_LITERAL_FLOAT: {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%g", literal->float_val);
+            return strdup(buf);
+        }
+        case GRAPHQL_LITERAL_BOOL:
+            return strdup(literal->bool_val ? "true" : "false");
+        case GRAPHQL_LITERAL_NULL:
+            return strdup("null");
+        case GRAPHQL_LITERAL_ENUM:
+            return strdup(literal->string_val ? literal->string_val : "");
+        default:
+            return strdup("");
+    }
+}
+
+// Add a PUT operation to a batch from string path/value
+static int batch_put_string(batch_t* batch, const char* path_str, const char* value) {
+    path_t* path = path_from_string(path_str);
+    if (path == NULL) return -1;
 
     buffer_t* val_buf = buffer_create(strlen(value));
     if (val_buf == NULL) {
@@ -197,8 +227,24 @@ static int local_db_put_string(database_t* db, const char* path_str, const char*
         return -1;
     }
 
-    // database_put_sync takes ownership of both path and val_id
-    return database_put_sync(db, path, val_id);
+    int rc = batch_add_put(batch, path, val_id);
+    // batch_add_put takes ownership on success; on failure, we must free
+    if (rc != 0) {
+        path_destroy(path);
+        identifier_destroy(val_id);
+    }
+    return rc;
+}
+
+// Add a DELETE operation to a batch from a path_t (copies the path)
+static int batch_delete_path(batch_t* batch, path_t* src_path) {
+    path_t* path = path_copy(src_path);
+    if (path == NULL) return -1;
+    int rc = batch_add_delete(batch, path);
+    if (rc != 0) {
+        path_destroy(path);
+    }
+    return rc;
 }
 
 // ============================================================
@@ -1275,19 +1321,26 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 graphql_result_destroy(validation_error);
                 continue;
             }
-            // Generate next ID
+
+            // Atomically generate next ID
+            // database_increment_sync increments and returns the NEW value,
+            // but we want the value BEFORE increment (e.g., counter=1 → use ID 1, counter becomes 2)
             char path_buf[512];
             snprintf(path_buf, sizeof(path_buf), "%s/__meta/next_id", plural);
-            char* next_id_str = local_db_get_string(layer->db, path_buf);
-            long long next_id = 1;
-            if (next_id_str != NULL) {
-                next_id = strtoll(next_id_str, NULL, 10);
-                free(next_id_str);
+            path_t* id_path = path_from_string(path_buf);
+            int64_t next_id = 1;
+            if (id_path != NULL) {
+                int64_t new_id = database_increment_sync(layer->db, id_path, 1);
+                path_destroy(id_path);
+                if (new_id > 0) {
+                    next_id = new_id - 1;  // Use the value BEFORE the increment
+                }
             }
 
-            // Write fields from arguments
+            // Collect all field writes in a batch for atomicity
+            batch_t* batch = batch_create(field->arguments.length + 4);
             graphql_result_node_t* create_result = graphql_result_node_create(RESULT_OBJECT, field_name);
-            if (create_result != NULL) {
+            if (create_result != NULL && batch != NULL) {
                 char id_str[32];
                 snprintf(id_str, sizeof(id_str), "%lld", (long long)next_id);
                 graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
@@ -1303,34 +1356,9 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                         char field_path[512];
                         snprintf(field_path, sizeof(field_path), "%s/%s/%s", plural, id_str, arg->name);
 
-                        // Convert literal to string
-                        char* value_str = NULL;
-                        switch (arg->literal->kind) {
-                            case GRAPHQL_LITERAL_STRING:
-                                value_str = arg->literal->string_val ? strdup(arg->literal->string_val) : strdup("");
-                                break;
-                            case GRAPHQL_LITERAL_INT: {
-                                char buf[32];
-                                snprintf(buf, sizeof(buf), "%lld", (long long)arg->literal->int_val);
-                                value_str = strdup(buf);
-                                break;
-                            }
-                            case GRAPHQL_LITERAL_FLOAT: {
-                                char buf[64];
-                                snprintf(buf, sizeof(buf), "%g", arg->literal->float_val);
-                                value_str = strdup(buf);
-                                break;
-                            }
-                            case GRAPHQL_LITERAL_BOOL:
-                                value_str = strdup(arg->literal->bool_val ? "true" : "false");
-                                break;
-                            default:
-                                value_str = strdup("");
-                                break;
-                        }
-
+                        char* value_str = literal_to_string(arg->literal);
                         if (value_str != NULL) {
-                            local_db_put_string(layer->db, field_path, value_str);
+                            batch_put_string(batch, field_path, value_str);
 
                             // Add to result
                             graphql_result_node_t* field_node = graphql_result_node_create(RESULT_STRING, arg->name);
@@ -1344,10 +1372,9 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                     }
                 }
 
-                // Increment next_id
-                char new_id[32];
-                snprintf(new_id, sizeof(new_id), "%lld", (long long)(next_id + 1));
-                local_db_put_string(layer->db, path_buf, new_id);
+                // Execute batch atomically
+                database_write_batch_sync(layer->db, batch);
+                batch_destroy(batch);
 
                 // If the mutation has sub-selections, resolve them on the created entity
                 if (field->children.length > 0) {
@@ -1368,7 +1395,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 vec_push(&result->data->children, create_result);
             }
         } else if (is_update) {
-            // Update: find id argument and update fields
+            // Update: find id argument and update fields atomically
             char* target_id = NULL;
             for (int j = 0; j < field->arguments.length; j++) {
                 graphql_ast_node_t* arg = field->arguments.data[j];
@@ -1385,6 +1412,8 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
             }
 
             if (target_id != NULL) {
+                // Collect field writes in a batch for atomicity
+                batch_t* batch = batch_create(field->arguments.length + 2);
                 graphql_result_node_t* update_result = graphql_result_node_create(RESULT_OBJECT, field_name);
                 if (update_result != NULL) {
                     // Add id to result
@@ -1400,24 +1429,11 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                             char field_path[512];
                             snprintf(field_path, sizeof(field_path), "%s/%s/%s", plural, target_id, arg->name);
 
-                            char* value_str = NULL;
-                            switch (arg->literal->kind) {
-                                case GRAPHQL_LITERAL_STRING:
-                                    value_str = arg->literal->string_val ? strdup(arg->literal->string_val) : strdup("");
-                                    break;
-                                case GRAPHQL_LITERAL_INT: {
-                                    char buf[32];
-                                    snprintf(buf, sizeof(buf), "%lld", (long long)arg->literal->int_val);
-                                    value_str = strdup(buf);
-                                    break;
-                                }
-                                default:
-                                    value_str = strdup("");
-                                    break;
-                            }
-
+                            char* value_str = literal_to_string(arg->literal);
                             if (value_str != NULL) {
-                                local_db_put_string(layer->db, field_path, value_str);
+                                if (batch != NULL) {
+                                    batch_put_string(batch, field_path, value_str);
+                                }
                                 graphql_result_node_t* f_node = graphql_result_node_create(RESULT_STRING, arg->name);
                                 if (f_node != NULL) {
                                     f_node->string_val = value_str;
@@ -1428,6 +1444,13 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                             }
                         }
                     }
+
+                    // Execute batch atomically
+                    if (batch != NULL) {
+                        database_write_batch_sync(layer->db, batch);
+                        batch_destroy(batch);
+                    }
+
                     vec_push(&result->data->children, update_result);
 
                     // If the mutation has sub-selections, resolve them on the updated entity
@@ -1471,28 +1494,8 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 char prefix[256];
                 snprintf(prefix, sizeof(prefix), "%s/%s", plural, target_id);
 
-                path_t* start = path_create();
+                path_t* start = path_from_string(prefix);
                 if (start != NULL) {
-                    const char* s = prefix;
-                    while (*s) {
-                        const char* e = strchr(s, '/');
-                        size_t len = e ? (size_t)(e - s) : strlen(s);
-                        if (len > 0) {
-                            buffer_t* buf = buffer_create(len);
-                            if (buf != NULL) {
-                                memcpy(buf->data, s, len);
-                                buf->size = len;
-                                identifier_t* id = identifier_create(buf, 0);
-                                buffer_destroy(buf);
-                                if (id != NULL) {
-                                    path_append(start, id);
-                                    identifier_destroy(id);
-                                }
-                            }
-                        }
-                        if (e) { s = e + 1; } else { break; }
-                    }
-
                     database_iterator_t* iter = database_scan_start(layer->db, start, NULL);
                     path_destroy(start);
 
@@ -1515,13 +1518,12 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 if (del_result != NULL) {
                     graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                     if (id_node != NULL) {
-                        id_node->string_val = target_id;
+                        id_node->string_val = strdup(target_id);
                         vec_push(&del_result->children, id_node);
                     }
                     vec_push(&result->data->children, del_result);
-                } else {
-                    free(target_id);
                 }
+                free(target_id);
             }
         }
     }
