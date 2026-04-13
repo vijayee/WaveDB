@@ -868,3 +868,47 @@ TEST_F(GraphQLTypenameTest, TypenameWithAlias) {
     free((void*)json);
     graphql_result_destroy(result);
 }
+
+// ============================================================
+// Mutation sub-selections tests
+// ============================================================
+
+TEST_F(GraphQLResolveTest, MutationCreateWithSelection) {
+    // Create with sub-selection should return requested fields
+    const char* create = "mutation { createUser(name: \"Charlie\", age: \"25\") { id name } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, create);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    // Should contain name from selection
+    EXPECT_NE(strstr(json, "Charlie"), nullptr) << "Should contain name from selection: " << json;
+    // Should contain id
+    EXPECT_NE(strstr(json, "id"), nullptr) << "Should contain id: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLResolveTest, MutationUpdateWithSelection) {
+    // First create a user
+    const char* create = "mutation { createUser(name: \"Dave\", age: \"40\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    // Update with selection
+    const char* update = "mutation { updateUser(id: \"1\", name: \"David\") { id name } }";
+    graphql_result_t* result = graphql_mutate_sync(layer, update);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "David"), nullptr) << "Should contain updated name: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}

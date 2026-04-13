@@ -651,3 +651,44 @@ char* graphql_plan_to_string(graphql_plan_t* plan) {
 
     return strdup(buf);
 }
+
+graphql_plan_t* graphql_compile_mutation_selection(graphql_layer_t* layer,
+                                                    const char* type_name,
+                                                    graphql_ast_node_t* field) {
+    if (layer == NULL || type_name == NULL || field == NULL) {
+        return NULL;
+    }
+
+    // Look up the type
+    graphql_type_t* type = graphql_schema_get_type(layer, type_name);
+    if (type == NULL) return NULL;
+
+    const char* plural = graphql_type_get_plural(type);
+
+    // Create a RESOLVE_FIELD plan that will be resolved as entity fields
+    graphql_plan_t* plan = graphql_plan_create(PLAN_RESOLVE_FIELD);
+    if (plan == NULL) return NULL;
+    plan->type_name = strdup(type_name);
+    plan->field_name = strdup(type_name);
+
+    // Compile each child field selection
+    for (int i = 0; i < field->children.length; i++) {
+        graphql_ast_node_t* child = field->children.data[i];
+        if (child == NULL || child->kind != GRAPHQL_AST_FIELD) continue;
+
+        graphql_plan_t* child_plan = compile_field(layer, child,
+                                                    type, plural,
+                                                    NULL, NULL, 0, true);
+        if (child_plan != NULL) {
+            vec_push(&plan->children, child_plan);
+        }
+    }
+
+    // If no children were compiled, destroy and return NULL
+    if (plan->children.length == 0) {
+        graphql_plan_destroy(plan);
+        return NULL;
+    }
+
+    return plan;
+}

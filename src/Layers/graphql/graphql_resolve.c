@@ -1096,7 +1096,50 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
     return result;
 }
 
-// Check whether a type's required fields are present in a mutation's arguments.
+// ============================================================
+// Resolve mutation sub-selections for created/updated entities
+// ============================================================
+
+static graphql_result_node_t* resolve_mutation_selection(graphql_layer_t* layer,
+                                                           graphql_plan_t* selection_plan,
+                                                           const char* type_name,
+                                                           const char* entity_id) {
+    if (layer == NULL || selection_plan == NULL || entity_id == NULL) return NULL;
+
+    graphql_type_t* type = graphql_schema_get_type(layer, type_name);
+    const char* plural = type ? graphql_type_get_plural(type) : type_name;
+
+    // Build a result object with the entity ID
+    graphql_result_node_t* obj = graphql_result_node_create(RESULT_OBJECT, type_name);
+    if (obj == NULL) return NULL;
+
+    // Include the entity ID
+    graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
+    if (id_node != NULL) {
+        id_node->string_val = strdup(entity_id);
+        graphql_result_node_add_child(obj, id_node);
+    }
+
+    // Resolve each child field plan
+    for (int i = 0; i < selection_plan->children.length; i++) {
+        graphql_plan_t* child = selection_plan->children.data[i];
+        graphql_type_t* child_type = NULL;
+        if (child->type_name != NULL && layer->registry != NULL) {
+            child_type = graphql_schema_get_type(layer, child->type_name);
+        }
+
+        graphql_result_node_t* child_result = resolve_field(layer, child, type, entity_id,
+                                                              1, NULL, type_name);
+        if (child_result != NULL) {
+            graphql_result_node_add_child(obj, child_result);
+        }
+    }
+
+    return obj;
+}
+
+// ============================================================
+// Mutation execution
 // Returns NULL if validation passes, or an error result listing missing fields.
 static graphql_result_t* validate_required_fields(graphql_type_t* type, graphql_ast_node_t* field) {
     if (type == NULL || type->kind != GRAPHQL_TYPE_OBJECT) return NULL;
@@ -1306,6 +1349,22 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 snprintf(new_id, sizeof(new_id), "%lld", (long long)(next_id + 1));
                 local_db_put_string(layer->db, path_buf, new_id);
 
+                // If the mutation has sub-selections, resolve them on the created entity
+                if (field->children.length > 0) {
+                    graphql_plan_t* sel_plan = graphql_compile_mutation_selection(
+                        layer, type_name, field);
+                    if (sel_plan != NULL) {
+                        graphql_result_node_t* sel_result = resolve_mutation_selection(
+                            layer, sel_plan, type_name, id_str);
+                        if (sel_result != NULL) {
+                            // Replace create_result with selection result
+                            graphql_result_node_destroy(create_result);
+                            create_result = sel_result;
+                        }
+                        graphql_plan_destroy(sel_plan);
+                    }
+                }
+
                 vec_push(&result->data->children, create_result);
             }
         } else if (is_update) {
@@ -1331,7 +1390,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                     // Add id to result
                     graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
                     if (id_node != NULL) {
-                        id_node->string_val = target_id;
+                        id_node->string_val = strdup(target_id);
                         vec_push(&update_result->children, id_node);
                     }
 
@@ -1370,6 +1429,23 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                         }
                     }
                     vec_push(&result->data->children, update_result);
+
+                    // If the mutation has sub-selections, resolve them on the updated entity
+                    if (field->children.length > 0) {
+                        graphql_plan_t* sel_plan = graphql_compile_mutation_selection(
+                            layer, type_name, field);
+                        if (sel_plan != NULL) {
+                            graphql_result_node_t* sel_result = resolve_mutation_selection(
+                                layer, sel_plan, type_name, target_id);
+                            if (sel_result != NULL) {
+                                // Replace update_result with selection result
+                                vec_pop(&result->data->children);  // Remove update_result
+                                graphql_result_node_destroy(update_result);
+                                vec_push(&result->data->children, sel_result);
+                            }
+                            graphql_plan_destroy(sel_plan);
+                        }
+                    }
                 }
                 free(target_id);
             }

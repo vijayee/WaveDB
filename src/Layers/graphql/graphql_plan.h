@@ -8,6 +8,9 @@
 
 #include "graphql_types.h"
 
+// Forward declaration to avoid circular include with graphql_parser.h
+typedef struct graphql_ast_node_t graphql_ast_node_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +52,20 @@ void graphql_plan_destroy(graphql_plan_t* plan);
  * @return Heap-allocated string. Caller must free().
  */
 char* graphql_plan_to_string(graphql_plan_t* plan);
+
+/**
+ * Compile the selection set of a mutation field into sub-plans.
+ *
+ * Used to resolve the requested fields on a created/updated entity.
+ *
+ * @param layer       Layer with registered schema
+ * @param type_name   The type name (e.g., "User")
+ * @param field       AST field node from the mutation (contains children as selections)
+ * @return Plan with compiled child selections, or NULL if no selections
+ */
+graphql_plan_t* graphql_compile_mutation_selection(graphql_layer_t* layer,
+                                                    const char* type_name,
+                                                    graphql_ast_node_t* field);
 
 #ifdef __cplusplus
 }
