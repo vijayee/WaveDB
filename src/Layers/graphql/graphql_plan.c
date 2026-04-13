@@ -35,7 +35,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                                       const char* parent_path,
                                       fragment_table_t* fragments,
                                       const char** visited,
-                                      int visited_depth);
+                                      int visited_depth,
+                                      bool parent_is_entity_scan);
 static bool should_skip_field(graphql_ast_node_t* field_node);
 
 // ============================================================
@@ -96,7 +97,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                                       const char* parent_path,
                                       fragment_table_t* fragments,
                                       const char** visited,
-                                      int visited_depth) {
+                                      int visited_depth,
+                                      bool parent_is_entity_scan) {
     if (field_node == NULL) return NULL;
 
     // Check @skip/@include
@@ -145,6 +147,21 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
         if (target_type_name != NULL && layer != NULL) {
             target_type = graphql_schema_get_type(layer, target_type_name);
         }
+    } else if (layer != NULL && layer->registry != NULL) {
+        // Field not found in parent type — check if the field name directly
+        // references a known type (root query fields like "User" or "Users")
+        for (int k = 0; k < layer->registry->types.length; k++) {
+            graphql_type_t* t = layer->registry->types.data[k];
+            const char* plural = graphql_type_get_plural(t);
+            if ((plural != NULL && strcmp(plural, field_name) == 0) ||
+                strcmp(t->name, field_name) == 0) {
+                target_type = t;
+                target_type_name = t->name;
+                // Matching the plural form means scanning a list of entities
+                is_list = (plural != NULL && strcmp(plural, field_name) == 0);
+                break;
+            }
+        }
     }
 
     // Get plural name for path construction
@@ -153,16 +170,43 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
     // Build the path for this field
     char* field_path = build_path(parent_path, field_name);
 
+    // Determine if the target type is a scalar (no nested fields to resolve)
+    bool is_scalar = (target_type == NULL) || (target_type->kind == GRAPHQL_TYPE_SCALAR) || (target_type->kind == GRAPHQL_TYPE_ENUM);
+
+    // Determine if the target type is a reference to another object type
+    bool is_reference = (!is_scalar && !is_list);
+    bool is_list_reference = (!is_scalar && is_list);
+
     // Determine plan kind
-    graphql_plan_t* plan = graphql_plan_create(
-        is_list ? PLAN_SCAN : PLAN_GET
-    );
+    graphql_plan_kind_t plan_kind;
+
+    if (is_list && field_node->arguments.length > 0) {
+        // List type with arguments (e.g., User(id: "1")) → batch get specific entities
+        plan_kind = PLAN_BATCH_GET;
+    } else if (parent_is_entity_scan && is_scalar) {
+        // Scalar field under an entity scan → resolve by parent entity ID
+        plan_kind = PLAN_RESOLVE_FIELD;
+    } else if (parent_is_entity_scan && is_reference) {
+        // Single reference field under an entity scan → follow the reference
+        plan_kind = PLAN_RESOLVE_REF;
+    } else if (parent_is_entity_scan && is_list_reference) {
+        // List reference under an entity scan → scan the reference path
+        // This stays as PLAN_SCAN but the path is entity-relative
+        plan_kind = PLAN_SCAN;
+    } else if (is_list) {
+        plan_kind = PLAN_SCAN;
+    } else {
+        plan_kind = PLAN_GET;
+    }
+
+    graphql_plan_t* plan = graphql_plan_create(plan_kind);
     if (plan == NULL) {
         free(field_path);
         return NULL;
     }
 
     plan->type_name = target_type_name ? strdup(target_type_name) : NULL;
+    plan->field_name = strdup(field_name);
     plan->alias = field_node->alias ? strdup(field_node->alias) : NULL;
 
     // Set up the path for this plan
@@ -194,13 +238,27 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                 }
             }
         }
-        if (is_list) {
-            plan->scan_start = path;
-            // Create end path for scan range
-            // For a scan, we want to scan all entries under this path prefix
-            plan->scan_end = NULL;  // NULL means no upper bound
-        } else {
-            plan->get_path = path;
+
+        switch (plan_kind) {
+            case PLAN_SCAN:
+            case PLAN_BATCH_GET:
+                plan->scan_start = path;
+                plan->scan_end = NULL;
+                break;
+            case PLAN_GET:
+                plan->get_path = path;
+                break;
+            case PLAN_RESOLVE_FIELD:
+            case PLAN_RESOLVE_REF:
+                // RESOLVE_FIELD and RESOLVE_REF build paths dynamically
+                // from parent_plural/parent_id/field_name, so we don't
+                // need a static path. Store as base_path for reference.
+                plan->base_path = path;
+                break;
+            default:
+                // Other plan kinds: free the path
+                if (path) path_destroy(path);
+                break;
         }
     }
     free(field_path);
@@ -247,12 +305,20 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
         vec_push(&plan->args, plan_arg);
     }
 
+    // For RESOLVE_REF, set the referenced type name
+    if (plan_kind == PLAN_RESOLVE_REF && target_type_name != NULL) {
+        plan->ref_type = strdup(target_type_name);
+    }
+
     // For arguments like id=xxx, construct a specific get path
     // instead of a scan
     if (is_list && plan->args.length > 0) {
         // This is like users(id: "1") - should be a batch get
         // Keep as PLAN_SCAN but with args that identify specific entries
     }
+
+    // Determine if child fields should be resolved per-entity
+    bool child_is_entity_scan = (plan_kind == PLAN_SCAN || plan_kind == PLAN_BATCH_GET);
 
     // Compile nested selections
     for (int i = 0; i < field_node->children.length; i++) {
@@ -308,7 +374,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
             for (int j = 0; j < frag_def->children.length; j++) {
                 graphql_plan_t* child_plan = compile_field(layer, frag_def->children.data[j],
                                                             frag_parent_type, parent_path,
-                                                            fragments, new_visited, new_depth);
+                                                            fragments, new_visited, new_depth,
+                                                            child_is_entity_scan);
                 if (child_plan != NULL) {
                     vec_push(&plan->children, child_plan);
                 }
@@ -333,7 +400,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                 for (int j = 0; j < child->children.length; j++) {
                     graphql_plan_t* child_plan = compile_field(layer, child->children.data[j],
                                                                 inline_parent_type, inline_path_str,
-                                                                fragments, visited, visited_depth);
+                                                                fragments, visited, visited_depth,
+                                                                child_is_entity_scan);
                     if (child_plan != NULL) {
                         vec_push(&plan->children, child_plan);
                     }
@@ -343,7 +411,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
                 for (int j = 0; j < child->children.length; j++) {
                     graphql_plan_t* child_plan = compile_field(layer, child->children.data[j],
                                                                 NULL, parent_path,
-                                                                fragments, visited, visited_depth);
+                                                                fragments, visited, visited_depth,
+                                                                child_is_entity_scan);
                     if (child_plan != NULL) {
                         vec_push(&plan->children, child_plan);
                     }
@@ -355,7 +424,8 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
         if (child->kind == GRAPHQL_AST_FIELD) {
             graphql_plan_t* child_plan = compile_field(layer, child,
                                                         target_type, plural,
-                                                        fragments, visited, visited_depth);
+                                                        fragments, visited, visited_depth,
+                                                        child_is_entity_scan);
             if (child_plan != NULL) {
                 vec_push(&plan->children, child_plan);
             }
@@ -434,7 +504,7 @@ graphql_plan_t* graphql_compile_query(graphql_layer_t* layer, const char* query)
 
                     graphql_plan_t* child_plan = compile_field(layer, field,
                                                                 root_type, path_prefix,
-                                                                &fragments, NULL, 0);
+                                                                &fragments, NULL, 0, false);
                     if (child_plan != NULL) {
                         if (root_plan == NULL) {
                             root_plan = graphql_plan_create(PLAN_GET);
@@ -510,7 +580,7 @@ graphql_plan_t* graphql_compile_mutation(graphql_layer_t* layer, const char* mut
                     const char* path_prefix = root_type ? graphql_type_get_plural(root_type) : field_name;
                     graphql_plan_t* child_plan = compile_field(layer, field,
                                                                 root_type, path_prefix,
-                                                                &fragments, NULL, 0);
+                                                                &fragments, NULL, 0, false);
                     if (child_plan != NULL) {
                         vec_push(&root_plan->children, child_plan);
                     }

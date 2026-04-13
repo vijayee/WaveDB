@@ -213,6 +213,7 @@ typedef struct graphql_arg_t {
 typedef struct graphql_plan_t {
     graphql_plan_kind_t kind;
     char* type_name;                        // "User", "Post" — which type this operates on
+    char* field_name;                       // "name", "age" — original field name from the query
     char* alias;                             // Field alias (NULL if none, e.g. "admin" in "admin: user")
     path_t* base_path;                      // e.g., path("Users/1")
     path_t* scan_start;                     // For SCAN: start of range

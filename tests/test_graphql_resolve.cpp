@@ -679,3 +679,95 @@ TEST_F(GraphQLAsyncTest, AsyncQueryAfterMutation) {
     graphql_result_destroy(ctx.result);
     promise_destroy(promise);
 }
+// ============================================================
+// Plan compiler improvement tests
+// ============================================================
+
+class GraphQLPlanImprovementTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_plan_imp";
+    graphql_layer_t* layer = nullptr;
+    graphql_layer_config_t* config = nullptr;
+
+    void SetUp() override {
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+
+        config = graphql_layer_config_default();
+        config->path = test_dir;
+        config->enable_persist = 1;
+
+        layer = graphql_layer_create(test_dir, config);
+        ASSERT_NE(layer, nullptr);
+
+        const char* sdl = "type User { name: String age: Int email: String }";
+        int rc = graphql_schema_parse(layer, sdl);
+        ASSERT_EQ(rc, 0);
+    }
+
+    void TearDown() override {
+        if (layer) graphql_layer_destroy(layer);
+        if (config) graphql_layer_config_destroy(config);
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+TEST_F(GraphQLPlanImprovementTest, QueryWithIdArgumentFetchesSingleEntity) {
+    // Create two users
+    const char* create1 = "mutation { createUser(name: \"Alice\", age: \"30\") { id name } }";
+    graphql_result_t* r1 = graphql_mutate_sync(layer, create1);
+    ASSERT_NE(r1, nullptr);
+    EXPECT_TRUE(r1->success);
+    graphql_result_destroy(r1);
+
+    const char* create2 = "mutation { createUser(name: \"Bob\", age: \"25\") { id name } }";
+    graphql_result_t* r2 = graphql_mutate_sync(layer, create2);
+    ASSERT_NE(r2, nullptr);
+    EXPECT_TRUE(r2->success);
+    graphql_result_destroy(r2);
+
+    // Query with id argument — should return only user 1
+    const char* query = "{ User(id: \"1\") { name } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success) << "Query should succeed";
+
+    const char* json = graphql_result_to_json(result);
+    EXPECT_NE(json, nullptr);
+    EXPECT_NE(strstr(json, "Alice"), nullptr) << "Should contain Alice: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
+}
+
+TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesBatchGetForArgs) {
+    const char* query = "{ User(id: \"1\") { name } }";
+    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    ASSERT_NE(plan, nullptr);
+
+    char* plan_str = graphql_plan_to_string(plan);
+    EXPECT_NE(plan_str, nullptr);
+    EXPECT_NE(strstr(plan_str, "BATCH_GET"), nullptr) << "Plan should contain BATCH_GET: " << plan_str;
+
+    free(plan_str);
+    graphql_plan_destroy(plan);
+}
+
+TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesResolveFieldForScalarChildren) {
+    const char* query = "{ User { name } }";
+    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    ASSERT_NE(plan, nullptr);
+
+    char* plan_str = graphql_plan_to_string(plan);
+    EXPECT_NE(plan_str, nullptr);
+    EXPECT_NE(strstr(plan_str, "RESOLVE_FIELD"), nullptr) << "Plan should contain RESOLVE_FIELD: " << plan_str;
+
+    free(plan_str);
+    graphql_plan_destroy(plan);
+}
