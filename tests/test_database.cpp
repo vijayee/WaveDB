@@ -849,6 +849,70 @@ TEST_F(DatabaseTest, WriteBatchSyncDoubleSubmit) {
     batch_destroy(batch);
 }
 
+TEST_F(DatabaseTest, WriteBatchSyncWithDelete) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Put key1 and key2 individually
+    path_t* path1 = make_path({"batch", "key1"});
+    identifier_t* value1 = make_value("batch_value1");
+    EXPECT_EQ(database_put_sync(db, path1, value1), 0);
+
+    path_t* path2 = make_path({"batch", "key2"});
+    identifier_t* value2 = make_value("batch_value2");
+    EXPECT_EQ(database_put_sync(db, path2, value2), 0);
+
+    // Verify both exist
+    path_t* get_path1 = make_path({"batch", "key1"});
+    identifier_t* result1 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path1, &result1), 0);
+    ASSERT_NE(result1, nullptr);
+    expect_identifier_eq(result1, "batch_value1");
+    identifier_destroy(result1);
+
+    // Create batch with put and delete
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* path3 = make_path({"batch", "key3"});
+    identifier_t* value3 = make_value("batch_value3");
+    EXPECT_EQ(batch_add_put(batch, path3, value3), 0);
+
+    path_t* del_path1 = make_path({"batch", "key1"});
+    EXPECT_EQ(batch_add_delete(batch, del_path1), 0);
+
+    // Submit batch
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, 0);
+
+    // Verify key1 is deleted
+    path_t* get_path1_after = make_path({"batch", "key1"});
+    identifier_t* result1_after = nullptr;
+    int get_rc = database_get_sync(db, get_path1_after, &result1_after);
+    EXPECT_EQ(result1_after, nullptr) << "key1 should be deleted after batch delete";
+
+    // Verify key2 still exists
+    path_t* get_path2 = make_path({"batch", "key2"});
+    identifier_t* result2 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path2, &result2), 0);
+    ASSERT_NE(result2, nullptr);
+    expect_identifier_eq(result2, "batch_value2");
+    identifier_destroy(result2);
+
+    // Verify key3 was put by batch
+    path_t* get_path3 = make_path({"batch", "key3"});
+    identifier_t* result3 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path3, &result3), 0);
+    ASSERT_NE(result3, nullptr);
+    expect_identifier_eq(result3, "batch_value3");
+    identifier_destroy(result3);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
 TEST_F(DatabaseTest, Snapshot) {
     int error = 0;
     db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, 0, pool, wheel, &error);

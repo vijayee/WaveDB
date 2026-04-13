@@ -1362,7 +1362,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           }
         } else if (is_last_chunk) {
           // End of this identifier, move to next HBTrie level
-          if (entry == NULL || entry->has_value || entry->child == NULL) {
+          if (entry == NULL || entry->child == NULL) {
             return NULL;
           }
 
@@ -1378,7 +1378,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           // Continue to next identifier
         } else {
           // Intermediate chunk within this identifier
-          if (entry == NULL || entry->has_value || entry->child == NULL) {
+          if (entry == NULL || entry->child == NULL) {
             return NULL;
           }
 
@@ -1621,12 +1621,30 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
-          // Entry exists but has value instead of child
-          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          // Entry exists with a value but we need to descend further.
+          // This happens when key1 is stored and key10 (sharing the 'key1'
+          // chunk prefix) needs to go deeper. Create a child node and
+          // keep the existing value in the entry (has_value stays 1).
+          // The traversal logic will check child first for longer keys.
+          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+          if (child == NULL) {
+            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+            platform_unlock(&current->write_lock);
+            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&path_stack);
+            return -1;
+          }
+
+          // Set the child on the entry, keeping has_value = 1
+          // This allows both key1 (value) and key10 (descend further) to work.
+          entry->child = child;
+
+          // Crab: lock child before unlocking parent
+          platform_lock(&child->write_lock);
+          atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
           platform_unlock(&current->write_lock);
-          vec_deinit(&identifier_chunk_counts);
-          vec_deinit(&path_stack);
-          return -1;
+          current = child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
@@ -1650,7 +1668,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
       } else {
         // Intermediate chunk - move deeper
         if (entry == NULL) {
-          // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
@@ -1685,11 +1702,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
-          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          // Intermediate chunk: entry has a value but we need to descend further.
+          // This happens when a shorter key (e.g. "key1") is stored and a longer
+          // key sharing the same prefix (e.g. "key10") needs to go deeper.
+          // Create a child node while keeping has_value = 1 so the shorter
+          // key's value remains accessible at this entry.
+          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+          if (child == NULL) {
+            atomic_fetch_add(&current->seq, 1);
+            platform_unlock(&current->write_lock);
+            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&path_stack);
+            return -1;
+          }
+
+          entry->child = child;
+
+          // Crab: lock child before unlocking parent
+          platform_lock(&child->write_lock);
+          atomic_fetch_add(&child->seq, 1);
+          atomic_fetch_add(&current->seq, 1);
           platform_unlock(&current->write_lock);
-          vec_deinit(&identifier_chunk_counts);
-          vec_deinit(&path_stack);
-          return -1;
+          current = child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
@@ -1830,7 +1864,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
+        if (entry == NULL || entry->child == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
@@ -1843,7 +1877,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         current = entry->child;
       } else {
         // Intermediate chunk
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
+        if (entry == NULL || entry->child == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;

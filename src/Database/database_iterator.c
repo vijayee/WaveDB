@@ -102,30 +102,26 @@ database_iterator_t* database_scan_start(database_t* db,
                                           path_t* start_path,
                                           path_t* end_path) {
     if (db == NULL) {
-        // Clean up paths if provided
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
         return NULL;
     }
 
     database_iterator_t* iter = get_clear_memory(sizeof(database_iterator_t));
     if (iter == NULL) {
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
         return NULL;
     }
 
     iter->db = db;
-    iter->start_path = start_path;
-    iter->end_path = end_path;
+    // Copy paths — the iterator owns its copies, callers retain theirs
+    iter->start_path = start_path ? path_copy(start_path) : NULL;
+    iter->end_path = end_path ? path_copy(end_path) : NULL;
     iter->current_path = path_create();
     iter->finished = 0;
 
     // Allocate initial stack
     iter->stack = get_clear_memory(INITIAL_STACK_SIZE * sizeof(iterator_frame_t));
     if (iter->stack == NULL) {
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
+        if (iter->start_path) path_destroy(iter->start_path);
+        if (iter->end_path) path_destroy(iter->end_path);
         if (iter->current_path) path_destroy(iter->current_path);
         free(iter);
         return NULL;

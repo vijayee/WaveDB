@@ -1278,7 +1278,11 @@ database_iterator_t* database_scan_range(database_t* db,
         }
     }
 
-    return database_scan_start(db, start_path, end_path);
+    database_iterator_t* iter = database_scan_start(db, start_path, end_path);
+    // database_scan_start copies the paths, so free our local copies
+    if (start_path) path_destroy(start_path);
+    if (end_path) path_destroy(end_path);
+    return iter;
 }
 
 int database_write_batch_sync(database_t* db, batch_t* batch) {
@@ -1371,13 +1375,19 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
             if (removed) {
                 identifier_destroy(removed);
             }
+            // Invalidate LRU cache for deleted keys
+            database_lru_cache_delete(db->lru, batch->ops[i].path);
         }
 
         if (op_result != 0) {
             platform_unlock(&batch->lock);
-            // CRITICAL: Crash to force recovery
-            fprintf(stderr, "CRITICAL: Batch apply failed at operation %zu, crashing for recovery\n", i);
-            abort();
+            fprintf(stderr, "ERROR: Batch apply failed at operation %zu\n", i);
+            // Release locks
+            for (size_t j = WRITE_LOCK_SHARDS; j > 0; j--) {
+                platform_unlock(&db->write_locks[j - 1]);
+            }
+            txn_desc_destroy(txn);
+            return -1;
         }
     }
     platform_unlock(&batch->lock);
