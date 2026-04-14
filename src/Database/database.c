@@ -12,6 +12,7 @@
 #include "../Util/log.h"
 #include "../Storage/sections.h"
 #include "../Storage/node_serializer.h"
+#include "../Util/memory_pool.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <arpa/inet.h>
 
 typedef struct {
     database_t* db;
@@ -392,12 +394,12 @@ static int save_index_sections(database_t* db) {
         }
 
         // Write to section storage
+        // buffer_create_from_existing_memory takes ownership of buf — buffer_destroy will free it
         buffer_t* data_buf = buffer_create_from_existing_memory(buf, len);
         transaction_id_t txn_id = {0, 0, 0};  // Snapshot writes don't need a real txn_id
         size_t section_id, offset;
         int rc = sections_write(storage, txn_id, data_buf, &section_id, &offset);
         buffer_destroy(data_buf);
-        free(buf);
 
         if (rc != 0) {
             log_error("Failed to write bnode to section storage");

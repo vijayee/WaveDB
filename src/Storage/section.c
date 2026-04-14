@@ -241,8 +241,8 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id) {
     refcounter_init((refcounter_t*) section);
     platform_lock_init(&section->lock);
 
-    char section_id[20];
-    sprintf(section_id, "%lu", id);
+    char section_id[24];
+    snprintf(section_id, sizeof(section_id), "%lu", id);
     section->fd = -1;
     section->path = path_join(path, section_id);
     section->meta_path = path_join(meta_path, section_id);
