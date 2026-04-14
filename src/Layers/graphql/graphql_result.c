@@ -145,9 +145,6 @@ static void result_node_to_json(graphql_result_node_t* node, json_builder_t* b) 
         case RESULT_LIST:
             result_list_to_json(node, b);
             break;
-        case RESULT_REF:
-            json_builder_append(b, "null");  // Refs are resolved during execution
-            break;
     }
 }
 

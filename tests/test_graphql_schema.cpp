@@ -78,7 +78,7 @@ TEST_F(GraphQLSchemaTest, ParseSimpleSchema) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String age: Int }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     // Verify type was registered
@@ -100,7 +100,7 @@ TEST_F(GraphQLSchemaTest, ParseEnumSchema) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "enum Role { ADMIN USER }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     graphql_type_t* role_type = graphql_schema_get_type(layer, "Role");
@@ -120,7 +120,7 @@ TEST_F(GraphQLSchemaTest, ParseSchemaWithDirectives) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Person @plural(name: \"People\") { name: String }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     graphql_type_t* person_type = graphql_schema_get_type(layer, "Person");
@@ -142,7 +142,7 @@ TEST_F(GraphQLSchemaTest, ParseSchemaDefinition) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "schema { query: Query mutation: Mutation }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     graphql_layer_destroy(layer);
@@ -157,7 +157,7 @@ TEST_F(GraphQLSchemaTest, ParseMultipleTypes) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String } type Post { title: String }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
@@ -179,13 +179,13 @@ TEST_F(GraphQLSchemaTest, ParseInvalidSDL) {
     graphql_layer_t* layer = graphql_layer_create(nullptr, config);
     ASSERT_NE(layer, nullptr);
 
-    int result = graphql_schema_parse(layer, "type !Invalid { }");
+    int result = graphql_schema_parse(layer, "type !Invalid { }", NULL);
     EXPECT_NE(result, 0);
 
-    result = graphql_schema_parse(layer, "");
+    result = graphql_schema_parse(layer, "", NULL);
     EXPECT_NE(result, 0);
 
-    result = graphql_schema_parse(layer, NULL);
+    result = graphql_schema_parse(layer, NULL, NULL);
     EXPECT_NE(result, 0);
 
     graphql_layer_destroy(layer);
@@ -204,7 +204,7 @@ TEST_F(GraphQLSchemaTest, TypeRegistryLookup) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }";
-    graphql_schema_parse(layer, sdl);
+    graphql_schema_parse(layer, sdl, NULL);
 
     // Existing type
     graphql_type_t* found = graphql_schema_get_type(layer, "User");
@@ -234,7 +234,7 @@ TEST_F(GraphQLSchemaTest, FieldTypesPreserved) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String age: Int friends: [User] id: ID! }";
-    int result = graphql_schema_parse(layer, sdl);
+    int result = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(result, 0);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
@@ -281,7 +281,7 @@ TEST_F(GraphQLSchemaTest, FieldTypesPreserved) {
 
 TEST_F(GraphQLSchemaTest, NullLayerParse) {
     // Parsing with null layer should fail gracefully
-    int result = graphql_schema_parse(nullptr, "type User { name: String }");
+    int result = graphql_schema_parse(nullptr, "type User { name: String }", NULL);
     EXPECT_NE(result, 0);
 }
 
@@ -308,7 +308,7 @@ TEST_F(GraphQLSchemaTest, DefaultPluralName) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }";
-    graphql_schema_parse(layer, sdl);
+    graphql_schema_parse(layer, sdl, NULL);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
     ASSERT_NE(user_type, nullptr);
@@ -329,7 +329,7 @@ TEST_F(GraphQLSchemaTest, CustomPluralName) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Person @plural(name: \"People\") { name: String }";
-    graphql_schema_parse(layer, sdl);
+    graphql_schema_parse(layer, sdl, NULL);
 
     graphql_type_t* person_type = graphql_schema_get_type(layer, "Person");
     ASSERT_NE(person_type, nullptr);
@@ -355,7 +355,7 @@ TEST_F(GraphQLSchemaTest, ParseScalarDefinition) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "scalar Date\nscalar DateTime\ntype User { name: String }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     // Check Date scalar was registered
@@ -394,7 +394,7 @@ TEST_F(GraphQLSchemaTest, ScalarTypePersistAndLoad) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "scalar Date\ntype Event { title: String date: Date }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     // Verify Date is a scalar after schema parse
@@ -428,7 +428,7 @@ TEST_F(GraphQLSchemaTest, ParseTypeExtension) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }\nextend type User { age: Int email: String }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
@@ -462,7 +462,7 @@ TEST_F(GraphQLSchemaTest, ExtendTypeMergesFields) {
 
     // Extension before definition — should create type first
     const char* sdl = "extend type Post { title: String }\ntype Post { content: String }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     graphql_type_t* post_type = graphql_schema_get_type(layer, "Post");
@@ -488,7 +488,7 @@ TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }\nextend type User { age: Int }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
@@ -514,7 +514,7 @@ TEST_F(GraphQLSchemaTest, ParseDefaultValue) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String = \"Anonymous\" age: Int = 0 active: Boolean = true }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     graphql_type_t* user_type = graphql_schema_get_type(layer, "User");
@@ -561,7 +561,7 @@ TEST_F(GraphQLSchemaTest, DefaultValuesPersistAndLoad) {
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Config { name: String = \"default\" count: Int = 10 }";
-    int rc = graphql_schema_parse(layer, sdl);
+    int rc = graphql_schema_parse(layer, sdl, NULL);
     EXPECT_EQ(rc, 0);
 
     // Verify default values are present

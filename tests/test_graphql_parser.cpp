@@ -26,7 +26,7 @@ protected:
 
 TEST_F(GraphQLParserTest, SimpleTypeDefinition) {
     const char* sdl = "type User { name: String age: Int }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
     EXPECT_EQ(ast->kind, GRAPHQL_AST_DOCUMENT);
     EXPECT_EQ(ast->children.length, 1);
@@ -53,7 +53,7 @@ TEST_F(GraphQLParserTest, SimpleTypeDefinition) {
 
 TEST_F(GraphQLParserTest, TypeWithRequiredField) {
     const char* sdl = "type User { id: ID! }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* type_def = ast->children.data[0];
@@ -67,7 +67,7 @@ TEST_F(GraphQLParserTest, TypeWithRequiredField) {
 
 TEST_F(GraphQLParserTest, TypeWithListField) {
     const char* sdl = "type User { friends: [User] }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* type_def = ast->children.data[0];
@@ -81,7 +81,7 @@ TEST_F(GraphQLParserTest, TypeWithListField) {
 
 TEST_F(GraphQLParserTest, TypeWithRequiredListField) {
     const char* sdl = "type User { friends: [User]! }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* type_def = ast->children.data[0];
@@ -92,7 +92,7 @@ TEST_F(GraphQLParserTest, TypeWithRequiredListField) {
 
 TEST_F(GraphQLParserTest, MultipleTypes) {
     const char* sdl = "type User { name: String } type Post { title: String }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
     EXPECT_EQ(ast->children.length, 2);
 
@@ -106,7 +106,7 @@ TEST_F(GraphQLParserTest, MultipleTypes) {
 
 TEST_F(GraphQLParserTest, EnumDefinition) {
     const char* sdl = "enum Role { ADMIN USER }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* enum_def = ast->children.data[0];
@@ -121,7 +121,7 @@ TEST_F(GraphQLParserTest, EnumDefinition) {
 
 TEST_F(GraphQLParserTest, SchemaDefinition) {
     const char* sdl = "schema { query: Query mutation: Mutation }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* schema_def = ast->children.data[0];
@@ -139,7 +139,7 @@ TEST_F(GraphQLParserTest, SchemaDefinition) {
 
 TEST_F(GraphQLParserTest, TypeDirective) {
     const char* sdl = "type Person @plural(name: \"People\") { name: String }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* type_def = ast->children.data[0];
@@ -154,7 +154,7 @@ TEST_F(GraphQLParserTest, TypeDirective) {
 
 TEST_F(GraphQLParserTest, FieldDirective) {
     const char* sdl = "type User { email: String @skip(if: true) }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* type_def = ast->children.data[0];
@@ -172,17 +172,17 @@ TEST_F(GraphQLParserTest, InvalidInput) {
     // This is now valid as an anonymous query: { invalid }
     // Use something that's actually invalid in both SDL and query syntax
     const char* sdl = "type !Invalid { }";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     EXPECT_EQ(ast, nullptr);
 }
 
 TEST_F(GraphQLParserTest, EmptyInput) {
     const char* sdl = "";
-    ast = graphql_parse(sdl, strlen(sdl));
+    ast = graphql_parse(sdl, strlen(sdl), NULL);
     EXPECT_EQ(ast, nullptr);
 }
 
 TEST_F(GraphQLParserTest, NullInput) {
-    ast = graphql_parse(NULL, 0);
+    ast = graphql_parse(NULL, 0, NULL);
     EXPECT_EQ(ast, nullptr);
 }

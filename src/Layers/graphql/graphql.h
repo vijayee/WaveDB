@@ -56,11 +56,13 @@ void graphql_layer_destroy(graphql_layer_t* layer);
  * Parses type definitions, enum definitions, and schema declarations.
  * Stores schema metadata in the database under __schema paths.
  *
- * @param layer  Layer to register schema with
- * @param sdl    SDL string to parse
+ * @param layer      Layer to register schema with
+ * @param sdl        SDL string to parse
+ * @param error_out  If non-NULL and parsing fails, receives the error message.
+ *                   Caller must free(). If NULL, the message is freed internally.
  * @return 0 on success, -1 on parse error, -2 on validation error
  */
-int graphql_schema_parse(graphql_layer_t* layer, const char* sdl);
+int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out);
 
 /**
  * Register a custom resolver for a type+field.

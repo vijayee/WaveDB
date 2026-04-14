@@ -21,22 +21,34 @@ extern "C" {
  * Walks the query AST, resolves types against the schema registry,
  * and produces a graphql_plan_t tree with computed paths.
  *
- * @param layer  Layer with registered schema
- * @param query  GraphQL query string
+ * @param layer               Layer with registered schema
+ * @param query               GraphQL query string
+ * @param error_out           If non-NULL and parsing fails, receives the error message.
+ *                            Caller must free(). If NULL, the message is freed internally.
+ * @param compilation_errors  If non-NULL, field validation errors are pushed here.
+ *                            Caller must destroy each error via graphql_error_contents_destroy.
  * @return Compiled plan or NULL on error
  */
 graphql_plan_t* graphql_compile_query(graphql_layer_t* layer,
-                                       const char* query);
+                                       const char* query,
+                                       char** error_out,
+                                       graphql_compilation_errors_t* compilation_errors);
 
 /**
  * Compile a GraphQL mutation string into an execution plan.
  *
- * @param layer    Layer with registered schema
- * @param mutation  GraphQL mutation string
+ * @param layer               Layer with registered schema
+ * @param mutation            GraphQL mutation string
+ * @param error_out           If non-NULL and parsing fails, receives the error message.
+ *                            Caller must free(). If NULL, the message is freed internally.
+ * @param compilation_errors  If non-NULL, field validation errors are pushed here.
+ *                            Caller must destroy each error via graphql_error_contents_destroy.
  * @return Compiled plan or NULL on error
  */
 graphql_plan_t* graphql_compile_mutation(graphql_layer_t* layer,
-                                          const char* mutation);
+                                          const char* mutation,
+                                          char** error_out,
+                                          graphql_compilation_errors_t* compilation_errors);
 
 /**
  * Destroy a plan (recursively destroys children).

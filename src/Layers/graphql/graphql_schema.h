@@ -19,11 +19,13 @@ extern "C" {
  * Stores schema metadata in the database under __schema paths.
  * Each type's fields are stored as individual path/value pairs.
  *
- * @param layer  Layer to register schema with
- * @param sdl    SDL string to parse
+ * @param layer      Layer to register schema with
+ * @param sdl        SDL string to parse
+ * @param error_out  If non-NULL and parsing fails, receives the error message.
+ *                   Caller must free(). If NULL, the message is freed internally.
  * @return 0 on success, -1 on parse error, -2 on validation error
  */
-int graphql_schema_parse(graphql_layer_t* layer, const char* sdl);
+int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out);
 
 /**
  * Look up a type by name from the registry.

@@ -126,20 +126,30 @@ static bool is_type_name(graphql_token_kind_t kind) {
 // Public API
 // ============================================================
 
-graphql_ast_node_t* graphql_parse(const char* source, size_t length) {
-    if (source == NULL || length == 0) return NULL;
+graphql_ast_node_t* graphql_parse(const char* source, size_t length, char** error_out) {
+    if (source == NULL || length == 0) {
+        if (error_out != NULL) *error_out = strdup("Empty or null input");
+        return NULL;
+    }
 
     graphql_parser_state_t state;
     memset(&state, 0, sizeof(state));
     state.lexer = graphql_lexer_create(source, length);
-    if (state.lexer == NULL) return NULL;
+    if (state.lexer == NULL) {
+        if (error_out != NULL) *error_out = strdup("Failed to create lexer");
+        return NULL;
+    }
 
     graphql_ast_node_t* doc = parse_document(&state);
 
     if (state.has_error) {
         graphql_ast_destroy(doc);
         graphql_lexer_destroy(state.lexer);
-        free(state.error_message);
+        if (error_out != NULL) {
+            *error_out = state.error_message;
+        } else {
+            free(state.error_message);
+        }
         return NULL;
     }
 
@@ -280,10 +290,6 @@ static graphql_ast_node_t* parse_definition(graphql_parser_state_t* state) {
         }
         if (token.length == 8 && strncmp(token.start, "mutation", 8) == 0) {
             return parse_operation_definition(state);
-        }
-        if (token.length == 4 && strncmp(token.start, "fragment", 4) == 0 &&
-            token.length == 8) {
-            return parse_fragment_definition(state);
         }
         // "fragment" keyword
         if (token.length == 8 && strncmp(token.start, "fragment", 8) == 0) {

@@ -151,10 +151,13 @@ Napi::Value GraphQLLayer::ParseSchema(const Napi::CallbackInfo& info) {
   }
 
   std::string sdl = info[0].As<Napi::String>().Utf8Value();
-  int rc = graphql_schema_parse(layer_, sdl.c_str());
+  char* error_msg = nullptr;
+  int rc = graphql_schema_parse(layer_, sdl.c_str(), &error_msg);
 
   if (rc != 0) {
-    Napi::Error::New(env, "Failed to parse schema").ThrowAsJavaScriptException();
+    std::string msg = error_msg ? error_msg : "Failed to parse schema";
+    free(error_msg);
+    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
     return env.Undefined();
   }
 

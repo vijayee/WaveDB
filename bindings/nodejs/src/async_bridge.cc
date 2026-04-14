@@ -118,8 +118,9 @@ void AsyncBridge::CallJs(napi_env env, napi_value jsCallback, void* context, voi
   // If there was an error, reject the promise
   if (opCtx->error) {
     std::string errorMsg = "Operation failed";
-    if (opCtx->error->message) {
-      errorMsg = opCtx->error->message;
+    const char* msg = error_get_message(opCtx->error);
+    if (msg != nullptr) {
+      errorMsg = msg;
     }
     error_destroy(opCtx->error);
 

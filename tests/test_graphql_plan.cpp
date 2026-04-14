@@ -26,7 +26,7 @@ protected:
 
         // Register a simple schema
         const char* sdl = "type User { name: String age: Int friends: [User] }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -45,7 +45,7 @@ protected:
 
 TEST_F(GraphQLPlanTest, SimpleQuery) {
     const char* query = "{ User { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -58,7 +58,7 @@ TEST_F(GraphQLPlanTest, SimpleQuery) {
 
 TEST_F(GraphQLPlanTest, QueryWithArgument) {
     const char* query = "{ User(id: \"1\") { name age } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -70,7 +70,7 @@ TEST_F(GraphQLPlanTest, QueryWithArgument) {
 
 TEST_F(GraphQLPlanTest, NestedQuery) {
     const char* query = "{ User { name friends { name } } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -82,7 +82,7 @@ TEST_F(GraphQLPlanTest, NestedQuery) {
 
 TEST_F(GraphQLPlanTest, SkipDirective) {
     const char* query = "{ User @skip(if: true) { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     // @skip(if: true) should skip the field
     // The top-level plan should have no children since User is skipped
     if (plan != nullptr) {
@@ -95,7 +95,7 @@ TEST_F(GraphQLPlanTest, SkipDirective) {
 
 TEST_F(GraphQLPlanTest, IncludeDirective) {
     const char* query = "{ User @include(if: true) { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -106,23 +106,23 @@ TEST_F(GraphQLPlanTest, IncludeDirective) {
 }
 
 TEST_F(GraphQLPlanTest, NullLayer) {
-    graphql_plan_t* plan = graphql_compile_query(nullptr, "{ User { name } }");
+    graphql_plan_t* plan = graphql_compile_query(nullptr, "{ User { name } }", NULL, NULL);
     EXPECT_EQ(plan, nullptr);
 }
 
 TEST_F(GraphQLPlanTest, NullQuery) {
-    graphql_plan_t* plan = graphql_compile_query(layer, nullptr);
+    graphql_plan_t* plan = graphql_compile_query(layer, nullptr, NULL, NULL);
     EXPECT_EQ(plan, nullptr);
 }
 
 TEST_F(GraphQLPlanTest, InvalidQuery) {
-    graphql_plan_t* plan = graphql_compile_query(layer, "type !Broken { }");
+    graphql_plan_t* plan = graphql_compile_query(layer, "type !Broken { }", NULL, NULL);
     EXPECT_EQ(plan, nullptr);
 }
 
 TEST_F(GraphQLPlanTest, NamedQuery) {
     const char* query = "query GetUser { User { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -134,7 +134,7 @@ TEST_F(GraphQLPlanTest, NamedQuery) {
 
 TEST_F(GraphQLPlanTest, MutationPlan) {
     const char* mutation = "mutation CreateUser { User { name } }";
-    graphql_plan_t* plan = graphql_compile_mutation(layer, mutation);
+    graphql_plan_t* plan = graphql_compile_mutation(layer, mutation, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);
@@ -147,7 +147,7 @@ TEST_F(GraphQLPlanTest, MutationPlan) {
 
 TEST_F(GraphQLPlanTest, PlanToString) {
     const char* query = "{ User { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* str = graphql_plan_to_string(plan);

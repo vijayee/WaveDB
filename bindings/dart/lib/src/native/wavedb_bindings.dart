@@ -475,16 +475,18 @@ typedef GraphQLLayerConfigDestroyC = Void Function(Pointer<graphql_layer_config_
 /// Dart signature for graphql_layer_config_destroy
 typedef GraphQLLayerConfigDestroy = void Function(Pointer<graphql_layer_config_t> config);
 
-/// C signature: int graphql_schema_parse(graphql_layer_t* layer, const char* sdl)
+/// C signature: int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out)
 typedef GraphQLSchemaParseC = Int32 Function(
   Pointer<graphql_layer_t> layer,
   Pointer<Utf8> sdl,
+  Pointer<Pointer<Utf8>> errorOut,
 );
 
 /// Dart signature for graphql_schema_parse
 typedef GraphQLSchemaParse = int Function(
   Pointer<graphql_layer_t> layer,
   Pointer<Utf8> sdl,
+  Pointer<Pointer<Utf8>> errorOut,
 );
 
 /// C signature: graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query)
@@ -602,6 +604,12 @@ typedef ErrorDestroyC = Void Function(Pointer<async_error_t> error);
 
 /// Dart signature for error_destroy
 typedef ErrorDestroy = void Function(Pointer<async_error_t> error);
+
+/// C signature: const char* error_get_message(async_error_t* error)
+typedef ErrorGetMessageC = Pointer<Utf8> Function(Pointer<async_error_t> error);
+
+/// Dart signature for error_get_message
+typedef ErrorGetMessage = Pointer<Utf8> Function(Pointer<async_error_t> error);
 
 // ============================================================
 // WAVEDB NATIVE - FFI Bindings Wrapper
@@ -764,6 +772,9 @@ class WaveDBNative {
 
   static late final ErrorDestroy _errorDestroy = WaveDBLibrary.load()
       .lookupFunction<ErrorDestroyC, ErrorDestroy>('error_destroy');
+
+  static late final ErrorGetMessage _errorGetMessage = WaveDBLibrary.load()
+      .lookupFunction<ErrorGetMessageC, ErrorGetMessage>('error_get_message');
 
   // ============================================================
   // PUBLIC API - Database Lifecycle
@@ -1238,13 +1249,15 @@ class WaveDBNative {
   /// Parse a GraphQL schema definition (SDL)
   ///
   /// Returns 0 on success, non-zero on error.
+  /// If [errorOut] is provided, it receives the error message (caller must free).
   static int graphQLSchemaParse(
     Pointer<graphql_layer_t> layer,
-    String sdl,
-  ) {
+    String sdl, {
+    Pointer<Pointer<Utf8>>? errorOut,
+  }) {
     final sdlPtr = sdl.toNativeUtf8();
     try {
-      return _graphQLSchemaParse(layer, sdlPtr.cast());
+      return _graphQLSchemaParse(layer, sdlPtr.cast(), errorOut ?? nullptr);
     } finally {
       calloc.free(sdlPtr);
     }
@@ -1350,5 +1363,11 @@ class WaveDBNative {
   /// Destroy a C async error
   static void errorDestroy(Pointer<async_error_t> error) {
     _errorDestroy(error);
+  }
+
+  /// Get the error message from an async_error_t.
+  /// Returns a pointer to the internal string (do not free).
+  static Pointer<Utf8> errorGetMessage(Pointer<async_error_t> error) {
+    return _errorGetMessage(error);
   }
 }

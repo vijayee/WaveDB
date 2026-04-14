@@ -62,11 +62,13 @@ struct graphql_ast_node_t {
 /**
  * Parse a GraphQL document (SDL, query, or mutation).
  *
- * @param source  GraphQL source string
- * @param length  Source string length
+ * @param source     GraphQL source string
+ * @param length     Source string length
+ * @param error_out  If non-NULL and parsing fails, receives the error message.
+ *                   Caller must free() the message. If NULL, the message is freed internally.
  * @return AST root node or NULL on parse error
  */
-graphql_ast_node_t* graphql_parse(const char* source, size_t length);
+graphql_ast_node_t* graphql_parse(const char* source, size_t length, char** error_out);
 
 /**
  * Destroy an AST node (recursively destroys children).

@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 
 // ============================================================
 // Constants
@@ -181,31 +182,9 @@ static path_t* path_from_string(const char* path_str) {
     return path;
 }
 
-// Convert a graphql_literal_t to a heap-allocated string
+// Convert a graphql_literal_t to a heap-allocated string (delegates to public function)
 static char* literal_to_string(graphql_literal_t* literal) {
-    if (literal == NULL) return strdup("");
-    switch (literal->kind) {
-        case GRAPHQL_LITERAL_STRING:
-            return strdup(literal->string_val ? literal->string_val : "");
-        case GRAPHQL_LITERAL_INT: {
-            char buf[32];
-            snprintf(buf, sizeof(buf), "%lld", (long long)literal->int_val);
-            return strdup(buf);
-        }
-        case GRAPHQL_LITERAL_FLOAT: {
-            char buf[64];
-            snprintf(buf, sizeof(buf), "%g", literal->float_val);
-            return strdup(buf);
-        }
-        case GRAPHQL_LITERAL_BOOL:
-            return strdup(literal->bool_val ? "true" : "false");
-        case GRAPHQL_LITERAL_NULL:
-            return strdup("null");
-        case GRAPHQL_LITERAL_ENUM:
-            return strdup(literal->string_val ? literal->string_val : "");
-        default:
-            return strdup("");
-    }
+    return graphql_literal_to_string(literal);
 }
 
 // Add a PUT operation to a batch from string path/value
@@ -310,6 +289,7 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
     if (list == NULL) return NULL;
 
     if (depth > MAX_RESOLVE_DEPTH) {
+        push_error(result, "Maximum query depth exceeded", path_prefix);
         return list;
     }
 
@@ -441,6 +421,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                                              graphql_result_t* result,
                                              const char* path_prefix) {
     if (depth > MAX_RESOLVE_DEPTH) {
+        push_error(result, "Maximum query depth exceeded", path_prefix);
         return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 
@@ -516,12 +497,57 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                 return obj;
             }
 
-            // Scalar field — return the value directly
-            graphql_result_node_t* node = graphql_result_node_create(RESULT_STRING, PLAN_NAME(plan));
-            if (node != NULL) {
-                node->string_val = value;
-            } else {
+            // Scalar field — determine result type from field's declared type
+            graphql_result_node_t* node = NULL;
+            const char* base_type_name = NULL;
+
+            // Look up the field's type from the parent type to determine scalar kind
+            if (parent_type != NULL && plan->field_name != NULL) {
+                for (int fi = 0; fi < parent_type->fields.length; fi++) {
+                    graphql_field_t* f = parent_type->fields.data[fi];
+                    if (strcmp(f->name, plan->field_name) == 0 && f->type != NULL) {
+                        // Unwrap LIST/NON_NULL to get base type name
+                        graphql_type_ref_t* ref = f->type;
+                        while (ref->of_type != NULL) ref = ref->of_type;
+                        base_type_name = ref->name;
+                        break;
+                    }
+                }
+            }
+
+            if (base_type_name != NULL && strcmp(base_type_name, "Int") == 0) {
+                node = graphql_result_node_create(RESULT_INT, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->int_val = strtoll(value, NULL, 10);
+                }
                 free(value);
+            } else if (base_type_name != NULL && strcmp(base_type_name, "Float") == 0) {
+                node = graphql_result_node_create(RESULT_FLOAT, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->float_val = strtod(value, NULL);
+                }
+                free(value);
+            } else if (base_type_name != NULL && strcmp(base_type_name, "Boolean") == 0) {
+                node = graphql_result_node_create(RESULT_BOOL, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->bool_val = (strcmp(value, "true") == 0);
+                }
+                free(value);
+            } else if (base_type_name != NULL && strcmp(base_type_name, "ID") == 0) {
+                node = graphql_result_node_create(RESULT_ID, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->string_val = value;
+                } else {
+                    free(value);
+                }
+            } else {
+                // String, Enum, custom scalars — return as string
+                node = graphql_result_node_create(RESULT_STRING, PLAN_NAME(plan));
+                if (node != NULL) {
+                    node->string_val = value;
+                } else {
+                    free(value);
+                }
             }
             return node;
         }
@@ -728,16 +754,13 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             }
             return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
 
-        case PLAN_FILTER:
-            // Filter is already applied during compilation (@skip/@include)
-            return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
-
         case PLAN_BATCH_GET: {
             // Batch get: resolve specific entities identified by id arguments
             graphql_result_node_t* list = graphql_result_node_create(RESULT_LIST, PLAN_NAME(plan));
             if (list == NULL) return NULL;
 
             if (depth > MAX_RESOLVE_DEPTH) {
+                push_error(result, "Maximum query depth exceeded", path_prefix);
                 return list;
             }
 
@@ -781,6 +804,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
         }
 
         default:
+            fprintf(stderr, "graphql: unknown plan kind %d in resolve_field\n", plan->kind);
             return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 }
@@ -795,6 +819,7 @@ static graphql_result_node_t* execute_plan(graphql_layer_t* layer,
     if (plan == NULL) return NULL;
 
     if (depth > MAX_RESOLVE_DEPTH) {
+        push_error(result, "Maximum query depth exceeded", path_prefix);
         return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 
@@ -1073,7 +1098,7 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
     // Check for introspection queries before compiling
     // __schema and __type are handled directly without plan compilation
     // Use "__type(" to avoid matching __typename
-    if (strstr(query, "__schema") != NULL || strstr(query, "__type(") != NULL) {
+    if (strstr(query, " __schema") != NULL || strstr(query, " __type(") != NULL) {
         graphql_result_t* result = get_clear_memory(sizeof(graphql_result_t));
         if (result == NULL) return make_error_result("Out of memory", NULL);
 
@@ -1123,20 +1148,45 @@ static graphql_result_t* graphql_query_impl(graphql_layer_t* layer, const char* 
     }
 
     // Compile the query into a plan
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    char* compile_error = NULL;
+    graphql_compilation_errors_t compilation_errors;
+    vec_init(&compilation_errors);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, &compile_error, &compilation_errors);
     if (plan == NULL) {
-        return make_error_result("Failed to compile query", NULL);
+        const char* msg = compile_error ? compile_error : "Failed to compile query";
+        graphql_result_t* err = make_error_result(msg, NULL);
+        free(compile_error);
+        // Merge compilation errors into result
+        for (int ei = 0; ei < compilation_errors.length; ei++) {
+            vec_push(&err->errors, compilation_errors.data[ei]);
+        }
+        vec_deinit(&compilation_errors);
+        return err;
     }
+    free(compile_error);
 
     // Execute the plan
     graphql_result_t* result = get_clear_memory(sizeof(graphql_result_t));
     if (result == NULL) {
         graphql_plan_destroy(plan);
+        for (int ei = 0; ei < compilation_errors.length; ei++) {
+            graphql_error_contents_destroy(&compilation_errors.data[ei]);
+        }
+        vec_deinit(&compilation_errors);
         return make_error_result("Out of memory", NULL);
     }
 
+    // Merge any compilation errors (field validation) into the result
+    for (int ei = 0; ei < compilation_errors.length; ei++) {
+        vec_push(&result->errors, compilation_errors.data[ei]);
+        result->success = false;
+    }
+    vec_deinit(&compilation_errors);
+
     result->data = execute_plan(layer, plan, NULL, NULL, 0, result, "data");
-    result->success = true;
+    if (result->errors.length == 0) {
+        result->success = true;
+    }
 
     graphql_plan_destroy(plan);
     return result;
@@ -1251,10 +1301,15 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
     }
 
     // Parse the mutation AST
-    graphql_ast_node_t* ast = graphql_parse(mutation, strlen(mutation));
+    char* parse_error = NULL;
+    graphql_ast_node_t* ast = graphql_parse(mutation, strlen(mutation), &parse_error);
     if (ast == NULL) {
-        return make_error_result("Failed to parse mutation", NULL);
+        const char* msg = parse_error ? parse_error : "Failed to parse mutation";
+        graphql_result_t* err = make_error_result(msg, NULL);
+        free(parse_error);
+        return err;
     }
+    free(parse_error);
 
     // Find the operation
     graphql_ast_node_t* op = NULL;
@@ -1285,17 +1340,21 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
         if (field->kind != GRAPHQL_AST_FIELD) continue;
 
         const char* field_name = field->name;
-        bool is_create = (strncmp(field_name, "create", 6) == 0);
-        bool is_update = (strncmp(field_name, "update", 6) == 0);
-        bool is_delete = (strncmp(field_name, "delete", 6) == 0);
+        const char* prefix = NULL;
+        bool is_create = false, is_update = false, is_delete = false;
+
+        if (strncmp(field_name, "create", 6) == 0) { prefix = "create"; is_create = true; }
+        else if (strncmp(field_name, "update", 6) == 0) { prefix = "update"; is_update = true; }
+        else if (strncmp(field_name, "delete", 6) == 0) { prefix = "delete"; is_delete = true; }
+
+        if (prefix == NULL) continue;  // Unknown mutation prefix, skip
 
         // Determine the type name from the field name
-        // e.g., "createUser" -> "User"
-        const char* type_name_start = field_name + 6;  // Skip "create"/"update"/"delete"
+        // e.g., "createUser" -> "User", "createuser" -> "User"
+        const char* type_name_start = field_name + strlen(prefix);
         char type_name[256];
         if (strlen(type_name_start) > 0) {
-            // Capitalize first letter
-            type_name[0] = type_name_start[0];  // Keep original case for now
+            type_name[0] = toupper((unsigned char)type_name_start[0]);
             strncpy(type_name + 1, type_name_start + 1, sizeof(type_name) - 2);
             type_name[sizeof(type_name) - 1] = '\0';
         } else {
@@ -1415,6 +1474,11 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 // Collect field writes in a batch for atomicity
                 batch_t* batch = batch_create(field->arguments.length + 2);
                 graphql_result_node_t* update_result = graphql_result_node_create(RESULT_OBJECT, field_name);
+                if (update_result == NULL) {
+                    batch_destroy(batch);
+                    free(target_id);
+                    continue;
+                }
                 if (update_result != NULL) {
                     // Add id to result
                     graphql_result_node_t* id_node = graphql_result_node_create(RESULT_STRING, "id");
@@ -1471,6 +1535,8 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                     }
                 }
                 free(target_id);
+            } else {
+                push_error(result, "Missing required 'id' argument on update mutation", NULL);
             }
         } else if (is_delete) {
             // Delete: find id argument
@@ -1524,6 +1590,8 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                     vec_push(&result->data->children, del_result);
                 }
                 free(target_id);
+            } else {
+                push_error(result, "Missing required 'id' argument on delete mutation", NULL);
             }
         }
     }

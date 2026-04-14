@@ -24,7 +24,6 @@
 // Forward declarations for internal helpers
 // ============================================================
 
-static int store_type_to_database(graphql_layer_t* layer, graphql_type_t* type);
 static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const char* type_name);
 static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc);
 static graphql_type_t* convert_type_definition(graphql_ast_node_t* node);
@@ -49,7 +48,7 @@ static bool is_list_type(graphql_type_ref_t* type_ref) {
 }
 
 // Helper: parse a type-prefixed default value string back to a graphql_literal_t
-// Format: s:hello, i:42, f:3.14, b:true, n:null, e:ENUMVAL
+// Format: s:hello, i:42, f:3.14, b:true, n:null, e:ENUMVAL, o:{...}, l:[...]
 static graphql_literal_t* parse_default_value(const char* str) {
     if (str == NULL || str[0] == '\0' || str[1] != ':') return NULL;
 
@@ -79,6 +78,20 @@ static graphql_literal_t* parse_default_value(const char* str) {
             break;
         case 'e':
             lit->kind = GRAPHQL_LITERAL_ENUM;
+            lit->string_val = strdup(val);
+            break;
+        case 'o':
+            // Object default: stored as o:{key: value, ...}
+            // Parse back into object fields — for now store as string representation
+            // Full round-trip requires recursive parsing which is complex;
+            // store the raw string for reconstruction on load
+            lit->kind = GRAPHQL_LITERAL_STRING;
+            lit->string_val = strdup(val);
+            break;
+        case 'l':
+            // List default: stored as l:[item, ...]
+            // Store the raw string for reconstruction on load
+            lit->kind = GRAPHQL_LITERAL_STRING;
             lit->string_val = strdup(val);
             break;
         default:
@@ -271,11 +284,6 @@ graphql_layer_t* graphql_layer_create(const char* path,
         return NULL;
     }
 
-    if (db == NULL) {
-        graphql_layer_config_destroy(cfg);
-        return NULL;
-    }
-
     // Create the layer
     graphql_layer_t* layer = get_clear_memory(sizeof(graphql_layer_t));
     if (layer == NULL) {
@@ -361,11 +369,14 @@ void graphql_layer_destroy(graphql_layer_t* layer) {
 // Schema parsing (SDL -> types -> database)
 // ============================================================
 
-int graphql_schema_parse(graphql_layer_t* layer, const char* sdl) {
-    if (layer == NULL || sdl == NULL) return -1;
+int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out) {
+    if (layer == NULL || sdl == NULL) {
+        if (error_out != NULL) *error_out = strdup("Invalid arguments");
+        return -1;
+    }
 
     // Parse SDL into AST
-    graphql_ast_node_t* ast = graphql_parse(sdl, strlen(sdl));
+    graphql_ast_node_t* ast = graphql_parse(sdl, strlen(sdl), error_out);
     if (ast == NULL) return -2;
 
     // Convert AST to type definitions
@@ -377,7 +388,7 @@ int graphql_schema_parse(graphql_layer_t* layer, const char* sdl) {
     // Store all types to the database
     for (int i = 0; i < layer->registry->types.length; i++) {
         graphql_type_t* type = layer->registry->types.data[i];
-        if (store_type_to_database(layer, type) != 0) {
+        if (graphql_schema_store_type(layer, type) != 0) {
             return -1;
         }
     }
@@ -394,7 +405,7 @@ graphql_type_t* graphql_schema_get_type(graphql_layer_t* layer, const char* name
 // Schema storage (types -> database paths)
 // ============================================================
 
-static int store_type_to_database(graphql_layer_t* layer, graphql_type_t* type) {
+int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
     if (layer == NULL || type == NULL || layer->db == NULL) return -1;
 
     const char* plural = graphql_type_get_plural(type);
@@ -460,6 +471,18 @@ static int store_type_to_database(graphql_layer_t* layer, graphql_type_t* type) 
                 case GRAPHQL_LITERAL_ENUM:
                     snprintf(val_buf, sizeof(val_buf), "e:%s", field->default_value->string_val ? field->default_value->string_val : "");
                     break;
+                case GRAPHQL_LITERAL_OBJECT: {
+                    char* obj_str = graphql_literal_to_string(field->default_value);
+                    snprintf(val_buf, sizeof(val_buf), "o:%s", obj_str);
+                    free(obj_str);
+                    break;
+                }
+                case GRAPHQL_LITERAL_LIST: {
+                    char* list_str = graphql_literal_to_string(field->default_value);
+                    snprintf(val_buf, sizeof(val_buf), "l:%s", list_str);
+                    free(list_str);
+                    break;
+                }
                 default:
                     val_buf[0] = '\0';
                     break;
@@ -563,20 +586,9 @@ int graphql_schema_load(graphql_layer_t* layer) {
 
     database_scan_end(iter);
 
-    // Load query and mutation type names from __schema
-    char* query_type = db_get_string(layer->db, "__schema/query_type");
-    char* mutation_type = db_get_string(layer->db, "__schema/mutation_type");
-    // Store these in the layer for query compilation
-    if (query_type != NULL) {
-        layer->query_type = query_type;
-    }
-    if (mutation_type != NULL) {
-        layer->mutation_type = mutation_type;
-    } else {
-        free(mutation_type);
-    }
-    free(query_type);
-    free(mutation_type);
+    // Load query and mutation type names — layer takes ownership
+    layer->query_type = db_get_string(layer->db, "__schema/query_type");
+    layer->mutation_type = db_get_string(layer->db, "__schema/mutation_type");
 
     return 0;
 }
@@ -700,6 +712,12 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                     bool is_list = (is_list_str != NULL && strcmp(is_list_str, "true") == 0);
 
                                     // Build type reference
+                                    // NOTE: Type resolution depends on all types being loaded
+                                    // into the registry before their fields. Custom scalars
+                                    // that are loaded after referencing types will be
+                                    // misclassified as OBJECT. The load order follows
+                                    // database scan order, which is deterministic but
+                                    // depends on insertion order.
                                     graphql_type_ref_t* type_ref = NULL;
                                     if (field_type_str != NULL) {
                                         // Determine the kind of the referenced type
@@ -724,6 +742,13 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                         }
 
                                         type_ref = graphql_type_ref_create_named(ref_kind, field_type_str);
+                                        // NOTE: Wrapping order is always [Type]! (NonNull wrapping
+                                        // List). This correctly represents most GraphQL schemas.
+                                        // The variant [Type!]! (NonNull wrapping both) is stored
+                                        // with is_required=true and is_list=true, producing the
+                                        // same [Type]! result. The distinction between [Type]!
+                                        // and [Type!]! is lost in the current storage format,
+                                        // which only records boolean is_list and is_required flags.
                                         if (is_list) {
                                             graphql_type_ref_t* inner = type_ref;
                                             type_ref = graphql_type_ref_create_list(inner);
@@ -873,6 +898,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                 // If type already exists (from a prior extension), merge fields instead of duplicating
                 graphql_type_t* existing = graphql_type_registry_get(layer->registry, type->name);
                 if (existing != NULL) {
+                    fprintf(stderr, "graphql: merging duplicate type definition '%s'\n", type->name);
                     // Merge new fields into existing type
                     for (int j = 0; j < type->fields.length; j++) {
                         graphql_field_t* new_field = type->fields.data[j];
@@ -954,6 +980,13 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                     }
                     if (already_exists) continue;
 
+                    // Skip fields with missing type information
+                    if (field_node->type_ref == NULL) {
+                        fprintf(stderr, "graphql: skipping field '%s' with missing type in extension\n",
+                                field_node->name ? field_node->name : "(unknown)");
+                        continue;
+                    }
+
                     graphql_field_t* field = graphql_field_create(
                         field_node->name,
                         field_node->type_ref,
@@ -989,6 +1022,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                 break;
             }
             default:
+                fprintf(stderr, "graphql: unexpected AST kind %d in convert_ast_to_types\n", def->kind);
                 break;
         }
     }

@@ -159,7 +159,6 @@ typedef enum {
     RESULT_LIST,
     RESULT_OBJECT,
     RESULT_ID,
-    RESULT_REF,
 } graphql_result_kind_t;
 
 typedef struct graphql_result_node_t {
@@ -202,13 +201,13 @@ typedef enum {
     PLAN_BATCH_GET,         // Get multiple specific paths
     PLAN_RESOLVE_FIELD,     // Resolve a single field from parent object
     PLAN_RESOLVE_REF,       // Follow a reference to another type
-    PLAN_FILTER,            // Apply @skip/@include
     PLAN_CUSTOM,            // Call custom resolver
 } graphql_plan_kind_t;
 
 typedef struct graphql_arg_t {
     char* name;
     char* value;                            // String representation of argument value
+    graphql_literal_kind_t literal_kind;    // Original literal kind for type-preserving deserialization
 } graphql_arg_t;
 
 typedef struct graphql_plan_t {
@@ -347,6 +346,12 @@ void graphql_literal_destroy(graphql_literal_t* literal);
  */
 graphql_literal_t* graphql_literal_copy(const graphql_literal_t* literal);
 
+/**
+ * Convert a literal value to a string representation.
+ * Returns a heap-allocated string. Caller must free().
+ */
+char* graphql_literal_to_string(const graphql_literal_t* literal);
+
 // ============================================================
 // Type functions
 // ============================================================
@@ -445,6 +450,15 @@ int graphql_type_registry_register(graphql_type_registry_t* registry, graphql_ty
  * Look up a type by name. Returns NULL if not found.
  */
 graphql_type_t* graphql_type_registry_get(graphql_type_registry_t* registry, const char* name);
+
+// ============================================================
+// Compilation errors type
+// ============================================================
+
+/**
+ * Vector of compilation errors, used by graphql_compile_query/mutation.
+ */
+typedef vec_t(graphql_error_t) graphql_compilation_errors_t;
 
 #ifdef __cplusplus
 }

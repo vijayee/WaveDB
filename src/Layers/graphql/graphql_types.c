@@ -7,6 +7,7 @@
 #include "../../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 // ============================================================
 // Type reference functions
@@ -135,6 +136,88 @@ graphql_literal_t* graphql_literal_copy(const graphql_literal_t* literal) {
             break;
     }
     return copy;
+}
+
+char* graphql_literal_to_string(const graphql_literal_t* literal) {
+    if (literal == NULL) return strdup("");
+    switch (literal->kind) {
+        case GRAPHQL_LITERAL_STRING:
+            return strdup(literal->string_val ? literal->string_val : "");
+        case GRAPHQL_LITERAL_INT: {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%lld", (long long)literal->int_val);
+            return strdup(buf);
+        }
+        case GRAPHQL_LITERAL_FLOAT: {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "%g", literal->float_val);
+            return strdup(buf);
+        }
+        case GRAPHQL_LITERAL_BOOL:
+            return strdup(literal->bool_val ? "true" : "false");
+        case GRAPHQL_LITERAL_NULL:
+            return strdup("null");
+        case GRAPHQL_LITERAL_ENUM:
+            return strdup(literal->string_val ? literal->string_val : "");
+        case GRAPHQL_LITERAL_OBJECT: {
+            size_t buf_size = 256;
+            char* buf = malloc(buf_size);
+            if (buf == NULL) return strdup("{}");
+            int pos = 0;
+            buf[pos++] = '{';
+            for (int i = 0; i < literal->object_fields.length; i++) {
+                graphql_object_field_t* f = literal->object_fields.data[i];
+                if (i > 0) {
+                    if (pos + 2 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+                    buf[pos++] = ','; buf[pos++] = ' ';
+                }
+                int nl = f->name ? (int)strlen(f->name) : 0;
+                while (pos + nl + 4 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+                buf[pos++] = '"';
+                if (f->name) { memcpy(buf + pos, f->name, nl); pos += nl; }
+                buf[pos++] = '"'; buf[pos++] = ':'; buf[pos++] = ' ';
+                if (f->value != NULL) {
+                    char* val_str = graphql_literal_to_string(f->value);
+                    int vl = (int)strlen(val_str);
+                    while (pos + vl + 1 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+                    memcpy(buf + pos, val_str, vl);
+                    pos += vl;
+                    free(val_str);
+                }
+            }
+            while (pos + 2 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+            buf[pos++] = '}';
+            buf[pos] = '\0';
+            return buf;
+        }
+        case GRAPHQL_LITERAL_LIST: {
+            size_t buf_size = 256;
+            char* buf = malloc(buf_size);
+            if (buf == NULL) return strdup("[]");
+            int pos = 0;
+            buf[pos++] = '[';
+            for (int i = 0; i < literal->list_items.length; i++) {
+                if (i > 0) {
+                    if (pos + 2 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+                    buf[pos++] = ','; buf[pos++] = ' ';
+                }
+                graphql_literal_t* item = literal->list_items.data[i];
+                char* item_str = graphql_literal_to_string(item);
+                int il = (int)strlen(item_str);
+                while (pos + il >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+                memcpy(buf + pos, item_str, il);
+                pos += il;
+                free(item_str);
+            }
+            while (pos + 2 >= (int)buf_size) { buf_size *= 2; buf = realloc(buf, buf_size); }
+            buf[pos++] = ']';
+            buf[pos] = '\0';
+            return buf;
+        }
+        default:
+            fprintf(stderr, "graphql: unknown literal kind %d in graphql_literal_to_string\n", literal->kind);
+            return strdup("");
+    }
 }
 
 // ============================================================

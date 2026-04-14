@@ -26,7 +26,7 @@ protected:
 
 TEST_F(GraphQLQueryTest, AnonymousQuery) {
     const char* query = "{ user { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
     EXPECT_EQ(ast->kind, GRAPHQL_AST_DOCUMENT);
     EXPECT_EQ(ast->children.length, 1);
@@ -48,7 +48,7 @@ TEST_F(GraphQLQueryTest, AnonymousQuery) {
 
 TEST_F(GraphQLQueryTest, NamedQuery) {
     const char* query = "query GetUser { user { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* op = ast->children.data[0];
@@ -59,7 +59,7 @@ TEST_F(GraphQLQueryTest, NamedQuery) {
 
 TEST_F(GraphQLQueryTest, MutationOperation) {
     const char* query = "mutation CreateUser { createUser { id } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* op = ast->children.data[0];
@@ -74,7 +74,7 @@ TEST_F(GraphQLQueryTest, MutationOperation) {
 
 TEST_F(GraphQLQueryTest, FieldWithArguments) {
     const char* query = "{ user(id: \"1\") { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* op = ast->children.data[0];
@@ -91,7 +91,7 @@ TEST_F(GraphQLQueryTest, FieldWithArguments) {
 
 TEST_F(GraphQLQueryTest, MultipleArguments) {
     const char* query = "{ users(limit: 10, offset: 0) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* field = ast->children.data[0]->children.data[0];
@@ -108,7 +108,7 @@ TEST_F(GraphQLQueryTest, MultipleArguments) {
 
 TEST_F(GraphQLQueryTest, FieldAlias) {
     const char* query = "{ admin: user(id: \"1\") { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* field = ast->children.data[0]->children.data[0];
@@ -122,7 +122,7 @@ TEST_F(GraphQLQueryTest, FieldAlias) {
 
 TEST_F(GraphQLQueryTest, SkipDirective) {
     const char* query = "{ user @skip(if: true) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* field = ast->children.data[0]->children.data[0];
@@ -133,7 +133,7 @@ TEST_F(GraphQLQueryTest, SkipDirective) {
 
 TEST_F(GraphQLQueryTest, IncludeDirective) {
     const char* query = "{ user @include(if: false) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* field = ast->children.data[0]->children.data[0];
@@ -147,7 +147,7 @@ TEST_F(GraphQLQueryTest, IncludeDirective) {
 
 TEST_F(GraphQLQueryTest, NestedSelection) {
     const char* query = "{ user { name friends { name email } } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* user_field = ast->children.data[0]->children.data[0];
@@ -169,7 +169,7 @@ TEST_F(GraphQLQueryTest, NestedSelection) {
 
 TEST_F(GraphQLQueryTest, FragmentSpread) {
     const char* query = "{ user { ...UserFields } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* user_field = ast->children.data[0]->children.data[0];
@@ -182,7 +182,7 @@ TEST_F(GraphQLQueryTest, FragmentSpread) {
 
 TEST_F(GraphQLQueryTest, FragmentDefinition) {
     const char* query = "fragment UserFields on User { name email }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* frag = ast->children.data[0];
@@ -195,7 +195,7 @@ TEST_F(GraphQLQueryTest, FragmentDefinition) {
 
 TEST_F(GraphQLQueryTest, InlineFragment) {
     const char* query = "{ user { ... on Admin { role } } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* user_field = ast->children.data[0]->children.data[0];
@@ -213,7 +213,7 @@ TEST_F(GraphQLQueryTest, InlineFragment) {
 
 TEST_F(GraphQLQueryTest, IntArgument) {
     const char* query = "{ user(id: 42) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
@@ -223,7 +223,7 @@ TEST_F(GraphQLQueryTest, IntArgument) {
 
 TEST_F(GraphQLQueryTest, BoolArgument) {
     const char* query = "{ users(active: true) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
@@ -233,7 +233,7 @@ TEST_F(GraphQLQueryTest, BoolArgument) {
 
 TEST_F(GraphQLQueryTest, NullArgument) {
     const char* query = "{ users(filter: null) { name } }";
-    ast = graphql_parse(query, strlen(query));
+    ast = graphql_parse(query, strlen(query), NULL);
     ASSERT_NE(ast, nullptr);
 
     graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
@@ -246,7 +246,7 @@ TEST_F(GraphQLQueryTest, NullArgument) {
 
 TEST_F(GraphQLQueryTest, SDLAndQueryInSameDocument) {
     const char* doc = "type User { name: String } query GetUser { user { name } }";
-    ast = graphql_parse(doc, strlen(doc));
+    ast = graphql_parse(doc, strlen(doc), NULL);
     ASSERT_NE(ast, nullptr);
     EXPECT_EQ(ast->children.length, 2);
 

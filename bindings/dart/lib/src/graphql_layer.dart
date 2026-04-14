@@ -28,6 +28,16 @@ class GraphQLLayerConfig {
   });
 }
 
+/// Structured GraphQL error with message and optional path
+class GraphQLError {
+  final String message;
+  final String? path;
+  const GraphQLError({required this.message, this.path});
+
+  @override
+  String toString() => path != null ? '$message (path: $path)' : message;
+}
+
 /// GraphQL query/mutation result
 class GraphQLResult {
   /// Whether the operation was successful
@@ -36,8 +46,8 @@ class GraphQLResult {
   /// The data returned by the operation
   final dynamic data;
 
-  /// Error messages, if any
-  final List<String> errors;
+  /// Structured errors, if any
+  final List<GraphQLError> errors;
 
   const GraphQLResult({
     required this.success,
@@ -46,7 +56,7 @@ class GraphQLResult {
   });
 
   @override
-  String toString() => jsonEncode({'success': success, 'data': data, 'errors': errors});
+  String toString() => jsonEncode({'success': success, 'data': data, 'errors': errors.map((e) => {'message': e.message, 'path': e.path}).toList()});
 }
 
 /// GraphQL layer for WaveDB
@@ -117,33 +127,34 @@ class GraphQLLayer {
     final completer = _pending.remove(requestId);
     if (completer == null || completer.isCompleted) return;
 
+    // Read the error message before destroying
+    String errorMsg = 'Operation failed';
+    if (error != nullptr) {
+      final msgPtr = WaveDBNative.errorGetMessage(error);
+      if (msgPtr != nullptr) {
+        errorMsg = msgPtr.toDartString();
+      }
+    }
     WaveDBNative.errorDestroy(error);
-    completer.completeError(GraphQLLayerException('Operation failed'));
+    completer.completeError(GraphQLLayerException(errorMsg));
   }
 
   /// Convert a C graphql_result_t pointer to a Dart GraphQLResult
   static GraphQLResult _convertResultFromPointer(Pointer<graphql_result_t> resultPtr) {
     if (resultPtr == nullptr) {
-      return const GraphQLResult(success: false, data: null, errors: ['Execution failed']);
+      return const GraphQLResult(success: false, data: null, errors: [GraphQLError(message: 'Execution failed')]);
     }
 
     try {
       final jsonPtr = WaveDBNative.graphQLResultToJson(resultPtr);
       if (jsonPtr == nullptr) {
-        return const GraphQLResult(success: false, data: null, errors: ['Failed to serialize result']);
+        return const GraphQLResult(success: false, data: null, errors: [GraphQLError(message: 'Failed to serialize result')]);
       }
 
       try {
         final jsonString = jsonPtr.toDartString();
         final parsed = jsonDecode(jsonString) as Map<String, dynamic>;
-        return GraphQLResult(
-          success: parsed['success'] as bool? ?? false,
-          data: parsed['data'],
-          errors: (parsed['errors'] as List<dynamic>?)
-                  ?.map((e) => e is String ? e : e.toString())
-                  .toList() ??
-              const [],
-        );
+        return _parseResult(parsed);
       } finally {
         malloc.free(jsonPtr.cast());
       }
@@ -155,9 +166,20 @@ class GraphQLLayer {
   /// Parse a GraphQL schema definition (SDL)
   void parseSchema(String sdl) {
     _checkOpen();
-    final rc = WaveDBNative.graphQLSchemaParse(_layer!, sdl);
-    if (rc != 0) {
-      throw GraphQLLayerException('Failed to parse schema (error code: $rc)');
+    final errorPtr = calloc<Pointer<Utf8>>();
+    try {
+      final rc = WaveDBNative.graphQLSchemaParse(_layer!, sdl, errorOut: errorPtr);
+      if (rc != 0) {
+        final msg = errorPtr.value != nullptr
+            ? errorPtr.value.toDartString()
+            : 'Failed to parse schema (error code: $rc)';
+        throw GraphQLLayerException(msg);
+      }
+    } finally {
+      if (errorPtr.value != nullptr) {
+        malloc.free(errorPtr.value);
+      }
+      malloc.free(errorPtr);
     }
   }
 
@@ -166,7 +188,7 @@ class GraphQLLayer {
     _checkOpen();
     final result = WaveDBNative.graphQLQuerySync(_layer!, query);
     if (result == nullptr) {
-      return const GraphQLResult(success: false, data: null, errors: ['Query execution failed']);
+      return const GraphQLResult(success: false, data: null, errors: [GraphQLError(message: 'Query execution failed')]);
     }
     try {
       return _convertResultFromJson(result);
@@ -180,7 +202,7 @@ class GraphQLLayer {
     _checkOpen();
     final result = WaveDBNative.graphQLMutateSync(_layer!, mutation);
     if (result == nullptr) {
-      return const GraphQLResult(success: false, data: null, errors: ['Mutation execution failed']);
+      return const GraphQLResult(success: false, data: null, errors: [GraphQLError(message: 'Mutation execution failed')]);
     }
     try {
       return _convertResultFromJson(result);
@@ -258,23 +280,30 @@ class GraphQLLayer {
   GraphQLResult _convertResultFromJson(Pointer<graphql_result_t> resultPtr) {
     final jsonPtr = WaveDBNative.graphQLResultToJson(resultPtr);
     if (jsonPtr == nullptr) {
-      return const GraphQLResult(success: false, data: null, errors: ['Failed to serialize result']);
+      return const GraphQLResult(success: false, data: null, errors: [GraphQLError(message: 'Failed to serialize result')]);
     }
 
     try {
       final jsonString = jsonPtr.toDartString();
       final parsed = jsonDecode(jsonString) as Map<String, dynamic>;
-      return GraphQLResult(
-        success: parsed['success'] as bool? ?? false,
-        data: parsed['data'],
-        errors: (parsed['errors'] as List<dynamic>?)
-                ?.map((e) => e is String ? e : e.toString())
-                .toList() ??
-            const [],
-      );
+      return _parseResult(parsed);
     } finally {
       malloc.free(jsonPtr.cast());
     }
+  }
+
+  /// Parse a decoded JSON map into a GraphQLResult
+  static GraphQLResult _parseResult(Map<String, dynamic> parsed) {
+    return GraphQLResult(
+      success: parsed['success'] as bool? ?? false,
+      data: parsed['data'],
+      errors: (parsed['errors'] as List<dynamic>?)
+              ?.map((e) => GraphQLError(
+                  message: (e is Map ? (e['message'] as String? ?? '') : e.toString()),
+                  path: e is Map ? e['path'] as String? : null))
+              .toList() ??
+          const [],
+    );
   }
 }
 

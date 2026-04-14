@@ -48,9 +48,6 @@ Napi::Value GraphQLResultNodeToJS(Napi::Env env, graphql_result_node_t* node) {
       return obj;
     }
 
-    case RESULT_REF:
-      return env.Null();
-
     default:
       return env.Null();
   }
@@ -74,6 +71,9 @@ Napi::Value GraphQLResultToJS(Napi::Env env, graphql_result_t* result) {
     for (size_t i = 0; i < result->errors.length; i++) {
       Napi::Object errObj = Napi::Object::New(env);
       errObj.Set("message", Napi::String::New(env, result->errors.data[i].message ? result->errors.data[i].message : ""));
+      if (result->errors.data[i].path) {
+        errObj.Set("path", Napi::String::New(env, result->errors.data[i].path));
+      }
       errors.Set(i, errObj);
     }
     obj.Set("errors", errors);

@@ -31,7 +31,7 @@ protected:
 
         // Register schema
         const char* sdl = "type User { name: String age: Int friends: [User] }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -350,7 +350,7 @@ protected:
 
         // Schema with required fields: name is required, age and email are optional
         const char* sdl = "type User { name: String! age: Int email: String }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -469,7 +469,7 @@ TEST_F(GraphQLRequiredFieldTest, MultipleMissingRequiredFields) {
     ASSERT_NE(layer2, nullptr);
 
     const char* sdl = "type Account { name: String! email: String! age: Int }";
-    int rc = graphql_schema_parse(layer2, sdl);
+    int rc = graphql_schema_parse(layer2, sdl, NULL);
     ASSERT_EQ(rc, 0);
 
     // Create without either required field
@@ -535,7 +535,7 @@ protected:
         }
 
         const char* sdl = "type User { name: String age: Int friends: [User] }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -701,7 +701,7 @@ protected:
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int email: String }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -748,7 +748,7 @@ TEST_F(GraphQLPlanImprovementTest, QueryWithIdArgumentFetchesSingleEntity) {
 
 TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesBatchGetForArgs) {
     const char* query = "{ User(id: \"1\") { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* plan_str = graphql_plan_to_string(plan);
@@ -761,7 +761,7 @@ TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesBatchGetForArgs) {
 
 TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesResolveFieldForScalarChildren) {
     const char* query = "{ User { name } }";
-    graphql_plan_t* plan = graphql_compile_query(layer, query);
+    graphql_plan_t* plan = graphql_compile_query(layer, query, NULL, NULL);
     ASSERT_NE(plan, nullptr);
 
     char* plan_str = graphql_plan_to_string(plan);
@@ -794,7 +794,7 @@ protected:
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int }";
-        int rc = graphql_schema_parse(layer, sdl);
+        int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
     }
 
@@ -995,4 +995,85 @@ TEST_F(GraphQLResolveTest, AtomicDeleteMutation) {
     EXPECT_NE(strstr(djson, "1"), nullptr) << "Delete result should contain id";
     free((void*)djson);
     graphql_result_destroy(dr);
+}
+
+// ============================================================
+// Scalar Result Types
+// ============================================================
+
+class GraphQLScalarTypeTest : public ::testing::Test {
+protected:
+    const char* test_dir = "/tmp/wavedb_test_graphql_scalartypes";
+    graphql_layer_t* layer = nullptr;
+    graphql_layer_config_t* config = nullptr;
+
+    void SetUp() override {
+        rmrf(test_dir);
+        mkdir(test_dir, 0755);
+
+        config = graphql_layer_config_default();
+        config->path = test_dir;
+        config->enable_persist = 1;
+
+        layer = graphql_layer_create(test_dir, config);
+        ASSERT_NE(layer, nullptr);
+
+        // Schema with Int, Float, Boolean, String, ID fields
+        const char* sdl = "type Item { name: String count: Int price: Float active: Boolean uid: ID }";
+        int rc = graphql_schema_parse(layer, sdl, NULL);
+        ASSERT_EQ(rc, 0);
+    }
+
+    void TearDown() override {
+        if (layer) graphql_layer_destroy(layer);
+        if (config) graphql_layer_config_destroy(config);
+        rmrf(test_dir);
+    }
+
+    void rmrf(const char* path) {
+        char cmd[512];
+        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+        (void)system(cmd);
+    }
+};
+
+TEST_F(GraphQLScalarTypeTest, IntFieldReturnsNativeInt) {
+    // Create an item with an Int field
+    const char* create = "mutation { createItem(name: \"Widget\", count: \"42\", price: \"9.99\", active: \"true\", uid: \"abc123\") { id } }";
+    graphql_result_t* cr = graphql_mutate_sync(layer, create);
+    ASSERT_NE(cr, nullptr);
+    EXPECT_TRUE(cr->success);
+    graphql_result_destroy(cr);
+
+    // Query the item and check that count is a native int in JSON (not "42")
+    const char* query = "{ Item { name count price active uid } }";
+    graphql_result_t* result = graphql_query_sync(layer, query);
+    ASSERT_NE(result, nullptr);
+    EXPECT_TRUE(result->success);
+
+    const char* json = graphql_result_to_json(result);
+    ASSERT_NE(json, nullptr);
+
+    // Int should be unquoted: "count":42  not  "count":"42"
+    EXPECT_NE(strstr(json, "\"count\":42"), nullptr)
+        << "Int field should be native JSON int. Got: " << json;
+
+    // Float should be unquoted: "price":9.99  not  "price":"9.99"
+    EXPECT_NE(strstr(json, "\"price\":9.99"), nullptr)
+        << "Float field should be native JSON float. Got: " << json;
+
+    // Bool should be unquoted: "active":true  not  "active":"true"
+    EXPECT_NE(strstr(json, "\"active\":true"), nullptr)
+        << "Boolean field should be native JSON bool. Got: " << json;
+
+    // String should remain quoted: "name":"Widget"
+    EXPECT_NE(strstr(json, "\"name\":\"Widget\""), nullptr)
+        << "String field should remain quoted. Got: " << json;
+
+    // ID should be quoted: "uid":"abc123"
+    EXPECT_NE(strstr(json, "\"uid\":\"abc123\""), nullptr)
+        << "ID field should be quoted. Got: " << json;
+
+    free((void*)json);
+    graphql_result_destroy(result);
 }
