@@ -30,3 +30,8 @@ void error_destroy(async_error_t* error) {
     free(error);
   }
 }
+
+const char* error_get_message(async_error_t* error) {
+  if (error == NULL) return NULL;
+  return error->message;
+}
