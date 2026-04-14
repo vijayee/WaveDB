@@ -40,6 +40,7 @@ typedef struct {
 } timer_wheel_plan_t;
 
 typedef struct {
+  refcounter_t refcounter;          // MUST be first member
   size_t timerId;
   timer_wheel_plan_t plan;
   void* ctx;

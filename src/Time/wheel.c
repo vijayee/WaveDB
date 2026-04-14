@@ -5,6 +5,7 @@
 #include "../Workers/work.h"
 #include "../Util/allocator.h"
 #include "../Util/hash.h"
+#include "../RefCounter/refcounter.h"
 #include <stdio.h>
 
 
@@ -16,6 +17,29 @@ timer_st* timer_list_remove(timer_list_t* list, timer_list_node_t* node);
 timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel);
 void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired);
 void timer_duration_rectify(timer_duration_t* duration);
+
+// Timer reference counting helpers.
+// A timer has two owners: the hashmap (for user timers) and a slot list.
+// When both references are released, the timer is freed.
+static void timer_destroy(timer_st* timer) {
+  if (timer == NULL) return;
+  free(timer->plan.steps);
+  refcounter_destroy_lock((refcounter_t*) timer);
+  free(timer);
+}
+
+static void timer_unref(timer_st* timer) {
+  if (timer == NULL) return;
+  refcounter_dereference((refcounter_t*) timer);
+  if (refcounter_count((refcounter_t*) timer) == 0) {
+    timer_destroy(timer);
+  }
+}
+
+static timer_st* timer_ref(timer_st* timer) {
+  if (timer == NULL) return NULL;
+  return (timer_st*) refcounter_reference((refcounter_t*) timer);
+}
 
 timer_list_t*  timer_list_create() {
   timer_list_t* list = get_clear_memory(sizeof(timer_list_t));
@@ -29,8 +53,7 @@ void timer_list_destroy(timer_list_t* list) {
   timer_list_node_t* next = NULL;
   while (current != NULL ) {
     next = current->next;
-    free(current->timer->plan.steps);
-    free(current->timer);
+    timer_unref(current->timer);  // Release slot list reference
     free(current);
       current = next;
   }
@@ -162,6 +185,7 @@ void timing_wheel_run(timing_wheel_t* wheel) {
     work_pool_enqueue(wheel->pool, work);
   } else {
     timer_st* timer = get_clear_memory(sizeof(timer_st));
+    refcounter_init((refcounter_t*) timer);
     timer->cb = timing_wheel_on_tick;
     timer->abort = timing_wheel_worker_abort;
     timer->ctx = wheel;
@@ -170,7 +194,8 @@ void timing_wheel_run(timing_wheel_t* wheel) {
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t));
     timer->plan.steps[0].delay = wheel->interval;
     timer->plan.steps[0].wheel = wheel->wheel;
-    timing_wheel_set_timer(wheel->wheel, timer);
+    timing_wheel_set_timer(wheel->wheel, timer);  // refcount: 1→2 (init + slot ref)
+    timer_unref(timer);  // Release creator reference (count: 2→1)
   }
 }
 
@@ -200,7 +225,9 @@ void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
         current->plan.current++;
       }
       if (current->plan.current < current->plan.size) {
+        // timing_wheel_set_timer adds a slot list reference via timer_ref
         timing_wheel_set_timer(current->plan.steps[current->plan.current].wheel, current);
+        timer_unref(current);  // Release local (maintenance) reference
         current = timer_list_dequeue(expired);
         continue;
       }
@@ -209,8 +236,7 @@ void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
     refcounter_yield((refcounter_t*) work);
     work_pool_enqueue(wheel->pool, work);
 
-    free(current->plan.steps);
-    free(current);
+    timer_unref(current);  // Release local (maintenance) reference
 
     current = timer_list_dequeue(expired);
 
@@ -235,8 +261,7 @@ timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel) {
     if (timer->removed) {
       next = current->next;
       timer_list_remove(list, current);
-      free(timer->plan.steps);
-      free(timer);
+      timer_unref(timer);  // Release slot list reference
       current = next;
       continue;
     } else if (timer->circle > 0) {
@@ -249,12 +274,17 @@ timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel) {
     if (expired == NULL) {
       expired = timer_list_create();
     }
+    timer_ref(timer);  // Local reference for expired list transfer
     timer_list_enqueue(expired, timer);
     next = current->next;
     platform_lock(wheel->hierarchical_lock);
-    hashmap_remove(wheel->timers, &timer->timerId);
+    timer_st* removed_from_map = hashmap_remove(wheel->timers, &timer->timerId);
     platform_unlock(wheel->hierarchical_lock);
+    if (removed_from_map != NULL) {
+      timer_unref(timer);  // Release hashmap reference
+    }
     timer_list_remove(list, current);
+    timer_unref(timer);  // Release slot list reference
     current = next;
   }
   return expired;
@@ -276,8 +306,12 @@ void timing_wheel_worker_abort(void* ctx) {
     timer_list_t* list = wheel->slots->data[i];
     timer_st* current = timer_list_dequeue(list);
     while (current != NULL) {
-      current->abort(current->ctx);
-      free(current);
+      // Skip abort callback if already cancelled — stop already called it
+      if (!current->removed && current->abort) {
+        current->abort(current->ctx);
+      }
+      timer_unref(current);  // Release slot list reference
+      current = timer_list_dequeue(list);
     }
   }
   platform_unlock(&wheel->lock);
@@ -290,6 +324,7 @@ void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer) {
   timer->circle = (steps - 1) / wheel->slots->length;
   timer_list_t* list = wheel->slots->data[position];
   timer_list_enqueue(list, timer);
+  timer_ref(timer);  // Slot list takes a reference
   platform_unlock(&wheel->lock);
 }
 
@@ -307,12 +342,14 @@ void hierachical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
 uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), timer_duration_t delay) {
   timer_duration_rectify(&delay);
   timer_st* timer = get_clear_memory(sizeof(timer_st));
+  refcounter_init((refcounter_t*) timer);
   timer->cb = cb;
   timer->abort = abort;
   timer->ctx = ctx;
   platform_lock(&wheel->lock);
   timer->timerId = wheel->next_id++;
   hashmap_put(&wheel->timers, &timer->timerId, timer);
+  timer_ref(timer);  // Hashmap reference (count: 1→2)
   platform_unlock(&wheel->lock);
   if (delay.days > 0) {
     timer->plan.size = 5;
@@ -328,7 +365,7 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
     timer->plan.steps[4].delay = delay.milliseconds;
     timer->plan.steps[4].wheel = wheel->milliseconds;
     timer->plan.current = 0;
-    timing_wheel_set_timer(wheel->days, timer);
+    timing_wheel_set_timer(wheel->days, timer);  // slot ref added inside
   } else if (delay.hours > 0) {
     timer->plan.size = 4;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
@@ -341,7 +378,7 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
     timer->plan.steps[3].delay = delay.milliseconds;
     timer->plan.steps[3].wheel = wheel->milliseconds;
     timer->plan.current = 0;
-    timing_wheel_set_timer(wheel->hours, timer);
+    timing_wheel_set_timer(wheel->hours, timer);  // slot ref added inside
   } else if (delay.minutes > 0) {
     timer->plan.size = 3;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
@@ -352,7 +389,7 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
     timer->plan.steps[2].delay = delay.milliseconds;
     timer->plan.steps[2].wheel = wheel->milliseconds;
     timer->plan.current = 0;
-    timing_wheel_set_timer(wheel->minutes, timer);
+    timing_wheel_set_timer(wheel->minutes, timer);  // slot ref added inside
   } else if (delay.seconds > 0) {
     timer->plan.size = 2;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
@@ -361,15 +398,16 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
     timer->plan.steps[1].delay = delay.milliseconds;
     timer->plan.steps[1].wheel = wheel->milliseconds;
     timer->plan.current = 0;
-    timing_wheel_set_timer(wheel->seconds, timer);
+    timing_wheel_set_timer(wheel->seconds, timer);  // slot ref added inside
   } else {
     timer->plan.size = 1;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
     timer->plan.steps[0].delay = delay.milliseconds;
     timer->plan.steps[0].wheel = wheel->milliseconds;
     timer->plan.current = 0;
-    timing_wheel_set_timer(wheel->milliseconds, timer);
+    timing_wheel_set_timer(wheel->milliseconds, timer);  // slot ref added inside
   }
+  timer_unref(timer);  // Release creator reference (count: 1 init + 1 hashmap + 1 slot → 3, now 2)
   return timer->timerId;
 }
 
@@ -379,6 +417,7 @@ void hierarchical_timing_wheel_cancel_timer(hierarchical_timing_wheel_t* wheel, 
   if (timer != NULL) {
     timer->removed = 1;
     hashmap_remove(&wheel->timers, &timerId);
+    timer_unref(timer);  // Release hashmap reference
     if (hashmap_size(&wheel->timers) == 0) {
       platform_signal_condition(&wheel->idle);
     }
@@ -464,18 +503,18 @@ void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
   timing_wheel_stop(wheel->days);
 
   // Cancel all remaining timers and call their abort callbacks.
-  // This ensures wait_for_idle_signal won't hang: after clearing the
-  // timer map, the idle condition is signaled below.
-  // Use hashmap_foreach_data_safe since we're removing during iteration.
+  // Mark timers as removed and release hashmap references.
+  // Timers stay in sub-wheel slot lists — their slot list references
+  // will be released by timing_wheel_worker_abort or timer_list_destroy.
   timer_st* timer;
   size_t* key;
   void* pos;
   hashmap_foreach_data_safe(timer, &wheel->timers, pos) {
+    timer->removed = 1;
     if (timer->abort) {
       timer->abort(timer->ctx);
     }
-    free(timer->plan.steps);
-    free(timer);
+    timer_unref(timer);  // Release hashmap reference
   }
 
   // Reinitialize the hashmap after freeing all entries
