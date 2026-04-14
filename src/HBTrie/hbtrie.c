@@ -1969,8 +1969,11 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
-        hbtrie_node_t* next = entry->has_value ? entry->trie_child : entry->child;
-        if (entry == NULL || next == NULL) {
+        hbtrie_node_t* next = NULL;
+        if (entry != NULL) {
+          next = entry->has_value ? entry->trie_child : entry->child;
+        }
+        if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
@@ -1983,8 +1986,11 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         current = next;
       } else {
         // Intermediate chunk
-        hbtrie_node_t* next = entry->has_value ? entry->trie_child : entry->child;
-        if (entry == NULL || next == NULL) {
+        hbtrie_node_t* next = NULL;
+        if (entry != NULL) {
+          next = entry->has_value ? entry->trie_child : entry->child;
+        }
+        if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
