@@ -1738,30 +1738,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
         } else if (entry->has_value) {
           // Entry exists with a value but we need to descend further.
           // This happens when key1 is stored and key10 (sharing the 'key1'
-          // chunk prefix) needs to go deeper. Create a child node and
-          // keep the existing value in the entry (has_value stays 1).
-          // Use trie_child (outside the union) since the union holds the value.
-          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
-          if (child == NULL) {
-            atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
-            return -1;
+          // chunk prefix) needs to go deeper. Use trie_child (outside the
+          // union) since the union holds the value.
+          if (entry->trie_child == NULL) {
+            // First time descending through this entry - create trie_child
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              return -1;
+            }
+            child->storage = current->storage;
+            entry->trie_child = child;
           }
-          child->storage = current->storage;
-
-          // Set trie_child on the entry, keeping has_value = 1 and the
-          // value in the union. This allows both the short key (value)
-          // and longer keys (descend via trie_child) to work.
-          entry->trie_child = child;
 
           // Crab: lock child before unlocking parent
-          platform_lock(&child->write_lock);
-          atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
+          platform_lock(&entry->trie_child->write_lock);
+          atomic_fetch_add(&entry->trie_child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
           platform_unlock(&current->write_lock);
-          current = child;
+          current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
@@ -1825,24 +1823,26 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when a shorter key (e.g. "key1") is stored and a longer
           // key sharing the same prefix (e.g. "key10") needs to go deeper.
           // Use trie_child (outside the union) since the union holds the value.
-          hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
-          if (child == NULL) {
-            atomic_fetch_add(&current->seq, 1);
-            platform_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
-            return -1;
+          if (entry->trie_child == NULL) {
+            // First time descending through this entry - create trie_child
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);
+              platform_unlock(&current->write_lock);
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              return -1;
+            }
+            child->storage = current->storage;
+            entry->trie_child = child;
           }
-          child->storage = current->storage;
-
-          entry->trie_child = child;
 
           // Crab: lock child before unlocking parent
-          platform_lock(&child->write_lock);
-          atomic_fetch_add(&child->seq, 1);
+          platform_lock(&entry->trie_child->write_lock);
+          atomic_fetch_add(&entry->trie_child->seq, 1);
           atomic_fetch_add(&current->seq, 1);
           platform_unlock(&current->write_lock);
-          current = child;
+          current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
