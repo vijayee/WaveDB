@@ -947,6 +947,18 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
+        // Stop the timing wheel and worker pool BEFORE destroying data structures.
+        // If we destroy the trie/LRU while workers are still running, a worker
+        // thread might access freed memory or hold a lock on a destroyed mutex.
+        if (db->owns_wheel && db->wheel != NULL) {
+            hierarchical_timing_wheel_stop(db->wheel);
+            hierarchical_timing_wheel_wait_for_idle_signal(db->wheel);
+        }
+        if (db->owns_pool && db->pool != NULL) {
+            work_pool_shutdown(db->pool);
+            work_pool_join_all(db->pool);
+        }
+
         // Flush all thread-local WALs to disk before destroying
         if (db->wal_manager) {
             wal_manager_flush(db->wal_manager);
@@ -986,10 +998,8 @@ void database_destroy(database_t* db) {
             database_config_destroy(db->active_config);
         }
 
-        // Destroy owned pool/wheel
+        // Destroy owned pool/wheel (already stopped/joined above)
         if (db->owns_pool && db->pool != NULL) {
-            work_pool_shutdown(db->pool);
-            work_pool_join_all(db->pool);
             work_pool_destroy(db->pool);
         }
         if (db->owns_wheel && db->wheel != NULL) {

@@ -243,6 +243,13 @@ int database_scan_next(database_iterator_t* iter,
             if (entry->has_value) {
                 frame->entry_index++;  // Move past this entry since we're processing it
 
+                // If entry also has a trie_child, push it for later traversal
+                if (entry->trie_child) {
+                    if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                        return -2;
+                    }
+                }
+
                 identifier_t* value = NULL;
 
                 // Get visible value from version chain
@@ -380,6 +387,14 @@ int database_scan_next(database_iterator_t* iter,
                     return -2;  // Error
                 }
                 break;  // Will continue with child on next iteration
+            } else if (entry->trie_child) {
+                // Entry has both value and trie_child - push trie_child for traversal
+                frame->entry_index++;
+                pushed_child = 1;
+                if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                break;
             } else {
                 // Entry has no value and no child - skip it
                 frame->entry_index++;

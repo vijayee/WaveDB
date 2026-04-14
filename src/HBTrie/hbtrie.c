@@ -344,6 +344,9 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
             } else if (!entry->has_value && entry->child != NULL) {
               // Child hbtrie_node - add to node collection
               vec_push(&nodes, entry->child);
+            } else if (entry->has_value && entry->trie_child != NULL) {
+              // Entry has both value and trie child - collect the child
+              vec_push(&nodes, entry->trie_child);
             }
           }
         }
@@ -425,6 +428,8 @@ static bnode_t* bnode_tree_copy(bnode_t* root) {
             entry->path_chunk_counts.data,
             (size_t)entry->path_chunk_counts.length);
       }
+      // Copy trie_child (set to NULL; caller fills in via hbtrie_node_copy)
+      new_entry.trie_child = NULL;
     } else if (entry->child != NULL) {
       // Child hbtrie_node - copy handled at the hbtrie level
       // Set to NULL here; caller will fill in via hbtrie_node_copy
@@ -476,6 +481,9 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
       } else if (!src_entry->has_value && src_entry->child != NULL) {
         // Recursively copy the child hbtrie_node
         dst_entry->child = hbtrie_node_copy(src_entry->child);
+      } else if (src_entry->has_value && src_entry->trie_child != NULL) {
+        // Entry has both value and trie child - copy the trie child
+        dst_entry->trie_child = hbtrie_node_copy(src_entry->trie_child);
       }
     }
   }
@@ -570,6 +578,13 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
       frame->entry_index++;
 
       if (entry == NULL) continue;
+
+      // When an entry has a trie_child (has_value=1 with child), push it for traversal
+      if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        cursor->stack[cursor->stack_depth].node = entry->trie_child;
+        cursor->stack[cursor->stack_depth].entry_index = 0;
+        cursor->stack_depth++;
+      }
 
       if (entry->has_value) {
         // Found an entry with a value — return it
@@ -754,6 +769,11 @@ static cbor_item_t* bnode_to_cbor(bnode_t* root) {
     } else if (entry->child != NULL) {
       // Child hbtrie_node
       cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->child);
+      cbor_array_push(entry_item, child_cbor);
+      cbor_decref(&child_cbor);
+    } else if (entry->trie_child != NULL) {
+      // Entry has both value and trie_child - serialize the trie_child
+      cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->trie_child);
       cbor_array_push(entry_item, child_cbor);
       cbor_decref(&child_cbor);
     } else {
@@ -1433,7 +1453,11 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           }
         } else if (is_last_chunk) {
           // End of this identifier, move to next HBTrie level
-          if (entry == NULL || entry->child == NULL) {
+          hbtrie_node_t* next = NULL;
+          if (entry != NULL) {
+            next = entry->has_value ? entry->trie_child : entry->child;
+          }
+          if (next == NULL) {
             return NULL;
           }
 
@@ -1445,11 +1469,15 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
             break;
           }
 
-          current = entry->child;
+          current = next;
           // Continue to next identifier
         } else {
           // Intermediate chunk within this identifier
-          if (entry == NULL || entry->child == NULL) {
+          hbtrie_node_t* next = NULL;
+          if (entry != NULL) {
+            next = entry->has_value ? entry->trie_child : entry->child;
+          }
+          if (next == NULL) {
             return NULL;
           }
 
@@ -1461,7 +1489,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
             break;
           }
 
-          current = entry->child;
+          current = next;
           // Continue to next chunk in this identifier
         }
       }
@@ -1697,7 +1725,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when key1 is stored and key10 (sharing the 'key1'
           // chunk prefix) needs to go deeper. Create a child node and
           // keep the existing value in the entry (has_value stays 1).
-          // The traversal logic will check child first for longer keys.
+          // Use trie_child (outside the union) since the union holds the value.
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
@@ -1708,9 +1736,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
           child->storage = current->storage;
 
-          // Set the child on the entry, keeping has_value = 1
-          // This allows both key1 (value) and key10 (descend further) to work.
-          entry->child = child;
+          // Set trie_child on the entry, keeping has_value = 1 and the
+          // value in the union. This allows both the short key (value)
+          // and longer keys (descend via trie_child) to work.
+          entry->trie_child = child;
 
           // Crab: lock child before unlocking parent
           platform_lock(&child->write_lock);
@@ -1780,8 +1809,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // Intermediate chunk: entry has a value but we need to descend further.
           // This happens when a shorter key (e.g. "key1") is stored and a longer
           // key sharing the same prefix (e.g. "key10") needs to go deeper.
-          // Create a child node while keeping has_value = 1 so the shorter
-          // key's value remains accessible at this entry.
+          // Use trie_child (outside the union) since the union holds the value.
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);
@@ -1792,7 +1820,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
           child->storage = current->storage;
 
-          entry->child = child;
+          entry->trie_child = child;
 
           // Crab: lock child before unlocking parent
           platform_lock(&child->write_lock);
@@ -1941,30 +1969,32 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
-        if (entry == NULL || entry->child == NULL) {
+        hbtrie_node_t* next = entry->has_value ? entry->trie_child : entry->child;
+        if (entry == NULL || next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&entry->child->write_lock);
-        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        platform_lock(&next->write_lock);
+        atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
         platform_unlock(&current->write_lock);
-        current = entry->child;
+        current = next;
       } else {
         // Intermediate chunk
-        if (entry == NULL || entry->child == NULL) {
+        hbtrie_node_t* next = entry->has_value ? entry->trie_child : entry->child;
+        if (entry == NULL || next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&entry->child->write_lock);
-        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        platform_lock(&next->write_lock);
+        atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
         platform_unlock(&current->write_lock);
-        current = entry->child;
+        current = next;
       }
     }
   }
@@ -2066,6 +2096,9 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
         } else if (!entry->has_value && entry->child != NULL) {
           // Child hbtrie_node - add to node stack for trie traversal
           vec_push(&stack, entry->child);
+        } else if (entry->has_value && entry->trie_child != NULL) {
+          // Entry has both value and trie child - traverse the child
+          vec_push(&stack, entry->trie_child);
         }
       }
     }

@@ -95,6 +95,12 @@ typedef struct bnode_entry_t {
     //         meaning 'users' has 2 chunks, 'alice' has 2 chunks
     vec_t(size_t) path_chunk_counts;
 
+    // Child HBTrie node for entries that ALSO have a value.
+    // When has_value==1 and a longer key shares this entry's chunk prefix,
+    // the value stays in the union but the child hbtrie node goes here.
+    // When has_value==0, use the union's child field instead.
+    struct hbtrie_node_t* trie_child;
+
     // Storage location for lazy-loaded children
     // Valid only when has_value == 0 and child pointer is loaded from disk
     size_t child_section_id;           // Section where child is stored
