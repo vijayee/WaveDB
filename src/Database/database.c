@@ -258,9 +258,348 @@ static int save_index(database_t* db) {
     return 0;
 }
 
+// Index pointer file magic: "WDBS" (WaveDB Sections)
+#define INDEX_POINTER_MAGIC 0x57444253
+#define INDEX_POINTER_SIZE 37  // 4+1+4+8+8+8+4 bytes
+
+// Save index pointer file (root node location for section-based persistence)
+static int save_index_pointer(database_t* db, size_t root_section_id,
+                               size_t root_block_index, size_t root_data_size) {
+    uint8_t buf[INDEX_POINTER_SIZE];
+    uint8_t* ptr = buf;
+
+    // Magic
+    uint32_t magic = htonl(INDEX_POINTER_MAGIC);
+    memcpy(ptr, &magic, 4); ptr += 4;
+
+    // chunk_size
+    *ptr = db->chunk_size; ptr += 1;
+
+    // btree_node_size
+    uint32_t node_size = htonl(db->btree_node_size);
+    memcpy(ptr, &node_size, 4); ptr += 4;
+
+    // root_section_id
+    uint32_t high = htonl((uint32_t)(root_section_id >> 32));
+    uint32_t low = htonl((uint32_t)(root_section_id & 0xFFFFFFFF));
+    memcpy(ptr, &high, 4); ptr += 4;
+    memcpy(ptr, &low, 4); ptr += 4;
+
+    // root_block_index
+    high = htonl((uint32_t)(root_block_index >> 32));
+    low = htonl((uint32_t)(root_block_index & 0xFFFFFFFF));
+    memcpy(ptr, &high, 4); ptr += 4;
+    memcpy(ptr, &low, 4); ptr += 4;
+
+    // root_data_size
+    high = htonl((uint32_t)(root_data_size >> 32));
+    low = htonl((uint32_t)(root_data_size & 0xFFFFFFFF));
+    memcpy(ptr, &high, 4); ptr += 4;
+    memcpy(ptr, &low, 4); ptr += 4;
+
+    // CRC32 of all above bytes (simple XOR-based checksum)
+    uint32_t crc = 0;
+    for (int i = 0; i < 33; i++) {
+        crc ^= ((uint32_t)buf[i]) << (i % 4 * 8);
+    }
+    uint32_t crc_net = htonl(crc);
+    memcpy(ptr, &crc_net, 4);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/index.wdbs", db->location);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        log_error("Failed to write index pointer file");
+        return -1;
+    }
+    ssize_t written = write(fd, buf, INDEX_POINTER_SIZE);
+    close(fd);
+
+    if (written != INDEX_POINTER_SIZE) {
+        log_error("Failed to write index pointer file completely");
+        return -1;
+    }
+
+    return 0;
+}
+
+// Node info for section-based persistence (tracks parent-child relationships)
+typedef struct {
+    hbtrie_node_t* node;
+    bnode_entry_t* parent_entry;  // Entry in parent that points to this node (NULL for root)
+} node_info_t;
+
+// Save HBTrie to section storage (per-bnode writes)
+static int save_index_sections(database_t* db) {
+    sections_t* storage = db->storage;
+    if (storage == NULL) return -1;
+
+    hbtrie_t* trie = db->trie;
+    hbtrie_node_t* root = atomic_load(&trie->root);
+    if (root == NULL) return 0;  // Empty trie
+
+    // 1. Collect all hbtrie_nodes with parent-child relationships
+    vec_t(node_info_t) node_infos;
+    vec_init(&node_infos);
+
+    node_info_t root_info = { root, NULL };
+    vec_push(&node_infos, root_info);
+
+    for (int i = 0; i < node_infos.length; i++) {
+        hbtrie_node_t* current = node_infos.data[i].node;
+        if (current->btree == NULL) continue;
+
+        // Walk bnode tree to find child hbtrie_nodes
+        vec_t(bnode_t*) bnode_stack;
+        vec_init(&bnode_stack);
+        vec_push(&bnode_stack, current->btree);
+
+        while (bnode_stack.length > 0) {
+            bnode_t* bn = vec_pop(&bnode_stack);
+            for (size_t j = 0; j < bnode_count(bn); j++) {
+                bnode_entry_t* entry = bnode_get(bn, j);
+                if (entry == NULL) continue;
+
+                if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                    vec_push(&bnode_stack, entry->child_bnode);
+                } else if (!entry->has_value && entry->child != NULL) {
+                    // Child hbtrie_node - record relationship
+                    node_info_t info = { entry->child, entry };
+                    vec_push(&node_infos, info);
+                }
+            }
+        }
+        vec_deinit(&bnode_stack);
+    }
+
+    // 2. Process nodes in reverse order (children before parents)
+    for (int i = node_infos.length - 1; i >= 0; i--) {
+        hbtrie_node_t* node = node_infos.data[i].node;
+
+        // Deallocate old section record if previously persisted
+        if (node->section_id != 0) {
+            sections_deallocate(storage, node->section_id,
+                                node->block_index, node->data_size);
+        }
+
+        // Serialize the bnode tree
+        uint8_t* buf = NULL;
+        size_t len = 0;
+        if (bnode_serialize(node->btree, trie->chunk_size, &buf, &len) != 0) {
+            log_error("Failed to serialize bnode for section persistence");
+            vec_deinit(&node_infos);
+            return -1;
+        }
+
+        // Write to section storage
+        buffer_t* data_buf = buffer_create_from_existing_memory(buf, len);
+        transaction_id_t txn_id = {0, 0, 0};  // Snapshot writes don't need a real txn_id
+        size_t section_id, offset;
+        int rc = sections_write(storage, txn_id, data_buf, &section_id, &offset);
+        buffer_destroy(data_buf);
+        free(buf);
+
+        if (rc != 0) {
+            log_error("Failed to write bnode to section storage");
+            vec_deinit(&node_infos);
+            return -1;
+        }
+
+        // Update node's storage tracking
+        node->section_id = section_id;
+        node->block_index = offset;
+        node->data_size = len;  // Data payload size for future deallocation
+        node->is_dirty = 0;
+
+        // Update parent entry's child location
+        bnode_entry_t* parent_entry = node_infos.data[i].parent_entry;
+        if (parent_entry != NULL) {
+            parent_entry->child_section_id = section_id;
+            parent_entry->child_block_index = offset;
+        }
+    }
+
+    // 3. Save index pointer (root location)
+    int rc = save_index_pointer(db, root->section_id, root->block_index, root->data_size);
+    vec_deinit(&node_infos);
+
+    if (rc == 0) {
+        log_info("Saved index to section storage successfully");
+    }
+    return rc;
+}
+
+// Helper: load an hbtrie_node from section storage
+static hbtrie_node_t* load_node_from_section(sections_t* storage, size_t section_id,
+                                              size_t block_index, size_t data_size,
+                                              uint8_t chunk_size, uint32_t btree_node_size) {
+    // Read the serialized bnode from section
+    transaction_id_t txn_id;
+    buffer_t* data_buf = NULL;
+    if (sections_read(storage, section_id, block_index, &txn_id, &data_buf) != 0) {
+        return NULL;
+    }
+
+    // Deserialize
+    node_location_t* locations = NULL;
+    size_t num_locations = 0;
+    bnode_t* btree = bnode_deserialize(data_buf->data, data_buf->size, chunk_size,
+                                        btree_node_size, &locations, &num_locations);
+    buffer_destroy(data_buf);
+
+    if (btree == NULL) {
+        return NULL;
+    }
+
+    // Create hbtrie_node wrapping the deserialized btree
+    hbtrie_node_t* node = memory_pool_alloc(sizeof(hbtrie_node_t));
+    if (node == NULL) {
+        if (locations) free(locations);
+        bnode_destroy_tree(btree);
+        return NULL;
+    }
+
+    node->btree = btree;
+    node->btree_height = atomic_load(&btree->level);
+    node->storage = storage;
+    node->section_id = section_id;
+    node->block_index = block_index;
+    node->data_size = data_size;
+    node->is_loaded = 1;
+    node->is_dirty = 0;
+
+    atomic_init(&node->seq, 0);
+    platform_lock_init(&node->write_lock);
+    refcounter_init((refcounter_t*)node);
+
+    // Load child hbtrie_nodes from locations
+    if (locations != NULL && num_locations > 0) {
+        // Walk btree entries to find those with child hbtrie_nodes
+        // and load them from sections
+        vec_t(bnode_t*) bnode_stack;
+        vec_init(&bnode_stack);
+        vec_push(&bnode_stack, btree);
+
+        size_t loc_idx = 0;
+        while (bnode_stack.length > 0) {
+            bnode_t* bn = vec_pop(&bnode_stack);
+            for (size_t j = 0; j < bnode_count(bn); j++) {
+                bnode_entry_t* entry = bnode_get(bn, j);
+                if (entry == NULL) continue;
+
+                if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                    vec_push(&bnode_stack, entry->child_bnode);
+                } else if (!entry->has_value && loc_idx < num_locations) {
+                    // This entry points to a child hbtrie_node
+                    if (locations[loc_idx].section_id != 0) {
+                        hbtrie_node_t* child = load_node_from_section(
+                            storage,
+                            locations[loc_idx].section_id,
+                            locations[loc_idx].block_index,
+                            0,  // data_size unknown during load — set from child's own tracking
+                            chunk_size, btree_node_size);
+                        if (child != NULL) {
+                            entry->child = child;
+                            entry->child_section_id = locations[loc_idx].section_id;
+                            entry->child_block_index = locations[loc_idx].block_index;
+                        }
+                    }
+                    loc_idx++;
+                }
+            }
+        }
+        vec_deinit(&bnode_stack);
+    }
+
+    if (locations) free(locations);
+    return node;
+}
+
+// Load HBTrie from section storage
+static hbtrie_t* load_index_sections(const char* location, uint8_t chunk_size,
+                                      uint32_t btree_node_size, sections_t* storage) {
+    // Read index pointer file
+    char path[512];
+    snprintf(path, sizeof(path), "%s/index.wdbs", location);
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    uint8_t buf[INDEX_POINTER_SIZE];
+    ssize_t bytes_read = read(fd, buf, INDEX_POINTER_SIZE);
+    close(fd);
+
+    if (bytes_read != INDEX_POINTER_SIZE) return NULL;
+
+    // Verify magic
+    uint32_t magic;
+    memcpy(&magic, buf, 4);
+    if (ntohl(magic) != INDEX_POINTER_MAGIC) return NULL;
+
+    // Parse fields
+    uint8_t stored_chunk_size = buf[4];
+    uint32_t stored_node_size;
+    memcpy(&stored_node_size, buf + 5, 4);
+    stored_node_size = ntohl(stored_node_size);
+
+    // Read root section_id (8 bytes network order)
+    uint32_t high, low;
+    memcpy(&high, buf + 9, 4);
+    memcpy(&low, buf + 13, 4);
+    size_t root_section_id = ((size_t)ntohl(high) << 32) | ntohl(low);
+
+    // Read root_block_index
+    memcpy(&high, buf + 17, 4);
+    memcpy(&low, buf + 21, 4);
+    size_t root_block_index = ((size_t)ntohl(high) << 32) | ntohl(low);
+
+    // Read root_data_size
+    memcpy(&high, buf + 25, 4);
+    memcpy(&low, buf + 29, 4);
+    size_t root_data_size = ((size_t)ntohl(high) << 32) | ntohl(low);
+
+    // Use stored chunk/btree sizes if available
+    if (stored_chunk_size != 0) chunk_size = stored_chunk_size;
+    if (stored_node_size != 0) btree_node_size = stored_node_size;
+
+    // Load root node from sections (recursively loads children)
+    hbtrie_node_t* root = load_node_from_section(storage, root_section_id,
+                                                   root_block_index, root_data_size,
+                                                   chunk_size, btree_node_size);
+    if (root == NULL) {
+        log_warn("Failed to load root node from section storage");
+        return NULL;
+    }
+
+    // Create trie with loaded root
+    hbtrie_t* trie = hbtrie_create(chunk_size, btree_node_size);
+    if (trie == NULL) {
+        hbtrie_node_destroy(root);
+        return NULL;
+    }
+
+    // Replace the default root with the loaded one
+    hbtrie_node_t* default_root = atomic_load(&trie->root);
+    atomic_store(&trie->root, root);
+    if (default_root != NULL) {
+        hbtrie_node_destroy(default_root);
+    }
+
+    log_info("Loaded index from section storage successfully");
+    return trie;
+}
+
 // Load HBTrie from disk
-static hbtrie_t* load_index(const char* location, uint8_t chunk_size, uint32_t btree_node_size) {
-    // Find most recent index file
+static hbtrie_t* load_index(const char* location, uint8_t chunk_size,
+                             uint32_t btree_node_size, sections_t* storage) {
+    // Try section-based index first if storage is available
+    if (storage != NULL) {
+        hbtrie_t* trie = load_index_sections(location, chunk_size, btree_node_size, storage);
+        if (trie != NULL) return trie;
+        // Fall through to CBOR if section-based load fails
+    }
+
+    // Find most recent CBOR index file
     DIR* dir = opendir(location);
     if (dir == NULL) return NULL;
 
@@ -474,14 +813,15 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Load or create trie
-    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
+    db->trie = load_index(location, db->chunk_size, db->btree_node_size, db->storage);
     if (db->trie == NULL) {
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // If using storage, attach it to trie
+    // If using storage, attach it to trie and set trie_ref for defrag remapping
     if (db->storage != NULL && db->trie->root != NULL) {
         db->trie->root->storage = db->storage;
+        db->storage->trie_ref = db->trie;
     }
 
     if (db->trie == NULL) {
@@ -954,8 +1294,12 @@ int database_snapshot(database_t* db) {
     // MVCC: Trigger GC to clean up old versions
     tx_manager_gc(db->tx_manager);
 
-    // Save index to disk
-    return save_index(db);
+    // Save index to disk: use sections if available, otherwise monolithic CBOR
+    if (db->storage != NULL) {
+        return save_index_sections(db);
+    } else {
+        return save_index(db);
+    }
 }
 
 size_t database_count(database_t* db) {

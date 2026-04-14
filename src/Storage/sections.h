@@ -202,6 +202,9 @@ typedef struct sections_t {
     debouncer_t* defrag_debouncer;   // Idle-triggered defrag timer
     double defrag_threshold;          // Free space ratio to trigger defrag (0.0-1.0)
 
+    // Trie reference for defrag offset remapping (set by database.c)
+    struct hbtrie_t* trie_ref;        // Reference to trie for updating node offsets after defrag
+
     transaction_id_t oldest_txn_id; // Oldest transaction since last compaction
     transaction_id_t newest_txn_id; // Newest transaction written to disk
     char* range_path;                // Path to .range file

@@ -8,6 +8,7 @@
 #include "../Util/allocator.h"
 #include "../Util/memory_pool.h"
 #include "../Util/log.h"
+#include "../Storage/sections.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -298,6 +299,7 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
 
   // Initialize storage tracking (in-memory by default)
   node->storage = NULL;          // NULL = in-memory only
+  node->data_size = 0;           // 0 = not in section
   node->is_loaded = 1;           // Newly created nodes are in memory
   node->is_dirty = 0;            // Not modified yet
 
@@ -353,6 +355,13 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     // Destroy nodes in reverse order (bottom-up: children before parents)
     for (int i = nodes.length - 1; i >= 0; i--) {
       hbtrie_node_t* current = nodes.data[i];
+
+      // Deallocate from section storage if this node was persisted
+      if (current->storage != NULL && current->section_id != 0) {
+        sections_deallocate(current->storage, current->section_id,
+                            current->block_index, current->data_size);
+      }
+
       if (current->btree != NULL) {
         bnode_destroy_tree(current->btree);
       }
@@ -477,6 +486,7 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   copy->storage = node->storage;
   copy->section_id = node->section_id;
   copy->block_index = node->block_index;
+  copy->data_size = node->data_size;
   copy->is_loaded = node->is_loaded;
   copy->is_dirty = node->is_dirty;
 
@@ -1656,6 +1666,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1695,6 +1706,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           // Set the child on the entry, keeping has_value = 1
           // This allows both key1 (value) and key10 (descend further) to work.
@@ -1717,6 +1729,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
+            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -1737,6 +1750,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1776,6 +1790,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           entry->child = child;
 
@@ -1796,6 +1811,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
+            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -2001,7 +2017,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
           vec_push(&bnode_stack, entry->child_bnode);
         } else if (entry->has_value && entry->has_versions) {
           // Leaf entry with version chain - clean up old versions
-          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
+          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id, node->storage);
           total_removed += removed;
 
           // If only one version remains and it's not deleted, downgrade to legacy mode
@@ -2025,6 +2041,17 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               chunk_destroy(removed.key);
             }
             if (removed.has_versions && removed.versions != NULL) {
+              // Deallocate section storage for all versions in the removed entry
+              if (node->storage != NULL) {
+                version_entry_t* v = removed.versions;
+                while (v != NULL) {
+                  if (v->value_section_id != 0) {
+                    sections_deallocate(node->storage, v->value_section_id,
+                                        v->value_offset, v->value_data_size);
+                  }
+                  v = v->next;
+                }
+              }
               version_entry_destroy(removed.versions);
             }
             total_removed++;

@@ -3,6 +3,7 @@
 //
 
 #include "sections.h"
+#include "../HBTrie/hbtrie.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -667,6 +668,70 @@ int sections_load_txn_range(sections_t* sections) {
     return 0;
 }
 
+// Remap context for defrag offset updates
+typedef struct {
+    size_t section_id;                // Section being defragmented
+    sections_t* sections;             // Sections pool (has trie_ref)
+} defrag_remap_ctx_t;
+
+// Callback: called by section_defragment for each moved record
+static void defrag_remap_callback(size_t old_offset, size_t new_offset, void* ctx) {
+    defrag_remap_ctx_t* remap_ctx = (defrag_remap_ctx_t*) ctx;
+    if (remap_ctx == NULL) return;
+
+    // Update hbtrie_node offsets that reference this (section_id, old_offset)
+    hbtrie_t* trie = remap_ctx->sections->trie_ref;
+    if (trie == NULL) return;
+
+    hbtrie_node_t* root = atomic_load(&trie->root);
+    if (root == NULL) return;
+
+    // Walk the trie to find nodes with matching section_id and block_index
+    vec_t(hbtrie_node_t*) stack;
+    vec_init(&stack);
+    vec_push(&stack, root);
+
+    while (stack.length > 0) {
+        hbtrie_node_t* node = vec_pop(&stack);
+        if (node == NULL) continue;
+
+        // Check if this node is in the defragmented section at the old offset
+        if (node->section_id == remap_ctx->section_id &&
+            node->block_index == old_offset) {
+            node->block_index = new_offset;
+        }
+
+        // Walk bnode tree to find child hbtrie_nodes
+        if (node->btree != NULL) {
+            vec_t(bnode_t*) bnode_stack;
+            vec_init(&bnode_stack);
+            vec_push(&bnode_stack, node->btree);
+
+            while (bnode_stack.length > 0) {
+                bnode_t* bn = vec_pop(&bnode_stack);
+                for (size_t j = 0; j < bnode_count(bn); j++) {
+                    bnode_entry_t* entry = bnode_get(bn, j);
+                    if (entry == NULL) continue;
+
+                    // Update child location entries pointing to this section
+                    if (entry->child_section_id == remap_ctx->section_id &&
+                        entry->child_block_index == old_offset) {
+                        entry->child_block_index = new_offset;
+                    }
+
+                    if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                        vec_push(&bnode_stack, entry->child_bnode);
+                    } else if (!entry->has_value && entry->child != NULL) {
+                        vec_push(&stack, entry->child);
+                    }
+                }
+            }
+            vec_deinit(&bnode_stack);
+        }
+    }
+    vec_deinit(&stack);
+}
+
 /**
  * Idle-triggered defragmentation check.
  *
@@ -684,14 +749,20 @@ static void sections_defrag_check(void* ctx) {
         section_t* section = current->value;
         if (section != NULL && section_is_fragmented(section, sections->defrag_threshold)) {
             // Section meets fragmentation threshold — defragment it.
-            // No remap callback for now since sections_deallocate is not yet
-            // wired to the database index. When it is, the caller should
-            // provide a remap callback to update bnode child pointers.
+            defrag_remap_ctx_t remap_ctx = {
+                .section_id = section->id,
+                .sections = sections,
+            };
             size_t remap_count = 0;
-            int rc = section_defragment(section, NULL, NULL, &remap_count);
+            int rc = section_defragment(section, defrag_remap_callback, &remap_ctx, &remap_count);
             if (rc == 0 && remap_count > 0) {
                 log_info("Defragmented section %zu: %zu records relocated",
                          section->id, remap_count);
+            }
+
+            // Re-add section to round-robin if it has usable free space
+            if (rc == 0 && !round_robin_contains(sections->robin, section->id)) {
+                round_robin_add(sections->robin, section->id);
             }
         }
         current = current->next;
