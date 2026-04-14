@@ -240,6 +240,10 @@ if(BUILD_TESTS)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
     add_test(NAME test_database_config COMMAND test_database_config)
 
+    # Quick database benchmark (for memory leak testing)
+    add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
+    target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)
+
     # Test for GraphQL lexer
     add_executable(test_graphql_lexer tests/test_graphql_lexer.cpp)
     target_link_libraries(test_graphql_lexer wavedb gtest gtest_main)

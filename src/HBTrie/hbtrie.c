@@ -291,7 +291,8 @@ void hbtrie_destroy(hbtrie_t* trie) {
   if (trie == NULL) return;
 
   refcounter_dereference((refcounter_t*)trie);
-  if (refcounter_count((refcounter_t*)trie) == 0) {
+  uint16_t count = refcounter_count((refcounter_t*)trie);
+  if (count == 0) {
     hbtrie_node_t* root = atomic_load(&trie->root);
     if (root != NULL) {
       hbtrie_node_destroy(root);
