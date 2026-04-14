@@ -958,7 +958,14 @@ void database_destroy(database_t* db) {
         // Legacy WAL (should be NULL, but check for safety)
         if (db->wal) wal_destroy(db->wal);
 
-        // Destroy trie
+        // Destroy LRU cache before trie — LRU holds REFERENCES to identifiers
+        // that are also stored in the trie. Destroying LRU first decrements
+        // refcounts (2→1), then trie destroy decrements (1→0) and frees.
+        // Reversing the order causes use-after-free since trie frees identifiers
+        // that the LRU still references.
+        if (db->lru) database_lru_cache_destroy(db->lru);
+
+        // Destroy trie (frees all identifiers and bnode entries)
         if (db->trie) hbtrie_destroy(db->trie);
 
         // Destroy transaction manager
@@ -968,8 +975,6 @@ void database_destroy(database_t* db) {
         if (db->storage) {
             sections_destroy(db->storage);
         }
-
-        if (db->lru) database_lru_cache_destroy(db->lru);
 
         // Destroy write lock shards
         for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {

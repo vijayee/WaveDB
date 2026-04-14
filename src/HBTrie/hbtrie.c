@@ -2025,10 +2025,17 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               entry->versions->next == NULL &&
               !entry->versions->is_deleted) {
             // Single non-deleted version - convert to legacy
-            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)entry->versions->value);
-            entry->value_txn_id = entry->versions->txn_id;
-            version_entry_destroy(entry->versions);
+            // Must save the version pointer before overwriting the union,
+            // since entry->value and entry->versions share the same memory.
+            version_entry_t* sole_version = entry->versions;
+            identifier_t* sole_value = sole_version->value;
+            transaction_id_t sole_txn_id = sole_version->txn_id;
+
+            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)sole_value);
+            entry->value_txn_id = sole_txn_id;
             entry->has_versions = 0;
+
+            version_entry_destroy(sole_version);
           } else if (entry->versions != NULL &&
                      entry->versions->next == NULL &&
                      entry->versions->is_deleted &&
