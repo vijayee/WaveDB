@@ -1127,7 +1127,10 @@ static void _database_get(database_get_ctx_t* ctx) {
     if (value != NULL) {
         path_t* copied_path = path_copy(path);
         identifier_t* cached = REFERENCE(value, identifier_t);
-        database_lru_cache_put(db->lru, copied_path, cached);
+        identifier_t* ejected = database_lru_cache_put(db->lru, copied_path, cached);
+        if (ejected) {
+            identifier_destroy(ejected);
+        }
     }
 
     path_destroy(path);
@@ -1430,7 +1433,10 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
     if (value != NULL) {
         path_t* copied_path = path_copy(path);
         identifier_t* cached = REFERENCE(value, identifier_t);
-        database_lru_cache_put(db->lru, copied_path, cached);
+        identifier_t* ejected = database_lru_cache_put(db->lru, copied_path, cached);
+        if (ejected) {
+            identifier_destroy(ejected);
+        }
     }
 
     path_destroy(path);
