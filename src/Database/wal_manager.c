@@ -1211,7 +1211,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     // Check entries array
     if (all_entries == NULL && entry_count > 0) {
-        fprintf(stderr, "ERROR: all_entries is NULL but entry_count=%zu\n", entry_count);
+        log_error("all_entries is NULL but entry_count=%zu", entry_count);
         // Clean up and return error
         if (manifest_entries) free(manifest_entries);
         for (size_t i = 0; i < wal_count; i++) free(wal_files[i]);
@@ -1257,7 +1257,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 size_t op_count = 0;
 
                 if (deserialize_batch(data, &ops, &op_count) != 0) {
-                    fprintf(stderr, "ERROR: Failed to deserialize batch\n");
+                    log_error("Failed to deserialize batch");
                     break;
                 }
 
@@ -1377,7 +1377,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 break;
             }
             default:
-                fprintf(stderr, "WARNING: Unknown WAL entry type: %c\n", entry->type);
+                log_warn("Unknown WAL entry type: %c", entry->type);
                 break;
         }
     }

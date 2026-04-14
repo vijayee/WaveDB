@@ -36,7 +36,7 @@ int rm_rf(const char *path) {
       r = -1;
       break;
     }
-    sprintf(buf, "%s/%s", path, p->d_name);
+    snprintf(buf, path_len + strlen(p->d_name) + 2, "%s/%s", path, p->d_name);
 
     struct stat statbuf;
     if (stat(buf, &statbuf) == -1) {

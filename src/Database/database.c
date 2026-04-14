@@ -718,7 +718,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     db->location = strdup(location);
-    db->lru_size = effective_config->lru_memory_mb;
+    db->lru_memory_mb = effective_config->lru_memory_mb;
     db->chunk_size = effective_config->chunk_size;
     db->btree_node_size = effective_config->btree_node_size;
     db->is_rebuilding = 0;
@@ -773,7 +773,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Create LRU cache
-    db->lru = database_lru_cache_create(db->lru_size * 1024 * 1024, effective_config->lru_shards);
+    db->lru = database_lru_cache_create(db->lru_memory_mb * 1024 * 1024, effective_config->lru_shards);
     if (db->lru == NULL) {
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
@@ -1325,7 +1325,8 @@ int database_snapshot(database_t* db) {
 size_t database_count(database_t* db) {
     if (db == NULL) return 0;
 
-    // Return LRU cache size as approximation
+    // Returns LRU cache entry count, which may undercount after eviction.
+    // This is a fast approximation; for exact counts, walk the trie.
     return database_lru_cache_size(db->lru);
 }
 
@@ -1748,7 +1749,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
 
         if (op_result != 0) {
             platform_unlock(&batch->lock);
-            fprintf(stderr, "ERROR: Batch apply failed at operation %zu\n", i);
+            log_error("Batch apply failed at operation %zu", i);
             // Release locks
             for (size_t j = WRITE_LOCK_SHARDS; j > 0; j--) {
                 platform_unlock(&db->write_locks[j - 1]);

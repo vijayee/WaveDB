@@ -143,7 +143,9 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
     left_entry.is_bnode_child = 1;
     left_entry.child_bnode = old_root;
     left_entry.has_value = 0;
-    bnode_insert(new_root, &left_entry);
+    if (bnode_insert(new_root, &left_entry) != 0) {
+      bnode_entry_destroy_key(&left_entry);
+    }
   }
 
   bnode_entry_t right_entry = {0};
@@ -152,15 +154,22 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   right_entry.is_bnode_child = 1;
   right_entry.child_bnode = current_right;
   right_entry.has_value = 0;
-  bnode_insert(new_root, &right_entry);
+  if (bnode_insert(new_root, &right_entry) != 0) {
+    bnode_entry_destroy_key(&right_entry);
+  }
 
   // Update the hbtrie_node
   hb_node->btree = new_root;
   hb_node->btree_height = atomic_load(&old_root->level) + 1;
 
+  // Release our reference to the split key:
+  // - If current_split_key != split_key, it's a separate allocation from bnode_split
+  // - If current_split_key == split_key, we created an extra reference with chunk_share
+  //   on line 150; the caller will destroy the original, and the entry shares it.
   if (current_split_key != split_key) {
-    // current_split_key was already consumed by the new root entry
-    // (we shared it, so we don't need to destroy it separately)
+    chunk_destroy(current_split_key);
+  } else {
+    chunk_destroy(split_key);  // Release the extra chunk_share reference from line 150
   }
 
   return 0;
@@ -213,7 +222,9 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
       left_entry.is_bnode_child = 1;
       left_entry.child_bnode = old_root;
       left_entry.has_value = 0;
-      bnode_insert(new_root, &left_entry);
+      if (bnode_insert(new_root, &left_entry) != 0) {
+        bnode_entry_destroy_key(&left_entry);
+      }
     }
 
     // Add right child
@@ -222,7 +233,10 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     right_entry.is_bnode_child = 1;
     right_entry.child_bnode = right_bnode;
     right_entry.has_value = 0;
-    bnode_insert(new_root, &right_entry);
+    if (bnode_insert(new_root, &right_entry) != 0) {
+      bnode_entry_destroy_key(&right_entry);
+    }
+    chunk_destroy(split_key);  // Release our reference after sharing into entry
 
     hb_node->btree = new_root;
     hb_node->btree_height = atomic_load(&old_root->level) + 1;
@@ -2096,6 +2110,13 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
                 }
               }
               version_entry_destroy(removed.versions);
+            } else if (removed.value != NULL) {
+              // Legacy single value - dereference
+              identifier_destroy(removed.value);
+            }
+            // Free path_chunk_counts data if present
+            if (removed.path_chunk_counts.data != NULL) {
+              vec_deinit(&removed.path_chunk_counts);
             }
             total_removed++;
           }

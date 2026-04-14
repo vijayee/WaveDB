@@ -172,7 +172,7 @@ buffer_t* buffer_and(buffer_t* buf1, buffer_t* buf2) {
 buffer_t* buffer_not(buffer_t* buf) {
   buffer_t* result = buffer_create(buf->size);
   for (size_t i = 0; i < buf->size; i++) {
-    result->data[i] = !buf->data[i];
+    result->data[i] = ~buf->data[i];
   }
   return result;
 }

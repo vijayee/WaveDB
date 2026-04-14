@@ -67,7 +67,7 @@ uint64_t elapsed_time(timeval_t start, timeval_t end) {
 #if _WIN32
   LARGE_INTEGER frequency;
   QueryPerformanceFrequency(&frequency);
-  elapsedTime = (t2.QuadPart - t1.QuadPart) * 1000.0 / frequency.QuadPart;
+  elapsedTime = (end.QuadPart - start.QuadPart) * 1000.0 / frequency.QuadPart;
 #else
   elapsedTime = (end.tv_sec - start.tv_sec) * 1000.0;
   elapsedTime += (end.tv_usec - start.tv_usec) / 1000.0;

@@ -334,11 +334,6 @@ void timing_wheel_stop(timing_wheel_t* wheel) {
   platform_unlock(&wheel->lock);
 }
 
-void hierachical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
-  // Delegate to the properly-named function which handles timer cleanup
-  hierarchical_timing_wheel_stop(wheel);
-}
-
 uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), timer_duration_t delay) {
   timer_duration_rectify(&delay);
   timer_st* timer = get_clear_memory(sizeof(timer_st));
@@ -481,8 +476,8 @@ void timer_duration_rectify(timer_duration_t* duration) {
     duration->minutes = duration->minutes % Time_Hours;
   }
   if (duration->hours > Time_Days) {
-    duration->hours += duration->hours / Time_Days;
-    duration->minutes = duration->hours / Time_Days;
+    duration->days += duration->hours / Time_Days;
+    duration->hours = duration->hours % Time_Days;
   }
 }
 

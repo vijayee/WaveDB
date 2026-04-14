@@ -53,7 +53,7 @@ typedef struct {
     work_pool_t* pool;                  // Thread pool for async ops
     hierarchical_timing_wheel_t* wheel; // Timing wheel
     char* location;                      // Storage directory
-    size_t lru_size;                     // LRU cache max size
+    size_t lru_memory_mb;                // LRU cache max size in megabytes
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
@@ -75,8 +75,7 @@ typedef struct {
 /**
  * Default sizes
  */
-#define DATABASE_DEFAULT_LRU_SIZE 1000          // DEPRECATED: Use DATABASE_DEFAULT_LRU_MEMORY_MB
-#define DATABASE_DEFAULT_LRU_MEMORY_MB 50       // NEW: 50 MB default
+#define DATABASE_DEFAULT_LRU_MEMORY_MB 50       // 50 MB default
 #define DATABASE_DEFAULT_WAL_MAX_SIZE (128 * 1024)  // 128KB
 #define DATABASE_DEBOUNCE_WAIT_MS 100                // Wait 100ms before save
 #define DATABASE_DEBOUNCE_MAX_WAIT_MS 1000           // Force save after 1 second

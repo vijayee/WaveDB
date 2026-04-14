@@ -70,14 +70,17 @@ void refcounter_dereference(refcounter_t* refcounter) {
   }
   platform_unlock(&refcounter->lock);
 #else
-  // With atomics, we need to respect yield optimization
-  // Only decrement count if yield == 0 and count > 0
-  uint8_t yield_val = atomic_load(&refcounter->yield);
-  if (yield_val == 0) {
-    uint16_t count_val = atomic_load(&refcounter->count);
-    if (count_val > 0) {
-      atomic_fetch_sub(&refcounter->count, 1);
+  // With atomics, try to consume a yield first (matching refcounter_reference pattern)
+  uint8_t expected_yield = atomic_load(&refcounter->yield);
+  while (expected_yield > 0) {
+    if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, expected_yield - 1)) {
+      return;  // Consumed a yield, don't decrement count
     }
+  }
+  // No yield to consume, decrement count
+  uint16_t count_val = atomic_load(&refcounter->count);
+  if (count_val > 0) {
+    atomic_fetch_sub(&refcounter->count, 1);
   }
 #endif
 }

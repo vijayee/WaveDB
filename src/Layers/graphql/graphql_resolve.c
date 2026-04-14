@@ -20,6 +20,7 @@
 #include "../../Workers/work.h"
 #include "../../Workers/promise.h"
 #include "../../Workers/error.h"
+#include "../../Util/log.h"
 #include "../../RefCounter/refcounter.h"
 #include <stdlib.h>
 #include <string.h>
@@ -804,7 +805,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
         }
 
         default:
-            fprintf(stderr, "graphql: unknown plan kind %d in resolve_field\n", plan->kind);
+            log_warn("graphql: unknown plan kind %d in resolve_field", plan->kind);
             return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
 }

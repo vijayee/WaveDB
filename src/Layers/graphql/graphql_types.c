@@ -5,6 +5,7 @@
 
 #include "graphql_types.h"
 #include "../../Util/allocator.h"
+#include "../../Util/log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -215,7 +216,7 @@ char* graphql_literal_to_string(const graphql_literal_t* literal) {
             return buf;
         }
         default:
-            fprintf(stderr, "graphql: unknown literal kind %d in graphql_literal_to_string\n", literal->kind);
+            log_warn("graphql: unknown literal kind %d in graphql_literal_to_string", literal->kind);
             return strdup("");
     }
 }

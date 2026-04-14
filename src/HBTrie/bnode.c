@@ -422,6 +422,11 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     entry->child = NULL;
     entry->child_bnode = NULL;
     entry->trie_child = NULL;
+    // Free path_chunk_counts data (right node's copy has its own allocation)
+    if (entry->path_chunk_counts.data != NULL) {
+      vec_deinit(&entry->path_chunk_counts);
+      entry->path_chunk_counts.data = NULL;
+    }
   }
 
   // Truncate left node to entries before mid

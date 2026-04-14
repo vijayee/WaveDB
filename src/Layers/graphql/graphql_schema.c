@@ -898,7 +898,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                 // If type already exists (from a prior extension), merge fields instead of duplicating
                 graphql_type_t* existing = graphql_type_registry_get(layer->registry, type->name);
                 if (existing != NULL) {
-                    fprintf(stderr, "graphql: merging duplicate type definition '%s'\n", type->name);
+                    log_warn("graphql: merging duplicate type definition '%s'", type->name);
                     // Merge new fields into existing type
                     for (int j = 0; j < type->fields.length; j++) {
                         graphql_field_t* new_field = type->fields.data[j];
@@ -982,7 +982,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
 
                     // Skip fields with missing type information
                     if (field_node->type_ref == NULL) {
-                        fprintf(stderr, "graphql: skipping field '%s' with missing type in extension\n",
+                        log_warn("graphql: skipping field '%s' with missing type in extension",
                                 field_node->name ? field_node->name : "(unknown)");
                         continue;
                     }
@@ -1022,7 +1022,7 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
                 break;
             }
             default:
-                fprintf(stderr, "graphql: unexpected AST kind %d in convert_ast_to_types\n", def->kind);
+                log_warn("graphql: unexpected AST kind %d in convert_ast_to_types", def->kind);
                 break;
         }
     }
