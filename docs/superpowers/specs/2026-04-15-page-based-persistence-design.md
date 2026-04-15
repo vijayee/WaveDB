@@ -301,6 +301,17 @@ This gives us **concurrent writers for in-memory operations** while maintaining 
 5. Full test suite pass
 6. Benchmark: concurrent throughput, memory usage, snapshot latency
 
+### Testing Requirements
+
+Memory leak detection must be integrated at every testing stage:
+
+1. **Unit tests**: Every test for page_file, bnode_cache, stale_region, and serializer must run under AddressSanitizer (ASan) with leak detection enabled. Tests must create and destroy structures in isolation and verify zero leaks.
+2. **Integration tests**: Full database lifecycle tests (create → put → get → snapshot → destroy) must be run under ASan. Every `database_create` must have a matching `database_destroy` that produces zero leaks.
+3. **Benchmark tests**: Before and after each benchmark run, verify heap growth is bounded. Use Valgrind or ASan leak checks on benchmark binaries.
+4. **Lazy loading tests**: Eviction + reload cycles must show zero net allocations. Load a trie, evict nodes, reload them, destroy — all with leak checking.
+5. **CoW tests**: Modify a node, flush, verify old offset is stale, verify new offset is correct, destroy — check for leaks in stale region tracking.
+6. **Crash recovery tests**: Write dirty nodes, write superblock, simulate crash (skip destroy), reopen and verify data integrity with zero leaks.
+
 ### Expected Improvements
 
 | Metric | Current | Target | Method |
@@ -312,21 +323,14 @@ This gives us **concurrent writers for in-memory operations** while maintaining 
 | Concurrent write model | 64 shards | 64 shards (unchanged) | Persistence is async |
 | Stale space reclamation | Fragment list + defrag (O(n) walk) | Stale regions + block reuse | Simpler, more efficient |
 
-### Open Questions
+### Resolved Design Decisions
 
-1. **Multi-block node handling**: When a bnode's serialized form exceeds one block (4KB), it spans multiple blocks linked by `nextBid`. The first 4 bytes of each node must start in the same block for size reading. Is 4KB the right block size, or should we use larger blocks (8KB, 16KB) to reduce multi-block nodes?
+1. **Block size**: Configurable with 4KB default. Aligns with filesystem page size and SSD erase blocks. Node size limit should be expressed as serialized size (not in-memory size) and default to a value that keeps most nodes within a single block (~3KB serialized, leaving room for block metadata). Both `page_file_block_size` and `btree_node_size` should be configurable at database creation time.
 
-2. **Superblock atomicity**: Writing the superblock (root location + revision) must be atomic. On crash, the previous superblock revision should still be valid. We need at least 2 superblock copies (alternating writes) for crash safety.
+2. **Superblock atomicity**: Configurable superblock count, default 2 (dual alternating superblocks). Superblocks are written round-robin at fixed positions in the file (blocks 0..N-1). Recovery reads all copies and picks the one with the highest revision number and valid CRC. The space cost is negligible (2 × 4KB = 8KB).
 
-3. **Dirty flush frequency**: How often should dirty nodes be flushed? Options:
-   - After every N writes (e.g., every 64 node modifications)
-   - After every commit (synchronous)
-   - Background thread with a dirty threshold (e.g., 1MB of dirty data)
-   - Combination: write-behind for throughput, sync on commit for durability
+3. **Dirty flush frequency**: Background write-behind with dirty threshold. A flusher (running on the existing timing wheel worker pool) triggers when dirty nodes exceed a threshold (default: 64 nodes or 1MB of dirty data). Explicit `database_snapshot()` flushes remaining dirty nodes synchronously. The WAL provides per-operation durability between flushes, so unflushed dirty nodes are recoverable via WAL replay.
 
-4. **Hybrid V1/V2 format**: Internal bnodes (is_bnode_child) within the same hbtrie_node could still be inlined for fewer disk reads. But child hbtrie_nodes must be offset-referenced for lazy loading. Is a hybrid format too complex?
+4. **Serializer format (Phase 1)**: Hybrid format — internal bnodes (`is_bnode_child`) within a single hbtrie_node are inlined (V2-style), while child hbtrie_nodes are stored as file offset references (V1-style). This gives one blob per hbtrie_node (one read per trie level). **Phase 2** (future) will implement fully flat per-bnode storage where every bnode is independent, enabling per-bnode CoW and per-bnode locking. Phase 2 will be benchmarked against Phase 1 to measure write amplification reduction and hot-prefix concurrency gains.
 
-5. **Concurrent page file writes**: With multiple dirty nodes being flushed, we need atomic offset advancement. Options:
-   - Single flusher thread (simplest)
-   - `compare_exchange_strong()` on the file offset (lock-free, as ForestDB's CommitLog does)
-   - Pre-assign offsets under a spin lock, then write without lock
+5. **Concurrent page file writes**: Single flusher thread for Phase 1. The flusher collects dirty nodes, assigns offsets, and writes them sequentially (optimal for both HDD and SSD I/O patterns). Runs on the existing timing wheel worker pool. If profiling shows the flusher is a bottleneck, we can evolve to atomic offset advancement with `compare_exchange_strong()` for concurrent allocation
