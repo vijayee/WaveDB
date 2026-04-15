@@ -101,10 +101,8 @@ typedef struct bnode_entry_t {
     // When has_value==0, use the union's child field instead.
     struct hbtrie_node_t* trie_child;
 
-    // Storage location for lazy-loaded children
-    // Valid only when has_value == 0 and child pointer is loaded from disk
-    size_t child_section_id;           // Section where child is stored
-    size_t child_block_index;           // Block index within section
+    // Storage location for lazy-loaded children (Phase 2: page file offset)
+    uint64_t child_disk_offset;        // File offset of child bnode or hbtrie_node root (0 = not on disk)
 } bnode_entry_t;
 
 /**
@@ -125,6 +123,10 @@ typedef struct bnode_t {
     vec_t(bnode_entry_t) entries;      // Sorted by chunk key
     _Atomic(uint64_t) seq;             // Seqlock: even=stable, odd=writing
     PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
+
+    // Per-bnode disk tracking (Phase 2: flat per-bnode persistence)
+    uint64_t disk_offset;              // File offset of this bnode (0 if not persisted)
+    uint8_t is_dirty;                  // 1 if modified since last write
 } bnode_t;
 
 /**

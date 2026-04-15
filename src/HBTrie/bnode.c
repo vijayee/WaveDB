@@ -395,8 +395,7 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     }
 
     // Copy storage location fields
-    new_entry.child_section_id = src->child_section_id;
-    new_entry.child_block_index = src->child_block_index;
+    new_entry.child_disk_offset = src->child_disk_offset;
 
     // Insert into right node
     bnode_insert(right, &new_entry);
