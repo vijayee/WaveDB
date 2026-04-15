@@ -256,6 +256,23 @@ void* memory_pool_alloc(size_t size) {
     return ptr;
 }
 
+// Check if a pointer falls within a pool's static array range
+static int memory_pool_ptr_in_class(memory_pool_class_t* cls, void* ptr) {
+    uint8_t* start = cls->pool_start;
+    uint8_t* end = start + cls->block_size * cls->total_blocks;
+    return ((uint8_t*)ptr >= start && (uint8_t*)ptr < end);
+}
+
+// Check if a pointer belongs to any pool's static array
+static int memory_pool_ptr_in_any_pool(void* ptr) {
+    for (int i = 0; i < 3; i++) {
+        if (memory_pool_ptr_in_class(&g_pool.classes[i], ptr)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Free memory to pool
 void memory_pool_free(void* ptr, size_t size) {
     if (!ptr) {
@@ -274,60 +291,64 @@ void memory_pool_free(void* ptr, size_t size) {
     }
 
     memory_pool_size_class_e class = memory_pool_get_class(size);
-    int freed = 0;
 
-    // Try TLS cache first (lock-free)
-    switch (class) {
-        case MEMORY_POOL_SMALL:
-            if (tls_small.count < TLS_CACHE_SIZE) {
-                tls_small.cache[tls_small.count++] = ptr;
-                g_pool.stats.small_frees++;
-                return;
-            }
-            break;
-        case MEMORY_POOL_MEDIUM:
-            if (tls_medium.count < TLS_CACHE_SIZE) {
-                tls_medium.cache[tls_medium.count++] = ptr;
-                g_pool.stats.medium_frees++;
-                return;
-            }
-            break;
-        case MEMORY_POOL_LARGE:
-            if (tls_large.count < TLS_CACHE_SIZE) {
-                tls_large.cache[tls_large.count++] = ptr;
-                g_pool.stats.large_frees++;
-                return;
-            }
-            break;
-        case MEMORY_POOL_FALLBACK:
-        default:
-            break;
-    }
+    // Only cache pointers that belong to a pool's static array.
+    // Malloc'd fallback pointers must be freed directly to avoid leaks.
+    int in_pool = memory_pool_ptr_in_any_pool(ptr);
 
-    // TLS cache full or not applicable, try to free to global pool
-    for (int i = 0; i < 3; i++) {
-        if (memory_pool_class_free(&g_pool.classes[i], ptr)) {
-            freed = 1;
-            switch (i) {
-                case MEMORY_POOL_SMALL:
+    // Try TLS cache first (lock-free) — only for pool-allocated pointers
+    if (in_pool) {
+        switch (class) {
+            case MEMORY_POOL_SMALL:
+                if (tls_small.count < TLS_CACHE_SIZE) {
+                    tls_small.cache[tls_small.count++] = ptr;
                     g_pool.stats.small_frees++;
-                    break;
-                case MEMORY_POOL_MEDIUM:
+                    return;
+                }
+                break;
+            case MEMORY_POOL_MEDIUM:
+                if (tls_medium.count < TLS_CACHE_SIZE) {
+                    tls_medium.cache[tls_medium.count++] = ptr;
                     g_pool.stats.medium_frees++;
-                    break;
-                case MEMORY_POOL_LARGE:
+                    return;
+                }
+                break;
+            case MEMORY_POOL_LARGE:
+                if (tls_large.count < TLS_CACHE_SIZE) {
+                    tls_large.cache[tls_large.count++] = ptr;
                     g_pool.stats.large_frees++;
-                    break;
-            }
-            break;
+                    return;
+                }
+                break;
+            case MEMORY_POOL_FALLBACK:
+            default:
+                break;
         }
     }
 
-    if (!freed) {
-        // Not in any pool, use free
-        g_pool.stats.fallback_frees++;
-        free(ptr);
+    // Try to return to global pool (only pool-allocated pointers can go here)
+    if (in_pool) {
+        for (int i = 0; i < 3; i++) {
+            if (memory_pool_class_free(&g_pool.classes[i], ptr)) {
+                switch (i) {
+                    case MEMORY_POOL_SMALL:
+                        g_pool.stats.small_frees++;
+                        break;
+                    case MEMORY_POOL_MEDIUM:
+                        g_pool.stats.medium_frees++;
+                        break;
+                    case MEMORY_POOL_LARGE:
+                        g_pool.stats.large_frees++;
+                        break;
+                }
+                return;
+            }
+        }
     }
+
+    // Not in any pool (malloc'd fallback) or pool return failed — use free
+    g_pool.stats.fallback_frees++;
+    free(ptr);
 }
 
 // Get memory pool statistics

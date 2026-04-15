@@ -132,43 +132,40 @@ buffer_t* identifier_to_buffer(identifier_t* id) {
   return buf;
 }
 
+uint8_t* identifier_get_data(identifier_t* id, size_t* out_len) {
+  if (id == NULL || out_len == NULL) return NULL;
+
+  *out_len = id->length;
+  if (id->length == 0) return NULL;
+
+  uint8_t* data = malloc(id->length);
+  if (data == NULL) return NULL;
+
+  size_t offset = 0;
+  for (size_t i = 0; i < (size_t)id->chunks.length; i++) {
+    chunk_t* chunk = id->chunks.data[i];
+    size_t copy_len = id->chunk_size;
+    if (i == (size_t)id->chunks.length - 1) {
+      copy_len = id->length - offset;
+    }
+    memcpy(data + offset, chunk->data, copy_len);
+    offset += copy_len;
+  }
+
+  return data;
+}
+
 cbor_item_t* identifier_to_cbor(identifier_t* id) {
   if (id == NULL) return NULL;
 
-  // Create array with one entry per chunk
-  cbor_item_t* array = cbor_new_definite_array((size_t)id->chunks.length);
-  if (array == NULL) return NULL;
+  // New format: single bytestring with original data
+  // (was: array of chunk bytestrings, now deprecated)
+  buffer_t* buf = identifier_to_buffer(id);
+  if (buf == NULL) return NULL;
 
-  for (int i = 0; i < id->chunks.length; i++) {
-    chunk_t* chunk = id->chunks.data[i];
-
-    // For last chunk, only serialize the actual data bytes (not padding)
-    size_t chunk_len = chunk->size;
-    if (i == id->chunks.length - 1) {
-      // Last chunk: calculate actual data length
-      size_t nchunk = id->chunks.length;
-      size_t full_chunks = (nchunk > 0) ? (nchunk - 1) : 0;
-      size_t expected_full_size = full_chunks * id->chunk_size;
-      chunk_len = id->length - expected_full_size;
-      if (chunk_len > chunk->size) {
-        chunk_len = chunk->size;  // Safety check
-      }
-    }
-
-    cbor_item_t* bstr = cbor_build_bytestring(chunk->data, chunk_len);
-    if (bstr == NULL) {
-      cbor_decref(&array);
-      return NULL;
-    }
-    if (!cbor_array_push(array, bstr)) {
-      cbor_decref(&bstr);
-      cbor_decref(&array);
-      return NULL;
-    }
-    cbor_decref(&bstr);
-  }
-
-  return array;
+  cbor_item_t* bstr = cbor_build_bytestring(buf->data, id->length);
+  buffer_destroy(buf);
+  return bstr;
 }
 
 identifier_t* cbor_to_identifier(cbor_item_t* item, size_t chunk_size) {

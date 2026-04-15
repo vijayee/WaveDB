@@ -49,6 +49,7 @@ static void init_default_config(wal_config_t* config) {
     config->idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
     config->compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
     config->max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
+    config->max_sealed_wals = WAL_DEFAULT_MAX_SEALED_WALS;
 }
 
 // Fsync callback for debouncer
@@ -516,7 +517,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->threads = NULL;
     manager->thread_count = 0;
     manager->thread_capacity = 0;
-    manager->wheel = wheel;  // Store timing wheel for debouncer
+    manager->sealed_count = 0;
     manager->wheel = wheel;  // Store timing wheel for debouncer
 
     // Create manifest file
@@ -723,7 +724,7 @@ wal_manager_t* wal_manager_load_with_options(const char* location, wal_config_t*
 
     // Handle force options
     if (options && options->force_legacy) {
-        // Use legacy WAL (not implemented in this task)
+        log_warn("force_legacy option is not supported — legacy WAL format has been removed");
         if (error_code) *error_code = ENOTSUP;
         return NULL;
     }
@@ -757,16 +758,18 @@ void wal_manager_destroy(wal_manager_t* manager) {
                         thread_local_wal = NULL;
                     }
 
-                    // Close file descriptor
-                    if (twal->fd >= 0) {
-                        fsync(twal->fd);
-                        close(twal->fd);
-                    }
-
-                    // Flush and destroy debouncer if present
+                    // Flush and destroy debouncer before closing fd
+                    // (debouncer_destroy flushes any pending fsync callback
+                    // which needs the fd to still be open)
                     if (twal->fsync_debouncer != NULL) {
                         debouncer_flush(twal->fsync_debouncer);
                         debouncer_destroy(twal->fsync_debouncer);
+                    }
+
+                    // Close file descriptor (after debouncer callback has fsync'd)
+                    if (twal->fd >= 0) {
+                        fsync(twal->fd);
+                        close(twal->fd);
                     }
 
                     // Free file path
@@ -880,6 +883,72 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
     return thread_local_wal;
 }
 
+/**
+ * Rotate the thread WAL: seal the current file and open a new one.
+ * Must be called with twal->lock held. Returns 0 on success, -1 on failure.
+ * On failure, the old file may already be sealed but no new file is opened.
+ */
+static int thread_wal_rotate(thread_wal_t* twal) {
+    if (twal == NULL) return -1;
+
+    // Seal the current file (flush, close, mark SEALED in manifest)
+    if (twal->fd >= 0) {
+        fsync(twal->fd);
+        close(twal->fd);
+        twal->fd = -1;
+    }
+
+    // Update manifest to mark old file as SEALED
+    write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
+                        WAL_FILE_SEALED, &twal->newest_txn_id);
+
+    // Track sealed file count
+    twal->manager->sealed_count++;
+
+    // Free old file path
+    if (twal->file_path) {
+        free(twal->file_path);
+        twal->file_path = NULL;
+    }
+
+    // Generate new file path with a unique suffix (timestamp-based)
+    char filename[96];
+    snprintf(filename, sizeof(filename), "thread_%lu_%lu.wal",
+             (unsigned long)twal->thread_id,
+             (unsigned long)twal->newest_txn_id.time);
+    twal->file_path = path_join(twal->manager->location, filename);
+    if (twal->file_path == NULL) {
+        return -1;
+    }
+
+    // Open new file
+    twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (twal->fd < 0) {
+        log_error("Failed to create rotated WAL file: %s (errno=%d)", twal->file_path, errno);
+        free(twal->file_path);
+        twal->file_path = NULL;
+        return -1;
+    }
+
+    log_info("Rotated WAL file: %s (thread_id=%lu, fd=%d)",
+             twal->file_path, (unsigned long)twal->thread_id, twal->fd);
+
+    // Reset size tracking
+    twal->current_size = 0;
+
+    // Reset transaction ID tracking
+    twal->oldest_txn_id = (transaction_id_t){0, 0, 0};
+    twal->newest_txn_id = (transaction_id_t){0, 0, 0};
+
+    // Write initial manifest entry (ACTIVE) for new file
+    platform_lock(&twal->manager->manifest_lock);
+    write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
+                        WAL_FILE_ACTIVE, &twal->newest_txn_id);
+    platform_unlock(&twal->manager->manifest_lock);
+
+    return 0;
+}
+
 int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
                      wal_type_e type, buffer_t* data) {
     if (twal == NULL || data == NULL) {
@@ -889,12 +958,29 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     // Acquire lock for thread safety
     platform_lock(&twal->lock);
 
-    // Check file size limit (TODO: file rotation not implemented yet)
+    // Check file size limit — rotate if needed
     if (twal->current_size >= twal->max_size) {
-        log_warn("WAL file full (current_size=%zu, max_size=%zu), rejecting write",
-                 twal->current_size, twal->max_size);
-        platform_unlock(&twal->lock);
-        return -1;  // File full, needs rotation
+        // Check sealed WAL limit before rotating
+        size_t max_sealed = twal->manager->config.max_sealed_wals;
+        if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
+            // Too many sealed WALs — try compaction first
+            platform_unlock(&twal->lock);
+            int compact_rc = compact_wal_files(twal->manager);
+            platform_lock(&twal->lock);
+            if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
+                log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
+                         twal->manager->sealed_count, max_sealed);
+                platform_unlock(&twal->lock);
+                return -1;
+            }
+        }
+
+        if (thread_wal_rotate(twal) != 0) {
+            log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
+                     (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
+            platform_unlock(&twal->lock);
+            return -1;
+        }
     }
 
     // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
@@ -1127,7 +1213,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
     // Check entries array
     if (all_entries == NULL && entry_count > 0) {
-        fprintf(stderr, "ERROR: all_entries is NULL but entry_count=%zu\n", entry_count);
+        log_error("all_entries is NULL but entry_count=%zu", entry_count);
         // Clean up and return error
         if (manifest_entries) free(manifest_entries);
         for (size_t i = 0; i < wal_count; i++) free(wal_files[i]);
@@ -1173,7 +1259,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 size_t op_count = 0;
 
                 if (deserialize_batch(data, &ops, &op_count) != 0) {
-                    fprintf(stderr, "ERROR: Failed to deserialize batch\n");
+                    log_error("Failed to deserialize batch");
                     break;
                 }
 
@@ -1293,7 +1379,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 break;
             }
             default:
-                fprintf(stderr, "WARNING: Unknown WAL entry type: %c\n", entry->type);
+                log_warn("Unknown WAL entry type: %c", entry->type);
                 break;
         }
     }
@@ -1324,6 +1410,25 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     free(wal_files);
 
     return 0;
+}
+
+int wal_manager_seal_and_compact(wal_manager_t* manager) {
+    if (manager == NULL) return -1;
+
+    platform_lock(&manager->threads_lock);
+    // Seal all active thread-local WALs
+    for (size_t i = 0; i < manager->thread_count; i++) {
+        thread_wal_t* twal = manager->threads[i];
+        if (twal != NULL && twal->fd >= 0) {
+            platform_unlock(&manager->threads_lock);
+            thread_wal_seal(twal);
+            platform_lock(&manager->threads_lock);
+        }
+    }
+    platform_unlock(&manager->threads_lock);
+
+    // Compact all sealed WAL files
+    return compact_wal_files(manager);
 }
 
 int compact_wal_files(wal_manager_t* manager) {
@@ -1455,12 +1560,21 @@ int compact_wal_files(wal_manager_t* manager) {
 
     // Update manifest: mark sealed files as COMPACTED, add compacted file as SEALED
     platform_lock(&manager->manifest_lock);
+    size_t compacted_count = 0;
     for (size_t i = 0; i < count; i++) {
         if (entries[i].status == WAL_FILE_SEALED) {
             write_manifest_entry(manager, entries[i].thread_id,
                                 entries[i].file_path, WAL_FILE_COMPACTED,
                                 &entries[i].newest_txn_id);
+            compacted_count++;
         }
+    }
+
+    // Update sealed count
+    if (manager->sealed_count >= compacted_count) {
+        manager->sealed_count -= compacted_count;
+    } else {
+        manager->sealed_count = 0;
     }
 
     // Add compacted file

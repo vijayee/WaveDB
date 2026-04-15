@@ -53,12 +53,29 @@ static void pop_frame(database_iterator_t* iter) {
 }
 
 /**
- * Check if we're within bounds (start_path <= current < end_path)
- * TODO: Implement path comparison for bound checking
- * For now, allow all paths
+ * Check if a path is within the scan bounds.
+ * Returns:
+ *   1  if start_path <= path < end_path (within bounds)
+ *   0  if path is before start_path (skip, but keep scanning)
+ *  -1  if path >= end_path (past upper bound, stop iteration)
  */
-static int within_bounds(database_iterator_t* iter) {
-    (void)iter;  // Suppress unused parameter warning
+static int within_bounds(database_iterator_t* iter, path_t* path) {
+    if (path == NULL) return 0;
+
+    // Check upper bound: if path >= end_path, iteration is done
+    if (iter->end_path != NULL) {
+        if (path_compare(path, iter->end_path) >= 0) {
+            return -1;
+        }
+    }
+
+    // Check lower bound: if path < start_path, skip this entry
+    if (iter->start_path != NULL) {
+        if (path_compare(path, iter->start_path) < 0) {
+            return 0;
+        }
+    }
+
     return 1;
 }
 
@@ -102,30 +119,26 @@ database_iterator_t* database_scan_start(database_t* db,
                                           path_t* start_path,
                                           path_t* end_path) {
     if (db == NULL) {
-        // Clean up paths if provided
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
         return NULL;
     }
 
     database_iterator_t* iter = get_clear_memory(sizeof(database_iterator_t));
     if (iter == NULL) {
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
         return NULL;
     }
 
     iter->db = db;
-    iter->start_path = start_path;
-    iter->end_path = end_path;
+    // Copy paths — the iterator owns its copies, callers retain theirs
+    iter->start_path = start_path ? path_copy(start_path) : NULL;
+    iter->end_path = end_path ? path_copy(end_path) : NULL;
     iter->current_path = path_create();
     iter->finished = 0;
 
     // Allocate initial stack
     iter->stack = get_clear_memory(INITIAL_STACK_SIZE * sizeof(iterator_frame_t));
     if (iter->stack == NULL) {
-        if (start_path) path_destroy(start_path);
-        if (end_path) path_destroy(end_path);
+        if (iter->start_path) path_destroy(iter->start_path);
+        if (iter->end_path) path_destroy(iter->end_path);
         if (iter->current_path) path_destroy(iter->current_path);
         free(iter);
         return NULL;
@@ -229,6 +242,13 @@ int database_scan_next(database_iterator_t* iter,
             // Check if this entry has a value (complete path)
             if (entry->has_value) {
                 frame->entry_index++;  // Move past this entry since we're processing it
+
+                // If entry also has a trie_child, push it for later traversal
+                if (entry->trie_child) {
+                    if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                        return -2;
+                    }
+                }
 
                 identifier_t* value = NULL;
 
@@ -337,6 +357,22 @@ int database_scan_next(database_iterator_t* iter,
 
                     if (chunks) free(chunks);
 
+                    // Check bounds on the result path
+                    int bounds = within_bounds(iter, result_path);
+                    if (bounds < 0) {
+                        // Past upper bound — stop iteration entirely
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        iter->finished = 1;
+                        return -1;
+                    }
+                    if (bounds == 0) {
+                        // Before lower bound — skip this entry, keep scanning
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        continue;
+                    }
+
                     *out_path = result_path;
                     *out_value = value;
                     return 0;  // Success
@@ -351,6 +387,14 @@ int database_scan_next(database_iterator_t* iter,
                     return -2;  // Error
                 }
                 break;  // Will continue with child on next iteration
+            } else if (entry->trie_child) {
+                // Entry has both value and trie_child - push trie_child for traversal
+                frame->entry_index++;
+                pushed_child = 1;
+                if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                break;
             } else {
                 // Entry has no value and no child - skip it
                 frame->entry_index++;

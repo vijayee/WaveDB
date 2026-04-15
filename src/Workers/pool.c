@@ -58,7 +58,7 @@ int work_pool_enqueue(work_pool_t* pool, work_t* work) {
 void work_pool_launch(work_pool_t* pool) {
   for (size_t i = 0; i < pool->size; i++) {
 #if _WIN32
-    pool->workers[i] = CreateThread(NULL, 0, workerFunction, pool, 0, &pool->workerIds[i])
+    pool->workers[i] = CreateThread(NULL, 0, workerFunction, pool, 0, &pool->workerIds[i]);
     if (pool->workers[i] == NULL) {
       log_error("Failed to Start worker threads");
       abort();

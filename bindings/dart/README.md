@@ -1,6 +1,6 @@
 # WaveDB Dart Bindings
 
-Dart FFI bindings for WaveDB, a hierarchical key-value database.
+Dart FFI bindings for [WaveDB](../../README.md) - A hierarchical B+trie database. It is a love child of ForrestDB and MUMPS.
 
 ## Installation
 
@@ -33,7 +33,7 @@ void main() async {
   final name = db.getSync('users/alice/name');
   print(name); // 'Alice'
 
-  // Async operations
+  // Async operations (non-blocking, uses C worker pool)
   await db.put('users/bob/name', 'Bob');
   final name2 = await db.get('users/bob/name');
 
@@ -49,6 +49,11 @@ void main() async {
     {'type': 'put', 'key': 'counter/b', 'value': '2'},
     {'type': 'del', 'key': 'old/key'},
   ]);
+
+  // Stream all entries
+  db.createReadStream().listen((kv) {
+    print('${kv.key} = ${kv.value}');
+  });
 
   db.close();
 }
@@ -118,116 +123,268 @@ final db = WaveDB(
   delimiter: '/',
   config: WaveDBConfig(
     lruMemoryMb: 100,      // 100 MB cache
-    lruShards: 0,         // auto-scale to CPU cores
+    lruShards: 0,          // auto-scale to CPU cores
     walSyncMode: 'debounced',
     walDebounceMs: 50,
   ),
 );
 ```
 
-## Configuration
+### Async Operations
 
-WaveDB uses sensible defaults for most use cases. The current bindings use these default settings:
-
-### Database Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `chunk_size` | 4 | HBTrie chunk size in bytes (atomic comparison unit) |
-| `btree_node_size` | 4096 | B+tree node size in bytes |
-| `enable_persist` | true | Persistence enabled (data saved to disk) |
-
-### Cache Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `lru_memory_mb` | 50 | LRU cache size in megabytes |
-| `lru_shards` | 64 | LRU cache shard count (0 = auto-scale to CPU cores) |
-| `storage_cache_size` | 1024 | Section cache size (number of sections) |
-
-### WAL (Write-Ahead Log) Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `sync_mode` | DEBOUNCED | Durability mode: IMMEDIATE, DEBOUNCED, or ASYNC |
-| `debounce_ms` | 100 | Debounce window for fsync (DEBOUNCED mode) |
-| `idle_threshold_ms` | 10000 | Idle time before compaction (10 seconds) |
-| `compact_interval_ms` | 60000 | Compaction interval (60 seconds) |
-| `max_file_size` | 131072 | Max WAL file size before sealing (128KB) |
-
-### Threading Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `worker_threads` | 4 | Number of background worker threads |
-| `timer_resolution_ms` | 10 | Timer wheel resolution in milliseconds |
-
-### Sync Modes Explained
-
-- **IMMEDIATE**: Each write calls `fsync()` - maximum durability, lowest performance
-- **DEBOUNCED** (default): Batches fsync calls within debounce window - good balance
-- **ASYNC**: No fsync guarantees - highest performance, potential data loss on crash
-
-### Performance Tuning Tips
-
-1. **High write throughput**: Use `ASYNC` mode for bulk imports
-2. **Low latency reads**: Increase `lru_memory_mb` (50-500MB typical)
-3. **Many CPU cores**: Set `lru_shards` to 0 for auto-scaling
-4. **Large datasets**: Increase `storage_cache_size` for better section locality
-
-### Future API
-
-The bindings will expose full configuration in a future release:
+Async operations dispatch work to the C worker pool via `promise_t` and bridge C thread callbacks back to the Dart isolate using `NativeCallable.listener`.
 
 ```dart
-// Planned API (not yet available)
-final db = WaveDB(
-  '/path/to/db',
-  delimiter: '/',
-  config: WaveDBConfig(
-    lruMemoryMb: 100,
-    lruShards: 0,  // auto-scale
-    wal: WalConfig(
-      syncMode: SyncMode.debounced,
-      debounceMs: 50,
-    ),
-  ),
-);
+// Put
+await db.put(key, value);
+
+// Get (returns null if not found)
+final value = await db.get(key);
+
+// Delete
+await db.del(key);
+
+// Batch
+await db.batch([
+  {'type': 'put', 'key': 'k1', 'value': 'v1'},
+  {'type': 'del', 'key': 'k2'},
+]);
 ```
 
-#### Async Operations
-- `Future<void> put(dynamic key, dynamic value)` - Store a value
-- `Future<dynamic> get(dynamic key)` - Retrieve a value
-- `Future<void> del(dynamic key)` - Delete a value
-- `Future<void> batch(List<Map<String, dynamic>> operations)` - Execute multiple operations
-- `Future<void> putObject(dynamic key, Map<String, dynamic> obj)` - Store nested object
-- `Future<Map<String, dynamic>?> getObject(dynamic key)` - Retrieve nested object (NOT_SUPPORTED)
+### Sync Operations
 
-#### Sync Operations
-- `void putSync(dynamic key, dynamic value)` - Store synchronously
-- `dynamic getSync(dynamic key)` - Retrieve synchronously
-- `void delSync(dynamic key)` - Delete synchronously
-- `void batchSync(List<Map<String, dynamic>> operations)` - Batch synchronously
-- `void putObjectSync(dynamic key, Map<String, dynamic> obj)` - Store object synchronously
-- `Map<String, dynamic>? getObjectSync(dynamic key)` - Retrieve object synchronously (NOT_SUPPORTED)
+Sync operations block the current isolate and call C functions directly via FFI.
 
-#### Streaming
-- `Stream<KeyValue> createReadStream({dynamic start, dynamic end, bool reverse = false, bool keys = true, bool values = true})` - Stream entries
+```dart
+db.putSync(key, value);
+final value = db.getSync(key);
+db.delSync(key);
+db.batchSync(ops);
+```
 
-#### Lifecycle
-- `void close()` - Close the database
+### Object Operations
+
+```dart
+// Flatten object to paths
+await db.putObject('users', {
+  'alice': {'name': 'Alice', 'roles': ['admin', 'user']},
+});
+// Creates:
+//   users/alice/name → 'Alice'
+//   users/alice/roles/0 → 'admin'
+//   users/alice/roles/1 → 'user'
+
+// Reconstruct object from subtree
+final user = await db.getObject('users/alice');
+// {name: 'Alice', roles: ['admin', 'user']}
+```
+
+### Keys
+
+Keys can be strings or lists:
+
+```dart
+// String with delimiter
+await db.put('users/alice/name', 'Alice');
+
+// List
+await db.put(['users', 'bob', 'name'], 'Bob');
+
+// Custom delimiter
+final db = WaveDB('/path/to/db', delimiter: ':');
+await db.put('users:charlie:name', 'Charlie');
+```
+
+### Values
+
+Values can be strings or `Uint8List`:
+
+```dart
+// String
+await db.put('key', 'value');
+
+// Uint8List (binary)
+await db.put('binary/key', Uint8List.fromList([0x01, 0x02]));
+```
+
+### Error Handling
+
+```dart
+try {
+  await db.put('key', 'value');
+} on WaveDBException catch (e) {
+  print('Database error: ${e.message}');
+}
+```
+
+### Streaming
+
+```dart
+db.createReadStream(
+  start: 'users/',
+  end: 'users/z',
+  reverse: false,
+  keys: true,
+  values: true,
+).listen((KeyValue kv) {
+  print('${kv.key} = ${kv.value}');
+});
+```
+
+**Options:**
+- `start`: Start path (inclusive)
+- `end`: End path (exclusive)
+- `reverse`: Reverse order (default: false, not yet implemented in C API)
+- `keys`: Include keys (default: true)
+- `values`: Include values (default: true)
+
+### Lifecycle
+
+- `void close()` - Close the database (waits for pending async operations)
 - `bool get isClosed` - Check if database is closed
 - `String get path` - Get database path
 - `String get delimiter` - Get path delimiter
 
-### KeyValue Class
-
-- `dynamic key` - The key (String or List<String>)
-- `dynamic value` - The value (String or Uint8List)
-
 ### WaveDBException Class
 
 Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALID_ARGUMENT`, `NOT_SUPPORTED`, `CORRUPTION`, `CONFLICT`, `LIBRARY_NOT_FOUND`, `UNSUPPORTED_PLATFORM`
+
+## GraphQL Schema Layer
+
+WaveDB includes a GraphQL layer that provides schema definition, queries, and mutations on top of the hierarchical key-value store.
+
+### Setup
+
+```dart
+import 'package:wavedb/graphql_layer.dart';
+
+final layer = GraphQLLayer();
+layer.create(GraphQLLayerConfig(
+  path: '/path/to/db',
+  enablePersist: true,
+));
+```
+
+Pass `path: null` for an in-memory database.
+
+### Define a Schema
+
+Use GraphQL Schema Definition Language (SDL) to define types:
+
+```dart
+layer.parseSchema('''
+  type User {
+    name: String
+    age: Int
+    friends: [User]
+  }
+''');
+```
+
+### Queries
+
+**Sync:**
+
+```dart
+final result = layer.querySync('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: null}}, errors: [])
+```
+
+**Async (non-blocking, uses C worker pool):**
+
+```dart
+final result = await layer.query('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: null}}, errors: [])
+```
+
+### Mutations
+
+Create records with auto-generated IDs:
+
+```dart
+// Sync
+final result = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// GraphQLResult(success: true, data: {createUser: {id: "abc123", name: "Alice"}})
+
+// Async
+final result = await layer.mutate('mutation { createUser(name: "Bob") { id name } }');
+```
+
+Then query the data:
+
+```dart
+final result = await layer.query('{ User { name } }');
+// GraphQLResult(success: true, data: {User: {name: "Alice"}})
+```
+
+### Introspection
+
+```dart
+// List all types
+final schema = await layer.query('{ __schema { types { name kind } } }');
+
+// Inspect a specific type
+final userType = await layer.query('{ __type(name: "User") { name kind fields { name } } }');
+```
+
+### Field Aliases
+
+```dart
+final result = await layer.query('{ admin: User { name } }');
+// GraphQLResult(success: true, data: {admin: {name: "Alice"}})
+```
+
+### Error Handling
+
+```dart
+try {
+  final result = await layer.query('{ InvalidType { name } }');
+  if (!result.success) {
+    print('GraphQL errors: ${result.errors}');
+  }
+} on GraphQLLayerException catch (e) {
+  print('Layer error: ${e.message}');
+}
+```
+
+### Required Fields
+
+Fields marked with `!` in the schema are required for create mutations. Providing a create mutation without a required field returns an error:
+
+```dart
+layer.parseSchema('''
+  type User {
+    name: String!
+    age: Int
+  }
+''');
+
+// Missing required field "name" — fails with error
+final result = layer.mutateSync('mutation { createUser(age: "30") { id } }');
+// GraphQLResult(success: false, data: null, errors: ['Missing required fields: name'])
+
+// Providing required field — succeeds
+final result2 = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// GraphQLResult(success: true, data: {...}, errors: [])
+```
+
+Update mutations skip required field validation since updates are partial.
+
+### GraphQLResult Class
+
+- `bool success` - Whether the operation succeeded
+- `dynamic data` - The data returned by the operation
+- `List<String> errors` - Error messages, if any
+
+### GraphQLLayerException Class
+
+Thrown on layer-level errors (e.g., closed layer, failed promise).
+
+### Cleanup
+
+```dart
+layer.close();
+```
 
 ## Testing
 
@@ -249,97 +406,80 @@ export LD_LIBRARY_PATH=/path/to/WaveDB/build:$LD_LIBRARY_PATH  # Linux
 dart test
 ```
 
-## Benchmarks
+## Architecture
 
-Run performance benchmarks comparing Dart and Node.js:
+The bindings use Dart FFI with `NativeCallable.listener` to bridge C `promise_t` callbacks from the worker pool back to the Dart isolate's event loop. This enables true non-blocking async operations that dispatch work to the C worker pool and receive results via C promise resolution callbacks.
 
-```bash
-cd bindings/dart/benchmark
-./compare.sh
-```
+**Key components:**
+- `database.dart`: WaveDB class with async operations via C promise/pool
+- `async_bridge`: NativeCallable.listener + C promise_t bridge for async operations
+- `path.dart`: Dart ↔ path_t conversion
+- `identifier.dart`: Dart ↔ identifier_t conversion
+- `iterator.dart`: Stream-based iterator
+- `object_ops.dart`: Object flattening/reconstruction
 
-This will:
-1. Build the native library if needed
-2. Run Node.js benchmark
-3. Run Dart benchmark
-4. Display comparison results
+Async operations dispatch work to the C worker pool via `database_put`, `database_get`, `database_delete`, and `database_write_batch`, bridging C promise callbacks back to the Dart isolate through `NativeCallable.listener`.
 
-### Performance (Native C Library)
+## Performance
 
-Benchmarks run on Linux x86_64 with 50MB LRU cache:
+Benchmarks run on Linux x86_64:
 
-**Single-Threaded:**
-| Operation | Throughput | Avg Latency |
-|-----------|------------|-------------|
-| Put | 36,169 ops/sec | 27.6 µs |
-| Get | 70,772 ops/sec | 14.1 µs |
-| Batch | 27,944 ops/sec | 35.8 µs |
-| Mixed | 50,542 ops/sec | 19.8 µs |
+### Native C Library Performance
 
-**Concurrent (8 threads):**
-| Operation | Throughput |
-|-----------|------------|
-| Write | 148,767 ops/sec |
-| Read | 210,073 ops/sec |
-| Mixed | 142,025 ops/sec |
+**Single-Threaded Operations:**
 
-**Concurrent (16 threads):**
-| Operation | Throughput |
-|-----------|------------|
-| Write | 200,344 ops/sec |
-| Read | 209,424 ops/sec |
-| Mixed | 158,298 ops/sec |
+| Operation | Throughput | Avg Latency | P99 Latency |
+|-----------|------------|-------------|-------------|
+| Put | 36,169 ops/sec | 27.6 µs | 53.0 µs |
+| Get | 70,772 ops/sec | 14.1 µs | 112.6 µs |
+| Batch | 27,944 ops/sec | 35.8 µs | 89.1 µs |
+| Mixed | 50,542 ops/sec | 19.8 µs | 65.8 µs |
 
-### Dart FFI vs Node.js N-API
+**Concurrent Operations (Multi-Threaded):**
 
-| Operation | Dart FFI (ops/sec) | Node.js N-API (ops/sec) | Notes |
-|-----------|-------------------|-----------------------|-------|
-| putSync   | ~62,500 | ~56,000 | Similar performance |
-| getSync   | ~166,000 | ~260,000 | Node.js ~1.5x faster |
-| put async | ~50,000 | N/A | - |
-| get async | ~166,000 | N/A | - |
+| Threads | Write | Read | Mixed |
+|---------|-------|------|-------|
+| 1 | 26,839 ops/sec | 111,927 ops/sec | 50,090 ops/sec |
+| 2 | 64,908 ops/sec | 190,248 ops/sec | 84,652 ops/sec |
+| 4 | 147,573 ops/sec | 191,212 ops/sec | 148,334 ops/sec |
+| 8 | 148,767 ops/sec | 210,073 ops/sec | 142,025 ops/sec |
+| 16 | 200,344 ops/sec | 209,424 ops/sec | 158,298 ops/sec |
 
-*Benchmarks run on Linux x86_64. Results vary by platform and workload.*
+### Dart FFI Performance
 
-Both bindings provide excellent performance for most use cases. The Dart FFI is well-suited for Flutter applications requiring native database access.
+Benchmarks run on Dart 3.11.0 (linux_x64) with 10,000 iterations:
+
+**Async Operations (C promise/pool-based, non-blocking):**
+- `put`: ~1,028 ops/sec
+- `get`: ~69,400 ops/sec
+- `batch`: ~103,000 ops/sec (1,000 operations per batch)
+
+**Sync Operations (blocking, direct FFI calls):**
+- `putSync`: ~1,200 ops/sec
+- `getSync`: ~435,000 ops/sec
+
+### Comparison with Node.js
+
+| Operation | Dart FFI | Node.js N-API | Notes |
+|-----------|-----------|---------------|-------|
+| putSync | ~1,200 ops/sec | ~1,100 ops/sec | Similar |
+| getSync | ~435,000 ops/sec | ~133,000 ops/sec | Dart ~3x faster |
+| put async | ~1,028 ops/sec | ~896 ops/sec | Similar |
+| get async | ~69,400 ops/sec | ~46,500 ops/sec | Dart ~1.5x faster |
+| batch async | ~103,000 ops/sec | ~39,800 ops/sec | Dart ~2.6x faster |
+
+*Both bindings use the same C async API (promise_t + worker pool) for non-blocking operations.*
+
+**MVCC & WAL:**
+- Multi-Version Concurrency Control enables lock-free reads
+- Write-Ahead Logging ensures durability
+- Atomic transaction IDs with CLOCK_MONOTONIC for stable ordering
+- Optimized with atomic operations (no mutex contention)
 
 ## Known Limitations
 
-### getObject / getObjectSync
-Throws `NOT_SUPPORTED` - requires C scan API for reconstruction. Use `createReadStream` to iterate over entries and reconstruct objects manually.
-
 ### Reverse Iteration
 The `reverse` parameter in `createReadStream` is reserved for future use. The C API doesn't support reverse iteration yet.
-
-## Architecture
-
-```
-bindings/dart/
-├── lib/
-│   ├── wavedb.dart          # Public API exports
-│   ├── src.dart             # Internal exports
-│   └── src/
-│       ├── database.dart    # WaveDB main class
-│       ├── iterator.dart    # Stream-based iterator
-│       ├── exceptions.dart  # WaveDBException
-│       ├── path.dart        # PathConverter (Dart ↔ path_t)
-│       ├── identifier.dart  # IdentifierConverter (Dart ↔ identifier_t)
-│       ├── object_ops.dart  # Object flattening/reconstruction
-│       └── native/
-│           ├── types.dart   # FFI opaque types
-│           ├── wavedb_library.dart  # Library loader
-│           └── wavedb_bindings.dart # FFI bindings
-├── test/
-│   ├── wavedb_test.dart     # Integration tests
-│   ├── object_ops_test.dart # ObjectOps tests
-│   ├── conversion_test.dart # Converter tests
-│   └── library_test.dart   # Library loader tests
-├── example/
-│   └── example.dart         # Usage example
-└── benchmark/
-    ├── benchmark.dart       # Dart benchmark
-    └── compare.sh           # Comparison script
-```
 
 ## License
 

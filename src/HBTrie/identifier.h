@@ -117,10 +117,23 @@ size_t identifier_chunk_count(identifier_t* id);
 buffer_t* identifier_to_buffer(identifier_t* id);
 
 /**
+ * Get raw data pointer and length from an identifier.
+ *
+ * Reconstructs the original byte data by concatenating all chunks.
+ * The returned pointer is valid only while the identifier is alive.
+ * Caller must NOT free the returned pointer (it points into a heap buffer).
+ *
+ * @param id       Identifier to get data from
+ * @param out_len  Output: length of data in bytes
+ * @return Pointer to data, or NULL on failure. Caller must free the returned buffer.
+ */
+uint8_t* identifier_get_data(identifier_t* id, size_t* out_len);
+
+/**
  * Serialize an identifier to CBOR.
  *
- * Format: array of byte strings, one per chunk
- * [bstr(chunk0), bstr(chunk1), ...]
+ * Format: single byte string with original data
+ * bstr(original_data)
  *
  * @param id  Identifier to serialize
  * @return CBOR item or NULL on failure
@@ -130,7 +143,9 @@ cbor_item_t* identifier_to_cbor(identifier_t* id);
 /**
  * Deserialize an identifier from CBOR.
  *
- * @param item  CBOR item (array of byte strings)
+ * Accepts new format (single bytestring) and deprecated format (array of chunk bytestrings).
+ *
+ * @param item  CBOR item (bytestring or array of bytestrings)
  * @param chunk_size  Chunk size to use
  * @return New identifier or NULL on failure
  */

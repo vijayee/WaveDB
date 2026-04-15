@@ -117,6 +117,19 @@ int path_compare(path_t* a, path_t* b) {
   return 0;
 }
 
+size_t path_get_identifiers(const path_t* path, identifier_t** out, size_t max_out) {
+  if (path == NULL || out == NULL) return 0;
+
+  size_t count = (size_t)path->identifiers.length;
+  if (count > max_out) count = max_out;
+
+  for (size_t i = 0; i < count; i++) {
+    out[i] = path->identifiers.data[i];
+  }
+
+  return count;
+}
+
 cbor_item_t* path_to_cbor(path_t* path) {
   if (path == NULL) return NULL;
 

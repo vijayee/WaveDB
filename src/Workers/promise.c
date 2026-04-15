@@ -37,8 +37,8 @@ void promise_resolve(promise_t* promise, void* payload) {
 
 void promise_reject(promise_t* promise, async_error_t* error) {
   if (promise->reject == NULL) {
-    char err[100];
-    sprintf(err,"Unhandled Error -%s:%d %s", error->file, error->line, error->message);
+    char err[256];
+    snprintf(err, sizeof(err), "Unhandled Error - %s:%d %s", error->file, error->line, error->message);
     log_error(err);
     abort();
   }

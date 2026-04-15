@@ -29,8 +29,8 @@ typedef struct {
 /**
  * Serialize a B+tree node to a binary buffer.
  *
- * Format:
- *   - Magic byte (0xB3 for new format with level/is_bnode_child)
+ * Format (V2, magic 0xB4):
+ *   - Magic byte (0xB4 for V2 with inline child bnodes)
  *   - Level (uint16_t)
  *   - Number of entries (uint16_t)
  *   - For each entry:
@@ -44,11 +44,20 @@ typedef struct {
  *         - If not deleted: identifier length (uint32_t) + data
  *     - If has_value and !has_versions:
  *       - Identifier length (uint32_t) + data
- *     - If !has_value and is_bnode_child:
- *       - child_level (uint16_t) placeholder for recursive bnode
+ *     - If !has_value and is_bnode_child (V2 inline):
+ *       - Child bnode size (uint32_t)
+ *       - Child bnode data (recursively serialized bnode)
  *     - If !has_value and !is_bnode_child:
  *       - section_id (uint64_t)
  *       - block_index (uint64_t)
+ *
+ * Legacy format (V1, magic 0xB3):
+ *   Same as V2 except is_bnode_child entries use section_id + block_index
+ *   instead of inline child bnode data.
+ *
+ * Old format (no magic byte):
+ *   - num_entries (uint16_t)
+ *   - For each entry: chunk + has_value + value/section data
  *
  * @param node     B+tree node to serialize
  * @param chunk_size Size of each chunk in bytes

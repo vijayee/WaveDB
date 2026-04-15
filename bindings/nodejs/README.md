@@ -268,6 +268,133 @@ db.get('key', (err, value) => {
 });
 ```
 
+## GraphQL Schema Layer
+
+WaveDB includes a GraphQL layer that provides schema definition, queries, and mutations on top of the hierarchical key-value store.
+
+### Setup
+
+```javascript
+const { GraphQLLayer } = require('wavedb');
+
+const layer = new GraphQLLayer('/path/to/db', {
+  enablePersist: true,
+  chunkSize: 4,
+  workerThreads: 4,
+});
+```
+
+Pass `null` as the path for an in-memory database.
+
+### Define a Schema
+
+Use GraphQL Schema Definition Language (SDL) to define types:
+
+```javascript
+layer.parseSchema(`
+  type User {
+    name: String
+    age: Int
+    friends: [User]
+  }
+`);
+```
+
+### Queries
+
+**Sync:**
+
+```javascript
+const result = layer.querySync('{ User { name } }');
+// { success: true, data: { User: { name: null } }, errors: [] }
+```
+
+**Async:**
+
+```javascript
+const result = await layer.query('{ User { name } }');
+// { success: true, data: { User: { name: null } }, errors: [] }
+```
+
+### Mutations
+
+Create records with auto-generated IDs:
+
+```javascript
+// Sync
+const result = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// { success: true, data: { createUser: { id: "abc123", name: "Alice" } } }
+
+// Async
+const result = await layer.mutate('mutation { createUser(name: "Bob") { id name } }');
+```
+
+Then query the data:
+
+```javascript
+const result = await layer.query('{ User { name } }');
+// { success: true, data: { User: { name: "Alice" } } }
+```
+
+### Introspection
+
+```javascript
+// List all types
+const schema = await layer.query('{ __schema { types { name kind } } }');
+
+// Inspect a specific type
+const userType = await layer.query('{ __type(name: "User") { name kind fields { name } } }');
+```
+
+### Field Aliases
+
+```javascript
+const result = await layer.query('{ admin: User { name } }');
+// { admin: { name: "Alice" } }
+```
+
+### Error Handling
+
+```javascript
+try {
+  const result = await layer.query('{ InvalidType { name } }');
+  if (!result.success) {
+    console.error('GraphQL errors:', result.errors);
+  }
+} catch (err) {
+  console.error('Layer error:', err.message);
+}
+```
+
+### Required Fields
+
+Fields marked with `!` in the schema are required for create mutations. Providing a create mutation without a required field returns an error:
+
+```javascript
+layer.parseSchema(`
+  type User {
+    name: String!
+    age: Int
+  }
+`);
+
+// Missing required field "name" — fails with error
+const result = layer.mutateSync('mutation { createUser(age: "30") { id } }');
+// { success: false, data: null, errors: ['Missing required fields: name'] }
+
+// Providing required field — succeeds
+const result2 = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// { success: true, data: { createUser: { id: '1', name: 'Alice' } }, errors: [] }
+```
+
+Update mutations skip required field validation since updates are partial.
+
+### Cleanup
+
+```javascript
+layer.close();
+```
+
 ## Building from Source
 
 ### Prerequisites
@@ -308,19 +435,21 @@ npm run test:valgrind
 
 ## Architecture
 
-The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++ wrapper for N-API) with the AsyncWorker pattern for non-blocking operations.
+The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++ wrapper for N-API) with a `Napi::ThreadSafeFunction` bridge to the C `promise_t` and worker pool infrastructure for true async operations.
 
 **Key components:**
 - `binding.cpp`: Module initialization
-- `database.cc`: WaveDB class wrapper
+- `database.cc`: WaveDB class wrapper with async operations via C promise/pool
+- `async_bridge.cc`: ThreadSafeFunction + C promise_t bridge for async operations
 - `path.cc`: JavaScript ↔ path_t conversion
 - `identifier.cc`: JavaScript ↔ identifier_t conversion
-- `*_worker.cc`: Async workers for put/get/del/batch
 - `iterator.cc`: Stream iterator
+
+Async operations dispatch work to the C worker pool via `database_put`, `database_get`, `database_delete`, and `database_write_batch`, bridging C promise callbacks back to the Node.js main thread through `napi_threadsafe_function`.
 
 ## Performance
 
-Benchmarks run on Linux x86_64 with Node.js v20.5.1:
+Benchmarks run on Linux x86_64 with Node.js v24.14.1:
 
 ### Native C Library Performance
 
@@ -346,19 +475,16 @@ Benchmarks run on Linux x86_64 with Node.js v20.5.1:
 
 ### Node.js Bindings Performance
 
-Benchmarks run on Node.js v20.5.1 with 10,000 iterations:
+Benchmarks run on Node.js v24.14.1 with 10,000 iterations:
 
-**Async Operations (non-blocking, thread-pool based):**
-- `put`: ~44,000 ops/sec
-- `get`: ~70,000 ops/sec
+**Async Operations (C promise/pool-based, non-blocking):**
+- `put`: ~896 ops/sec
+- `get`: ~46,500 ops/sec
+- `batch`: ~39,800 ops/sec (1,000 operations per batch)
 
 **Sync Operations (blocking, direct C++ calls):**
-- `putSync`: ~83,000 ops/sec
-- `getSync`: ~468,000 ops/sec
-
-**Batch Operations:**
-- `batch`: ~72,000 ops/sec (1,000 operations per batch)
-- Recommended for bulk inserts: 10-100x faster than individual puts
+- `putSync`: ~1,100 ops/sec
+- `getSync`: ~133,000 ops/sec
 
 **Stream Operations:**
 - Internal buffer of 100 entries
@@ -368,7 +494,7 @@ Benchmarks run on Node.js v20.5.1 with 10,000 iterations:
 **Performance Tips:**
 - Use async operations for production (non-blocking event loop)
 - Use sync operations for initialization/migration scripts
-- Batch operations for bulk data loading
+- Batch operations for bulk data loading (10-100x faster than individual puts)
 - Streams for iterating over large datasets
 
 **MVCC & WAL:**

@@ -53,7 +53,7 @@ typedef struct {
     work_pool_t* pool;                  // Thread pool for async ops
     hierarchical_timing_wheel_t* wheel; // Timing wheel
     char* location;                      // Storage directory
-    size_t lru_size;                     // LRU cache max size
+    size_t lru_memory_mb;                // LRU cache max size in megabytes
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
@@ -75,8 +75,7 @@ typedef struct {
 /**
  * Default sizes
  */
-#define DATABASE_DEFAULT_LRU_SIZE 1000          // DEPRECATED: Use DATABASE_DEFAULT_LRU_MEMORY_MB
-#define DATABASE_DEFAULT_LRU_MEMORY_MB 50       // NEW: 50 MB default
+#define DATABASE_DEFAULT_LRU_MEMORY_MB 50       // 50 MB default
 #define DATABASE_DEFAULT_WAL_MAX_SIZE (128 * 1024)  // 128KB
 #define DATABASE_DEBOUNCE_WAIT_MS 100                // Wait 100ms before save
 #define DATABASE_DEBOUNCE_MAX_WAIT_MS 1000           // Force save after 1 second
@@ -226,6 +225,38 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result);
 int database_delete_sync(database_t* db, path_t* path);
 
 /**
+ * Atomically increment a numeric value at the given path.
+ *
+ * Reads the current value, increments by delta, and writes the result back.
+ * Uses sharded write locks for atomicity under concurrent access.
+ * If the path doesn't exist, starts from 0.
+ *
+ * @param db     Database to modify
+ * @param path   Path key (takes ownership)
+ * @param delta  Amount to increment by
+ * @return New value after increment, or -1 on error
+ */
+int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta);
+
+// Forward declaration for database iterator
+typedef struct database_iterator_t database_iterator_t;
+
+/**
+ * Start a database scan using string-based path bounds.
+ *
+ * Convenience wrapper that converts string bounds to path_t
+ * and calls database_scan_start.
+ *
+ * @param db     Database to scan
+ * @param start  Start path string (NULL = beginning)
+ * @param end    End path string (NULL = no upper bound)
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_scan_range(database_t* db,
+                                          const char* start,
+                                          const char* end);
+
+/**
  * Submit batch synchronously.
  *
  * @param db Database to modify
@@ -242,9 +273,6 @@ int database_write_batch_sync(database_t* db, batch_t* batch);
  * @param promise Promise to resolve with result
  */
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise);
-
-// Forward declaration for database iterator
-typedef struct database_iterator_t database_iterator_t;
 
 /**
  * Start a database scan.

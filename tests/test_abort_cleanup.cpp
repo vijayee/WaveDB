@@ -38,19 +38,31 @@ protected:
     }
 
     void TearDown() override {
-        // Force cleanup of queued work items (triggers abort path)
-        if (pool) {
-            work_pool_destroy(pool);
+        // Stop wheel and pool before destroying database
+        // to ensure no timer callbacks fire on freed memory.
+        if (wheel) {
+            hierarchical_timing_wheel_stop(wheel);
         }
 
-        // Destroy database
+        if (pool) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+        }
+
+        // Destroy database (WAL manager, LRU, trie, etc.)
         if (db) {
             database_destroy(db);
+            db = nullptr;
         }
 
-        // Destroy timing wheel
         if (wheel) {
             hierarchical_timing_wheel_destroy(wheel);
+            wheel = nullptr;
+        }
+
+        if (pool) {
+            work_pool_destroy(pool);
+            pool = nullptr;
         }
 
         // Clean up test directory

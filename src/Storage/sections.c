@@ -3,6 +3,7 @@
 //
 
 #include "sections.h"
+#include "../HBTrie/hbtrie.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -26,6 +27,7 @@ static void round_robin_save(void* ctx);
 static void sections_full(sections_t* sections, size_t section_id);
 static size_t sections_get_next_id(sections_t* sections);
 static void sections_free(sections_t* sections, size_t section_id);
+static void sections_defrag_check(void* ctx);
 
 // Helper: Get shard index for section_id
 static inline size_t get_shard(size_t section_id) {
@@ -142,12 +144,17 @@ static void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node
     if (node == lru->first) {
         return;
     }
+    if (node == lru->last) {
+        lru->last = node->previous;
+    }
     if (node->previous != NULL) {
         node->previous->next = node->next;
     }
     if (node->next != NULL) {
         node->next->previous = node->previous;
     }
+    node->next = lru->first;
+    node->previous = NULL;
     lru->first->previous = node;
     lru->first = node;
 }
@@ -338,6 +345,11 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
     sections->max_wait = max_wait;
     sections->section_concurrency = section_concurrency;
     sections->size = size;
+    sections->defrag_threshold = SECTIONS_DEFAULT_DEFRAG_THRESHOLD;
+
+    // Initialize defragmentation debouncer (fires after idle period with no write/dealloc activity)
+    sections->defrag_debouncer = debouncer_create(wheel, sections, sections_defrag_check, NULL,
+                                                   SECTIONS_DEFAULT_DEFRAG_IDLE_MS, 0);
 
     // Initialize transaction range
     sections->oldest_txn_id = (transaction_id_t){0, 0, 0};
@@ -414,8 +426,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
     } else {
         sections->next_id = 0;
     }
-    vec_deinit(files);
-    free(files);
+    destroy_files(files);
 
     // Create initial sections if needed
     while (sections->robin->size < sections->section_concurrency) {
@@ -430,17 +441,41 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
 }
 
 void sections_destroy(sections_t* sections) {
-    // Cleanup sharded checkout locks
+    // Flush and destroy defrag debouncer
+    if (sections->defrag_debouncer) {
+        debouncer_flush(sections->defrag_debouncer);
+        debouncer_destroy(sections->defrag_debouncer);
+    }
+
+    // Save transaction range before destroying paths
+    sections_save_txn_range(sections);
+
+    // Free checkout_t values from sharded checkout hashmaps
+    // (hashmap_cleanup only frees keys via registered key_free func, not values)
     for (size_t i = 0; i < CHECKOUT_LOCK_SHARDS; i++) {
+        checkout_t* checkout;
+        void* pos;
+        hashmap_foreach_data_safe(checkout, &sections->checkout_shards[i].sections, pos) {
+            if (checkout != NULL) {
+                if (checkout->section != NULL) {
+                    section_destroy(checkout->section);
+                }
+                free(checkout);
+            }
+        }
         platform_lock_destroy(&sections->checkout_shards[i].lock);
         hashmap_cleanup(&sections->checkout_shards[i].sections);
     }
 
     sections_lru_cache_destroy(sections->lru);
     round_robin_destroy(sections->robin);
+
+    // Release reference to wheel (NOT destroy — wheel is owned by database)
     if (sections->wheel != NULL) {
-        hierarchical_timing_wheel_destroy(sections->wheel);
+        refcounter_dereference((refcounter_t*) sections->wheel);
+        sections->wheel = NULL;
     }
+
     free(sections->meta_path);
     free(sections->data_path);
     free(sections->robin_path);
@@ -476,6 +511,11 @@ int sections_write(sections_t* sections, transaction_id_t txn_id, buffer_t* data
         sections_update_txn_range(sections, txn_id);
     }
 
+    // Reset defrag idle timer — section is actively being written to
+    if (sections->defrag_debouncer) {
+        debouncer_debounce(sections->defrag_debouncer);
+    }
+
     return result;
 }
 
@@ -494,6 +534,12 @@ int sections_deallocate(sections_t* sections, size_t section_id, size_t offset, 
         sections_free(sections, section_id);
     }
     sections_checkin(sections, section);
+
+    // Reset defrag idle timer — section is actively being deallocated
+    if (sections->defrag_debouncer) {
+        debouncer_debounce(sections->defrag_debouncer);
+    }
+
     return result;
 }
 
@@ -567,9 +613,11 @@ static void sections_full(sections_t* sections, size_t section_id) {
 }
 
 static void sections_free(sections_t* sections, size_t section_id) {
-    // Currently no-op - could implement section cleanup here
-    (void)sections;
-    (void)section_id;
+    // Re-add section to round-robin if it has free space and isn't already listed.
+    // This allows deallocated space to be reused for future writes.
+    if (!round_robin_contains(sections->robin, section_id)) {
+        round_robin_add(sections->robin, section_id);
+    }
 }
 
 void sections_update_txn_range(sections_t* sections, transaction_id_t txn_id) {
@@ -640,4 +688,105 @@ int sections_load_txn_range(sections_t* sections) {
 
     cbor_decref(&cbor);
     return 0;
+}
+
+// Remap context for defrag offset updates
+typedef struct {
+    size_t section_id;                // Section being defragmented
+    sections_t* sections;             // Sections pool (has trie_ref)
+} defrag_remap_ctx_t;
+
+// Callback: called by section_defragment for each moved record
+static void defrag_remap_callback(size_t old_offset, size_t new_offset, void* ctx) {
+    defrag_remap_ctx_t* remap_ctx = (defrag_remap_ctx_t*) ctx;
+    if (remap_ctx == NULL) return;
+
+    // Update hbtrie_node offsets that reference this (section_id, old_offset)
+    hbtrie_t* trie = remap_ctx->sections->trie_ref;
+    if (trie == NULL) return;
+
+    hbtrie_node_t* root = atomic_load(&trie->root);
+    if (root == NULL) return;
+
+    // Walk the trie to find nodes with matching section_id and block_index
+    vec_t(hbtrie_node_t*) stack;
+    vec_init(&stack);
+    vec_push(&stack, root);
+
+    while (stack.length > 0) {
+        hbtrie_node_t* node = vec_pop(&stack);
+        if (node == NULL) continue;
+
+        // Check if this node is in the defragmented section at the old offset
+        if (node->section_id == remap_ctx->section_id &&
+            node->block_index == old_offset) {
+            node->block_index = new_offset;
+        }
+
+        // Walk bnode tree to find child hbtrie_nodes
+        if (node->btree != NULL) {
+            vec_t(bnode_t*) bnode_stack;
+            vec_init(&bnode_stack);
+            vec_push(&bnode_stack, node->btree);
+
+            while (bnode_stack.length > 0) {
+                bnode_t* bn = vec_pop(&bnode_stack);
+                for (size_t j = 0; j < bnode_count(bn); j++) {
+                    bnode_entry_t* entry = bnode_get(bn, j);
+                    if (entry == NULL) continue;
+
+                    // Update child location entries pointing to this section
+                    if (entry->child_section_id == remap_ctx->section_id &&
+                        entry->child_block_index == old_offset) {
+                        entry->child_block_index = new_offset;
+                    }
+
+                    if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                        vec_push(&bnode_stack, entry->child_bnode);
+                    } else if (!entry->has_value && entry->child != NULL) {
+                        vec_push(&stack, entry->child);
+                    }
+                }
+            }
+            vec_deinit(&bnode_stack);
+        }
+    }
+    vec_deinit(&stack);
+}
+
+/**
+ * Idle-triggered defragmentation check.
+ *
+ * Called by the defrag debouncer after a period of inactivity
+ * (no writes or deallocations). Scans all cached sections
+ * and defragments any that exceed the fragmentation threshold.
+ */
+static void sections_defrag_check(void* ctx) {
+    sections_t* sections = (sections_t*) ctx;
+    if (sections == NULL || sections->lru == NULL) return;
+
+    // Walk the LRU cache and check each section for fragmentation
+    sections_lru_node_t* current = sections->lru->first;
+    while (current != NULL) {
+        section_t* section = current->value;
+        if (section != NULL && section_is_fragmented(section, sections->defrag_threshold)) {
+            // Section meets fragmentation threshold — defragment it.
+            defrag_remap_ctx_t remap_ctx = {
+                .section_id = section->id,
+                .sections = sections,
+            };
+            size_t remap_count = 0;
+            int rc = section_defragment(section, defrag_remap_callback, &remap_ctx, &remap_count);
+            if (rc == 0 && remap_count > 0) {
+                log_info("Defragmented section %zu: %zu records relocated",
+                         section->id, remap_count);
+            }
+
+            // Re-add section to round-robin if it has usable free space
+            if (rc == 0 && !round_robin_contains(sections->robin, section->id)) {
+                round_robin_add(sections->robin, section->id);
+            }
+        }
+        current = current->next;
+    }
 }

@@ -14,6 +14,7 @@
 
 // Global state for transaction ID generation
 static transaction_id_t g_current_txn_id = {0, 0, 0};
+static PLATFORMLOCKTYPE(g_txn_id_lock);
 static atomic_uint_fast64_t g_global_count = ATOMIC_VAR_INIT(0);
 
 // One-time initialization control
@@ -25,7 +26,7 @@ static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 // Actual initialization function (called once)
 static void transaction_id_do_init(void) {
-    // Nothing needed - atomic is already initialized
+    platform_lock_init(&g_txn_id_lock);
 }
 
 // Initialize global transaction ID generator (safe to call multiple times)
@@ -128,7 +129,9 @@ void transaction_id_advance_to(const transaction_id_t* target) {
     while (new_count > current) {
         if (atomic_compare_exchange_weak(&g_global_count, &current, new_count)) {
             // Successfully updated
+            platform_lock(&g_txn_id_lock);
             g_current_txn_id = *target;
+            platform_unlock(&g_txn_id_lock);
             break;
         }
         // Another thread updated current, retry the comparison

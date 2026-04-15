@@ -16,11 +16,11 @@ void platform_lock(CRITICAL_SECTION* lock) {
   EnterCriticalSection(lock);
 }
 
-void platform_rw_lock_r(PSRW* lock) {
+void platform_rw_lock_r(SRWLOCK* lock) {
   AcquireSRWLockShared(lock);
 }
 
-void platform_rw_lock_w(PSRW* lock) {
+void platform_rw_lock_w(SRWLOCK* lock) {
   AcquireSRWLockExclusive(lock);
 }
 
@@ -28,28 +28,28 @@ void platform_unlock(CRITICAL_SECTION* lock) {
   LeaveCriticalSection(lock);
 }
 
-void platform_rw_unlock_r(pthread_rwlock_t* lock) {
+void platform_rw_unlock_r(SRWLOCK* lock) {
   ReleaseSRWLockShared(lock);
 }
 
-void platform_rw_unlock_w(pthread_rwlock_t* lock) {
-  ReleaseSRWLockExclusive((lock);
+void platform_rw_unlock_w(SRWLOCK* lock) {
+  ReleaseSRWLockExclusive(lock);
 }
 
 void platform_lock_init(CRITICAL_SECTION* lock) {
   InitializeCriticalSection(lock);
 }
 
-void platform_rw_lock_init(pthread_rwlock_t* lock) {
+void platform_rw_lock_init(SRWLOCK* lock) {
   InitializeSRWLock(lock);
 }
 
 void platform_lock_destroy(CRITICAL_SECTION* lock) {
-  DeleteCriticalSection(lock, NULL);
+  DeleteCriticalSection(lock);
 }
 
-void platform_rw_lock_destroy(PSRWLOCK* lock) {
-
+void platform_rw_lock_destroy(SRWLOCK* lock) {
+  (void)lock;  // SRWLocks do not require explicit destruction
 }
 
 void platform_condition_init(CONDITION_VARIABLE* condition) {
@@ -61,7 +61,7 @@ void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* conditi
 }
 
 void platform_condition_destroy(CONDITION_VARIABLE* condition) {
-
+  (void)condition;  // Win32 Condition Variables do not require explicit destruction
 }
 void platform_signal_condition(CONDITION_VARIABLE* condition) {
    WakeConditionVariable(condition);

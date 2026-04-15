@@ -156,6 +156,134 @@ typedef DatabaseDeleteSync = int Function(
 );
 
 // ============================================================
+// C TYPEDEFS - Async Database Operations
+// ============================================================
+
+/// C signature: void database_put(
+///   database_t* db,
+///   path_t* path,
+///   identifier_t* value,
+///   promise_t* promise
+/// )
+typedef DatabasePutAsyncC = Void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
+  Pointer<promise_t> promise,
+);
+
+/// Dart signature for database_put (async)
+typedef DatabasePutAsync = void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: void database_get(
+///   database_t* db,
+///   path_t* path,
+///   promise_t* promise
+/// )
+typedef DatabaseGetAsyncC = Void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<promise_t> promise,
+);
+
+/// Dart signature for database_get (async)
+typedef DatabaseGetAsync = void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: void database_delete(
+///   database_t* db,
+///   path_t* path,
+///   promise_t* promise
+/// )
+typedef DatabaseDeleteAsyncC = Void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<promise_t> promise,
+);
+
+/// Dart signature for database_delete (async)
+typedef DatabaseDeleteAsync = void Function(
+  Pointer<database_t> db,
+  Pointer<path_t> path,
+  Pointer<promise_t> promise,
+);
+
+// ============================================================
+// C TYPEDEFS - Batch Operations
+// ============================================================
+
+/// C signature: batch_t* batch_create(size_t reserve_count)
+typedef BatchCreateC = Pointer<batch_t> Function(UintPtr reserve_count);
+
+/// Dart signature for batch_create
+typedef BatchCreate = Pointer<batch_t> Function(int reserve_count);
+
+/// C signature: int batch_add_put(
+///   batch_t* batch,
+///   path_t* path,
+///   identifier_t* value
+/// )
+typedef BatchAddPutC = Int32 Function(
+  Pointer<batch_t> batch,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
+);
+
+/// Dart signature for batch_add_put
+typedef BatchAddPut = int Function(
+  Pointer<batch_t> batch,
+  Pointer<path_t> path,
+  Pointer<identifier_t> value,
+);
+
+/// C signature: int batch_add_delete(
+///   batch_t* batch,
+///   path_t* path
+/// )
+typedef BatchAddDeleteC = Int32 Function(
+  Pointer<batch_t> batch,
+  Pointer<path_t> path,
+);
+
+/// Dart signature for batch_add_delete
+typedef BatchAddDelete = int Function(
+  Pointer<batch_t> batch,
+  Pointer<path_t> path,
+);
+
+/// C signature: void batch_destroy(batch_t* batch)
+typedef BatchDestroyC = Void Function(Pointer<batch_t> batch);
+
+/// Dart signature for batch_destroy
+typedef BatchDestroy = void Function(Pointer<batch_t> batch);
+
+/// C signature: void database_write_batch(
+///   database_t* db,
+///   batch_t* batch,
+///   promise_t* promise
+/// )
+typedef DatabaseWriteBatchAsyncC = Void Function(
+  Pointer<database_t> db,
+  Pointer<batch_t> batch,
+  Pointer<promise_t> promise,
+);
+
+/// Dart signature for database_write_batch (async)
+typedef DatabaseWriteBatchAsync = void Function(
+  Pointer<database_t> db,
+  Pointer<batch_t> batch,
+  Pointer<promise_t> promise,
+);
+
+// ============================================================
 // C TYPEDEFS - Path Operations
 // ============================================================
 
@@ -254,6 +382,12 @@ typedef IdentifierDestroyC = Void Function(Pointer<identifier_t> id);
 /// Dart signature for identifier_destroy
 typedef IdentifierDestroy = void Function(Pointer<identifier_t> id);
 
+/// C signature: void* refcounter_reference(refcounter_t* refcounter)
+typedef RefcounterReferenceC = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
+
+/// Dart signature for refcounter_reference
+typedef RefcounterReference = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
+
 /// C signature: buffer_t* identifier_to_buffer(identifier_t* id)
 typedef IdentifierToBufferC = Pointer<buffer_t> Function(
   Pointer<identifier_t> id,
@@ -311,6 +445,179 @@ typedef DatabaseScanEndC = Void Function(Pointer<database_iterator_t> iter);
 typedef DatabaseScanEnd = void Function(Pointer<database_iterator_t> iter);
 
 // ============================================================
+// C TYPEDEFS - GraphQL Layer
+// ============================================================
+
+/// C signature: graphql_layer_t* graphql_layer_create(
+///   const char* path,
+///   const graphql_layer_config_t* config
+/// )
+typedef GraphQLLayerCreateC = Pointer<graphql_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<graphql_layer_config_t> config,
+);
+
+/// Dart signature for graphql_layer_create
+typedef GraphQLLayerCreate = Pointer<graphql_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<graphql_layer_config_t> config,
+);
+
+/// C signature: void graphql_layer_destroy(graphql_layer_t* layer)
+typedef GraphQLLayerDestroyC = Void Function(Pointer<graphql_layer_t> layer);
+
+/// Dart signature for graphql_layer_destroy
+typedef GraphQLLayerDestroy = void Function(Pointer<graphql_layer_t> layer);
+
+/// C signature: graphql_layer_config_t* graphql_layer_config_default()
+typedef GraphQLLayerConfigDefaultC = Pointer<graphql_layer_config_t> Function();
+
+/// Dart signature for graphql_layer_config_default
+typedef GraphQLLayerConfigDefault = Pointer<graphql_layer_config_t> Function();
+
+/// C signature: void graphql_layer_config_destroy(graphql_layer_config_t* config)
+typedef GraphQLLayerConfigDestroyC = Void Function(Pointer<graphql_layer_config_t> config);
+
+/// Dart signature for graphql_layer_config_destroy
+typedef GraphQLLayerConfigDestroy = void Function(Pointer<graphql_layer_config_t> config);
+
+/// C signature: int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out)
+typedef GraphQLSchemaParseC = Int32 Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> sdl,
+  Pointer<Pointer<Utf8>> errorOut,
+);
+
+/// Dart signature for graphql_schema_parse
+typedef GraphQLSchemaParse = int Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> sdl,
+  Pointer<Pointer<Utf8>> errorOut,
+);
+
+/// C signature: graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query)
+typedef GraphQLQuerySyncC = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+);
+
+/// Dart signature for graphql_query_sync
+typedef GraphQLQuerySync = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+);
+
+/// C signature: graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutation)
+typedef GraphQLMutateSyncC = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+);
+
+/// Dart signature for graphql_mutate_sync
+typedef GraphQLMutateSync = Pointer<graphql_result_t> Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+);
+
+/// C signature: void graphql_result_destroy(graphql_result_t* result)
+typedef GraphQLResultDestroyC = Void Function(Pointer<graphql_result_t> result);
+
+/// Dart signature for graphql_result_destroy
+typedef GraphQLResultDestroy = void Function(Pointer<graphql_result_t> result);
+
+/// C signature: const char* graphql_result_to_json(graphql_result_t* result)
+typedef GraphQLResultToJsonC = Pointer<Utf8> Function(Pointer<graphql_result_t> result);
+
+/// Dart signature for graphql_result_to_json
+typedef GraphQLResultToJson = Pointer<Utf8> Function(Pointer<graphql_result_t> result);
+
+// ============================================================
+// C TYPEDEFS - Async GraphQL
+// ============================================================
+
+/// C signature: void graphql_query(
+///   graphql_layer_t* layer,
+///   const char* query,
+///   promise_t* promise,
+///   void* user_data
+/// )
+typedef GraphQLQueryAsyncC = Void Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+  Pointer<promise_t> promise,
+  Pointer<Void> user_data,
+);
+
+/// Dart signature for graphql_query (async)
+typedef GraphQLQueryAsync = void Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> query,
+  Pointer<promise_t> promise,
+  Pointer<Void> user_data,
+);
+
+/// C signature: void graphql_mutate(
+///   graphql_layer_t* layer,
+///   const char* mutation,
+///   promise_t* promise,
+///   void* user_data
+/// )
+typedef GraphQLMutateAsyncC = Void Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+  Pointer<promise_t> promise,
+  Pointer<Void> user_data,
+);
+
+/// Dart signature for graphql_mutate (async)
+typedef GraphQLMutateAsync = void Function(
+  Pointer<graphql_layer_t> layer,
+  Pointer<Utf8> mutation,
+  Pointer<promise_t> promise,
+  Pointer<Void> user_data,
+);
+
+// ============================================================
+// C TYPEDEFS - Promise
+// ============================================================
+
+/// C signature: promise_t* promise_create(
+///   void (*resolve)(void*, void*),
+///   void (*reject)(void*, async_error_t*),
+///   void* ctx
+/// )
+typedef PromiseCreateC = Pointer<promise_t> Function(
+  Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<Void>)>>,
+  Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<async_error_t>)>>,
+  Pointer<Void>,
+);
+
+/// Dart signature for promise_create
+typedef PromiseCreate = Pointer<promise_t> Function(
+  Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<Void>)>>,
+  Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<async_error_t>)>>,
+  Pointer<Void>,
+);
+
+/// C signature: void promise_destroy(promise_t* promise)
+typedef PromiseDestroyC = Void Function(Pointer<promise_t> promise);
+
+/// Dart signature for promise_destroy
+typedef PromiseDestroy = void Function(Pointer<promise_t> promise);
+
+/// C signature: void error_destroy(async_error_t* error)
+typedef ErrorDestroyC = Void Function(Pointer<async_error_t> error);
+
+/// Dart signature for error_destroy
+typedef ErrorDestroy = void Function(Pointer<async_error_t> error);
+
+/// C signature: const char* error_get_message(async_error_t* error)
+typedef ErrorGetMessageC = Pointer<Utf8> Function(Pointer<async_error_t> error);
+
+/// Dart signature for error_get_message
+typedef ErrorGetMessage = Pointer<Utf8> Function(Pointer<async_error_t> error);
+
+// ============================================================
 // WAVEDB NATIVE - FFI Bindings Wrapper
 // ============================================================
 
@@ -356,6 +663,32 @@ class WaveDBNative {
   static late final DatabaseDeleteSync _databaseDeleteSync = WaveDBLibrary.load()
       .lookupFunction<DatabaseDeleteSyncC, DatabaseDeleteSync>('database_delete_sync');
 
+  // Async database operations
+  static late final DatabasePutAsync _databasePutAsync = WaveDBLibrary.load()
+      .lookupFunction<DatabasePutAsyncC, DatabasePutAsync>('database_put');
+
+  static late final DatabaseGetAsync _databaseGetAsync = WaveDBLibrary.load()
+      .lookupFunction<DatabaseGetAsyncC, DatabaseGetAsync>('database_get');
+
+  static late final DatabaseDeleteAsync _databaseDeleteAsync = WaveDBLibrary.load()
+      .lookupFunction<DatabaseDeleteAsyncC, DatabaseDeleteAsync>('database_delete');
+
+  // Batch operations
+  static late final BatchCreate _batchCreate = WaveDBLibrary.load()
+      .lookupFunction<BatchCreateC, BatchCreate>('batch_create');
+
+  static late final BatchAddPut _batchAddPut = WaveDBLibrary.load()
+      .lookupFunction<BatchAddPutC, BatchAddPut>('batch_add_put');
+
+  static late final BatchAddDelete _batchAddDelete = WaveDBLibrary.load()
+      .lookupFunction<BatchAddDeleteC, BatchAddDelete>('batch_add_delete');
+
+  static late final BatchDestroy _batchDestroy = WaveDBLibrary.load()
+      .lookupFunction<BatchDestroyC, BatchDestroy>('batch_destroy');
+
+  static late final DatabaseWriteBatchAsync _databaseWriteBatchAsync = WaveDBLibrary.load()
+      .lookupFunction<DatabaseWriteBatchAsyncC, DatabaseWriteBatchAsync>('database_write_batch');
+
   // Path operations
   static late final PathCreate _pathCreate = WaveDBLibrary.load()
       .lookupFunction<PathCreateC, PathCreate>('path_create');
@@ -388,6 +721,9 @@ class WaveDBNative {
   static late final IdentifierDestroy _identifierDestroy = WaveDBLibrary.load()
       .lookupFunction<IdentifierDestroyC, IdentifierDestroy>('identifier_destroy');
 
+  static late final RefcounterReference _refcounterReference = WaveDBLibrary.load()
+      .lookupFunction<RefcounterReferenceC, RefcounterReference>('refcounter_reference');
+
   static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
       .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
 
@@ -400,6 +736,54 @@ class WaveDBNative {
 
   static late final DatabaseScanEnd _databaseScanEnd = WaveDBLibrary.load()
       .lookupFunction<DatabaseScanEndC, DatabaseScanEnd>('database_scan_end');
+
+  // GraphQL layer operations
+  static late final GraphQLLayerCreate _graphQLLayerCreate = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerCreateC, GraphQLLayerCreate>('graphql_layer_create');
+
+  static late final GraphQLLayerDestroy _graphQLLayerDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerDestroyC, GraphQLLayerDestroy>('graphql_layer_destroy');
+
+  static late final GraphQLLayerConfigDefault _graphQLLayerConfigDefault = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerConfigDefaultC, GraphQLLayerConfigDefault>('graphql_layer_config_default');
+
+  static late final GraphQLLayerConfigDestroy _graphQLLayerConfigDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLLayerConfigDestroyC, GraphQLLayerConfigDestroy>('graphql_layer_config_destroy');
+
+  static late final GraphQLSchemaParse _graphQLSchemaParse = WaveDBLibrary.load()
+      .lookupFunction<GraphQLSchemaParseC, GraphQLSchemaParse>('graphql_schema_parse');
+
+  static late final GraphQLQuerySync _graphQLQuerySync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLQuerySyncC, GraphQLQuerySync>('graphql_query_sync');
+
+  static late final GraphQLMutateSync _graphQLMutateSync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLMutateSyncC, GraphQLMutateSync>('graphql_mutate_sync');
+
+  static late final GraphQLResultDestroy _graphQLResultDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphQLResultDestroyC, GraphQLResultDestroy>('graphql_result_destroy');
+
+  static late final GraphQLResultToJson _graphQLResultToJson = WaveDBLibrary.load()
+      .lookupFunction<GraphQLResultToJsonC, GraphQLResultToJson>('graphql_result_to_json');
+
+  // Async GraphQL operations
+  static late final GraphQLQueryAsync _graphQLQueryAsync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLQueryAsyncC, GraphQLQueryAsync>('graphql_query');
+
+  static late final GraphQLMutateAsync _graphQLMutateAsync = WaveDBLibrary.load()
+      .lookupFunction<GraphQLMutateAsyncC, GraphQLMutateAsync>('graphql_mutate');
+
+  // Promise operations
+  static late final PromiseCreate _promiseCreate = WaveDBLibrary.load()
+      .lookupFunction<PromiseCreateC, PromiseCreate>('promise_create');
+
+  static late final PromiseDestroy _promiseDestroy = WaveDBLibrary.load()
+      .lookupFunction<PromiseDestroyC, PromiseDestroy>('promise_destroy');
+
+  static late final ErrorDestroy _errorDestroy = WaveDBLibrary.load()
+      .lookupFunction<ErrorDestroyC, ErrorDestroy>('error_destroy');
+
+  static late final ErrorGetMessage _errorGetMessage = WaveDBLibrary.load()
+      .lookupFunction<ErrorGetMessageC, ErrorGetMessage>('error_get_message');
 
   // ============================================================
   // PUBLIC API - Database Lifecycle
@@ -579,6 +963,78 @@ class WaveDBNative {
   }
 
   // ============================================================
+  // PUBLIC API - Async Database Operations
+  // ============================================================
+
+  /// Asynchronously put a value at the given path (dispatches to C worker pool)
+  static void databasePutAsync(
+    Pointer<database_t> db,
+    Pointer<path_t> path,
+    Pointer<identifier_t> value,
+    Pointer<promise_t> promise,
+  ) {
+    _databasePutAsync(db, path, value, promise);
+  }
+
+  /// Asynchronously get a value at the given path (dispatches to C worker pool)
+  static void databaseGetAsync(
+    Pointer<database_t> db,
+    Pointer<path_t> path,
+    Pointer<promise_t> promise,
+  ) {
+    _databaseGetAsync(db, path, promise);
+  }
+
+  /// Asynchronously delete a value at the given path (dispatches to C worker pool)
+  static void databaseDeleteAsync(
+    Pointer<database_t> db,
+    Pointer<path_t> path,
+    Pointer<promise_t> promise,
+  ) {
+    _databaseDeleteAsync(db, path, promise);
+  }
+
+  // ============================================================
+  // PUBLIC API - Batch Operations
+  // ============================================================
+
+  /// Create a write batch
+  static Pointer<batch_t> batchCreate([int reserveCount = 0]) {
+    return _batchCreate(reserveCount);
+  }
+
+  /// Add a PUT operation to a batch (ownership transfers on success)
+  static int batchAddPut(
+    Pointer<batch_t> batch,
+    Pointer<path_t> path,
+    Pointer<identifier_t> value,
+  ) {
+    return _batchAddPut(batch, path, value);
+  }
+
+  /// Add a DELETE operation to a batch (ownership transfers on success)
+  static int batchAddDelete(
+    Pointer<batch_t> batch,
+    Pointer<path_t> path,
+  ) {
+    return _batchAddDelete(batch, path);
+  }
+
+  /// Destroy a batch
+  static void batchDestroy(Pointer<batch_t> batch) {
+    _batchDestroy(batch);
+  }
+
+  /// Asynchronously submit a write batch (dispatches to C worker pool)
+  static void databaseWriteBatchAsync(
+    Pointer<database_t> db,
+    Pointer<batch_t> batch,
+    Pointer<promise_t> promise,
+  ) {
+    _databaseWriteBatchAsync(db, batch, promise);
+  }
+
+  // ============================================================
   // PUBLIC API - Path Operations
   // ============================================================
 
@@ -696,6 +1152,15 @@ class WaveDBNative {
     _identifierDestroy(id);
   }
 
+  /// Reference an identifier (increment refcount or consume yield)
+  ///
+  /// Since refcounter_t is the first member of identifier_t, we can
+  /// safely cast the pointer. This handles the CONSUME pattern:
+  /// if yield>0, it consumes the yield; otherwise it increments count.
+  static void identifierReference(Pointer<identifier_t> id) {
+    _refcounterReference(id.cast<refcounter_t>());
+  }
+
   /// Convert an identifier to a buffer containing the original data
   ///
   /// [id] - Identifier handle
@@ -751,5 +1216,176 @@ class WaveDBNative {
   /// [iter] - Iterator handle to destroy
   static void databaseScanEnd(Pointer<database_iterator_t> iter) {
     _databaseScanEnd(iter);
+  }
+
+  // ============================================================
+  // PUBLIC API - GraphQL Layer
+  // ============================================================
+
+  /// Create a GraphQL layer with its own database
+  ///
+  /// [path] - Database storage path (null for in-memory)
+  /// [config] - Configuration (nullptr for defaults)
+  ///
+  /// Returns a pointer to the GraphQL layer handle.
+  static Pointer<graphql_layer_t> graphQLLayerCreate(
+    String? path, {
+    Pointer<graphql_layer_config_t>? config,
+  }) {
+    final pathPtr = path != null ? path.toNativeUtf8() : nullptr;
+    try {
+      final layer = _graphQLLayerCreate(
+        pathPtr.cast(),
+        config ?? nullptr,
+      );
+      if (layer == nullptr) {
+        throw WaveDBException.ioError('graphql_layer_create', 'Failed to create GraphQL layer');
+      }
+      return layer;
+    } finally {
+      if (pathPtr != nullptr) {
+        calloc.free(pathPtr);
+      }
+    }
+  }
+
+  /// Destroy a GraphQL layer and free all resources
+  static void graphQLLayerDestroy(Pointer<graphql_layer_t> layer) {
+    _graphQLLayerDestroy(layer);
+  }
+
+  /// Get default GraphQL layer configuration
+  static Pointer<graphql_layer_config_t> graphQLLayerConfigDefault() {
+    return _graphQLLayerConfigDefault();
+  }
+
+  /// Destroy a GraphQL layer configuration
+  static void graphQLLayerConfigDestroy(Pointer<graphql_layer_config_t> config) {
+    _graphQLLayerConfigDestroy(config);
+  }
+
+  /// Parse a GraphQL schema definition (SDL)
+  ///
+  /// Returns 0 on success, non-zero on error.
+  /// If [errorOut] is provided, it receives the error message (caller must free).
+  static int graphQLSchemaParse(
+    Pointer<graphql_layer_t> layer,
+    String sdl, {
+    Pointer<Pointer<Utf8>>? errorOut,
+  }) {
+    final sdlPtr = sdl.toNativeUtf8();
+    try {
+      return _graphQLSchemaParse(layer, sdlPtr.cast(), errorOut ?? nullptr);
+    } finally {
+      calloc.free(sdlPtr);
+    }
+  }
+
+  /// Execute a GraphQL query synchronously
+  ///
+  /// Returns a pointer to the result. Caller must destroy with graphQLResultDestroy.
+  static Pointer<graphql_result_t> graphQLQuerySync(
+    Pointer<graphql_layer_t> layer,
+    String query,
+  ) {
+    final queryPtr = query.toNativeUtf8();
+    try {
+      return _graphQLQuerySync(layer, queryPtr.cast());
+    } finally {
+      calloc.free(queryPtr);
+    }
+  }
+
+  /// Execute a GraphQL mutation synchronously
+  ///
+  /// Returns a pointer to the result. Caller must destroy with graphQLResultDestroy.
+  static Pointer<graphql_result_t> graphQLMutateSync(
+    Pointer<graphql_layer_t> layer,
+    String mutation,
+  ) {
+    final mutationPtr = mutation.toNativeUtf8();
+    try {
+      return _graphQLMutateSync(layer, mutationPtr.cast());
+    } finally {
+      calloc.free(mutationPtr);
+    }
+  }
+
+  /// Destroy a GraphQL result
+  static void graphQLResultDestroy(Pointer<graphql_result_t> result) {
+    _graphQLResultDestroy(result);
+  }
+
+  /// Convert a GraphQL result to a JSON string
+  ///
+  /// Returns a pointer to a null-terminated UTF-8 string.
+  /// Caller must call malloc.free() on the returned pointer.
+  static Pointer<Utf8> graphQLResultToJson(Pointer<graphql_result_t> result) {
+    return _graphQLResultToJson(result);
+  }
+
+  // ============================================================
+  // PUBLIC API - Async GraphQL
+  // ============================================================
+
+  /// Execute a GraphQL query asynchronously via the C worker pool
+  ///
+  /// The caller provides a promise with resolve/reject callbacks.
+  static void graphQLQueryAsync(
+    Pointer<graphql_layer_t> layer,
+    String query,
+    Pointer<promise_t> promise,
+  ) {
+    final queryPtr = query.toNativeUtf8();
+    try {
+      _graphQLQueryAsync(layer, queryPtr.cast(), promise, nullptr);
+    } finally {
+      calloc.free(queryPtr);
+    }
+  }
+
+  /// Execute a GraphQL mutation asynchronously via the C worker pool
+  ///
+  /// The caller provides a promise with resolve/reject callbacks.
+  static void graphQLMutateAsync(
+    Pointer<graphql_layer_t> layer,
+    String mutation,
+    Pointer<promise_t> promise,
+  ) {
+    final mutationPtr = mutation.toNativeUtf8();
+    try {
+      _graphQLMutateAsync(layer, mutationPtr.cast(), promise, nullptr);
+    } finally {
+      calloc.free(mutationPtr);
+    }
+  }
+
+  // ============================================================
+  // PUBLIC API - Promise
+  // ============================================================
+
+  /// Create a C promise with the given resolve/reject callbacks and context
+  static Pointer<promise_t> promiseCreate(
+    Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<Void>)>> resolve,
+    Pointer<NativeFunction<Void Function(Pointer<Void>, Pointer<async_error_t>)>> reject,
+    Pointer<Void> ctx,
+  ) {
+    return _promiseCreate(resolve, reject, ctx);
+  }
+
+  /// Destroy a C promise
+  static void promiseDestroy(Pointer<promise_t> promise) {
+    _promiseDestroy(promise);
+  }
+
+  /// Destroy a C async error
+  static void errorDestroy(Pointer<async_error_t> error) {
+    _errorDestroy(error);
+  }
+
+  /// Get the error message from an async_error_t.
+  /// Returns a pointer to the internal string (do not free).
+  static Pointer<Utf8> errorGetMessage(Pointer<async_error_t> error) {
+    return _errorGetMessage(error);
   }
 }

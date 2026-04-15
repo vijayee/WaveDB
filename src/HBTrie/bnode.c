@@ -3,6 +3,7 @@
 //
 
 #include "bnode.h"
+#include "../Storage/sections.h"
 #include <stdatomic.h>
 #include "bs_array.h"
 #include "chunk.h"
@@ -355,9 +356,77 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
 
   // Move entries from mid to end to right node
   // The entry at 'mid' becomes the first entry of right node
+  // We must properly share key/value refcounts since both the left node's
+  // hidden entries and the right node's entries will point to the same objects.
   for (size_t i = mid; i < (size_t)node->entries.length; i++) {
-    bnode_entry_t entry = node->entries.data[i];
-    bnode_insert(right, &entry);
+    bnode_entry_t* src = &node->entries.data[i];
+    bnode_entry_t new_entry = {0};
+
+    // Share the key (increment refcount)
+    bnode_entry_set_key(&new_entry, bnode_entry_get_key(src));
+
+    // Copy other fields
+    new_entry.has_value = src->has_value;
+    new_entry.has_versions = src->has_versions;
+    new_entry.is_bnode_child = src->is_bnode_child;
+    new_entry.value_txn_id = src->value_txn_id;
+
+    if (src->has_value) {
+      if (src->has_versions && src->versions != NULL) {
+        // MVCC version chain - transfer pointer (version chain owns its refs)
+        new_entry.versions = src->versions;
+      } else if (src->value != NULL) {
+        // Legacy value - share reference (increment refcount)
+        new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)src->value);
+      }
+      // Copy trie_child if present (entry has both value and child)
+      new_entry.trie_child = src->trie_child;
+    } else if (src->is_bnode_child && src->child_bnode != NULL) {
+      new_entry.child_bnode = src->child_bnode;
+    } else if (src->child != NULL) {
+      new_entry.child = src->child;
+    }
+
+    // Copy path chunk counts if present
+    if (src->has_value && src->path_chunk_counts.data != NULL) {
+      bnode_entry_set_path_chunk_counts(&new_entry,
+          src->path_chunk_counts.data,
+          (size_t)src->path_chunk_counts.length);
+    }
+
+    // Copy storage location fields
+    new_entry.child_section_id = src->child_section_id;
+    new_entry.child_block_index = src->child_block_index;
+
+    // Insert into right node
+    bnode_insert(right, &new_entry);
+  }
+
+  // Destroy keys and values of the hidden entries in the left node
+  // (they're now owned by the right node's copies, which hold proper references)
+  for (size_t i = mid; i < (size_t)node->entries.length; i++) {
+    bnode_entry_t* entry = &node->entries.data[i];
+    // Destroy key (the right node's copy has its own reference via chunk_share)
+    bnode_entry_destroy_key(entry);
+    if (entry->has_value) {
+      if (entry->has_versions && entry->versions != NULL) {
+        // Version chain - clear pointer (right node now owns it)
+        entry->versions = NULL;
+      } else if (entry->value != NULL) {
+        // Legacy value - dereference our copy (right node has its own reference)
+        identifier_destroy(entry->value);
+        entry->value = NULL;
+      }
+    }
+    // Clear child pointers so bnode_destroy won't double-free
+    entry->child = NULL;
+    entry->child_bnode = NULL;
+    entry->trie_child = NULL;
+    // Free path_chunk_counts data (right node's copy has its own allocation)
+    if (entry->path_chunk_counts.data != NULL) {
+      vec_deinit(&entry->path_chunk_counts);
+      entry->path_chunk_counts.data = NULL;
+    }
   }
 
   // Truncate left node to entries before mid
@@ -510,7 +579,8 @@ int version_entry_add(version_entry_t** versions,
   return 0;
 }
 
-size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id) {
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id,
+                         sections_t* storage) {
   if (versions == NULL || *versions == NULL) return 0;
 
   size_t removed_count = 0;
@@ -536,6 +606,12 @@ size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_
       }
       if (to_remove->next != NULL) {
         to_remove->next->prev = to_remove->prev;
+      }
+
+      // Deallocate section storage for the removed version's value
+      if (storage != NULL && to_remove->value_section_id != 0) {
+        sections_deallocate(storage, to_remove->value_section_id,
+                            to_remove->value_offset, to_remove->value_data_size);
       }
 
       version_entry_destroy(to_remove);

@@ -67,6 +67,7 @@ typedef struct {
     uint64_t idle_threshold_ms;          // Compaction idle trigger (default 10s)
     uint64_t compact_interval_ms;        // Compaction interval (default 60s)
     size_t max_file_size;                // Max file size before seal (default 128KB)
+    size_t max_sealed_wals;              // Max sealed WALs before writes block (default 10, 0 = unlimited)
 } wal_config_t;
 
 /**
@@ -106,6 +107,7 @@ struct wal_manager {
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
     hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
+    size_t sealed_count;                 // Number of sealed WAL files not yet compacted
 };
 
 /**
@@ -123,6 +125,7 @@ typedef struct {
 #define WAL_DEFAULT_IDLE_THRESHOLD_MS 10000
 #define WAL_DEFAULT_COMPACT_INTERVAL_MS 60000
 #define WAL_DEFAULT_MAX_FILE_SIZE (128 * 1024)
+#define WAL_DEFAULT_MAX_SEALED_WALS 10
 
 /**
  * Create WAL manager
@@ -170,6 +173,13 @@ int wal_manager_recover(wal_manager_t* manager, void* db);
  * Compact sealed WAL files
  */
 int compact_wal_files(wal_manager_t* manager);
+
+/**
+ * Seal all active thread-local WALs and compact all sealed WALs.
+ * After this, all WAL entries are in COMPACTED files and will be
+ * skipped by wal_manager_recover() on next database creation.
+ */
+int wal_manager_seal_and_compact(wal_manager_t* manager);
 
 /**
  * Flush pending operations

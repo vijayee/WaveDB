@@ -241,8 +241,8 @@ section_t* section_create(char* path, char* meta_path, size_t size, size_t id) {
     refcounter_init((refcounter_t*) section);
     platform_lock_init(&section->lock);
 
-    char section_id[20];
-    sprintf(section_id, "%lu", id);
+    char section_id[24];
+    snprintf(section_id, sizeof(section_id), "%lu", id);
     section->fd = -1;
     section->path = path_join(path, section_id);
     section->meta_path = path_join(meta_path, section_id);
@@ -347,6 +347,16 @@ uint8_t section_full(section_t* section) {
     return result;
 }
 
+uint8_t section_can_fit(section_t* section, size_t required_bytes) {
+    uint8_t result;
+    platform_lock(&section->lock);
+    // Check if any fragment can accommodate the required size
+    size_t offset;
+    result = fragment_list_find_fit(section->fragments, required_bytes, &offset) == 0;
+    platform_unlock(&section->lock);
+    return result;
+}
+
 // Write variable-size record: [transaction_id (24B)] [data_size (8B)] [data]
 int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, size_t* offset, uint8_t* full) {
     platform_lock(&section->lock);
@@ -356,7 +366,9 @@ int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, s
 
     // Find space
     if (section_next_offset(section, total_bytes, offset)) {
-        *full = section->fragments->count == 0;
+        // Section cannot fit this write. Check if it's truly full
+        // (no fragments at all) or just fragmented (fragments too small).
+        *full = section->fragments->count == 0 || section->fragments->total_free_space < total_bytes;
         platform_unlock(&section->lock);
         return 1;  // No space
     }
@@ -370,7 +382,7 @@ int section_write(section_t* section, transaction_id_t txn_id, buffer_t* data, s
 #endif
         if (section->fd < 0) {
             _section_deallocate(section, *offset, total_bytes);
-            *full = section->fragments->count == 0;
+            *full = section->fragments->count == 0 || section->fragments->total_free_space < total_bytes;
             platform_unlock(&section->lock);
             return 2;
         }
@@ -537,4 +549,267 @@ void section_flush(section_t* section) {
         section_save_fragments(section);
     }
     platform_unlock(&section->lock);
+}
+
+// Helper: check if an offset range is entirely within a free fragment
+static int offset_in_free_fragments(fragment_list_t* fragments, size_t offset, size_t total_bytes) {
+    size_t end = offset + total_bytes - 1;
+    for (size_t i = 0; i < fragments->count; i++) {
+        fragment_t* frag = &fragments->fragments[i];
+        if (offset >= frag->start && end <= frag->end) {
+            return 1;  // This record is in a free fragment (deallocated)
+        }
+    }
+    return 0;
+}
+
+uint8_t section_is_fragmented(section_t* section, double threshold_ratio) {
+    uint8_t result;
+    platform_lock(&section->lock);
+    if (section->size == 0) {
+        platform_unlock(&section->lock);
+        return 0;
+    }
+    double free_ratio = (double)section->fragments->total_free_space / (double)section->size;
+    result = (free_ratio >= threshold_ratio) ? 1 : 0;
+    platform_unlock(&section->lock);
+    return result;
+}
+
+int section_defragment(section_t* section,
+                       void (*remap_cb)(size_t old_offset, size_t new_offset, void* ctx),
+                       void* remap_ctx,
+                       size_t* remap_count) {
+    if (section == NULL) return -1;
+
+    platform_lock(&section->lock);
+
+    // Open file if needed
+    if (section->fd == -1) {
+#ifdef _WIN32
+        section->fd = _open(section->path, _O_RDWR | _O_BINARY | _O_CREAT, 0644);
+#else
+        section->fd = open(section->path, O_RDWR | O_CREAT, 0644);
+#endif
+        if (section->fd < 0) {
+            platform_unlock(&section->lock);
+            return -2;
+        }
+    }
+
+    // Get current file size
+    off_t file_size = lseek(section->fd, 0, SEEK_END);
+    if (file_size <= 0) {
+        platform_unlock(&section->lock);
+        if (remap_count) *remap_count = 0;
+        return 0;  // Empty or unseekable — nothing to defragment
+    }
+
+    // Build a snapshot of free fragments for checking dead records.
+    // Copy the fragment data so we can check without holding the list stable.
+    size_t frag_count = section->fragments->count;
+    fragment_t* frag_snapshot = NULL;
+    if (frag_count > 0) {
+        frag_snapshot = malloc(frag_count * sizeof(fragment_t));
+        if (frag_snapshot == NULL) {
+            platform_unlock(&section->lock);
+            return -3;
+        }
+        memcpy(frag_snapshot, section->fragments->fragments, frag_count * sizeof(fragment_t));
+    }
+
+    // Scan the file sequentially, reading record headers to find live records
+    typedef struct {
+        size_t offset;      // Original offset
+        size_t total_bytes;  // Total record size (header + data)
+    } live_record_t;
+
+    // We don't know how many records there are, so use a dynamic array
+    size_t live_cap = 64;
+    size_t live_count = 0;
+    live_record_t* live_records = malloc(live_cap * sizeof(live_record_t));
+    if (live_records == NULL) {
+        free(frag_snapshot);
+        platform_unlock(&section->lock);
+        return -3;
+    }
+
+    size_t scan_offset = 0;
+    while (scan_offset < (size_t)file_size) {
+        // Read transaction_id header (24 bytes) + data_size (8 bytes) = 32 bytes
+        uint8_t header[32];
+        if (lseek(section->fd, scan_offset, SEEK_SET) != (off_t)scan_offset) {
+            break;  // Can't seek — stop scanning
+        }
+        ssize_t hdr_read = read(section->fd, header, 32);
+        if (hdr_read != 32) {
+            break;  // Can't read full header — stop scanning
+        }
+
+        uint64_t data_size = read_uint64(header + 24);
+        size_t total_bytes = 24 + 8 + data_size;
+
+        // Check if this record is in a free fragment (deallocated)
+        int is_dead = 0;
+        if (frag_snapshot != NULL) {
+            size_t rec_end = scan_offset + total_bytes - 1;
+            for (size_t i = 0; i < frag_count; i++) {
+                if (scan_offset >= frag_snapshot[i].start && rec_end <= frag_snapshot[i].end) {
+                    is_dead = 1;
+                    break;
+                }
+            }
+        }
+
+        if (!is_dead) {
+            // Live record — track it
+            if (live_count >= live_cap) {
+                live_cap *= 2;
+                live_record_t* new_arr = realloc(live_records, live_cap * sizeof(live_record_t));
+                if (new_arr == NULL) {
+                    free(live_records);
+                    free(frag_snapshot);
+                    platform_unlock(&section->lock);
+                    return -3;
+                }
+                live_records = new_arr;
+            }
+            live_records[live_count].offset = scan_offset;
+            live_records[live_count].total_bytes = total_bytes;
+            live_count++;
+        }
+
+        scan_offset += total_bytes;
+    }
+
+    free(frag_snapshot);
+
+    // No live records, or all records already at offset 0 contiguously — nothing to do
+    if (live_count == 0) {
+        free(live_records);
+        // Section is entirely free — replace fragments with single fragment covering whole section
+        fragment_list_destroy(section->fragments);
+        section->fragments = fragment_list_create();
+        fragment_t* whole = fragment_create(0, section->size - 1);
+        fragment_list_insert(section->fragments, whole);
+        section->meta_dirty = 1;
+        platform_unlock(&section->lock);
+        if (remap_count) *remap_count = 0;
+        return 0;
+    }
+
+    // Check if already contiguous (no gaps between live records starting at offset 0)
+    int already_contiguous = 1;
+    size_t expected_offset = 0;
+    for (size_t i = 0; i < live_count; i++) {
+        if (live_records[i].offset != expected_offset) {
+            already_contiguous = 0;
+            break;
+        }
+        expected_offset += live_records[i].total_bytes;
+    }
+
+    if (already_contiguous) {
+        free(live_records);
+        // Already compact — just rebuild fragment list for the tail
+        fragment_list_destroy(section->fragments);
+        section->fragments = fragment_list_create();
+        if (expected_offset < section->size) {
+            fragment_t* tail = fragment_create(expected_offset, section->size - 1);
+            fragment_list_insert(section->fragments, tail);
+        }
+        section->meta_dirty = 1;
+        platform_unlock(&section->lock);
+        if (remap_count) *remap_count = 0;
+        return 0;
+    }
+
+    // Need to compact: read each live record and write it contiguously
+    // Read the entire file into memory for efficient compaction
+    size_t buf_size = (size_t)file_size;
+    uint8_t* file_buf = malloc(buf_size);
+    if (file_buf == NULL) {
+        free(live_records);
+        platform_unlock(&section->lock);
+        return -3;
+    }
+
+    // Read entire file
+    if (lseek(section->fd, 0, SEEK_SET) != 0) {
+        free(file_buf);
+        free(live_records);
+        platform_unlock(&section->lock);
+        return -4;
+    }
+    ssize_t total_read = read(section->fd, file_buf, buf_size);
+    if ((size_t)total_read != buf_size) {
+        free(file_buf);
+        free(live_records);
+        platform_unlock(&section->lock);
+        return -4;
+    }
+
+    // Write live records contiguously from the beginning
+    size_t write_offset = 0;
+    size_t moved_count = 0;
+
+    for (size_t i = 0; i < live_count; i++) {
+        size_t old_off = live_records[i].offset;
+        size_t rec_size = live_records[i].total_bytes;
+
+        if (old_off != write_offset) {
+            // Move record to new position
+            memmove(file_buf + write_offset, file_buf + old_off, rec_size);
+
+            // Notify caller of offset change
+            if (remap_cb) {
+                remap_cb(old_off, write_offset, remap_ctx);
+            }
+            moved_count++;
+        }
+
+        write_offset += rec_size;
+    }
+
+    // Write the compacted data back to the file
+    if (lseek(section->fd, 0, SEEK_SET) != 0) {
+        free(file_buf);
+        free(live_records);
+        platform_unlock(&section->lock);
+        return -4;
+    }
+    ssize_t written = write(section->fd, file_buf, write_offset);
+    if ((size_t)written != write_offset) {
+        free(file_buf);
+        free(live_records);
+        platform_unlock(&section->lock);
+        return -4;
+    }
+
+    // Truncate the file to the new size
+#ifdef _WIN32
+    // On Windows, use _chsize to truncate
+    _chsize(section->fd, write_offset);
+#else
+    if (ftruncate(section->fd, write_offset) != 0) {
+        log_warn("Failed to truncate section file after defragmentation");
+    }
+#endif
+
+    free(file_buf);
+    free(live_records);
+
+    // Rebuild fragment list with single free fragment for the tail
+    fragment_list_destroy(section->fragments);
+    section->fragments = fragment_list_create();
+    if (write_offset < section->size) {
+        fragment_t* tail = fragment_create(write_offset, section->size - 1);
+        fragment_list_insert(section->fragments, tail);
+    }
+
+    section->meta_dirty = 1;
+    platform_unlock(&section->lock);
+
+    if (remap_count) *remap_count = moved_count;
+    return 0;
 }

@@ -164,6 +164,19 @@ typedef struct {
 } checkout_shard_t;
 
 /**
+ * Default defragmentation idle threshold in milliseconds.
+ * Section must be idle (no writes/deallocations) for this long
+ * before defragmentation is considered.
+ */
+#define SECTIONS_DEFAULT_DEFRAG_IDLE_MS 30000  // 30 seconds
+
+/**
+ * Default free space ratio threshold for triggering defragmentation.
+ * Sections with less free space than this ratio are not defragmented.
+ */
+#define SECTIONS_DEFAULT_DEFRAG_THRESHOLD 0.5  // 50%
+
+/**
  * sections_t - Pool of sections with LRU cache and checkout management.
  *
  * Manages multiple section files for storing variable-size records.
@@ -184,6 +197,13 @@ typedef struct sections_t {
     size_t wait;                     // Debounce wait time
     size_t max_wait;                 // Max debounce wait time
     hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
+
+    // Defragmentation scheduling
+    debouncer_t* defrag_debouncer;   // Idle-triggered defrag timer
+    double defrag_threshold;          // Free space ratio to trigger defrag (0.0-1.0)
+
+    // Trie reference for defrag offset remapping (set by database.c)
+    struct hbtrie_t* trie_ref;        // Reference to trie for updating node offsets after defrag
 
     transaction_id_t oldest_txn_id; // Oldest transaction since last compaction
     transaction_id_t newest_txn_id; // Newest transaction written to disk

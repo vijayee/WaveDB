@@ -9,17 +9,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-// Cached debug flag - initialized once on first use
-static int debug_chunk_flag = -1;  // -1 = not initialized, 0 = off, 1 = on
-
-// Check and cache the debug flag
-static int get_debug_chunk_flag(void) {
-    if (debug_chunk_flag == -1) {
-        debug_chunk_flag = getenv("WAVEDB_DEBUG_CHUNK") ? 1 : 0;
-    }
-    return debug_chunk_flag;
-}
-
 chunk_t* chunk_create(const void* data, size_t chunk_size) {
   if (chunk_size == 0) return NULL;
 
@@ -87,20 +76,6 @@ int chunk_compare(chunk_t* a, chunk_t* b) {
   size_t size_a = a->size;
   size_t size_b = b->size;
   size_t min_size = size_a < size_b ? size_a : size_b;
-
-  // Debug logging for WAL recovery (cached flag - no getenv per call)
-  if (get_debug_chunk_flag()) {
-    fprintf(stderr, "CHUNK_COMPARE: size_a=%zu, size_b=%zu\n", size_a, size_b);
-    fprintf(stderr, "  Chunk A: ");
-    for (size_t i = 0; i < size_a && i < 8; i++) {
-      fprintf(stderr, "%02x ", a->data[i]);
-    }
-    fprintf(stderr, "\n  Chunk B: ");
-    for (size_t i = 0; i < size_b && i < 8; i++) {
-      fprintf(stderr, "%02x ", b->data[i]);
-    }
-    fprintf(stderr, "\n");
-  }
 
   int cmp = memcmp(a->data, b->data, min_size);
   if (cmp != 0) return cmp;

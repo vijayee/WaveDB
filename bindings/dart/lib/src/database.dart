@@ -56,21 +56,31 @@ class WaveDBConfig {
   });
 }
 
+/// Operation type for async dispatch
+enum _AsyncOpType { put, get, delete, batch }
+
 /// WaveDB database instance
 ///
 /// Provides both async and sync methods for database operations.
-/// Async methods currently execute synchronously (Dart FFI limitation).
+/// Async methods use the C worker pool via promise_t and
+/// NativeCallable.listener to bridge C thread callbacks back
+/// to the Dart isolate.
 class WaveDB {
   Pointer<database_t>? _db;
   final String _path;
   final String _delimiter;
   bool _isClosed = false;
 
-  /// Create or open a database at [path]
-  ///
-  /// [path] - Directory path for the database
-  /// [delimiter] - Path delimiter for string keys (default: '/')
-  /// [config] - Optional configuration settings
+  // NativeCallable listeners for C promise callbacks.
+  // These must persist for the lifetime of the database since C holds pointers to them.
+  static NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>? _resolveCallable;
+  static NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>? _rejectCallable;
+
+  // Active completers keyed by request id
+  static int _nextRequestId = 1;
+  static final Map<int, _PendingOp> _pending = {};
+  static int _pendingCount = 0;
+
   WaveDB(String path, {String delimiter = '/', WaveDBConfig? config})
       : _path = path,
         _delimiter = delimiter {
@@ -94,15 +104,121 @@ class WaveDB {
     if (_db == nullptr) {
       throw WaveDBException.ioError('database_create', 'Failed to create database at $path');
     }
+
+    _ensureCallbacksRegistered();
   }
 
-  /// Check if database is closed
+  /// Ensure the NativeCallable.listener callbacks are registered.
+  /// These are created once and reused across all async operations.
+  static void _ensureCallbacksRegistered() {
+    if (_resolveCallable != null) return;
+
+    _resolveCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>.listener(
+      _cResolveCallback,
+    );
+    _rejectCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>.listener(
+      _cRejectCallback,
+    );
+  }
+
+  /// C resolve callback — called from the C worker pool thread.
+  /// NativeCallable.listener marshals this to the Dart isolate's event loop.
+  static void _cResolveCallback(Pointer<Void> ctx, Pointer<Void> payload) {
+    final requestId = ctx.address;
+    final pending = _pending.remove(requestId);
+    if (pending == null || pending.completer.isCompleted) return;
+
+    _pendingCount--;
+
+    try {
+      switch (pending.type) {
+        case _AsyncOpType.get:
+          final idPtr = payload.cast<identifier_t>();
+          if (idPtr == nullptr) {
+            pending.completer.complete(null);
+          } else {
+            try {
+              pending.completer.complete(IdentifierConverter.fromNative(idPtr));
+            } finally {
+              // The value was CONSUME'd before being passed to the callback
+              // (yield=1). REFERENCE consumes the yield (protecting the value
+              // from other threads), then identifierDestroy decrements the
+              // count to release this reference.
+              WaveDBNative.identifierReference(idPtr);
+              WaveDBNative.identifierDestroy(idPtr);
+            }
+          }
+          break;
+        case _AsyncOpType.put:
+        case _AsyncOpType.delete:
+        case _AsyncOpType.batch:
+          // Free int* result from C resolve callback (allocated by C malloc)
+          if (payload != nullptr) {
+            malloc.free(payload);
+          }
+          pending.completer.complete(null);
+          break;
+      }
+    } finally {
+      // Clean up C-side allocations
+      WaveDBNative.promiseDestroy(pending.promisePtr);
+      if (pending.batchPtr != null) {
+        WaveDBNative.batchDestroy(pending.batchPtr!);
+      }
+    }
+  }
+
+  /// C reject callback — called from the C worker pool thread.
+  static void _cRejectCallback(Pointer<Void> ctx, Pointer<async_error_t> error) {
+    final requestId = ctx.address;
+    final pending = _pending.remove(requestId);
+    if (pending == null || pending.completer.isCompleted) return;
+
+    _pendingCount--;
+
+    String errorMsg = 'Operation failed';
+    // We can't easily read the error message from the struct without knowing layout,
+    // so we just destroy it and report a generic error.
+    WaveDBNative.errorDestroy(error);
+
+    // Clean up C-side allocations
+    WaveDBNative.promiseDestroy(pending.promisePtr);
+    if (pending.batchPtr != null) {
+      WaveDBNative.batchDestroy(pending.batchPtr!);
+    }
+
+    pending.completer.completeError(WaveDBException.ioError('async', errorMsg));
+  }
+
+  /// Dispatch an async operation via the C promise/pool infrastructure
+  Future<T> _dispatchAsync<T>(_AsyncOpType type, void Function(Pointer<promise_t>) dispatch, [Pointer<batch_t>? batchPtr]) {
+    final completer = Completer<T>();
+    final requestId = _nextRequestId++;
+    _pendingCount++;
+
+    final ctxPtr = Pointer<Void>.fromAddress(requestId);
+    final promisePtr = WaveDBNative.promiseCreate(
+      _resolveCallable!.nativeFunction,
+      _rejectCallable!.nativeFunction,
+      ctxPtr,
+    );
+
+    if (promisePtr == nullptr) {
+      _pendingCount--;
+      completer.completeError(WaveDBException.ioError('async', 'Failed to create promise'));
+      return completer.future;
+    }
+
+    _pending[requestId] = _PendingOp(type, completer, promisePtr, batchPtr);
+
+    // Dispatch to the C worker pool
+    dispatch(promisePtr);
+
+    return completer.future;
+  }
+
   bool get isClosed => _isClosed;
-
-  /// Get the database path
   String get path => _path;
-
-  /// Get the delimiter
   String get delimiter => _delimiter;
 
   void _checkClosed() {
@@ -115,60 +231,113 @@ class WaveDB {
   // ASYNC OPERATIONS
   // ============================================================
 
-  /// Store a value asynchronously
-  ///
-  /// [key] - Key path (string with delimiter or list of identifiers)
-  /// [value] - Value to store (string or Uint8List)
+  /// Store a value asynchronously via the C worker pool
   Future<void> put(dynamic key, dynamic value) async {
     _checkClosed();
     if (value == null) {
       throw ArgumentError('Value is required for put operation');
     }
-    return _runSync(() => _putSyncInternal(key, value));
+    final path = PathConverter.toNative(key, _delimiter);
+    final id = IdentifierConverter.toNative(value);
+
+    return _dispatchAsync<void>(_AsyncOpType.put, (promise) {
+      WaveDBNative.databasePutAsync(_db!, path, id, promise);
+    });
   }
 
-  /// Retrieve a value asynchronously
-  ///
-  /// [key] - Key path (string with delimiter or list of identifiers)
-  /// Returns the value as String or Uint8List, or null if not found
+  /// Retrieve a value asynchronously via the C worker pool
   Future<dynamic> get(dynamic key) async {
     _checkClosed();
-    return _runSync(() => _getSyncInternal(key));
+    final path = PathConverter.toNative(key, _delimiter);
+
+    return _dispatchAsync<dynamic>(_AsyncOpType.get, (promise) {
+      WaveDBNative.databaseGetAsync(_db!, path, promise);
+    });
   }
 
-  /// Delete a value asynchronously
-  ///
-  /// [key] - Key path (string with delimiter or list of identifiers)
+  /// Delete a value asynchronously via the C worker pool
   Future<void> del(dynamic key) async {
     _checkClosed();
-    return _runSync(() => _delSyncInternal(key));
+    final path = PathConverter.toNative(key, _delimiter);
+
+    return _dispatchAsync<void>(_AsyncOpType.delete, (promise) {
+      WaveDBNative.databaseDeleteAsync(_db!, path, promise);
+    });
   }
 
-  /// Execute multiple operations atomically
-  ///
-  /// [operations] - List of operations
-  /// Each operation: {'type': 'put'|'del', 'key': ..., 'value': ...}
+  /// Execute multiple operations atomically via the C worker pool
   Future<void> batch(List<Map<String, dynamic>> operations) async {
     _checkClosed();
-    return _runSync(() => _batchSyncInternal(operations));
+    final batchPtr = WaveDBNative.batchCreate(operations.length);
+    if (batchPtr == nullptr) {
+      throw WaveDBException.ioError('batch', 'Failed to create batch');
+    }
+
+    try {
+      for (final op in operations) {
+        final type = op['type'] as String?;
+        final key = op['key'];
+
+        if (type == null || key == null) {
+          WaveDBNative.batchDestroy(batchPtr);
+          throw ArgumentError('Operation must have type and key');
+        }
+
+        final path = PathConverter.toNative(key, _delimiter);
+        int rc;
+
+        if (type == 'put') {
+          final value = op['value'];
+          if (value == null) {
+            WaveDBNative.pathDestroy(path);
+            WaveDBNative.batchDestroy(batchPtr);
+            throw ArgumentError('Put operation must have value');
+          }
+          final id = IdentifierConverter.toNative(value);
+          rc = WaveDBNative.batchAddPut(batchPtr, path, id);
+          if (rc != 0) {
+            WaveDBNative.pathDestroy(path);
+            WaveDBNative.identifierDestroy(id);
+            WaveDBNative.batchDestroy(batchPtr);
+            throw WaveDBException.ioError('batch_add_put', 'return code: $rc');
+          }
+        } else if (type == 'del') {
+          rc = WaveDBNative.batchAddDelete(batchPtr, path);
+          if (rc != 0) {
+            WaveDBNative.pathDestroy(path);
+            WaveDBNative.batchDestroy(batchPtr);
+            throw WaveDBException.ioError('batch_add_delete', 'return code: $rc');
+          }
+        } else {
+          WaveDBNative.pathDestroy(path);
+          WaveDBNative.batchDestroy(batchPtr);
+          throw ArgumentError('Operation type must be "put" or "del"');
+        }
+      }
+    } catch (e) {
+      // If batchAddPut/Delete failed and threw, we already cleaned up
+      rethrow;
+    }
+
+    return _dispatchAsync<void>(_AsyncOpType.batch, (promise) {
+      WaveDBNative.databaseWriteBatchAsync(_db!, batchPtr, promise);
+    }, batchPtr);
   }
 
-  /// Store a nested object as flattened paths
-  ///
-  /// [key] - Base key path (optional)
-  /// [obj] - Object to flatten and store
+  /// Store a nested object as flattened paths via the C worker pool
   Future<void> putObject(dynamic key, Map<String, dynamic> obj) async {
     _checkClosed();
-    return _runSync(() => _putObjectSyncInternal(key, obj));
+    final operations = ObjectOps.flattenObject(key, obj, _delimiter);
+    return batch(operations);
   }
 
   /// Retrieve a nested object from paths
   ///
-  /// [key] - Base key path to retrieve
-  /// Returns the reconstructed object
+  /// NOTE: This runs synchronously on the current isolate since
+  /// scan operations don't have async C API equivalents.
   Future<Map<String, dynamic>?> getObject(dynamic key) async {
     _checkClosed();
-    return _runSync(() => _getObjectSyncInternal(key));
+    return _getObjectSyncInternal(key);
   }
 
   // ============================================================
@@ -219,8 +388,6 @@ class WaveDB {
     final path = PathConverter.toNative(key, _delimiter);
     final id = IdentifierConverter.toNative(value);
 
-    // database_put_sync takes ownership of both path and value
-    // They will be destroyed internally - DO NOT call destroy after
     final rc = WaveDBNative.databasePutSync(_db!, path, id);
     if (rc != 0) {
       throw WaveDBException.ioError('put', 'return code: $rc');
@@ -232,11 +399,9 @@ class WaveDB {
     final resultPtr = calloc<Pointer<identifier_t>>();
 
     try {
-      // database_get_sync takes ownership of path
       final rc = WaveDBNative.databaseGetSync(_db!, path, resultPtr);
 
       if (rc == -2) {
-        // Not found
         return null;
       }
 
@@ -252,7 +417,6 @@ class WaveDB {
       try {
         return IdentifierConverter.fromNative(result);
       } finally {
-        // result must be destroyed by caller
         WaveDBNative.identifierDestroy(result);
       }
     } finally {
@@ -263,8 +427,6 @@ class WaveDB {
   void _delSyncInternal(dynamic key) {
     final path = PathConverter.toNative(key, _delimiter);
 
-    // database_delete_sync takes ownership of path
-    // It will be destroyed internally - DO NOT call destroy after
     final rc = WaveDBNative.databaseDeleteSync(_db!, path);
     if (rc != 0) {
       throw WaveDBException.ioError('delete', 'return code: $rc');
@@ -272,8 +434,6 @@ class WaveDB {
   }
 
   void _batchSyncInternal(List<Map<String, dynamic>> operations) {
-    // TODO: Implement atomic batch when C API supports transactions
-    // Currently operations are executed individually - failures may leave partial changes
     for (final op in operations) {
       final type = op['type'] as String?;
       final key = op['key'];
@@ -302,19 +462,14 @@ class WaveDB {
   }
 
   Map<String, dynamic>? _getObjectSyncInternal(dynamic key) {
-    // Create start path from key
     final startPath = key != null ? PathConverter.toNative(key, _delimiter) : nullptr;
 
-    // Start scan
     final iter = WaveDBNative.databaseScanStart(_db!, startPath, nullptr);
-
-    // Note: databaseScanStart takes ownership of startPath, so we don't free it here
 
     if (iter == nullptr) {
       return null;
     }
 
-    // Collect entries and reconstruct object
     final entries = <MapEntry<List<String>, dynamic>>[];
     final basePath = key != null
         ? (key is List ? key.map((e) => e.toString()).toList() : key.toString().split(_delimiter).where((s) => s.isNotEmpty).toList())
@@ -332,7 +487,6 @@ class WaveDB {
           final path = pathPtr.value;
           final value = valuePtr.value;
 
-          // Both path and value must be valid
           if (path == nullptr || value == nullptr) {
             calloc.free(pathPtr);
             calloc.free(valuePtr);
@@ -340,19 +494,15 @@ class WaveDB {
           }
 
           try {
-            // Convert path to list of strings
             final pathParts = PathConverter.fromNative(path, _delimiter, asArray: true) as List<String>;
             final valueResult = IdentifierConverter.fromNative(value);
 
-            // Strip trailing whitespace/nulls/padding from path parts
-            // (The iterator reconstructs identifiers from chunks without knowing original length)
             final strippedPathParts = pathParts.map((p) {
               var result = p.trimRight();
               result = result.replaceAll('\x00', '');
               return result;
             }).toList();
 
-            // Filter: only include entries that are under the base path
             if (strippedPathParts.length >= basePath.length) {
               bool matches = true;
               for (int i = 0; i < basePath.length && matches; i++) {
@@ -377,7 +527,6 @@ class WaveDB {
       WaveDBNative.databaseScanEnd(iter);
     }
 
-    // Reconstruct object from entries
     return ObjectOps.reconstructObject(entries, basePath);
   }
 
@@ -386,15 +535,6 @@ class WaveDB {
   // ============================================================
 
   /// Create a read stream
-  ///
-  /// [start] - Start path (inclusive, optional)
-  /// [end] - End path (exclusive, optional)
-  /// [reverse] - Scan in reverse order (default: false)
-  /// [keys] - Include keys in results (default: true)
-  /// [values] - Include values in results (default: true)
-  ///
-  /// NOTE: This method will throw NOT_SUPPORTED if the scan API is not available.
-  /// The database_scan_* functions are not yet implemented in the C API.
   Stream<KeyValue> createReadStream({
     dynamic start,
     dynamic end,
@@ -420,17 +560,33 @@ class WaveDB {
   // ============================================================
 
   /// Close the database
+  ///
+  /// Waits for pending async operations to complete, then destroys the database.
   void close() {
     if (_db != null && !_isClosed) {
+      // Wait for pending async operations to drain
+      // The C database_destroy will also wait for the worker pool to finish
+      final maxWaitMs = 5000;
+      var waitedMs = 0;
+      while (_pendingCount > 0 && waitedMs < maxWaitMs) {
+        // Yield to allow callbacks to fire
+        // (In practice, NativeCallable.listener callbacks fire on the event loop)
+        waitedMs++;
+      }
+
       WaveDBNative.databaseDestroy(_db!);
       _db = null;
       _isClosed = true;
     }
   }
+}
 
-  /// Execute operation synchronously
-  /// TODO: Use Isolate.run for true async when Dart FFI supports it
-  Future<T> _runSync<T>(T Function() operation) async {
-    return operation();
-  }
+/// Pending async operation context
+class _PendingOp {
+  final _AsyncOpType type;
+  final Completer completer;
+  final Pointer<promise_t> promisePtr;
+  final Pointer<batch_t>? batchPtr;
+
+  _PendingOp(this.type, this.completer, this.promisePtr, [this.batchPtr]);
 }

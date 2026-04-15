@@ -8,6 +8,7 @@
 #include "../Util/allocator.h"
 #include "../Util/memory_pool.h"
 #include "../Util/log.h"
+#include "../Storage/sections.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -142,7 +143,9 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
     left_entry.is_bnode_child = 1;
     left_entry.child_bnode = old_root;
     left_entry.has_value = 0;
-    bnode_insert(new_root, &left_entry);
+    if (bnode_insert(new_root, &left_entry) != 0) {
+      bnode_entry_destroy_key(&left_entry);
+    }
   }
 
   bnode_entry_t right_entry = {0};
@@ -151,15 +154,22 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   right_entry.is_bnode_child = 1;
   right_entry.child_bnode = current_right;
   right_entry.has_value = 0;
-  bnode_insert(new_root, &right_entry);
+  if (bnode_insert(new_root, &right_entry) != 0) {
+    bnode_entry_destroy_key(&right_entry);
+  }
 
   // Update the hbtrie_node
   hb_node->btree = new_root;
   hb_node->btree_height = atomic_load(&old_root->level) + 1;
 
+  // Release our reference to the split key:
+  // - If current_split_key != split_key, it's a separate allocation from bnode_split
+  // - If current_split_key == split_key, we created an extra reference with chunk_share
+  //   on line 150; the caller will destroy the original, and the entry shares it.
   if (current_split_key != split_key) {
-    // current_split_key was already consumed by the new root entry
-    // (we shared it, so we don't need to destroy it separately)
+    chunk_destroy(current_split_key);
+  } else {
+    chunk_destroy(split_key);  // Release the extra chunk_share reference from line 150
   }
 
   return 0;
@@ -212,7 +222,9 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
       left_entry.is_bnode_child = 1;
       left_entry.child_bnode = old_root;
       left_entry.has_value = 0;
-      bnode_insert(new_root, &left_entry);
+      if (bnode_insert(new_root, &left_entry) != 0) {
+        bnode_entry_destroy_key(&left_entry);
+      }
     }
 
     // Add right child
@@ -221,7 +233,10 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     right_entry.is_bnode_child = 1;
     right_entry.child_bnode = right_bnode;
     right_entry.has_value = 0;
-    bnode_insert(new_root, &right_entry);
+    if (bnode_insert(new_root, &right_entry) != 0) {
+      bnode_entry_destroy_key(&right_entry);
+    }
+    chunk_destroy(split_key);  // Release our reference after sharing into entry
 
     hb_node->btree = new_root;
     hb_node->btree_height = atomic_load(&old_root->level) + 1;
@@ -276,7 +291,8 @@ void hbtrie_destroy(hbtrie_t* trie) {
   if (trie == NULL) return;
 
   refcounter_dereference((refcounter_t*)trie);
-  if (refcounter_count((refcounter_t*)trie) == 0) {
+  uint16_t count = refcounter_count((refcounter_t*)trie);
+  if (count == 0) {
     hbtrie_node_t* root = atomic_load(&trie->root);
     if (root != NULL) {
       hbtrie_node_destroy(root);
@@ -298,6 +314,7 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
 
   // Initialize storage tracking (in-memory by default)
   node->storage = NULL;          // NULL = in-memory only
+  node->data_size = 0;           // 0 = not in section
   node->is_loaded = 1;           // Newly created nodes are in memory
   node->is_dirty = 0;            // Not modified yet
 
@@ -342,6 +359,9 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
             } else if (!entry->has_value && entry->child != NULL) {
               // Child hbtrie_node - add to node collection
               vec_push(&nodes, entry->child);
+            } else if (entry->has_value && entry->trie_child != NULL) {
+              // Entry has both value and trie child - collect the child
+              vec_push(&nodes, entry->trie_child);
             }
           }
         }
@@ -353,6 +373,13 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     // Destroy nodes in reverse order (bottom-up: children before parents)
     for (int i = nodes.length - 1; i >= 0; i--) {
       hbtrie_node_t* current = nodes.data[i];
+
+      // Deallocate from section storage if this node was persisted
+      if (current->storage != NULL && current->section_id != 0) {
+        sections_deallocate(current->storage, current->section_id,
+                            current->block_index, current->data_size);
+      }
+
       if (current->btree != NULL) {
         bnode_destroy_tree(current->btree);
       }
@@ -416,6 +443,8 @@ static bnode_t* bnode_tree_copy(bnode_t* root) {
             entry->path_chunk_counts.data,
             (size_t)entry->path_chunk_counts.length);
       }
+      // Copy trie_child (set to NULL; caller fills in via hbtrie_node_copy)
+      new_entry.trie_child = NULL;
     } else if (entry->child != NULL) {
       // Child hbtrie_node - copy handled at the hbtrie level
       // Set to NULL here; caller will fill in via hbtrie_node_copy
@@ -467,6 +496,9 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
       } else if (!src_entry->has_value && src_entry->child != NULL) {
         // Recursively copy the child hbtrie_node
         dst_entry->child = hbtrie_node_copy(src_entry->child);
+      } else if (src_entry->has_value && src_entry->trie_child != NULL) {
+        // Entry has both value and trie child - copy the trie child
+        dst_entry->trie_child = hbtrie_node_copy(src_entry->trie_child);
       }
     }
   }
@@ -477,6 +509,7 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   copy->storage = node->storage;
   copy->section_id = node->section_id;
   copy->block_index = node->block_index;
+  copy->data_size = node->data_size;
   copy->is_loaded = node->is_loaded;
   copy->is_dirty = node->is_dirty;
 
@@ -509,42 +542,110 @@ hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
 void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
   if (cursor == NULL || trie == NULL) return;
 
-  cursor->current = atomic_load(&trie->root);
-  cursor->identifier_index = 0;
-  cursor->chunk_pos = 0;
+  cursor->trie = trie;
+  cursor->stack_depth = 0;
+  cursor->finished = 0;
 
-  (void)path; // Path is for future use in more complex traversals
+  // Push root node onto stack
+  hbtrie_node_t* root = atomic_load(&trie->root);
+  if (root != NULL) {
+    cursor->stack[0].node = root;
+    cursor->stack[0].entry_index = 0;
+    cursor->stack_depth = 1;
+  } else {
+    cursor->finished = 1;
+  }
+
+  (void)path; // Path is for future seek support
+}
+
+hbtrie_cursor_t* hbtrie_cursor_create(hbtrie_t* trie, path_t* path) {
+  hbtrie_cursor_t* cursor = get_clear_memory(sizeof(hbtrie_cursor_t));
+  if (cursor == NULL) return NULL;
+  hbtrie_cursor_init(cursor, trie, path);
+  return cursor;
+}
+
+void hbtrie_cursor_destroy(hbtrie_cursor_t* cursor) {
+  if (cursor == NULL) return;
+  // Stack nodes are referenced by the trie; no dereference needed here
+  free(cursor);
 }
 
 int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return -1;
+  if (cursor == NULL || cursor->finished) return -1;
 
-  // For now, this is a simple placeholder
-  // Full implementation would iterate through all chunks in the current node
-  cursor->chunk_pos++;
+  while (cursor->stack_depth > 0) {
+    hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+    hbtrie_node_t* node = frame->node;
 
-  return 0;
+    if (node == NULL || node->btree == NULL) {
+      // Empty node, pop and continue
+      cursor->stack_depth--;
+      continue;
+    }
+
+    bnode_t* btree = node->btree;
+    size_t count = bnode_count(btree);
+
+    while (frame->entry_index < count) {
+      bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
+      frame->entry_index++;
+
+      if (entry == NULL) continue;
+
+      // When an entry has a trie_child (has_value=1 with child), push it for traversal
+      if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        cursor->stack[cursor->stack_depth].node = entry->trie_child;
+        cursor->stack[cursor->stack_depth].entry_index = 0;
+        cursor->stack_depth++;
+      }
+
+      if (entry->has_value) {
+        // Found an entry with a value — return it
+        return 0;
+      }
+
+      if (entry->child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        // Descend into child node
+        cursor->stack[cursor->stack_depth].node = entry->child;
+        cursor->stack[cursor->stack_depth].entry_index = 0;
+        cursor->stack_depth++;
+        // Will process child on next outer loop iteration
+        break;
+      }
+      // No value and no child — skip
+    }
+
+    // If inner loop didn't push a child, pop this frame
+    if (frame->entry_index >= count) {
+      cursor->stack_depth--;
+    }
+  }
+
+  cursor->finished = 1;
+  return -1;
 }
 
 int hbtrie_cursor_at_end(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return 1;
-
-  // Check if we've processed all chunks
-  return cursor->chunk_pos >= bnode_count(cursor->current->btree);
+  if (cursor == NULL) return 1;
+  return cursor->finished;
 }
 
-chunk_t* hbtrie_cursor_get_chunk(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL || cursor->current == NULL) return NULL;
+bnode_entry_t* hbtrie_cursor_get_entry(hbtrie_cursor_t* cursor) {
+  if (cursor == NULL || cursor->stack_depth == 0 || cursor->finished) return NULL;
 
-  bnode_entry_t* entry = bnode_get(cursor->current->btree, cursor->chunk_pos);
-  if (entry == NULL) return NULL;
+  hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+  if (frame->entry_index == 0) return NULL;
 
-  return bnode_entry_get_key(entry);
+  // entry_index was already advanced by next(), so look at previous
+  bnode_entry_t* entry = bnode_get(frame->node->btree, frame->entry_index - 1);
+  return entry;
 }
 
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor) {
-  if (cursor == NULL) return NULL;
-  return cursor->current;
+  if (cursor == NULL || cursor->stack_depth == 0) return NULL;
+  return cursor->stack[cursor->stack_depth - 1].node;
 }
 
 // Forward declaration for recursive serialization
@@ -683,6 +784,11 @@ static cbor_item_t* bnode_to_cbor(bnode_t* root) {
     } else if (entry->child != NULL) {
       // Child hbtrie_node
       cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->child);
+      cbor_array_push(entry_item, child_cbor);
+      cbor_decref(&child_cbor);
+    } else if (entry->trie_child != NULL) {
+      // Entry has both value and trie_child - serialize the trie_child
+      cbor_item_t* child_cbor = hbtrie_node_to_cbor(entry->trie_child);
       cbor_array_push(entry_item, child_cbor);
       cbor_decref(&child_cbor);
     } else {
@@ -1362,7 +1468,11 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           }
         } else if (is_last_chunk) {
           // End of this identifier, move to next HBTrie level
-          if (entry == NULL || entry->has_value || entry->child == NULL) {
+          hbtrie_node_t* next = NULL;
+          if (entry != NULL) {
+            next = entry->has_value ? entry->trie_child : entry->child;
+          }
+          if (next == NULL) {
             return NULL;
           }
 
@@ -1374,11 +1484,15 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
             break;
           }
 
-          current = entry->child;
+          current = next;
           // Continue to next identifier
         } else {
           // Intermediate chunk within this identifier
-          if (entry == NULL || entry->has_value || entry->child == NULL) {
+          hbtrie_node_t* next = NULL;
+          if (entry != NULL) {
+            next = entry->has_value ? entry->trie_child : entry->child;
+          }
+          if (next == NULL) {
             return NULL;
           }
 
@@ -1390,7 +1504,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
             break;
           }
 
-          current = entry->child;
+          current = next;
           // Continue to next chunk in this identifier
         }
       }
@@ -1595,6 +1709,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1621,12 +1736,30 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
-          // Entry exists but has value instead of child
-          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          // Entry exists with a value but we need to descend further.
+          // This happens when key1 is stored and key10 (sharing the 'key1'
+          // chunk prefix) needs to go deeper. Use trie_child (outside the
+          // union) since the union holds the value.
+          if (entry->trie_child == NULL) {
+            // First time descending through this entry - create trie_child
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+              platform_unlock(&current->write_lock);
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              return -1;
+            }
+            child->storage = current->storage;
+            entry->trie_child = child;
+          }
+
+          // Crab: lock child before unlocking parent
+          platform_lock(&entry->trie_child->write_lock);
+          atomic_fetch_add(&entry->trie_child->seq, 1);  // child seq odd (writing)
+          atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
           platform_unlock(&current->write_lock);
-          vec_deinit(&identifier_chunk_counts);
-          vec_deinit(&path_stack);
-          return -1;
+          current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
@@ -1638,6 +1771,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
+            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -1650,7 +1784,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
       } else {
         // Intermediate chunk - move deeper
         if (entry == NULL) {
-          // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
@@ -1659,6 +1792,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
+          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1685,11 +1819,30 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           platform_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
-          atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+          // Intermediate chunk: entry has a value but we need to descend further.
+          // This happens when a shorter key (e.g. "key1") is stored and a longer
+          // key sharing the same prefix (e.g. "key10") needs to go deeper.
+          // Use trie_child (outside the union) since the union holds the value.
+          if (entry->trie_child == NULL) {
+            // First time descending through this entry - create trie_child
+            hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
+            if (child == NULL) {
+              atomic_fetch_add(&current->seq, 1);
+              platform_unlock(&current->write_lock);
+              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&path_stack);
+              return -1;
+            }
+            child->storage = current->storage;
+            entry->trie_child = child;
+          }
+
+          // Crab: lock child before unlocking parent
+          platform_lock(&entry->trie_child->write_lock);
+          atomic_fetch_add(&entry->trie_child->seq, 1);
+          atomic_fetch_add(&current->seq, 1);
           platform_unlock(&current->write_lock);
-          vec_deinit(&identifier_chunk_counts);
-          vec_deinit(&path_stack);
-          return -1;
+          current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
@@ -1701,6 +1854,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
+            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -1830,30 +1984,38 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
+        hbtrie_node_t* next = NULL;
+        if (entry != NULL) {
+          next = entry->has_value ? entry->trie_child : entry->child;
+        }
+        if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&entry->child->write_lock);
-        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        platform_lock(&next->write_lock);
+        atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
         platform_unlock(&current->write_lock);
-        current = entry->child;
+        current = next;
       } else {
         // Intermediate chunk
-        if (entry == NULL || entry->has_value || entry->child == NULL) {
+        hbtrie_node_t* next = NULL;
+        if (entry != NULL) {
+          next = entry->has_value ? entry->trie_child : entry->child;
+        }
+        if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
           platform_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&entry->child->write_lock);
-        atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
+        platform_lock(&next->write_lock);
+        atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
         platform_unlock(&current->write_lock);
-        current = entry->child;
+        current = next;
       }
     }
   }
@@ -1906,7 +2068,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
           vec_push(&bnode_stack, entry->child_bnode);
         } else if (entry->has_value && entry->has_versions) {
           // Leaf entry with version chain - clean up old versions
-          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
+          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id, node->storage);
           total_removed += removed;
 
           // If only one version remains and it's not deleted, downgrade to legacy mode
@@ -1914,10 +2076,17 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               entry->versions->next == NULL &&
               !entry->versions->is_deleted) {
             // Single non-deleted version - convert to legacy
-            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)entry->versions->value);
-            entry->value_txn_id = entry->versions->txn_id;
-            version_entry_destroy(entry->versions);
+            // Must save the version pointer before overwriting the union,
+            // since entry->value and entry->versions share the same memory.
+            version_entry_t* sole_version = entry->versions;
+            identifier_t* sole_value = sole_version->value;
+            transaction_id_t sole_txn_id = sole_version->txn_id;
+
+            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)sole_value);
+            entry->value_txn_id = sole_txn_id;
             entry->has_versions = 0;
+
+            version_entry_destroy(sole_version);
           } else if (entry->versions != NULL &&
                      entry->versions->next == NULL &&
                      entry->versions->is_deleted &&
@@ -1930,13 +2099,34 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               chunk_destroy(removed.key);
             }
             if (removed.has_versions && removed.versions != NULL) {
+              // Deallocate section storage for all versions in the removed entry
+              if (node->storage != NULL) {
+                version_entry_t* v = removed.versions;
+                while (v != NULL) {
+                  if (v->value_section_id != 0) {
+                    sections_deallocate(node->storage, v->value_section_id,
+                                        v->value_offset, v->value_data_size);
+                  }
+                  v = v->next;
+                }
+              }
               version_entry_destroy(removed.versions);
+            } else if (removed.value != NULL) {
+              // Legacy single value - dereference
+              identifier_destroy(removed.value);
+            }
+            // Free path_chunk_counts data if present
+            if (removed.path_chunk_counts.data != NULL) {
+              vec_deinit(&removed.path_chunk_counts);
             }
             total_removed++;
           }
         } else if (!entry->has_value && entry->child != NULL) {
           // Child hbtrie_node - add to node stack for trie traversal
           vec_push(&stack, entry->child);
+        } else if (entry->has_value && entry->trie_child != NULL) {
+          // Entry has both value and trie child - traverse the child
+          vec_push(&stack, entry->trie_child);
         }
       }
     }

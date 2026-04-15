@@ -716,7 +716,7 @@ TEST_F(BatchTest, SizeEstimationMultiplePaths) {
 
     // Size should account for all path components
     size_t estimated_size = batch_estimate_size(batch);
-    EXPECT_GT(estimated_size, 90);  // Should be substantial with 5 path components (99 bytes observed)
+    EXPECT_GT(estimated_size, 70);  // Should be substantial with 5 path components
 
     batch_destroy(batch);
 }

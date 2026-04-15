@@ -11,24 +11,24 @@ extern "C" {
 #endif
 
 #if _WIN32
-#include <windows>
-#define PlATFORMLOCKTYPE(N) CRITICAL_SECTION N
+#include <windows.h>
+#define PLATFORMLOCKTYPE(N) CRITICAL_SECTION N
 #define PLATFORMLOCKTYPEPTR(N) CRITICAL_SECTION* N
 #define PLATFORMCONDITIONTYPE(N) CONDITION_VARIABLE N
 #define PLATFORMCONDITIONTYPEPTR(N) CONDITION_VARIABLE* N
 #define PLATFORMBARRIERTYPE(N) SYNCHRONIZATION_BARRIER N
 #define PLATFORMTHREADTYPE HANDLE
-#define PLATFORMRWLOCKTYPE(N) PSRWLOCK N
+#define PLATFORMRWLOCKTYPE(N) SRWLOCK N
 void platform_lock(CRITICAL_SECTION* lock);
 void platform_unlock(CRITICAL_SECTION* lock);
-void platform_rw_lock_r(PSRWLOCK* lock);
-void platform_rw_lock_w(PSRWLOCK* lock);
-void platform_rw_unlock_r(pthread_rwlock_t* lock);
-void platform_rw_unlock_w(pthread_rwlock_t* lock);
+void platform_rw_lock_r(SRWLOCK* lock);
+void platform_rw_lock_w(SRWLOCK* lock);
+void platform_rw_unlock_r(SRWLOCK* lock);
+void platform_rw_unlock_w(SRWLOCK* lock);
 void platform_lock_init(CRITICAL_SECTION* lock);
-void platform_rw_lock_init(pthread_rwlock_t* lock);
+void platform_rw_lock_init(SRWLOCK* lock);
 void platform_lock_destroy(CRITICAL_SECTION* lock);
-void platform_rw_lock_destroy(PSRWLOCK* lock);
+void platform_rw_lock_destroy(SRWLOCK* lock);
 void platform_condition_init(CONDITION_VARIABLE* condition);
 void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition);
 void platform_condition_destroy(CONDITION_VARIABLE* condition);

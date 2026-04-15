@@ -271,10 +271,16 @@ TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     database_destroy(db);
     database_config_destroy(config);
 
-    // External resources still valid after database destroy
-    // (Cleaned up below)
-    work_pool_destroy(pool);
+    // Stop wheel and pool before cleanup
+    if (wheel) {
+        hierarchical_timing_wheel_stop(wheel);
+    }
+    if (pool) {
+        work_pool_shutdown(pool);
+        work_pool_join_all(pool);
+    }
     hierarchical_timing_wheel_destroy(wheel);
+    work_pool_destroy(pool);
 
     // Cleanup
     char cmd[256];

@@ -102,6 +102,19 @@ path_t* path_copy(path_t* path);
 int path_compare(path_t* a, path_t* b);
 
 /**
+ * Get identifiers from a path.
+ *
+ * Copies identifier pointers into the provided array. The identifiers
+ * are NOT referenced — caller must not destroy them (they belong to the path).
+ *
+ * @param path     Path to get identifiers from
+ * @param out      Output array of identifier pointers
+ * @param max_out Maximum number of identifiers to copy
+ * @return Number of identifiers copied
+ */
+size_t path_get_identifiers(const path_t* path, identifier_t** out, size_t max_out);
+
+/**
  * Serialize a path to CBOR.
  *
  * Format: array of identifier arrays
