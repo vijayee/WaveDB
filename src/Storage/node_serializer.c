@@ -730,29 +730,9 @@ static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serial
                     sbuf_write_uint32(sb, 0);
                 }
             }
-        } else if (entry->is_bnode_child) {
-            // V3: Inline child bnodes still serialized recursively (same as V2)
-            size_t length_pos = sb->size;
-            sbuf_write_uint32(sb, 0);  // placeholder for child bnode size
-
-            bnode_t* child = entry->child_bnode;
-            if (child != NULL) {
-                sbuf_write_uint8(sb, BNODE_SERIALIZE_MAGIC_V3);
-                sbuf_write_uint16(sb, atomic_load(&child->level));
-                sbuf_write_uint16(sb, (uint16_t)child->entries.length);
-                bnode_serialize_entries_v3(child, chunk_size, sb);
-            } else {
-                sbuf_write_uint8(sb, BNODE_SERIALIZE_MAGIC_V3);
-                sbuf_write_uint16(sb, 1);
-                sbuf_write_uint16(sb, 0);
-            }
-
-            // Backfill the length
-            uint32_t child_size = (uint32_t)(sb->size - length_pos - 4);
-            uint32_t net_size = htonl(child_size);
-            memcpy(sb->data + length_pos, &net_size, 4);
         } else {
-            // V3: Child hbtrie_node or bnode location — write child_disk_offset
+            // V3: All non-value entries (both is_bnode_child and hbtrie_node children)
+            // store child_disk_offset (8 bytes) — no inline bnodes
             sbuf_write_uint64(sb, entry->child_disk_offset);
         }
     }
@@ -918,42 +898,13 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                 }
                 (*locations)[i].offset = 0;
             }
-        } else if (entry.is_bnode_child) {
-            // V3: inline child bnode with length prefix (same structure as V2)
-            if (*remaining < 4) goto fail;
-            uint32_t child_size = read_uint32(ptr);
-            *remaining -= 4;
-
-            if (child_size > 0 && *remaining >= child_size) {
-                uint8_t* child_start = *ptr;
-                size_t child_remaining = child_size;
-
-                node_location_t* child_locs = NULL;
-                size_t child_num_locs = 0;
-                bnode_t* child_bnode = bnode_deserialize_v3_impl(
-                    ptr, &child_remaining, chunk_size, btree_node_size,
-                    &child_locs, &child_num_locs);
-                free(child_locs);
-
-                if (child_bnode != NULL) {
-                    entry.child_bnode = child_bnode;
-                }
-
-                // Advance past any remaining child bytes
-                size_t consumed = (size_t)(*ptr - child_start);
-                if (consumed < child_size) {
-                    *ptr += (child_size - consumed);
-                    *remaining -= (child_size - consumed);
-                }
-                *remaining -= consumed;
-            }
-            (*locations)[i].offset = 0;
         } else {
-            // V3: Child location — read child_disk_offset (8 bytes only)
+            // V3: All non-value entries store child_disk_offset (8 bytes)
+            // Both is_bnode_child and hbtrie_node children are lazy-loaded
             if (*remaining < 8) goto fail;
             entry.child_disk_offset = read_uint64(ptr);
             *remaining -= 8;
-            // child and child_bnode stay NULL for lazy loading
+            // child_bnode and child stay NULL for lazy loading
             (*locations)[i].offset = entry.child_disk_offset;
         }
 
