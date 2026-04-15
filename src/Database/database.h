@@ -14,7 +14,8 @@
 #include "../Time/wheel.h"
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
-#include "../Storage/sections.h"
+#include "../Storage/page_file.h"
+#include "../Storage/bnode_cache.h"
 #include "database_lru.h"
 #include "wal.h"
 #include "wal_manager.h"
@@ -36,8 +37,8 @@ extern "C" {
  * - WAL provides durability for writes
  *
  * Storage modes:
- * - In-memory only: storage = NULL, no persistence
- * - Section-based: storage != NULL, incremental persistence
+ * - In-memory only: page_file = NULL, no persistence
+ * - Page-file based: page_file != NULL, append-only persistence
  */
 // Number of shards for write locks (reduces contention)
 #define WRITE_LOCK_SHARDS 64
@@ -59,10 +60,10 @@ typedef struct {
     uint8_t is_rebuilding;               // Flag for recovery mode
     uint64_t next_index_id;              // Incrementing ID for index files
 
-    // Section-based storage (NULL for in-memory only)
-    sections_t* storage;              // Section pool for persistent storage
-    size_t storage_cache_size;         // LRU cache size for sections
-    size_t storage_max_tuple;          // Max open sections
+    // Page-file based storage (NULL for in-memory only)
+    page_file_t* page_file;            // Append-only page file for persistence
+    bnode_cache_mgr_t* bnode_cache_mgr; // Cache manager (owns bnode_cache)
+    file_bnode_cache_t* bnode_cache;   // Sharded read-through cache for lazy loading
 
     // Config ownership tracking
     bool owns_pool;                     // True if database created the pool
@@ -81,6 +82,17 @@ typedef struct {
 #define DATABASE_DEBOUNCE_MAX_WAIT_MS 1000           // Force save after 1 second
 
 /**
+ * Flush and persist all dirty bnodes to the page file.
+ *
+ * Walks the trie, serializes all dirty bnodes, writes them to the
+ * page file using copy-on-write, and updates the superblock.
+ *
+ * @param db  Database to flush
+ * @return 0 on success, -1 on failure
+ */
+int database_flush_persist(database_t* db);
+
+/**
  * Create a database.
  *
  * Creates or loads a database from the specified location.
@@ -92,7 +104,7 @@ typedef struct {
  * @param chunk_size        HBTrie chunk size (0 for default)
  * @param btree_node_size   B+tree node size (0 for default)
  * @param enable_persist   Enable persistent storage (0 = in-memory only, 1 = persistent)
- * @param storage_cache_size Section LRU cache size (0 for default, ignored if in-memory)
+ * @param storage_cache_size Section LRU cache size (0 for default, ignored — kept for ABI compat)
  * @param pool              Work pool for async operations
  * @param wheel             Timing wheel for debouncer
  * @param error_code        Output error code (0 on success)
