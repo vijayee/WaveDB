@@ -455,12 +455,12 @@ static void teardown_database(bench_context_t* ctx) {
         work_pool_join_all(ctx->pool);
     }
 
-    if (ctx->pool) {
-        work_pool_destroy(ctx->pool);
-    }
-
     if (ctx->wheel) {
         hierarchical_timing_wheel_destroy(ctx->wheel);
+    }
+
+    if (ctx->pool) {
+        work_pool_destroy(ctx->pool);
     }
 
     // Cleanup test directory

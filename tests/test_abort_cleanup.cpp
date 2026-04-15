@@ -38,19 +38,30 @@ protected:
     }
 
     void TearDown() override {
-        // Force cleanup of queued work items (triggers abort path)
-        if (pool) {
-            work_pool_destroy(pool);
-        }
-
-        // Destroy database
+        // Destroy database first
         if (db) {
             database_destroy(db);
+            db = nullptr;
         }
 
-        // Destroy timing wheel
+        if (wheel) {
+            hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+            hierarchical_timing_wheel_stop(wheel);
+        }
+
+        if (pool) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+        }
+
         if (wheel) {
             hierarchical_timing_wheel_destroy(wheel);
+            wheel = nullptr;
+        }
+
+        if (pool) {
+            work_pool_destroy(pool);
+            pool = nullptr;
         }
 
         // Clean up test directory

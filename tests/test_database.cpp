@@ -55,14 +55,14 @@ protected:
             work_pool_join_all(pool);
         }
 
-        // Destroy pool and wheel
-        if (pool) {
-            work_pool_destroy(pool);
-            pool = nullptr;
-        }
+        // Destroy wheel then pool
         if (wheel) {
             hierarchical_timing_wheel_destroy(wheel);
             wheel = nullptr;
+        }
+        if (pool) {
+            work_pool_destroy(pool);
+            pool = nullptr;
         }
 
         // Cleanup test directory

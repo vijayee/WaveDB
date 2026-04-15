@@ -43,13 +43,16 @@ protected:
         if (pool) {
             work_pool_shutdown(pool);
             work_pool_join_all(pool);
-            work_pool_destroy(pool);
-            pool = nullptr;
         }
 
         if (wheel) {
             hierarchical_timing_wheel_destroy(wheel);
             wheel = nullptr;
+        }
+
+        if (pool) {
+            work_pool_destroy(pool);
+            pool = nullptr;
         }
 
         std::string cmd = std::string("rm -rf ") + test_dir;
