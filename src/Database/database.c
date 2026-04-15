@@ -740,6 +740,9 @@ database_t* database_create_with_config(const char* location,
                         cache_mgr, db->page_file, page_path);
                     if (db->bnode_cache == NULL) {
                         bnode_cache_mgr_destroy(cache_mgr);
+                    } else if (db->trie != NULL) {
+                        // Wire bnode cache for lazy loading
+                        db->trie->fcache = db->bnode_cache;
                     }
                 }
             } else {

@@ -8,6 +8,8 @@
 #include "../Util/allocator.h"
 #include "../Util/memory_pool.h"
 #include "../Util/log.h"
+#include "../Storage/bnode_cache.h"
+#include "../Storage/node_serializer.h"
 #include <cbor.h>
 #include <string.h>
 
@@ -61,6 +63,99 @@ static bnode_t* btree_descend_with_path(bnode_t* root, chunk_t* key, btree_path_
   }
 
   return current;
+}
+
+// Descend through a multi-level B+tree, lazy-loading child bnodes as needed.
+// Same as btree_descend_with_path but loads child bnodes from disk on demand.
+static bnode_t* btree_descend_with_path_lazy(bnode_t* root, chunk_t* key,
+                                                btree_path_t* path,
+                                                file_bnode_cache_t* fcache,
+                                                uint8_t chunk_size,
+                                                uint32_t btree_node_size) {
+  if (path) {
+    path->count = 0;
+  }
+
+  bnode_t* current = root;
+
+  while (atomic_load(&current->level) > 1) {
+    if (path && path->count < MAX_BTREE_HEIGHT) {
+      path->nodes[path->count++] = current;
+    }
+
+    size_t index;
+    bnode_entry_t* entry = bnode_find(current, key, &index);
+
+    bnode_t* next = NULL;
+
+    if (entry != NULL && entry->is_bnode_child) {
+      // Lazy load child bnode if needed
+      if (entry->child_bnode == NULL && entry->child_disk_offset != 0 && fcache != NULL) {
+        bnode_entry_lazy_load_bnode_child(entry, fcache, chunk_size, btree_node_size);
+      }
+      if (entry->child_bnode != NULL) {
+        next = entry->child_bnode;
+      }
+    }
+
+    if (next == NULL) {
+      // No exact match - find greatest key <= search key
+      if (index == 0) {
+        bnode_entry_t* first = &current->entries.data[0];
+        if (first->is_bnode_child) {
+          if (first->child_bnode == NULL && first->child_disk_offset != 0 && fcache != NULL) {
+            bnode_entry_lazy_load_bnode_child(first, fcache, chunk_size, btree_node_size);
+          }
+          if (first->child_bnode != NULL) {
+            next = first->child_bnode;
+          }
+        }
+      } else {
+        bnode_entry_t* prev = &current->entries.data[index - 1];
+        if (prev->is_bnode_child) {
+          if (prev->child_bnode == NULL && prev->child_disk_offset != 0 && fcache != NULL) {
+            bnode_entry_lazy_load_bnode_child(prev, fcache, chunk_size, btree_node_size);
+          }
+          if (prev->child_bnode != NULL) {
+            next = prev->child_bnode;
+          }
+        }
+      }
+    }
+
+    if (next == NULL) break;  // Can't descend further
+    current = next;
+  }
+
+  return current;
+}
+
+// Descend through a multi-level B+tree with lazy loading (no path tracking).
+// Used by hbtrie_delete which doesn't need split propagation.
+static bnode_t* bnode_descend_lazy(bnode_t* root, chunk_t* key,
+                                     file_bnode_cache_t* fcache,
+                                     uint8_t chunk_size,
+                                     uint32_t btree_node_size) {
+  return btree_descend_with_path_lazy(root, key, NULL, fcache, chunk_size, btree_node_size);
+}
+
+// Find a leaf entry in a multi-level B+tree with lazy loading support.
+// Used by hbtrie_find (the read path) for lazy-loaded trees.
+static bnode_entry_t* bnode_find_leaf_lazy(bnode_t* root, chunk_t* key,
+                                              size_t* out_index,
+                                              file_bnode_cache_t* fcache,
+                                              uint8_t chunk_size,
+                                              uint32_t btree_node_size) {
+  if (root == NULL || key == NULL) {
+    if (out_index) *out_index = 0;
+    return NULL;
+  }
+
+  // Descend to leaf with lazy loading
+  bnode_t* leaf = bnode_descend_lazy(root, key, fcache, chunk_size, btree_node_size);
+
+  // Exact match in the leaf
+  return bnode_find(leaf, key, out_index);
 }
 
 /**
@@ -608,6 +703,14 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
       if (entry->has_value) {
         // Found an entry with a value — return it
         return 0;
+      }
+
+      // Lazy load hbtrie child if needed
+      if (entry->child == NULL && !entry->has_value && entry->child_disk_offset != 0
+          && cursor->trie->fcache != NULL) {
+        bnode_entry_lazy_load_hbtrie_child(entry, cursor->trie->fcache,
+                                            cursor->trie->chunk_size,
+                                            cursor->trie->btree_node_size);
       }
 
       if (entry->child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
@@ -1390,6 +1493,104 @@ hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint3
 }
 
 // ============================================================================
+// Lazy Loading (Phase 2: load child nodes from page file on demand)
+// ============================================================================
+
+int bnode_entry_lazy_load_bnode_child(bnode_entry_t* entry,
+                                       file_bnode_cache_t* fcache,
+                                       uint8_t chunk_size,
+                                       uint32_t btree_node_size) {
+    if (entry == NULL || fcache == NULL) return -1;
+    if (entry->child_bnode != NULL) return 0;  // Already loaded
+    if (entry->child_disk_offset == 0) return -1;  // Not on disk
+
+    // Read from bnode cache (which reads from page file on miss)
+    bnode_cache_item_t* item = bnode_cache_read(fcache, entry->child_disk_offset);
+    if (item == NULL) return -1;
+
+    // Deserialize with V3 format
+    node_location_t* locations = NULL;
+    size_t num_locations = 0;
+    bnode_t* child = bnode_deserialize_v3(item->data, item->data_len,
+                                           chunk_size, btree_node_size,
+                                           &locations, &num_locations);
+
+    bnode_cache_release(fcache, item);
+
+    if (child == NULL) {
+        free(locations);
+        return -1;
+    }
+
+    // Set child_disk_offset on child's entries (from locations)
+    for (size_t i = 0; i < num_locations && i < child->entries.length; i++) {
+        child->entries.data[i].child_disk_offset = locations[i].offset;
+    }
+
+    // Set the child's disk_offset
+    child->disk_offset = entry->child_disk_offset;
+    child->is_dirty = 0;
+
+    entry->child_bnode = child;
+    free(locations);
+    return 0;
+}
+
+int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
+                                        file_bnode_cache_t* fcache,
+                                        uint8_t chunk_size,
+                                        uint32_t btree_node_size) {
+    if (entry == NULL || fcache == NULL) return -1;
+    if (entry->child != NULL) return 0;  // Already loaded
+    if (entry->child_disk_offset == 0) return -1;  // Not on disk
+
+    // Read root bnode from page file
+    bnode_cache_item_t* item = bnode_cache_read(fcache, entry->child_disk_offset);
+    if (item == NULL) return -1;
+
+    node_location_t* locations = NULL;
+    size_t num_locations = 0;
+    bnode_t* root_bnode = bnode_deserialize_v3(item->data, item->data_len,
+                                                 chunk_size, btree_node_size,
+                                                 &locations, &num_locations);
+
+    bnode_cache_release(fcache, item);
+
+    if (root_bnode == NULL) {
+        free(locations);
+        return -1;
+    }
+
+    // Set child_disk_offset on root bnode entries
+    for (size_t i = 0; i < num_locations && i < root_bnode->entries.length; i++) {
+        root_bnode->entries.data[i].child_disk_offset = locations[i].offset;
+    }
+
+    root_bnode->disk_offset = entry->child_disk_offset;
+    root_bnode->is_dirty = 0;
+
+    // Create hbtrie_node wrapper
+    hbtrie_node_t* hbnode = hbtrie_node_create(btree_node_size);
+    if (hbnode == NULL) {
+        bnode_destroy_tree(root_bnode);
+        free(locations);
+        return -1;
+    }
+
+    // Replace the default btree with the loaded one
+    bnode_destroy(hbnode->btree);
+    hbnode->btree = root_bnode;
+    hbnode->btree_height = atomic_load(&root_bnode->level);
+    hbnode->disk_offset = entry->child_disk_offset;
+    hbnode->is_loaded = 1;
+    hbnode->is_dirty = 0;
+
+    entry->child = hbnode;
+    free(locations);
+    return 0;
+}
+
+// ============================================================================
 // MVCC Operations
 // ============================================================================
 
@@ -1437,7 +1638,9 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
         atomic_thread_fence(memory_order_acquire);
 
         size_t index;
-        bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
+        bnode_entry_t* entry = bnode_find_leaf_lazy(current->btree, chunk, &index,
+                                                      trie->fcache, trie->chunk_size,
+                                                      trie->btree_node_size);
 
         int is_last_chunk = (j == nchunk - 1);
         int is_last_identifier = (i == path_len_ids - 1);
@@ -1474,7 +1677,16 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           // End of this identifier, move to next HBTrie level
           hbtrie_node_t* next = NULL;
           if (entry != NULL) {
-            next = entry->has_value ? entry->trie_child : entry->child;
+            if (entry->has_value) {
+              next = entry->trie_child;
+            } else {
+              // Lazy load hbtrie child if needed
+              if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
+                bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                    trie->chunk_size, trie->btree_node_size);
+              }
+              next = entry->child;
+            }
           }
           if (next == NULL) {
             return NULL;
@@ -1494,7 +1706,16 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
           // Intermediate chunk within this identifier
           hbtrie_node_t* next = NULL;
           if (entry != NULL) {
-            next = entry->has_value ? entry->trie_child : entry->child;
+            if (entry->has_value) {
+              next = entry->trie_child;
+            } else {
+              // Lazy load hbtrie child if needed
+              if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
+                bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                    trie->chunk_size, trie->btree_node_size);
+              }
+              next = entry->child;
+            }
           }
           if (next == NULL) {
             return NULL;
@@ -1579,7 +1800,9 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
       size_t index;
       btree_path_t bnode_path = {0};
-      bnode_t* leaf = btree_descend_with_path(current->btree, chunk, &bnode_path);
+      bnode_t* leaf = btree_descend_with_path_lazy(current->btree, chunk, &bnode_path,
+                                                      trie->fcache, trie->chunk_size,
+                                                      trie->btree_node_size);
       bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
 
       // Track node for split propagation
@@ -1770,6 +1993,13 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
+            // Try lazy loading from disk first
+            if (entry->child_disk_offset != 0 && trie->fcache != NULL) {
+              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                  trie->chunk_size, trie->btree_node_size);
+            }
+          }
+          if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
@@ -1853,6 +2083,13 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
+            // Try lazy loading from disk first
+            if (entry->child_disk_offset != 0 && trie->fcache != NULL) {
+              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                  trie->chunk_size, trie->btree_node_size);
+            }
+          }
+          if (entry->child == NULL) {
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
@@ -1922,7 +2159,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
       }
 
       size_t index;
-      bnode_t* leaf = bnode_descend(current->btree, chunk);
+      bnode_t* leaf = bnode_descend_lazy(current->btree, chunk, trie->fcache,
+                                           trie->chunk_size, trie->btree_node_size);
       bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
@@ -1997,7 +2235,16 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         // End of identifier - move to next HBTrie level
         hbtrie_node_t* next = NULL;
         if (entry != NULL) {
-          next = entry->has_value ? entry->trie_child : entry->child;
+          if (entry->has_value) {
+            next = entry->trie_child;
+          } else {
+            // Lazy load hbtrie child if needed
+            if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
+              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                  trie->chunk_size, trie->btree_node_size);
+            }
+            next = entry->child;
+          }
         }
         if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
@@ -2014,7 +2261,16 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         // Intermediate chunk
         hbtrie_node_t* next = NULL;
         if (entry != NULL) {
-          next = entry->has_value ? entry->trie_child : entry->child;
+          if (entry->has_value) {
+            next = entry->trie_child;
+          } else {
+            // Lazy load hbtrie child if needed
+            if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
+              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
+                                                  trie->chunk_size, trie->btree_node_size);
+            }
+            next = entry->child;
+          }
         }
         if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)

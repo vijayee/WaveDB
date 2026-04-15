@@ -20,10 +20,13 @@
 extern "C" {
 #endif
 
-// Forward declarations (for circular dependency with mvcc.h)
+// Forward declarations
 struct txn_desc_t;
 typedef struct txn_desc_t txn_desc_t;
 typedef struct txn_desc_t txn_desc_t;
+
+// Forward declaration for lazy loading
+typedef struct file_bnode_cache_t file_bnode_cache_t;
 
 // Note: mvcc.h is NOT included here to avoid circular dependency
 // mvcc.h includes this file (hbtrie.h)
@@ -60,6 +63,7 @@ typedef struct hbtrie_t {
     uint32_t btree_node_size;         // Max B+tree node size in bytes
 
     _Atomic(hbtrie_node_t*) root;     // Root HBTrie node (atomic for lock-free reads)
+    file_bnode_cache_t* fcache;        // Phase 2: bnode cache for lazy loading (NULL if no persistence)
 } hbtrie_t;
 
 /**
@@ -319,6 +323,42 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
  * @return Total number of versions removed
  */
 size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id);
+
+/**
+ * Load a child bnode from disk on demand (lazy loading).
+ *
+ * If entry->child_bnode is NULL and entry->child_disk_offset != 0,
+ * reads the bnode from the page file via the bnode cache,
+ * deserializes with V3 format, and sets entry->child_bnode.
+ *
+ * @param entry        Bnode entry whose child needs loading
+ * @param fcache       File bnode cache for read-through
+ * @param chunk_size   Chunk size for deserialization
+ * @param btree_node_size Max btree node size for deserialization
+ * @return 0 on success, -1 on failure
+ */
+int bnode_entry_lazy_load_bnode_child(bnode_entry_t* entry,
+                                       file_bnode_cache_t* fcache,
+                                       uint8_t chunk_size,
+                                       uint32_t btree_node_size);
+
+/**
+ * Load a child hbtrie_node from disk on demand (lazy loading).
+ *
+ * If entry->child is NULL and entry->child_disk_offset != 0,
+ * reads the root bnode from the page file, creates an hbtrie_node
+ * wrapper, and sets entry->child.
+ *
+ * @param entry        Bnode entry whose child needs loading
+ * @param fcache       File bnode cache for read-through
+ * @param chunk_size   Chunk size for deserialization
+ * @param btree_node_size Max btree node size for deserialization
+ * @return 0 on success, -1 on failure
+ */
+int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
+                                        file_bnode_cache_t* fcache,
+                                        uint8_t chunk_size,
+                                        uint32_t btree_node_size);
 
 #ifdef __cplusplus
 }
