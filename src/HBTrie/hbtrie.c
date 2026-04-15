@@ -11,6 +11,12 @@
 #include <cbor.h>
 #include <string.h>
 
+// Mark an hbtrie_node and its root bnode as dirty (modified since last flush)
+static void mark_dirty(hbtrie_node_t* hbnode, bnode_t* bnode) {
+    if (hbnode != NULL) hbnode->is_dirty = 1;
+    if (bnode != NULL) bnode->is_dirty = 1;
+}
+
 // Default: enough space for ~64 entries per node
 // Each entry is roughly: sizeof(bnode_entry_t) + chunk_size for key buffer
 #define DEFAULT_ENTRIES_PER_NODE 64
@@ -97,6 +103,7 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
       bnode_destroy_tree(current_right);
       return -1;
     }
+    parent->is_dirty = 1;
 
     // Check if parent needs splitting
     if (!bnode_needs_split(parent, chunk_size)) {
@@ -160,6 +167,7 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
   // Update the hbtrie_node
   hb_node->btree = new_root;
   hb_node->btree_height = atomic_load(&old_root->level) + 1;
+  mark_dirty(hb_node, new_root);
 
   // Release our reference to the split key:
   // - If current_split_key != split_key, it's a separate allocation from bnode_split
@@ -201,6 +209,9 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     return;  // Split failed, data still consistent
   }
 
+  // Mark the split node dirty
+  mark_dirty(hb_node, leaf);
+
   // Propagate the split upward
   if (bnode_path->count == 0) {
     // Leaf IS the root - create a new root
@@ -239,6 +250,7 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
 
     hb_node->btree = new_root;
     hb_node->btree_height = atomic_load(&old_root->level) + 1;
+    mark_dirty(hb_node, new_root);
   } else {
     // Insert into parent and propagate
     btree_propagate_split(hb_node, bnode_path, split_key, right_bnode, chunk_size);
@@ -1611,6 +1623,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
+          mark_dirty(current, leaf);
         } else {
           log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
                   entry->has_value, entry->has_versions,
@@ -1631,6 +1644,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
                 (size_t)identifier_chunk_counts.length);
             log_info("MVCC: Set first value (legacy mode) with txn_id=%lu.%09lu.%lu",
                     txn_id.time, txn_id.nanos, txn_id.count);
+            mark_dirty(current, leaf);
           } else if (entry->has_versions) {
             // Already has version chain - add new version
             log_info("MVCC: Adding to existing version chain");
@@ -1647,6 +1661,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             bnode_entry_set_path_chunk_counts(entry,
                 identifier_chunk_counts.data,
                 (size_t)identifier_chunk_counts.length);
+            mark_dirty(current, leaf);
           } else {
             // Legacy single value - upgrade to version chain
             log_info("MVCC: Upgrading legacy entry to version chain (old_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
@@ -1687,6 +1702,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
+            mark_dirty(current, leaf);
           }
         }
       } else if (is_last_chunk) {
@@ -1719,6 +1735,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
+          mark_dirty(current, leaf);
 
           // Crab: lock child before unlocking parent
           platform_lock(&child->write_lock);
@@ -1742,6 +1759,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               return -1;
             }
             entry->trie_child = child;
+            mark_dirty(current, leaf);
           }
 
           // Crab: lock child before unlocking parent
@@ -1762,6 +1780,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               return -1;
             }
             entry->child = child;
+            mark_dirty(current, leaf);
           }
           // Crab: lock child before unlocking parent
           platform_lock(&entry->child->write_lock);
@@ -1799,6 +1818,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
+          mark_dirty(current, leaf);
 
           // Crab: lock child before unlocking parent
           platform_lock(&child->write_lock);
@@ -1822,6 +1842,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               return -1;
             }
             entry->trie_child = child;
+            mark_dirty(current, leaf);
           }
 
           // Crab: lock child before unlocking parent
@@ -1842,6 +1863,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               return -1;
             }
             entry->child = child;
+            mark_dirty(current, leaf);
           }
           // Crab: lock child before unlocking parent
           platform_lock(&entry->child->write_lock);
@@ -1930,6 +1952,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
             platform_unlock(&current->write_lock);
             return NULL;
           }
+          mark_dirty(current, NULL);
         } else {
           // Legacy single value - upgrade to version chain with tombstone
           if (entry->value != NULL) {
@@ -1962,6 +1985,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
               platform_unlock(&current->write_lock);
               return NULL;
             }
+            mark_dirty(current, NULL);
           }
         }
 
@@ -2056,6 +2080,9 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
           // Leaf entry with version chain - clean up old versions
           size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
           total_removed += removed;
+          if (removed > 0) {
+            mark_dirty(node, bn);
+          }
 
           // If only one version remains and it's not deleted, downgrade to legacy mode
           if (entry->versions != NULL &&
@@ -2096,6 +2123,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               vec_deinit(&removed.path_chunk_counts);
             }
             total_removed++;
+            mark_dirty(node, bn);
           }
         } else if (!entry->has_value && entry->child != NULL) {
           // Child hbtrie_node - add to node stack for trie traversal
