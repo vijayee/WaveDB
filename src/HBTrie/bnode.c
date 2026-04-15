@@ -33,6 +33,7 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   // Initialize fields that need proper initialization (not just zero)
   atomic_init(&node->level, level);
   node->node_size = node_size;
+  node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
   vec_init(&node->entries);
   atomic_init(&node->seq, 0);
   platform_lock_init(&node->write_lock);

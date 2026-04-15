@@ -125,7 +125,7 @@ typedef struct bnode_t {
     PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
 
     // Per-bnode disk tracking (Phase 2: flat per-bnode persistence)
-    uint64_t disk_offset;              // File offset of this bnode (0 if not persisted)
+    uint64_t disk_offset;              // File offset of this bnode (UINT64_MAX if not persisted)
     uint8_t is_dirty;                  // 1 if modified since last write
 } bnode_t;
 
