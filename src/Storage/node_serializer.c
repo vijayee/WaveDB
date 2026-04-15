@@ -769,7 +769,8 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                                             node_location_t** locations, size_t* num_locations) {
     if (*remaining < 1) return NULL;
 
-    // Skip V3 magic byte
+    // Validate V3 magic byte
+    if (**ptr != BNODE_SERIALIZE_MAGIC_V3) return NULL;
     (*ptr)++;
     (*remaining)--;
 

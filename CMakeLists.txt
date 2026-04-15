@@ -246,6 +246,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_bnode_cache wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_bnode_cache COMMAND test_bnode_cache)
 
+    # V3 serializer tests
+    add_executable(test_v3_serializer tests/test_v3_serializer.cpp)
+    target_link_libraries(test_v3_serializer wavedb gtest gtest_main)
+    add_test(NAME test_v3_serializer COMMAND test_v3_serializer)
+
     # Test for page file + bnode cache integration
     add_executable(test_page_cache_integration tests/test_page_cache_integration.cpp)
     target_link_libraries(test_page_cache_integration wavedb gtest gtest_main Threads::Threads)
