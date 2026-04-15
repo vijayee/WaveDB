@@ -447,26 +447,26 @@ Benchmarks run on Linux x86_64:
 
 ### Dart FFI Performance
 
-Preliminary benchmarks (100 iterations, limited sample):
+Benchmarks run on Dart 3.11.0 (linux_x64) with 10,000 iterations:
 
 **Async Operations (C promise/pool-based, non-blocking):**
-- `put`: ~741 ops/sec
-- `get`: ~14,286 ops/sec
+- `put`: ~1,028 ops/sec
+- `get`: ~69,400 ops/sec
+- `batch`: ~103,000 ops/sec (1,000 operations per batch)
 
 **Sync Operations (blocking, direct FFI calls):**
-- `putSync`: ~1,064 ops/sec
-- `getSync`: ~20,000 ops/sec
-
-*Note: These are preliminary results from a small sample size. Full benchmarks require a release-mode build of the native library.*
+- `putSync`: ~1,200 ops/sec
+- `getSync`: ~435,000 ops/sec
 
 ### Comparison with Node.js
 
 | Operation | Dart FFI | Node.js N-API | Notes |
 |-----------|-----------|---------------|-------|
-| putSync | ~1,064 ops/sec | ~4,400 ops/sec | Node.js ~4x faster |
-| getSync | ~20,000 ops/sec | ~240,000 ops/sec | Node.js ~12x faster |
-| put async | ~741 ops/sec | ~1,000 ops/sec | Similar |
-| get async | ~14,286 ops/sec | ~38,000 ops/sec | Node.js ~2.7x faster |
+| putSync | ~1,200 ops/sec | ~1,100 ops/sec | Similar |
+| getSync | ~435,000 ops/sec | ~133,000 ops/sec | Dart ~3x faster |
+| put async | ~1,028 ops/sec | ~896 ops/sec | Similar |
+| get async | ~69,400 ops/sec | ~46,500 ops/sec | Dart ~1.5x faster |
+| batch async | ~103,000 ops/sec | ~39,800 ops/sec | Dart ~2.6x faster |
 
 *Both bindings use the same C async API (promise_t + worker pool) for non-blocking operations.*
 

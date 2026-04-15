@@ -273,6 +273,7 @@ Benchmarks run on Linux x86_64 with the following configuration:
 - CPU: 8-core processor
 - Memory: 50MB LRU cache
 - Pre-populated: 10,000 keys for read benchmarks
+- WAL mode: ASYNC (no fsync) for sync benchmarks, DEBOUNCED for concurrent
 
 ### WAL Sync Modes
 
@@ -280,46 +281,45 @@ WaveDB supports three durability/performance trade-offs:
 
 | Mode | fsync Behavior | Durability | Performance |
 |------|----------------|------------|-------------|
-| `IMMEDIATE` | fsync after every write | Highest | ~1-5K ops/sec |
-| `DEBOUNCED` | fsync batched to 100ms | High | ~30-50K ops/sec |
-| `ASYNC` | No fsync (OS cache) | Lowest | ~50-150K ops/sec |
+| `IMMEDIATE` | fsync after every write | Highest | ~1K ops/sec |
+| `DEBOUNCED` | fsync batched to 100ms | High | ~300K ops/sec |
+| `ASYNC` | No fsync (OS cache) | Lowest | ~300K+ ops/sec |
 
 **Default:** `DEBOUNCED` (recommended for most workloads)
 
-### Single-Threaded Operations (DEBOUNCED mode)
+### Synchronous Operations (ASYNC mode, single-threaded)
 
-| Operation | Throughput | Avg Latency | P99 Latency |
-|-----------|------------|-------------|-------------|
-| Put (single) | 36K ops/sec | 27 µs | 53 µs |
-| Get (single) | 71K ops/sec | 14 µs | 113 µs |
-| Batch (1K ops) | 28K ops/sec | 36 µs | 89 µs |
-| Mixed (70% read) | 51K ops/sec | 20 µs | 66 µs |
-| Delete | 33K ops/sec | 31 µs | 83 µs |
+| Operation | Throughput | Avg Latency | P50 Latency | P99 Latency |
+|-----------|------------|-------------|-------------|-------------|
+| Put | 87K ops/sec | 11.5 µs | 10.0 µs | 23.8 µs |
+| Get | 1.94M ops/sec | 0.51 µs | 0.51 µs | 0.68 µs |
+| Mixed (70% read) | 2.13M ops/sec | 0.47 µs | 0.46 µs | 0.60 µs |
+| Delete | 209K ops/sec | 4.8 µs | 4.4 µs | 12.3 µs |
 
 ### Concurrent Operations (DEBOUNCED mode)
 
-| Threads | Write | Read | Mixed |
-|---------|-------|------|-------|
-| 1 | 27K ops/sec | 112K ops/sec | 50K ops/sec |
-| 4 | 148K ops/sec | 191K ops/sec | 148K ops/sec |
-| 8 | 149K ops/sec | 210K ops/sec | 142K ops/sec |
-| 16 | 200K ops/sec | 209K ops/sec | 158K ops/sec |
+| Threads | Write | Read | Mixed (70R/20W/10D) |
+|---------|-------|------|---------------------|
+| 4 | 64K ops/sec | 113K ops/sec | 106K ops/sec |
+| 8 | 114K ops/sec | 133K ops/sec | 138K ops/sec |
+| 16 | 167K ops/sec | 167K ops/sec | 166K ops/sec |
+| 32 | 195K ops/sec | 310K ops/sec | 258K ops/sec |
 
-### ASYNC Mode (No fsync)
-
-For maximum performance when durability is not critical:
+### Node.js Binding Performance
 
 | Operation | Throughput |
 |-----------|------------|
-| Put | 40-50K ops/sec |
-| Get | 100-150K ops/sec |
-| Mixed | 80-120K ops/sec |
+| put (async) | 896 ops/sec |
+| get (async) | 46.5K ops/sec |
+| putSync | 1.1K ops/sec |
+| getSync | 133K ops/sec |
+| batch | 39.8K ops/sec |
 
 ### Memory Efficiency
 
-- LRU Cache Budget: 50.00 MB
-- Typical Memory Usage: ~11 MB for 35K entries
-- Average Entry Size: ~318 bytes
+- LRU Cache Budget: 50 MB
+- Typical Memory Usage: ~21 MB for 50K entries
+- Average Entry Size: ~429 bytes
 
 ### Performance Features
 

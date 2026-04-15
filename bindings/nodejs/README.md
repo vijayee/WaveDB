@@ -477,13 +477,13 @@ Benchmarks run on Linux x86_64 with Node.js v24.14.1:
 Benchmarks run on Node.js v24.14.1 with 10,000 iterations:
 
 **Async Operations (C promise/pool-based, non-blocking):**
-- `put`: ~1,000 ops/sec
-- `get`: ~38,000 ops/sec
-- `batch`: ~81,000 ops/sec (1,000 operations per batch)
+- `put`: ~896 ops/sec
+- `get`: ~46,500 ops/sec
+- `batch`: ~39,800 ops/sec (1,000 operations per batch)
 
 **Sync Operations (blocking, direct C++ calls):**
-- `putSync`: ~4,400 ops/sec
-- `getSync`: ~240,000 ops/sec
+- `putSync`: ~1,100 ops/sec
+- `getSync`: ~133,000 ops/sec
 
 **Stream Operations:**
 - Internal buffer of 100 entries
