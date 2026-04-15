@@ -44,11 +44,8 @@ typedef struct hbtrie_node_t {
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
     uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)
 
-    // Storage location tracking for incremental persistence
-    struct sections_t* storage;       // Storage system (NULL if in-memory only)
-    size_t section_id;                // Section where this node is stored
-    size_t block_index;               // Block index within section
-    size_t data_size;                 // Serialized size in section (0 if not in section)
+    // Page file storage tracking (Phase 2: replaces section_id + block_index)
+    uint64_t disk_offset;             // File offset of root bnode (UINT64_MAX if not persisted)
     uint8_t is_loaded;                // 1 if in memory, 0 if on-disk stub
     uint8_t is_dirty;                 // 1 if modified since last save
 } hbtrie_node_t;
