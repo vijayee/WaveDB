@@ -3,7 +3,6 @@
 //
 
 #include "bnode.h"
-#include "../Storage/sections.h"
 #include <stdatomic.h>
 #include "bs_array.h"
 #include "chunk.h"
@@ -33,6 +32,8 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   // Initialize fields that need proper initialization (not just zero)
   atomic_init(&node->level, level);
   node->node_size = node_size;
+  node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
+  node->is_dirty = 0;
   vec_init(&node->entries);
   atomic_init(&node->seq, 0);
   platform_lock_init(&node->write_lock);
@@ -395,8 +396,7 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     }
 
     // Copy storage location fields
-    new_entry.child_section_id = src->child_section_id;
-    new_entry.child_block_index = src->child_block_index;
+    new_entry.child_disk_offset = src->child_disk_offset;
 
     // Insert into right node
     bnode_insert(right, &new_entry);
@@ -579,8 +579,7 @@ int version_entry_add(version_entry_t** versions,
   return 0;
 }
 
-size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id,
-                         sections_t* storage) {
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id) {
   if (versions == NULL || *versions == NULL) return 0;
 
   size_t removed_count = 0;
@@ -606,12 +605,6 @@ size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_
       }
       if (to_remove->next != NULL) {
         to_remove->next->prev = to_remove->prev;
-      }
-
-      // Deallocate section storage for the removed version's value
-      if (storage != NULL && to_remove->value_section_id != 0) {
-        sections_deallocate(storage, to_remove->value_section_id,
-                            to_remove->value_offset, to_remove->value_data_size);
       }
 
       version_entry_destroy(to_remove);

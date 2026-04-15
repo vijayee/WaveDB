@@ -8,13 +8,19 @@
 #include "../Util/allocator.h"
 #include "../Util/memory_pool.h"
 #include "../Util/log.h"
-#include "../Storage/sections.h"
+#include "../Storage/bnode_cache.h"
 #include <cbor.h>
 #include <string.h>
 
 // Default: enough space for ~64 entries per node
 // Each entry is roughly: sizeof(bnode_entry_t) + chunk_size for key buffer
 #define DEFAULT_ENTRIES_PER_NODE 64
+
+// Mark hbtrie_node and/or bnode as dirty (modified since last save)
+static void mark_dirty(hbtrie_node_t* hbnode, bnode_t* bnode) {
+    if (hbnode != NULL) hbnode->is_dirty = 1;
+    if (bnode != NULL) bnode->is_dirty = 1;
+}
 
 // Maximum B+tree height (safety limit for descent)
 #define MAX_BTREE_HEIGHT 32
@@ -98,6 +104,9 @@ static int btree_propagate_split(hbtrie_node_t* hb_node,
       bnode_destroy_tree(current_right);
       return -1;
     }
+
+    // Mark parent dirty after insertion
+    mark_dirty(NULL, parent);
 
     // Check if parent needs splitting
     if (!bnode_needs_split(parent, chunk_size)) {
@@ -202,6 +211,9 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
     return;  // Split failed, data still consistent
   }
 
+  // Mark leaf and hb_node dirty after split
+  mark_dirty(hb_node, leaf);
+
   // Propagate the split upward
   if (bnode_path->count == 0) {
     // Leaf IS the root - create a new root
@@ -240,6 +252,7 @@ static void btree_split_after_insert(hbtrie_node_t* hb_node,
 
     hb_node->btree = new_root;
     hb_node->btree_height = atomic_load(&old_root->level) + 1;
+    mark_dirty(hb_node, new_root);
   } else {
     // Insert into parent and propagate
     btree_propagate_split(hb_node, bnode_path, split_key, right_bnode, chunk_size);
@@ -313,10 +326,9 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
   node->btree_height = 1;  // Single leaf bnode
 
   // Initialize storage tracking (in-memory by default)
-  node->storage = NULL;          // NULL = in-memory only
-  node->data_size = 0;           // 0 = not in section
-  node->is_loaded = 1;           // Newly created nodes are in memory
-  node->is_dirty = 0;            // Not modified yet
+  node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
+  node->is_loaded = 1;               // Newly created nodes are in memory
+  node->is_dirty = 0;                // Not modified yet
 
   atomic_init(&node->seq, 0);
   platform_lock_init(&node->write_lock);
@@ -373,12 +385,6 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     // Destroy nodes in reverse order (bottom-up: children before parents)
     for (int i = nodes.length - 1; i >= 0; i--) {
       hbtrie_node_t* current = nodes.data[i];
-
-      // Deallocate from section storage if this node was persisted
-      if (current->storage != NULL && current->section_id != 0) {
-        sections_deallocate(current->storage, current->section_id,
-                            current->block_index, current->data_size);
-      }
 
       if (current->btree != NULL) {
         bnode_destroy_tree(current->btree);
@@ -506,10 +512,7 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   vec_deinit(&bnode_stack);
 
   // Copy storage metadata
-  copy->storage = node->storage;
-  copy->section_id = node->section_id;
-  copy->block_index = node->block_index;
-  copy->data_size = node->data_size;
+  copy->disk_offset = node->disk_offset;
   copy->is_loaded = node->is_loaded;
   copy->is_dirty = node->is_dirty;
 
@@ -1619,6 +1622,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
           // Check if leaf bnode needs splitting after insert
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
+          mark_dirty(current, leaf);
         } else {
           log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
                   entry->has_value, entry->has_versions,
@@ -1696,6 +1700,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               return -1;
             }
           }
+          mark_dirty(current, leaf);
         }
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
@@ -1709,7 +1714,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
-          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1750,7 +1754,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
-            child->storage = current->storage;
             entry->trie_child = child;
           }
 
@@ -1771,7 +1774,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
-            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -1792,7 +1794,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             vec_deinit(&path_stack);
             return -1;
           }
-          child->storage = current->storage;
 
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
@@ -1833,7 +1834,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
-            child->storage = current->storage;
             entry->trie_child = child;
           }
 
@@ -1854,7 +1854,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               vec_deinit(&path_stack);
               return -1;
             }
-            child->storage = current->storage;
             entry->child = child;
           }
           // Crab: lock child before unlocking parent
@@ -1979,6 +1978,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
           }
         }
 
+        mark_dirty(current, NULL);
+
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
         platform_unlock(&current->write_lock);
         return last_visible;
@@ -2068,7 +2069,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
           vec_push(&bnode_stack, entry->child_bnode);
         } else if (entry->has_value && entry->has_versions) {
           // Leaf entry with version chain - clean up old versions
-          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id, node->storage);
+          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
           total_removed += removed;
 
           // If only one version remains and it's not deleted, downgrade to legacy mode
@@ -2099,17 +2100,6 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               chunk_destroy(removed.key);
             }
             if (removed.has_versions && removed.versions != NULL) {
-              // Deallocate section storage for all versions in the removed entry
-              if (node->storage != NULL) {
-                version_entry_t* v = removed.versions;
-                while (v != NULL) {
-                  if (v->value_section_id != 0) {
-                    sections_deallocate(node->storage, v->value_section_id,
-                                        v->value_offset, v->value_data_size);
-                  }
-                  v = v->next;
-                }
-              }
               version_entry_destroy(removed.versions);
             } else if (removed.value != NULL) {
               // Legacy single value - dereference
