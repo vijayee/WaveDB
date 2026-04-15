@@ -1410,6 +1410,25 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     return 0;
 }
 
+int wal_manager_seal_and_compact(wal_manager_t* manager) {
+    if (manager == NULL) return -1;
+
+    platform_lock(&manager->threads_lock);
+    // Seal all active thread-local WALs
+    for (size_t i = 0; i < manager->thread_count; i++) {
+        thread_wal_t* twal = manager->threads[i];
+        if (twal != NULL && twal->fd >= 0) {
+            platform_unlock(&manager->threads_lock);
+            thread_wal_seal(twal);
+            platform_lock(&manager->threads_lock);
+        }
+    }
+    platform_unlock(&manager->threads_lock);
+
+    // Compact all sealed WAL files
+    return compact_wal_files(manager);
+}
+
 int compact_wal_files(wal_manager_t* manager) {
     if (manager == NULL) {
         return WAL_ERROR_INVALID_ARG;

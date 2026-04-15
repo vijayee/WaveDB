@@ -940,6 +940,13 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
     return db;
 }
 
+// Persist the trie to section storage (without GC — safe for teardown).
+// Returns 0 on success, -1 if storage not available or persist failed.
+static int database_persist(database_t* db) {
+    if (db == NULL || db->storage == NULL) return -1;
+    return save_index_sections(db);
+}
+
 void database_destroy(database_t* db) {
     if (db == NULL) return;
 
@@ -962,6 +969,20 @@ void database_destroy(database_t* db) {
         // Flush all thread-local WALs to disk before destroying
         if (db->wal_manager) {
             wal_manager_flush(db->wal_manager);
+        }
+
+        // Persist trie to section storage before teardown
+        // This ensures data survives across database_destroy/create cycles.
+        if (db->storage != NULL) {
+            int persist_rc = database_persist(db);
+            if (persist_rc == 0 && db->wal_manager != NULL) {
+                // Seal and compact WAL so entries already captured in the
+                // snapshot are not replayed on next database creation.
+                wal_manager_seal_and_compact(db->wal_manager);
+            } else if (persist_rc != 0) {
+                log_warn("database_destroy: persist failed (rc=%d), "
+                         "WAL entries will be replayed on next open", persist_rc);
+            }
         }
 
         // Destroy WAL manager (thread-local WAL)

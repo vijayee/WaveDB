@@ -175,6 +175,13 @@ int wal_manager_recover(wal_manager_t* manager, void* db);
 int compact_wal_files(wal_manager_t* manager);
 
 /**
+ * Seal all active thread-local WALs and compact all sealed WALs.
+ * After this, all WAL entries are in COMPACTED files and will be
+ * skipped by wal_manager_recover() on next database creation.
+ */
+int wal_manager_seal_and_compact(wal_manager_t* manager);
+
+/**
  * Flush pending operations
  */
 int wal_manager_flush(wal_manager_t* manager);

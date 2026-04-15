@@ -144,12 +144,17 @@ static void sections_lru_cache_move(sections_lru_cache_t* lru, sections_lru_node
     if (node == lru->first) {
         return;
     }
+    if (node == lru->last) {
+        lru->last = node->previous;
+    }
     if (node->previous != NULL) {
         node->previous->next = node->next;
     }
     if (node->next != NULL) {
         node->next->previous = node->previous;
     }
+    node->next = lru->first;
+    node->previous = NULL;
     lru->first->previous = node;
     lru->first = node;
 }
@@ -421,8 +426,7 @@ sections_t* sections_create(char* path, size_t size, size_t cache_size, size_t s
     } else {
         sections->next_id = 0;
     }
-    vec_deinit(files);
-    free(files);
+    destroy_files(files);
 
     // Create initial sections if needed
     while (sections->robin->size < sections->section_concurrency) {
@@ -443,17 +447,35 @@ void sections_destroy(sections_t* sections) {
         debouncer_destroy(sections->defrag_debouncer);
     }
 
-    // Cleanup sharded checkout locks
+    // Save transaction range before destroying paths
+    sections_save_txn_range(sections);
+
+    // Free checkout_t values from sharded checkout hashmaps
+    // (hashmap_cleanup only frees keys via registered key_free func, not values)
     for (size_t i = 0; i < CHECKOUT_LOCK_SHARDS; i++) {
+        checkout_t* checkout;
+        void* pos;
+        hashmap_foreach_data_safe(checkout, &sections->checkout_shards[i].sections, pos) {
+            if (checkout != NULL) {
+                if (checkout->section != NULL) {
+                    section_destroy(checkout->section);
+                }
+                free(checkout);
+            }
+        }
         platform_lock_destroy(&sections->checkout_shards[i].lock);
         hashmap_cleanup(&sections->checkout_shards[i].sections);
     }
 
     sections_lru_cache_destroy(sections->lru);
     round_robin_destroy(sections->robin);
+
+    // Release reference to wheel (NOT destroy — wheel is owned by database)
     if (sections->wheel != NULL) {
-        hierarchical_timing_wheel_destroy(sections->wheel);
+        refcounter_dereference((refcounter_t*) sections->wheel);
+        sections->wheel = NULL;
     }
+
     free(sections->meta_path);
     free(sections->data_path);
     free(sections->robin_path);

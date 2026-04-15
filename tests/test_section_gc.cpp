@@ -411,3 +411,60 @@ TEST_F(SectionGCTest, DeepTriePersistAndReload) {
         identifier_destroy(result);
     }
 }
+
+// ============================================================================
+// Test 7: Auto-persist on destroy (no explicit snapshot needed)
+// Test that database_destroy automatically persists the trie, so data
+// survives across destroy/create cycles without calling database_snapshot.
+// ============================================================================
+TEST_F(SectionGCTest, AutoPersistOnDestroy) {
+    int error = 0;
+
+    database_config_t* config = database_config_default();
+    config->enable_persist = 1;
+    config->lru_memory_mb = 10;
+    config->external_pool = pool;
+    config->external_wheel = wheel;
+
+    db = database_create_with_config(test_dir.c_str(), config, &error);
+    database_config_destroy(config);
+    ASSERT_NE(db, nullptr) << "Failed to create database, error=" << error;
+
+    // Insert data
+    path_t* path = make_path({"users", "alice"});
+    identifier_t* value = make_value("engineer");
+    EXPECT_EQ(database_put_sync(db, path, value), 0);
+
+    path = make_path({"users", "bob"});
+    value = make_value("designer");
+    EXPECT_EQ(database_put_sync(db, path, value), 0);
+
+    // Do NOT call database_snapshot — rely on auto-persist in database_destroy
+    database_destroy(db);
+    db = nullptr;
+    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+
+    // Reload database from disk
+    config = database_config_default();
+    config->enable_persist = 1;
+    config->lru_memory_mb = 10;
+    config->external_pool = pool;
+    config->external_wheel = wheel;
+
+    db = database_create_with_config(test_dir.c_str(), config, &error);
+    database_config_destroy(config);
+    ASSERT_NE(db, nullptr) << "Failed to reload database, error=" << error;
+
+    // Verify data persists after reload
+    path = make_path({"users", "alice"});
+    identifier_t* result = nullptr;
+    EXPECT_EQ(database_get_sync(db, path, &result), 0);
+    expect_identifier_eq(result, "engineer");
+    identifier_destroy(result);
+
+    path = make_path({"users", "bob"});
+    result = nullptr;
+    EXPECT_EQ(database_get_sync(db, path, &result), 0);
+    expect_identifier_eq(result, "designer");
+    identifier_destroy(result);
+}
