@@ -18,6 +18,15 @@ debouncer_t* debouncer_create(hierarchical_timing_wheel_t* wheel, void* ctx, voi
 void debouncer_destroy(debouncer_t* bouncer) {
   refcounter_dereference((refcounter_t*) bouncer);
   if (refcounter_count((refcounter_t*) bouncer) == 0) {
+    // Flush any pending timer: cancel it and execute the callback synchronously.
+    // This ensures no dangling timer callbacks reference freed memory.
+    if (bouncer->wheel != NULL && bouncer->timerId != 0) {
+      hierarchical_timing_wheel_cancel_timer(bouncer->wheel, bouncer->timerId);
+      bouncer->timerId = 0;
+      if (bouncer->cb != NULL) {
+        bouncer->cb(bouncer->ctx);
+      }
+    }
     refcounter_destroy_lock((refcounter_t*) bouncer);
     free(bouncer);
   }

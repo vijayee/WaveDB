@@ -271,10 +271,8 @@ TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     database_destroy(db);
     database_config_destroy(config);
 
-    // External resources still valid after database destroy
-    // (Cleaned up below)
+    // Stop wheel and pool before cleanup
     if (wheel) {
-        hierarchical_timing_wheel_wait_for_idle_signal(wheel);
         hierarchical_timing_wheel_stop(wheel);
     }
     if (pool) {

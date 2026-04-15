@@ -218,6 +218,14 @@ void timing_wheel_on_tick(void* ctx) {
 void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
   timer_st* current = timer_list_dequeue(expired);
   while (current != NULL) {
+    // Skip cancelled timers — cancel_timer removes them from the hashmap
+    // but they may still be in a slot list that was already dequeued.
+    // The abort callback was already called by cancel_timer or stop.
+    if (current->removed) {
+      timer_unref(current);  // Release local (maintenance) reference
+      current = timer_list_dequeue(expired);
+      continue;
+    }
     if (current->plan.current < (current->plan.size - 1)) {
       current->plan.current++;
       //Move to first non-zero wheel

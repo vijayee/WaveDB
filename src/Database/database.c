@@ -957,9 +957,11 @@ void database_destroy(database_t* db) {
         // Stop the timing wheel and worker pool BEFORE destroying data structures.
         // If we destroy the trie/LRU while workers are still running, a worker
         // thread might access freed memory or hold a lock on a destroyed mutex.
+        // Note: Do NOT call wait_for_idle_signal here — debouncers reschedule
+        // timers indefinitely, so the idle condition is never reached. The wheel
+        // stop cancels all timers and the pool join ensures all workers complete.
         if (db->owns_wheel && db->wheel != NULL) {
             hierarchical_timing_wheel_stop(db->wheel);
-            hierarchical_timing_wheel_wait_for_idle_signal(db->wheel);
         }
         if (db->owns_pool && db->pool != NULL) {
             work_pool_shutdown(db->pool);

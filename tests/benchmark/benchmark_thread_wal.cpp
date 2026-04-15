@@ -81,20 +81,22 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
 
 // Cleanup thread-local WAL benchmark
 static void thread_wal_cleanup(thread_wal_ctx_t* ctx) {
-    if (ctx->manager) {
-        wal_manager_destroy(ctx->manager);
-    }
-    // Clear thread-local WAL reference so next init gets a fresh one
-    clear_thread_wal_reference();
-
+    // Stop wheel and pool before destroying WAL manager
+    // to ensure no timer callbacks fire on freed memory
     if (ctx->wheel) {
-        hierarchical_timing_wheel_wait_for_idle_signal(ctx->wheel);
         hierarchical_timing_wheel_stop(ctx->wheel);
     }
     if (ctx->pool) {
         work_pool_shutdown(ctx->pool);
         work_pool_join_all(ctx->pool);
     }
+
+    if (ctx->manager) {
+        wal_manager_destroy(ctx->manager);
+    }
+    // Clear thread-local WAL reference so next init gets a fresh one
+    clear_thread_wal_reference();
+
     if (ctx->wheel) {
         hierarchical_timing_wheel_destroy(ctx->wheel);
     }

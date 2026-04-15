@@ -74,6 +74,14 @@ protected:
     }
 
     void TearDown() override {
+        // Stop wheel and pool before destroying database
+        if (wheel) {
+            hierarchical_timing_wheel_stop(wheel);
+        }
+        if (pool) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+        }
         if (db) {
             database_destroy(db);
         }

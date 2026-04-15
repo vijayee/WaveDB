@@ -758,16 +758,18 @@ void wal_manager_destroy(wal_manager_t* manager) {
                         thread_local_wal = NULL;
                     }
 
-                    // Close file descriptor
-                    if (twal->fd >= 0) {
-                        fsync(twal->fd);
-                        close(twal->fd);
-                    }
-
-                    // Flush and destroy debouncer if present
+                    // Flush and destroy debouncer before closing fd
+                    // (debouncer_destroy flushes any pending fsync callback
+                    // which needs the fd to still be open)
                     if (twal->fsync_debouncer != NULL) {
                         debouncer_flush(twal->fsync_debouncer);
                         debouncer_destroy(twal->fsync_debouncer);
+                    }
+
+                    // Close file descriptor (after debouncer callback has fsync'd)
+                    if (twal->fd >= 0) {
+                        fsync(twal->fd);
+                        close(twal->fd);
                     }
 
                     // Free file path

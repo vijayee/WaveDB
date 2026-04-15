@@ -30,19 +30,19 @@ protected:
     }
 
     void TearDown() override {
-        if (db) {
-            database_destroy(db);
-            db = nullptr;
-        }
-
+        // Stop wheel and pool before destroying database
         if (wheel) {
-            hierarchical_timing_wheel_wait_for_idle_signal(wheel);
             hierarchical_timing_wheel_stop(wheel);
         }
 
         if (pool) {
             work_pool_shutdown(pool);
             work_pool_join_all(pool);
+        }
+
+        if (db) {
+            database_destroy(db);
+            db = nullptr;
         }
 
         if (wheel) {
@@ -133,9 +133,6 @@ TEST_F(SectionGCTest, PersistAndReload) {
     database_destroy(db);
     db = nullptr;
 
-    // Wait for pending operations
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
-
     // Reload database from disk
     config = database_config_default();
     config->enable_persist = 1;
@@ -198,7 +195,6 @@ TEST_F(SectionGCTest, MultipleKeysPersistAndReload) {
     // Destroy and reload
     database_destroy(db);
     db = nullptr;
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
 
     config = database_config_default();
     config->enable_persist = 1;
@@ -388,7 +384,6 @@ TEST_F(SectionGCTest, DeepTriePersistAndReload) {
     // Destroy and reload
     database_destroy(db);
     db = nullptr;
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
 
     config = database_config_default();
     config->enable_persist = 1;
@@ -445,7 +440,6 @@ TEST_F(SectionGCTest, AutoPersistOnDestroy) {
     // Do NOT call database_snapshot — rely on auto-persist in database_destroy
     database_destroy(db);
     db = nullptr;
-    hierarchical_timing_wheel_wait_for_idle_signal(wheel);
 
     // Reload database from disk
     config = database_config_default();

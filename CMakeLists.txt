@@ -327,6 +327,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_database_sync tests/benchmark/benchmark_database_sync.cpp)
     target_link_libraries(benchmark_database_sync benchmark_base wavedb Threads::Threads)
 
+    # Concurrent Database Benchmark
+    add_executable(benchmark_concurrent tests/benchmark/benchmark_concurrent_only.cpp)
+    target_link_libraries(benchmark_concurrent benchmark_base wavedb Threads::Threads)
+
     # Thread-local WAL benchmark
     add_executable(benchmark_thread_wal tests/benchmark/benchmark_thread_wal.cpp)
     target_link_libraries(benchmark_thread_wal benchmark_base wavedb Threads::Threads)

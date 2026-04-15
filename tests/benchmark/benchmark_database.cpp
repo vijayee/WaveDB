@@ -441,18 +441,19 @@ static void setup_database(bench_context_t* ctx) {
 
 // Teardown helper
 static void teardown_database(bench_context_t* ctx) {
-    if (ctx->db) {
-        database_destroy(ctx->db);
-    }
-
+    // Stop wheel and pool before destroying database
+    // to ensure no timer callbacks fire on freed memory
     if (ctx->wheel) {
-        hierarchical_timing_wheel_wait_for_idle_signal(ctx->wheel);
         hierarchical_timing_wheel_stop(ctx->wheel);
     }
 
     if (ctx->pool) {
         work_pool_shutdown(ctx->pool);
         work_pool_join_all(ctx->pool);
+    }
+
+    if (ctx->db) {
+        database_destroy(ctx->db);
     }
 
     if (ctx->wheel) {

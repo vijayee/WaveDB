@@ -38,20 +38,21 @@ protected:
     }
 
     void TearDown() override {
-        // Destroy database first
-        if (db) {
-            database_destroy(db);
-            db = nullptr;
-        }
-
+        // Stop wheel and pool before destroying database
+        // to ensure no timer callbacks fire on freed memory.
         if (wheel) {
-            hierarchical_timing_wheel_wait_for_idle_signal(wheel);
             hierarchical_timing_wheel_stop(wheel);
         }
 
         if (pool) {
             work_pool_shutdown(pool);
             work_pool_join_all(pool);
+        }
+
+        // Destroy database (WAL manager, LRU, trie, etc.)
+        if (db) {
+            database_destroy(db);
+            db = nullptr;
         }
 
         if (wheel) {
