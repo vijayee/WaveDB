@@ -11,6 +11,8 @@
 #include "../Util/path_join.h"
 #include "../Util/log.h"
 #include "../Storage/node_serializer.h"
+#include "../Storage/page_file.h"
+#include "../Storage/bnode_cache.h"
 #include "../Util/memory_pool.h"
 #include <cbor.h>
 #include <string.h>
@@ -324,6 +326,171 @@ static hbtrie_t* load_index(const char* location, uint8_t chunk_size,
     return trie ? trie : hbtrie_create(chunk_size, btree_node_size);
 }
 
+// ============================================================================
+// Phase 2: Per-bnode CoW flush
+// ============================================================================
+
+typedef struct {
+    bnode_t* bnode;
+    hbtrie_node_t* hbnode;         // Owning hbtrie_node
+    bnode_t* parent_bnode;         // Parent bnode (or NULL for root)
+    size_t parent_entry_index;      // Index of this bnode in parent's entries
+    uint16_t level;                // B+tree level (for sorting)
+} dirty_bnode_info_t;
+
+static int compare_dirty_by_level(const void* a, const void* b) {
+    const dirty_bnode_info_t* da = (const dirty_bnode_info_t*)a;
+    const dirty_bnode_info_t* db = (const dirty_bnode_info_t*)b;
+    if (da->level < db->level) return -1;
+    if (da->level > db->level) return 1;
+    return 0;
+}
+
+// Propagate is_dirty upward through the btree so all ancestors of dirty
+// leaves are also marked dirty. This ensures they get collected and flushed.
+static void propagate_dirty_upward(bnode_t* root) {
+    if (root == NULL) return;
+    for (size_t i = 0; i < root->entries.length; i++) {
+        bnode_entry_t* entry = &root->entries.data[i];
+        if (entry->is_bnode_child && entry->child_bnode != NULL) {
+            propagate_dirty_upward(entry->child_bnode);
+            if (entry->child_bnode->is_dirty) {
+                root->is_dirty = 1;
+            }
+        }
+    }
+}
+
+// Walk the trie to collect all dirty bnodes with parent tracking
+static void collect_dirty_bnodes_from_hbnode(
+    hbtrie_node_t* hbnode,
+    bnode_t* parent_bnode,
+    size_t parent_entry_index,
+    vec_t(dirty_bnode_info_t)* dirty_list)
+{
+    if (hbnode == NULL || !hbnode->is_dirty) return;
+
+    // Propagate dirty upward within this hbnode's btree
+    propagate_dirty_upward(hbnode->btree);
+
+    // Walk all bnodes in this hbtrie_node's btree
+    vec_t(bnode_t*) stack;
+    vec_init(&stack);
+    vec_push(&stack, hbnode->btree);
+
+    while (stack.length > 0) {
+        bnode_t* bn = vec_pop(&stack);
+
+        if (bn->is_dirty) {
+            dirty_bnode_info_t info;
+            info.bnode = bn;
+            info.hbnode = hbnode;
+            info.parent_bnode = parent_bnode;
+            info.parent_entry_index = parent_entry_index;
+            info.level = atomic_load(&bn->level);
+            vec_push(dirty_list, info);
+        }
+
+        // Push child bnodes for internal nodes
+        for (size_t i = 0; i < bn->entries.length; i++) {
+            bnode_entry_t* entry = &bn->entries.data[i];
+            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                vec_push(&stack, entry->child_bnode);
+            }
+        }
+    }
+
+    vec_deinit(&stack);
+
+    // Recurse into child hbtrie_nodes
+    for (size_t i = 0; i < hbnode->btree->entries.length; i++) {
+        bnode_entry_t* entry = &hbnode->btree->entries.data[i];
+        if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
+            collect_dirty_bnodes_from_hbnode(entry->child, hbnode->btree, i, dirty_list);
+        }
+        if (entry->trie_child != NULL) {
+            collect_dirty_bnodes_from_hbnode(entry->trie_child, hbnode->btree, i, dirty_list);
+        }
+    }
+}
+
+int database_flush_dirty_bnodes(database_t* db) {
+    if (db == NULL || db->page_file == NULL || db->trie == NULL) return -1;
+
+    hbtrie_node_t* root = atomic_load(&db->trie->root);
+    if (root == NULL || !root->is_dirty) return 0;
+
+    // 1. Collect all dirty bnodes
+    vec_t(dirty_bnode_info_t) dirty_list;
+    vec_init(&dirty_list);
+    collect_dirty_bnodes_from_hbnode(root, NULL, 0, &dirty_list);
+
+    if (dirty_list.length == 0) {
+        vec_deinit(&dirty_list);
+        root->is_dirty = 0;
+        return 0;
+    }
+
+    // 2. Sort by level (leaves first, root last)
+    qsort(dirty_list.data, dirty_list.length, sizeof(dirty_bnode_info_t),
+          compare_dirty_by_level);
+
+    // 3. Flush each dirty bnode
+    for (size_t i = 0; i < dirty_list.length; i++) {
+        dirty_bnode_info_t* info = &dirty_list.data[i];
+        bnode_t* bn = info->bnode;
+
+        // Serialize with V3 format
+        uint8_t* buf = NULL;
+        size_t len = 0;
+        int rc = bnode_serialize_v3(bn, db->trie->chunk_size, &buf, &len);
+        if (rc != 0) {
+            free(buf);
+            vec_deinit(&dirty_list);
+            return -1;
+        }
+
+        // Write to page file at new offset (CoW)
+        uint64_t new_offset = 0;
+        uint64_t bids[64] = {0};
+        size_t num_bids = 0;
+        rc = page_file_write_node(db->page_file, buf, len,
+                                   &new_offset, bids, 64, &num_bids);
+        free(buf);
+        if (rc != 0) {
+            vec_deinit(&dirty_list);
+            return -1;
+        }
+
+        // Mark old offset as stale (if previously persisted)
+        if (bn->disk_offset != UINT64_MAX) {
+            page_file_mark_stale(db->page_file, bn->disk_offset, len);
+        }
+
+        // Update bnode's disk_offset
+        bn->disk_offset = new_offset;
+        bn->is_dirty = 0;
+
+        // Update parent entry's child_disk_offset
+        if (info->parent_bnode != NULL && info->parent_entry_index < info->parent_bnode->entries.length) {
+            bnode_entry_t* parent_entry = &info->parent_bnode->entries.data[info->parent_entry_index];
+            parent_entry->child_disk_offset = new_offset;
+            // Parent is now dirty (its entry changed)
+            info->parent_bnode->is_dirty = 1;
+        }
+    }
+
+    // 4. Update root hbtrie_node disk_offset
+    root->disk_offset = root->btree->disk_offset;
+    root->is_dirty = 0;
+
+    // 5. Write superblock with new root offset
+    page_file_write_superblock(db->page_file, root->disk_offset, 0);
+
+    vec_deinit(&dirty_list);
+    return 0;
+}
+
 database_t* database_create_with_config(const char* location,
                                         database_config_t* config,
                                         int* error_code) {
@@ -465,6 +632,76 @@ database_t* database_create_with_config(const char* location,
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
+    // Create page file and bnode cache (Phase 2)
+    if (effective_config->enable_persist) {
+        char page_path[1024];
+        snprintf(page_path, sizeof(page_path), "%s/data.wdbp", location);
+
+        db->page_file = page_file_create(page_path,
+            PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS);
+        if (db->page_file != NULL) {
+            int pf_rc = page_file_open(db->page_file, 1);
+            if (pf_rc == 0) {
+                // Try to load root from superblock
+                page_superblock_t sb;
+                int sb_rc = page_file_read_superblock(db->page_file, &sb);
+                if (sb_rc == 0 && sb.root_offset != 0) {
+                    // Root exists on disk — load it
+                    size_t root_len = 0;
+                    uint8_t* root_data = page_file_read_node(db->page_file, sb.root_offset, &root_len);
+                    if (root_data != NULL) {
+                        node_location_t* locations = NULL;
+                        size_t num_locations = 0;
+                        bnode_t* root_bnode = bnode_deserialize_v3(
+                            root_data, root_len,
+                            db->trie->chunk_size, db->trie->btree_node_size,
+                            &locations, &num_locations);
+                        free(root_data);
+
+                        if (root_bnode != NULL) {
+                            // Set child_disk_offset on entries
+                            for (size_t li = 0; li < num_locations && li < root_bnode->entries.length; li++) {
+                                root_bnode->entries.data[li].child_disk_offset = locations[li].offset;
+                            }
+                            root_bnode->disk_offset = sb.root_offset;
+                            root_bnode->is_dirty = 0;
+
+                            // Create hbtrie_node wrapper for loaded root
+                            hbtrie_node_t* root_hbnode = hbtrie_node_create(db->trie->btree_node_size);
+                            if (root_hbnode != NULL) {
+                                bnode_destroy(root_hbnode->btree);
+                                root_hbnode->btree = root_bnode;
+                                root_hbnode->btree_height = atomic_load(&root_bnode->level);
+                                root_hbnode->disk_offset = sb.root_offset;
+                                root_hbnode->is_loaded = 1;
+                                root_hbnode->is_dirty = 0;
+
+                                hbtrie_node_t* old_root = atomic_load(&db->trie->root);
+                                atomic_store(&db->trie->root, root_hbnode);
+                                hbtrie_node_destroy(old_root);
+                            }
+                            free(locations);
+                        }
+                    }
+                }
+
+                // Create bnode cache
+                bnode_cache_mgr_t* cache_mgr = bnode_cache_mgr_create(
+                    128 * 1024 * 1024,  // 128 MB
+                    4);                   // 4 shards
+                if (cache_mgr != NULL) {
+                    db->bnode_cache = bnode_cache_create_file_cache(
+                        cache_mgr, db->page_file, page_path);
+                }
+            } else {
+                // Failed to open page file — log warning but continue
+                log_warn("Failed to open page file: %s", page_path);
+                page_file_destroy(db->page_file);
+                db->page_file = NULL;
+            }
+        }
+    }
+
     if (db->trie == NULL) {
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
@@ -579,6 +816,9 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
 // Returns 0 on success, -1 if persist failed.
 static int database_persist(database_t* db) {
     if (db == NULL) return -1;
+    if (db->page_file != NULL) {
+        return database_flush_dirty_bnodes(db);
+    }
     return save_index(db);
 }
 
@@ -637,6 +877,16 @@ void database_destroy(database_t* db) {
 
         // Destroy trie (frees all identifiers and bnode entries)
         if (db->trie) hbtrie_destroy(db->trie);
+
+        // Destroy page-based persistence (Phase 2)
+        if (db->bnode_cache != NULL) {
+            bnode_cache_mgr_t* mgr = db->bnode_cache->mgr;
+            bnode_cache_destroy_file_cache(db->bnode_cache);
+            if (mgr != NULL) bnode_cache_mgr_destroy(mgr);
+        }
+        if (db->page_file != NULL) {
+            page_file_destroy(db->page_file);
+        }
 
         // Destroy transaction manager
         if (db->tx_manager) tx_manager_destroy(db->tx_manager);
@@ -976,7 +1226,10 @@ int database_snapshot(database_t* db) {
     // MVCC: Trigger GC to clean up old versions
     tx_manager_gc(db->tx_manager);
 
-    // Save index to disk (CBOR format)
+    // Save index to disk
+    if (db->page_file != NULL) {
+        return database_flush_dirty_bnodes(db);
+    }
     return save_index(db);
 }
 

@@ -19,6 +19,8 @@
 #include "wal_manager.h"
 #include "batch.h"
 #include "database_config.h"
+#include "../Storage/page_file.h"
+#include "../Storage/bnode_cache.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +57,10 @@ typedef struct {
     uint8_t chunk_size;                  // HBTrie chunk size
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
+
+    // Page-based persistence (Phase 2: replaces CBOR index files)
+    page_file_t* page_file;
+    file_bnode_cache_t* bnode_cache;
     uint64_t next_index_id;              // Incrementing ID for index files
 
     // Config ownership tracking
@@ -301,6 +307,18 @@ int database_scan_next(database_iterator_t* iter,
  * @param iter  Iterator to destroy
  */
 void database_scan_end(database_iterator_t* iter);
+
+/**
+ * Flush all dirty bnodes to the page file using CoW.
+ *
+ * Collects all dirty bnodes bottom-up, serializes each with V3 format,
+ * writes to page file at new offset, marks old offset stale, and
+ * propagates new offsets up to parent entries.
+ *
+ * @param db  Database to flush
+ * @return 0 on success, -1 on failure
+ */
+int database_flush_dirty_bnodes(database_t* db);
 
 #ifdef __cplusplus
 }
