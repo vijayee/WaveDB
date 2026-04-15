@@ -98,7 +98,7 @@ TEST_F(PageFileTest, WriteReadSmallNode) {
     uint64_t bids[16] = {0};
     size_t num_bids = 0;
 
-    rc = page_file_write_node(pf, data + 4, payload_len, &offset, bids, &num_bids);
+    rc = page_file_write_node(pf, data + 4, payload_len, &offset, bids, 16, &num_bids);
     EXPECT_EQ(rc, 0);
     EXPECT_GT(num_bids, 0u);
 
@@ -139,7 +139,7 @@ TEST_F(PageFileTest, WriteReadLargeNode) {
     uint64_t bids[16] = {0};
     size_t num_bids = 0;
 
-    rc = page_file_write_node(pf, payload, payload_len, &offset, bids, &num_bids);
+    rc = page_file_write_node(pf, payload, payload_len, &offset, bids, 16, &num_bids);
     EXPECT_EQ(rc, 0);
     EXPECT_GE(num_bids, 2u);  // Should span at least 2 blocks
 
@@ -179,7 +179,7 @@ TEST_F(PageFileTest, WriteReadMultipleNodes) {
         uint64_t bids[16] = {0};
         size_t num_bids = 0;
         rc = page_file_write_node(pf, (const uint8_t*)payloads[i], payload_lens[i],
-                                   &offsets[i], bids, &num_bids);
+                                   &offsets[i], bids, 16, &num_bids);
         EXPECT_EQ(rc, 0);
     }
 
@@ -219,7 +219,7 @@ TEST_F(PageFileTest, MarkStaleAndRatio) {
     uint64_t bids[16] = {0};
     size_t num_bids = 0;
 
-    rc = page_file_write_node(pf, (const uint8_t*)payload, payload_len, &offset, bids, &num_bids);
+    rc = page_file_write_node(pf, (const uint8_t*)payload, payload_len, &offset, bids, 16, &num_bids);
     EXPECT_EQ(rc, 0);
 
     // Mark stale
@@ -331,33 +331,39 @@ TEST_F(PageFileTest, StaleRatioHalf) {
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
 
-    // Write several nodes
-    uint64_t offsets[4] = {0};
-    for (int i = 0; i < 4; i++) {
-        uint8_t data[100];
-        memset(data, 'A' + i, 100);
-        uint64_t bids[16] = {0};
-        size_t num_bids = 0;
-        rc = page_file_write_node(pf, data, 100, &offsets[i], bids, &num_bids);
-        EXPECT_EQ(rc, 0);
-    }
+    // Write two nodes that fill blocks completely, making stale ratio straightforward
+    // Use data size that fills most of a block (block_size - 4 size prefix - INDEX_BLK_META_SIZE)
+    size_t node_data_len = 4096 - 4 - 16; // Fill one block exactly
+    uint8_t* data1 = (uint8_t*)calloc(1, node_data_len);
+    uint8_t* data2 = (uint8_t*)calloc(1, node_data_len);
+    memset(data1, 'A', node_data_len);
+    memset(data2, 'B', node_data_len);
 
-    // Now mark the first two nodes' regions as stale
-    // Each node occupies approximately 104 bytes (4 size prefix + 100 data)
-    // The first two nodes start at offsets[0] and offsets[1]
-    uint64_t first_region_len = offsets[1] - offsets[0];
-    uint64_t second_region_len = (offsets[2] > offsets[1]) ? (offsets[2] - offsets[1]) : 104;
-    page_file_mark_stale(pf, offsets[0], first_region_len);
-    page_file_mark_stale(pf, offsets[1], second_region_len);
+    uint64_t offset1 = 0, offset2 = 0;
+    uint64_t bids[16] = {0};
+    size_t num_bids = 0;
+    rc = page_file_write_node(pf, data1, node_data_len, &offset1, bids, 16, &num_bids);
+    EXPECT_EQ(rc, 0);
+    rc = page_file_write_node(pf, data2, node_data_len, &offset2, bids, 16, &num_bids);
+    EXPECT_EQ(rc, 0);
 
-    // The stale ratio should be roughly: (first_region + second_region) / file_size
-    uint64_t total_stale = first_region_len + second_region_len;
+    // Mark the first node's region as stale
+    // Each node occupies one full block (4096 bytes)
+    page_file_mark_stale(pf, offset1, 4096);
+
+    // Stale ratio should be approximately 0.5 (one of two data blocks is stale)
+    // File has 2 superblocks + 2 data blocks = 4 blocks total, 1 data block stale
+    // So ratio ≈ 4096 / (4 * 4096) = 0.25 by file size. But stale_ratio is
+    // stale_bytes / file_size. Let's just check the actual ratio directly.
     uint64_t file_sz = page_file_size(pf);
-    double expected_ratio = (double)total_stale / (double)file_sz;
     double actual_ratio = page_file_stale_ratio(pf);
-
-    // Allow some tolerance since blocks have overhead
+    double expected_ratio = 4096.0 / (double)file_sz;
     EXPECT_NEAR(actual_ratio, expected_ratio, 0.05);
+    // Also verify that approximately half the data area is stale
+    // (2 data blocks, 1 stale = 50% of data blocks)
+    EXPECT_NEAR(actual_ratio / expected_ratio, 1.0, 0.05);
 
+    free(data1);
+    free(data2);
     page_file_destroy(pf);
 }

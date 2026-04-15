@@ -67,7 +67,8 @@ uint64_t page_file_alloc_block(page_file_t* pf);
 // out_bids array must be large enough for ceil(data_len / (block_size - INDEX_BLK_META_SIZE)) + 1 blocks.
 // Caller provides out_bids array; function fills it and sets out_num_bids.
 int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
-                          uint64_t* out_offset, uint64_t* out_bids, size_t* out_num_bids);
+                          uint64_t* out_offset, uint64_t* out_bids, size_t max_bids,
+                          size_t* out_num_bids);
 
 // Read a node from the file at the given offset.
 // Reads first 4 bytes for size, then reads the full node.

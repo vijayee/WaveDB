@@ -15,12 +15,6 @@
 
 #include <xxhash.h>
 
-// Compute CRC32 of superblock fields (everything before the crc32 field)
-static uint32_t compute_superblock_crc(const page_superblock_t* sb) {
-    // CRC covers: magic(4) + version(2) + root_offset(8) + root_size(8) + revision(8) = 30 bytes
-    return XXH32(sb, 30, 0);
-}
-
 // Write a superblock to a buffer (block_size bytes), returns the buffer
 static void serialize_superblock(const page_superblock_t* sb, uint8_t* buf, uint64_t block_size) {
     memset(buf, 0, block_size);
@@ -88,6 +82,11 @@ void page_file_destroy(page_file_t* pf) {
 int page_file_open(page_file_t* pf, uint8_t writable) {
     if (pf == NULL) return -1;
 
+    if (pf->fd >= 0) {
+        // Already open, close the old fd first
+        close(pf->fd);
+    }
+
     int flags = writable ? (O_RDWR | O_CREAT) : O_RDONLY;
     int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // 0644
 
@@ -125,7 +124,6 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
         sb.root_offset = 0;
         sb.root_size = 0;
         sb.revision = 0;
-        sb.crc32 = compute_superblock_crc(&sb);
 
         uint8_t* blk_buf = get_clear_memory(pf->block_size);
         serialize_superblock(&sb, blk_buf, pf->block_size);
@@ -202,9 +200,10 @@ uint64_t page_file_alloc_block(page_file_t* pf) {
 }
 
 int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
-                          uint64_t* out_offset, uint64_t* out_bids, size_t* out_num_bids) {
+                          uint64_t* out_offset, uint64_t* out_bids, size_t max_bids,
+                          size_t* out_num_bids) {
     if (pf == NULL || data == NULL || data_len == 0 || out_offset == NULL ||
-        out_bids == NULL || out_num_bids == NULL || !pf->is_writable) {
+        out_bids == NULL || max_bids == 0 || out_num_bids == NULL || !pf->is_writable) {
         return -1;
     }
 
@@ -297,6 +296,10 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
         // Record this block ID
         if (bids_count == 0 || out_bids[bids_count - 1] != pf->cur_bid) {
             // Check for overflow of bids array
+            if (bids_count >= max_bids) {
+                platform_unlock(&pf->lock);
+                return -1;
+            }
             out_bids[bids_count] = pf->cur_bid;
             bids_count++;
         }
@@ -340,11 +343,41 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
 
     *out_len = 0;
 
-    // Read the first 4 bytes for the node size
+    // Read the first 4 bytes for the node size, respecting block boundaries
     uint32_t node_size = 0;
-    ssize_t rd = pread(pf->fd, &node_size, 4, (off_t)offset);
-    if (rd != 4) {
-        return NULL;
+    ssize_t rd;
+    uint64_t first_bid = offset / pf->block_size;
+    uint64_t first_data_start = first_bid * pf->block_size;
+    uint64_t first_data_end = (first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE;
+    size_t first_data_len = (size_t)(first_data_end - first_data_start);
+
+    uint64_t data_offset_in_block = offset - first_data_start;
+    if (data_offset_in_block + 4 > first_data_len) {
+        // Size prefix spans block boundary - unlikely but handle it
+        uint8_t size_buf[4];
+        size_t can_read = (size_t)(first_data_len - data_offset_in_block);
+        rd = pread(pf->fd, size_buf, can_read, (off_t)offset);
+        if (rd < (ssize_t)can_read) {
+            return NULL;
+        }
+        // Read remaining from next block via IndexBlkMeta
+        index_blk_meta_t meta;
+        rd = pread(pf->fd, &meta, sizeof(meta), (off_t)((first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE));
+        if (rd != sizeof(meta) || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) {
+            return NULL;
+        }
+        uint64_t next_data_start = meta.next_bid * pf->block_size;
+        rd = pread(pf->fd, size_buf + can_read, 4 - can_read, (off_t)next_data_start);
+        if (rd < (ssize_t)(4 - can_read)) {
+            return NULL;
+        }
+        memcpy(&node_size, size_buf, 4);
+    } else {
+        // Size prefix is within this block's data area
+        rd = pread(pf->fd, &node_size, 4, (off_t)offset);
+        if (rd < 4) {
+            return NULL;
+        }
     }
 
     // Guard against unreasonable sizes
@@ -396,7 +429,7 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
             index_blk_meta_t meta;
             off_t meta_pos = (off_t)((bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
             rd = pread(pf->fd, &meta, INDEX_BLK_META_SIZE, meta_pos);
-            if (rd != INDEX_BLK_META_SIZE || meta.next_bid == BLK_NOT_FOUND) {
+            if (rd != INDEX_BLK_META_SIZE || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) {
                 free(result);
                 return NULL;
             }
@@ -412,7 +445,9 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
 
 void page_file_mark_stale(page_file_t* pf, uint64_t offset, uint64_t length) {
     if (pf == NULL || length == 0) return;
+    platform_lock(&pf->lock);
     stale_region_add(pf->stale_mgr, offset, length);
+    platform_unlock(&pf->lock);
 }
 
 uint64_t* page_file_get_reusable_blocks(page_file_t* pf, double threshold_ratio, size_t* out_count) {
@@ -423,8 +458,11 @@ uint64_t* page_file_get_reusable_blocks(page_file_t* pf, double threshold_ratio,
     uint64_t file_sz = page_file_size(pf);
     if (file_sz == 0) return NULL;
 
+    platform_lock(&pf->lock);
     stale_region_t* regions = stale_region_get_reusable(pf->stale_mgr, file_sz,
                                                          threshold_ratio, out_count);
+    platform_unlock(&pf->lock);
+
     if (regions == NULL || *out_count == 0) {
         if (regions) free(regions);
         return NULL;
@@ -457,7 +495,6 @@ int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t r
     sb.root_offset = root_offset;
     sb.root_size = root_size;
     sb.revision = pf->revision;
-    sb.crc32 = compute_superblock_crc(&sb);
 
     // Write to the round-robin slot
     uint64_t slot = pf->revision % pf->num_superblocks;
@@ -532,9 +569,9 @@ int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb) {
 uint64_t page_file_size(page_file_t* pf) {
     if (pf == NULL || pf->fd < 0) return 0;
 
-    off_t sz = lseek(pf->fd, 0, SEEK_END);
-    if (sz < 0) return 0;
-    return (uint64_t)sz;
+    struct stat st;
+    if (fstat(pf->fd, &st) != 0) return 0;
+    return (uint64_t)st.st_size;
 }
 
 double page_file_stale_ratio(page_file_t* pf) {
@@ -543,6 +580,8 @@ double page_file_stale_ratio(page_file_t* pf) {
     uint64_t file_sz = page_file_size(pf);
     if (file_sz == 0) return 0.0;
 
+    platform_lock(&pf->lock);
     uint64_t stale = stale_region_total(pf->stale_mgr);
+    platform_unlock(&pf->lock);
     return (double)stale / (double)file_sz;
 }
