@@ -15,6 +15,14 @@
 
 #include <xxhash.h>
 
+// posix_fadvise availability: Linux has it, macOS/BSD may not
+#if defined(__linux__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#define HAS_POSIX_FADVISE 1
+#endif
+
+// Forward declaration for multi-block read fallback
+static uint8_t* page_file_read_node_multiblock(page_file_t* pf, uint64_t offset, size_t* out_len);
+
 // Write a superblock to a buffer (block_size bytes), returns the buffer
 static void serialize_superblock(const page_superblock_t* sb, uint8_t* buf, uint64_t block_size) {
     memset(buf, 0, block_size);
@@ -95,6 +103,11 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
         return -1;
     }
     pf->is_writable = writable;
+
+    // Hint sequential access for better readahead
+#if HAS_POSIX_FADVISE
+    posix_fadvise(pf->fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
 
     // Check file size
     off_t file_size = lseek(pf->fd, 0, SEEK_END);
@@ -343,68 +356,111 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
 
     *out_len = 0;
 
-    // Read the first 4 bytes for the node size, respecting block boundaries
+    // Optimized read path: read the entire block in one pread, then extract
+    // the node data in-memory. For single-block nodes (the common case), this
+    // reduces syscalls from 3 to 1.
+    uint64_t bid = offset / pf->block_size;
+    uint64_t block_start = bid * pf->block_size;
+    uint64_t data_start_in_block = offset - block_start;
+
+    // Read the entire block into a temporary buffer
+    uint8_t* block_buf = (uint8_t*)malloc(pf->block_size);
+    if (block_buf == NULL) return NULL;
+
+    ssize_t rd = pread(pf->fd, block_buf, (size_t)pf->block_size, (off_t)block_start);
+    if (rd < 0) {
+        free(block_buf);
+        return NULL;
+    }
+
+    size_t bytes_in_block = (size_t)rd;
+    uint64_t block_data_end = (bid + 1) * pf->block_size - INDEX_BLK_META_SIZE;
+    size_t data_area_len = (size_t)(block_data_end - block_start);
+    if (data_area_len > bytes_in_block) {
+        data_area_len = bytes_in_block;
+    }
+
+    // Extract the 4-byte size prefix from the block buffer
+    if (data_start_in_block + 4 > data_area_len) {
+        // Size prefix spans block boundary - fall back to multi-block read
+        free(block_buf);
+        return page_file_read_node_multiblock(pf, offset, out_len);
+    }
+
+    uint32_t node_size;
+    memcpy(&node_size, block_buf + data_start_in_block, 4);
+
+    // Guard against unreasonable sizes
+    if (node_size == 0 || node_size > UINT32_MAX - 4) {
+        free(block_buf);
+        return NULL;
+    }
+
+    size_t total = 4 + (size_t)node_size;
+
+    // Check if the entire node fits within this block's data area
+    if (data_start_in_block + total <= data_area_len) {
+        // Single-block node: copy directly from block buffer (0 additional preads)
+        uint8_t* result = (uint8_t*)malloc(total);
+        if (result == NULL) {
+            free(block_buf);
+            return NULL;
+        }
+        memcpy(result, block_buf + data_start_in_block, total);
+        free(block_buf);
+        *out_len = node_size;
+        return result;
+    }
+
+    // Multi-block node: use block buffer for the first part, then follow
+    // IndexBlkMeta links for the remainder.
+    free(block_buf);
+    return page_file_read_node_multiblock(pf, offset, out_len);
+}
+
+// Multi-block read: follows IndexBlkMeta links across blocks.
+// Called when a node spans multiple blocks (rare for small nodes).
+static uint8_t* page_file_read_node_multiblock(page_file_t* pf, uint64_t offset, size_t* out_len) {
+    // Read the 4-byte size prefix first
     uint32_t node_size = 0;
-    ssize_t rd;
     uint64_t first_bid = offset / pf->block_size;
     uint64_t first_data_start = first_bid * pf->block_size;
     uint64_t first_data_end = (first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE;
     size_t first_data_len = (size_t)(first_data_end - first_data_start);
-
     uint64_t data_offset_in_block = offset - first_data_start;
+
     if (data_offset_in_block + 4 > first_data_len) {
-        // Size prefix spans block boundary - unlikely but handle it
+        // Size prefix spans block boundary
         uint8_t size_buf[4];
         size_t can_read = (size_t)(first_data_len - data_offset_in_block);
-        rd = pread(pf->fd, size_buf, can_read, (off_t)offset);
-        if (rd < (ssize_t)can_read) {
-            return NULL;
-        }
-        // Read remaining from next block via IndexBlkMeta
+        ssize_t rd = pread(pf->fd, size_buf, can_read, (off_t)offset);
+        if (rd < (ssize_t)can_read) return NULL;
         index_blk_meta_t meta;
         rd = pread(pf->fd, &meta, sizeof(meta), (off_t)((first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE));
-        if (rd != sizeof(meta) || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) {
-            return NULL;
-        }
+        if (rd != sizeof(meta) || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) return NULL;
         uint64_t next_data_start = meta.next_bid * pf->block_size;
         rd = pread(pf->fd, size_buf + can_read, 4 - can_read, (off_t)next_data_start);
-        if (rd < (ssize_t)(4 - can_read)) {
-            return NULL;
-        }
+        if (rd < (ssize_t)(4 - can_read)) return NULL;
         memcpy(&node_size, size_buf, 4);
     } else {
-        // Size prefix is within this block's data area
-        rd = pread(pf->fd, &node_size, 4, (off_t)offset);
-        if (rd < 4) {
-            return NULL;
-        }
+        ssize_t rd = pread(pf->fd, &node_size, 4, (off_t)offset);
+        if (rd < 4) return NULL;
     }
 
-    // Guard against unreasonable sizes
-    if (node_size == 0 || node_size > UINT32_MAX - 4) {
-        return NULL;
-    }
+    if (node_size == 0 || node_size > UINT32_MAX - 4) return NULL;
 
-    // Total bytes to read: 4 (size) + node_size
-    size_t total = 4 + node_size;
-    uint8_t* result = get_clear_memory(total);
-    if (result == NULL) {
-        return NULL;
-    }
-
-    // Read the size prefix + full node data
-    // For single-block nodes, a single pread may suffice
-    // For multi-block nodes, we follow next_bid links
+    size_t total = 4 + (size_t)node_size;
+    uint8_t* result = (uint8_t*)malloc(total);
+    if (result == NULL) return NULL;
 
     uint64_t read_offset = offset;
     uint64_t bid = offset / pf->block_size;
     size_t total_read = 0;
 
     while (total_read < total) {
-        // How much data can we read from this block?
-        uint64_t block_data_end = (bid + 1) * pf->block_size - INDEX_BLK_META_SIZE;
-        uint64_t block_start = bid * pf->block_size;
-        uint64_t can_read = block_data_end - (block_start + (read_offset - block_start));
+        uint64_t block_data_end_local = (bid + 1) * pf->block_size - INDEX_BLK_META_SIZE;
+        uint64_t block_start_local = bid * pf->block_size;
+        uint64_t can_read = block_data_end_local - (block_start_local + (read_offset - block_start_local));
 
         if (can_read > total - total_read) {
             can_read = total - total_read;
@@ -415,7 +471,7 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
             return NULL;
         }
 
-        rd = pread(pf->fd, result + total_read, can_read, (off_t)read_offset);
+        ssize_t rd = pread(pf->fd, result + total_read, can_read, (off_t)read_offset);
         if (rd != (ssize_t)can_read) {
             free(result);
             return NULL;
@@ -424,8 +480,6 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
         read_offset += can_read;
 
         if (total_read < total) {
-            // Need to follow next_bid link
-            // Read IndexBlkMeta at end of current block
             index_blk_meta_t meta;
             off_t meta_pos = (off_t)((bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
             rd = pread(pf->fd, &meta, INDEX_BLK_META_SIZE, meta_pos);
@@ -433,7 +487,6 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
                 free(result);
                 return NULL;
             }
-
             bid = meta.next_bid;
             read_offset = bid * pf->block_size;
         }
