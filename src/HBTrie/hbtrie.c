@@ -1922,7 +1922,8 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
       }
 
       size_t index;
-      bnode_entry_t* entry = bnode_find_leaf(current->btree, chunk, &index);
+      bnode_t* leaf = bnode_descend(current->btree, chunk);
+      bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -1952,7 +1953,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
             platform_unlock(&current->write_lock);
             return NULL;
           }
-          mark_dirty(current, NULL);
+          mark_dirty(current, leaf);
         } else {
           // Legacy single value - upgrade to version chain with tombstone
           if (entry->value != NULL) {
@@ -1985,7 +1986,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
               platform_unlock(&current->write_lock);
               return NULL;
             }
-            mark_dirty(current, NULL);
+            mark_dirty(current, leaf);
           }
         }
 
@@ -2100,6 +2101,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
             entry->has_versions = 0;
 
             version_entry_destroy(sole_version);
+            mark_dirty(node, bn);
           } else if (entry->versions != NULL &&
                      entry->versions->next == NULL &&
                      entry->versions->is_deleted &&
