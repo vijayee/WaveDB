@@ -89,6 +89,7 @@ set(WAVEDB_SOURCES
     src/Storage/node_serializer.c
     src/Storage/stale_region.c
     src/Storage/page_file.c
+    src/Storage/bnode_cache.c
 
     # Database
     src/Database/wal.c
@@ -251,6 +252,11 @@ if(BUILD_TESTS)
     add_executable(test_page_file tests/test_page_file.cpp)
     target_link_libraries(test_page_file wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_page_file COMMAND test_page_file)
+
+    # Test for bnode_cache
+    add_executable(test_bnode_cache tests/test_bnode_cache.cpp)
+    target_link_libraries(test_bnode_cache wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_bnode_cache COMMAND test_bnode_cache)
 
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
