@@ -361,11 +361,21 @@ static void propagate_dirty_upward(bnode_t* root) {
     }
 }
 
-// Walk the trie to collect all dirty bnodes with parent tracking
+// Stack item for DFS walk of bnode tree with parent tracking
+typedef struct {
+    bnode_t* bnode;
+    bnode_t* parent_bnode;         // Within-B+tree parent (NULL for root)
+    size_t parent_entry_index;     // Index in parent's entries
+} bnode_stack_item_t;
+
+// Walk the trie to collect all dirty bnodes with parent tracking.
+// The DFS uses a stack that carries within-B+tree parent information,
+// so each bnode knows its actual parent within the B+tree (not just
+// the cross-hbtrie-node boundary parent).
 static void collect_dirty_bnodes_from_hbnode(
     hbtrie_node_t* hbnode,
-    bnode_t* parent_bnode,
-    size_t parent_entry_index,
+    bnode_t* cross_parent_bnode,
+    size_t cross_parent_entry_index,
     vec_t(dirty_bnode_info_t)* dirty_list)
 {
     if (hbnode == NULL || !hbnode->is_dirty) return;
@@ -373,45 +383,75 @@ static void collect_dirty_bnodes_from_hbnode(
     // Propagate dirty upward within this hbnode's btree
     propagate_dirty_upward(hbnode->btree);
 
-    // Walk all bnodes in this hbtrie_node's btree
-    vec_t(bnode_t*) stack;
+    // Walk all bnodes in this hbtrie_node's btree using DFS with parent tracking
+    vec_t(bnode_stack_item_t) stack;
     vec_init(&stack);
-    vec_push(&stack, hbnode->btree);
+
+    // Root of this hbnode's B+tree: parent is the cross-hbtrie-node parent
+    bnode_stack_item_t root_item;
+    root_item.bnode = hbnode->btree;
+    root_item.parent_bnode = cross_parent_bnode;
+    root_item.parent_entry_index = cross_parent_entry_index;
+    vec_push(&stack, root_item);
 
     while (stack.length > 0) {
-        bnode_t* bn = vec_pop(&stack);
+        bnode_stack_item_t item = vec_pop(&stack);
+        bnode_t* bn = item.bnode;
 
         if (bn->is_dirty) {
             dirty_bnode_info_t info;
             info.bnode = bn;
             info.hbnode = hbnode;
-            info.parent_bnode = parent_bnode;
-            info.parent_entry_index = parent_entry_index;
+            info.parent_bnode = item.parent_bnode;
+            info.parent_entry_index = item.parent_entry_index;
             info.level = atomic_load(&bn->level);
             vec_push(dirty_list, info);
         }
 
-        // Push child bnodes for internal nodes
+        // Push child bnodes for internal nodes, tracking within-B+tree parent
         for (size_t i = 0; i < bn->entries.length; i++) {
             bnode_entry_t* entry = &bn->entries.data[i];
             if (entry->is_bnode_child && entry->child_bnode != NULL) {
-                vec_push(&stack, entry->child_bnode);
+                bnode_stack_item_t child_item;
+                child_item.bnode = entry->child_bnode;
+                child_item.parent_bnode = bn;        // Within-B+tree parent
+                child_item.parent_entry_index = i;    // Index in parent's entries
+                vec_push(&stack, child_item);
             }
         }
     }
 
     vec_deinit(&stack);
 
-    // Recurse into child hbtrie_nodes
-    for (size_t i = 0; i < hbnode->btree->entries.length; i++) {
-        bnode_entry_t* entry = &hbnode->btree->entries.data[i];
-        if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
-            collect_dirty_bnodes_from_hbnode(entry->child, hbnode->btree, i, dirty_list);
-        }
-        if (entry->trie_child != NULL) {
-            collect_dirty_bnodes_from_hbnode(entry->trie_child, hbnode->btree, i, dirty_list);
+    // Recurse into child hbtrie_nodes from ALL leaf bnodes (not just root)
+    // In a multi-level B+tree, hbtrie child pointers live in leaf bnodes,
+    // not the root. We must walk the tree to find all leaf entries.
+    vec_t(bnode_t*) leaf_stack;
+    vec_init(&leaf_stack);
+    vec_push(&leaf_stack, hbnode->btree);
+
+    while (leaf_stack.length > 0) {
+        bnode_t* bn = vec_pop(&leaf_stack);
+
+        for (size_t i = 0; i < bn->entries.length; i++) {
+            bnode_entry_t* entry = &bn->entries.data[i];
+
+            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                // Internal node — descend further
+                vec_push(&leaf_stack, entry->child_bnode);
+            } else {
+                // Leaf entry — check for hbtrie children
+                if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
+                    collect_dirty_bnodes_from_hbnode(entry->child, bn, i, dirty_list);
+                }
+                if (entry->trie_child != NULL) {
+                    collect_dirty_bnodes_from_hbnode(entry->trie_child, bn, i, dirty_list);
+                }
+            }
         }
     }
+
+    vec_deinit(&leaf_stack);
 }
 
 int database_flush_dirty_bnodes(database_t* db) {
@@ -485,7 +525,11 @@ int database_flush_dirty_bnodes(database_t* db) {
     root->is_dirty = 0;
 
     // 5. Write superblock with new root offset
-    page_file_write_superblock(db->page_file, root->disk_offset, 0);
+    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0);
+    if (sb_rc != 0) {
+        vec_deinit(&dirty_list);
+        return -1;
+    }
 
     vec_deinit(&dirty_list);
     return 0;
@@ -679,6 +723,8 @@ database_t* database_create_with_config(const char* location,
                                 hbtrie_node_t* old_root = atomic_load(&db->trie->root);
                                 atomic_store(&db->trie->root, root_hbnode);
                                 hbtrie_node_destroy(old_root);
+                            } else {
+                                bnode_destroy_tree(root_bnode);
                             }
                             free(locations);
                         }
@@ -692,6 +738,9 @@ database_t* database_create_with_config(const char* location,
                 if (cache_mgr != NULL) {
                     db->bnode_cache = bnode_cache_create_file_cache(
                         cache_mgr, db->page_file, page_path);
+                    if (db->bnode_cache == NULL) {
+                        bnode_cache_mgr_destroy(cache_mgr);
+                    }
                 }
             } else {
                 // Failed to open page file — log warning but continue
