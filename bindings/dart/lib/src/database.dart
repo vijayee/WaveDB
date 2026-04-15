@@ -140,6 +140,11 @@ class WaveDB {
             try {
               pending.completer.complete(IdentifierConverter.fromNative(idPtr));
             } finally {
+              // The value was CONSUME'd before being passed to the callback
+              // (yield=1). REFERENCE consumes the yield (protecting the value
+              // from other threads), then identifierDestroy decrements the
+              // count to release this reference.
+              WaveDBNative.identifierReference(idPtr);
               WaveDBNative.identifierDestroy(idPtr);
             }
           }

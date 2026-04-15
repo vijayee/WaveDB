@@ -1110,10 +1110,10 @@ static void _database_get(database_get_ctx_t* ctx) {
     if (value != NULL) {
         path_destroy(path);
         free(ctx);
-        // database_lru_cache_get REFERENCE'd the value (count+1).
-        // CONSUME transfers it to the callback: sets yield=1 so the
-        // callback's REFERENCE consumes the yield instead of incrementing
-        // count, preventing a refcount leak.
+        // database_lru_cache_get REFERENCE'd the value (count+1) for the
+        // caller. CONSUME transfers this reference to the callback: sets
+        // yield=1. The callback must REFERENCE (which consumes the yield)
+        // then identifier_destroy (which decrements the count).
         identifier_t* consumed = (identifier_t*)CONSUME(value, identifier_t);
         promise_resolve(promise, consumed);
         return;
@@ -1138,11 +1138,11 @@ static void _database_get(database_get_ctx_t* ctx) {
     path_destroy(path);
     free(ctx);
 
-    // hbtrie_find returns a reference the caller owns.
+    // hbtrie_find returns a reference the caller owns (count+1).
     // REFERENCE above created a separate reference for LRU.
-    // CONSUME transfers the caller's reference to the promise callback
-    // so the callback's REFERENCE consumes the yield instead of
-    // incrementing count, preventing a refcount leak.
+    // CONSUME transfers the caller's reference to the callback: sets
+    // yield=1. The callback must REFERENCE (which consumes the yield)
+    // then identifier_destroy (which decrements the count).
     if (value != NULL) {
         identifier_t* consumed = (identifier_t*)CONSUME(value, identifier_t);
         promise_resolve(promise, consumed);

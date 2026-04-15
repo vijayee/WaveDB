@@ -382,6 +382,12 @@ typedef IdentifierDestroyC = Void Function(Pointer<identifier_t> id);
 /// Dart signature for identifier_destroy
 typedef IdentifierDestroy = void Function(Pointer<identifier_t> id);
 
+/// C signature: void* refcounter_reference(refcounter_t* refcounter)
+typedef RefcounterReferenceC = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
+
+/// Dart signature for refcounter_reference
+typedef RefcounterReference = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
+
 /// C signature: buffer_t* identifier_to_buffer(identifier_t* id)
 typedef IdentifierToBufferC = Pointer<buffer_t> Function(
   Pointer<identifier_t> id,
@@ -714,6 +720,9 @@ class WaveDBNative {
 
   static late final IdentifierDestroy _identifierDestroy = WaveDBLibrary.load()
       .lookupFunction<IdentifierDestroyC, IdentifierDestroy>('identifier_destroy');
+
+  static late final RefcounterReference _refcounterReference = WaveDBLibrary.load()
+      .lookupFunction<RefcounterReferenceC, RefcounterReference>('refcounter_reference');
 
   static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
       .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
@@ -1141,6 +1150,15 @@ class WaveDBNative {
   /// [id] - Identifier handle to destroy
   static void identifierDestroy(Pointer<identifier_t> id) {
     _identifierDestroy(id);
+  }
+
+  /// Reference an identifier (increment refcount or consume yield)
+  ///
+  /// Since refcounter_t is the first member of identifier_t, we can
+  /// safely cast the pointer. This handles the CONSUME pattern:
+  /// if yield>0, it consumes the yield; otherwise it increments count.
+  static void identifierReference(Pointer<identifier_t> id) {
+    _refcounterReference(id.cast<refcounter_t>());
   }
 
   /// Convert an identifier to a buffer containing the original data

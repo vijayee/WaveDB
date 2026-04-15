@@ -203,6 +203,11 @@ Napi::Value AsyncBridge::ConvertResult(Napi::Env env, AsyncOpContext* ctx) {
         return env.Null();
       }
       Napi::Value value = ValueToJS(env, id);
+      // The value was CONSUME'd before being passed to the callback
+      // (yield=1). REFERENCE consumes the yield (protecting the value
+      // from other threads), then identifier_destroy decrements the count
+      // to release this reference.
+      REFERENCE(id, identifier_t);
       identifier_destroy(id);
       return value;
     }
