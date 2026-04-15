@@ -10,7 +10,6 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
-#include "../Storage/sections.h"
 #include "../Storage/node_serializer.h"
 #include "../Util/memory_pool.h"
 #include <cbor.h>
@@ -22,7 +21,6 @@
 #include <errno.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <arpa/inet.h>
 
 typedef struct {
     database_t* db;
@@ -219,7 +217,7 @@ static char* create_index_path(const char* location, uint64_t id, uint32_t crc) 
     return strdup(buf);
 }
 
-// Save HBTrie to disk
+// Save HBTrie to disk (CBOR format)
 static int save_index(database_t* db) {
     uint32_t crc = hbtrie_compute_hash(db->trie);
     uint64_t index_id = db->next_index_id++;
@@ -260,119 +258,9 @@ static int save_index(database_t* db) {
     return 0;
 }
 
-// Index pointer file magic: "WDBS" (WaveDB Sections)
-#define INDEX_POINTER_MAGIC 0x57444253
-#define INDEX_POINTER_SIZE 37  // 4+1+4+8+8+8+4 bytes
-
-// Save index pointer file (root node location for section-based persistence)
-static int save_index_pointer(database_t* db, size_t root_section_id,
-                               size_t root_block_index, size_t root_data_size) {
-    uint8_t buf[INDEX_POINTER_SIZE];
-    uint8_t* ptr = buf;
-
-    // Magic
-    uint32_t magic = htonl(INDEX_POINTER_MAGIC);
-    memcpy(ptr, &magic, 4); ptr += 4;
-
-    // chunk_size
-    *ptr = db->chunk_size; ptr += 1;
-
-    // btree_node_size
-    uint32_t node_size = htonl(db->btree_node_size);
-    memcpy(ptr, &node_size, 4); ptr += 4;
-
-    // root_section_id
-    uint32_t high = htonl((uint32_t)(root_section_id >> 32));
-    uint32_t low = htonl((uint32_t)(root_section_id & 0xFFFFFFFF));
-    memcpy(ptr, &high, 4); ptr += 4;
-    memcpy(ptr, &low, 4); ptr += 4;
-
-    // root_block_index
-    high = htonl((uint32_t)(root_block_index >> 32));
-    low = htonl((uint32_t)(root_block_index & 0xFFFFFFFF));
-    memcpy(ptr, &high, 4); ptr += 4;
-    memcpy(ptr, &low, 4); ptr += 4;
-
-    // root_data_size
-    high = htonl((uint32_t)(root_data_size >> 32));
-    low = htonl((uint32_t)(root_data_size & 0xFFFFFFFF));
-    memcpy(ptr, &high, 4); ptr += 4;
-    memcpy(ptr, &low, 4); ptr += 4;
-
-    // CRC32 of all above bytes (simple XOR-based checksum)
-    uint32_t crc = 0;
-    for (int i = 0; i < 33; i++) {
-        crc ^= ((uint32_t)buf[i]) << (i % 4 * 8);
-    }
-    uint32_t crc_net = htonl(crc);
-    memcpy(ptr, &crc_net, 4);
-
-    char path[512];
-    snprintf(path, sizeof(path), "%s/index.wdbs", db->location);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        log_error("Failed to write index pointer file");
-        return -1;
-    }
-    ssize_t written = write(fd, buf, INDEX_POINTER_SIZE);
-    close(fd);
-
-    if (written != INDEX_POINTER_SIZE) {
-        log_error("Failed to write index pointer file completely");
-        return -1;
-    }
-
-    return 0;
-}
-
-// Node info for section-based persistence (tracks parent-child relationships)
-typedef struct {
-    hbtrie_node_t* node;
-    bnode_entry_t* parent_entry;  // Entry in parent that points to this node (NULL for root)
-} node_info_t;
-
-// Save HBTrie to section storage (per-bnode writes)
-// Phase 2: stubbed — will be replaced by page_file flush
-static int save_index_sections(database_t* db) {
-    (void)db;
-    return 0;
-}
-
-// Helper: load an hbtrie_node from section storage
-// Phase 2: stubbed — will be replaced by lazy loading from page file
-static hbtrie_node_t* load_node_from_section(sections_t* storage, size_t section_id,
-                                              size_t block_index, size_t data_size,
-                                              uint8_t chunk_size, uint32_t btree_node_size) {
-    (void)storage;
-    (void)section_id;
-    (void)block_index;
-    (void)data_size;
-    (void)chunk_size;
-    (void)btree_node_size;
-    return NULL;
-}
-
-// Load HBTrie from section storage
-// Phase 2: stubbed — will be replaced by page file loading
-static hbtrie_t* load_index_sections(const char* location, uint8_t chunk_size,
-                                      uint32_t btree_node_size, sections_t* storage) {
-    (void)location;
-    (void)chunk_size;
-    (void)btree_node_size;
-    (void)storage;
-    return NULL;
-}
-
-// Load HBTrie from disk
+// Load HBTrie from disk (CBOR format)
 static hbtrie_t* load_index(const char* location, uint8_t chunk_size,
-                             uint32_t btree_node_size, sections_t* storage) {
-    // Try section-based index first if storage is available
-    if (storage != NULL) {
-        hbtrie_t* trie = load_index_sections(location, chunk_size, btree_node_size, storage);
-        if (trie != NULL) return trie;
-        // Fall through to CBOR if section-based load fails
-    }
-
+                             uint32_t btree_node_size) {
     // Find most recent CBOR index file
     DIR* dir = opendir(location);
     if (dir == NULL) return NULL;
@@ -561,44 +449,23 @@ database_t* database_create_with_config(const char* location,
         platform_lock_init(&db->write_locks[i]);
     }
 
-    // Create storage if persistent
+    // Create storage directories if persistent
     if (effective_config->enable_persist) {
         char* data_path = path_join(location, "data");
         char* meta_path = path_join(location, "meta");
         mkdir_p(data_path);
         mkdir_p(meta_path);
-
-        size_t cache_size = effective_config->storage_cache_size;
-        size_t section_concurrency = 8;
-        size_t sections_size = 1024 * 1024;
-
-        db->storage = sections_create(location, sections_size, cache_size, section_concurrency,
-                                      db->wheel, DATABASE_DEBOUNCE_WAIT_MS, DATABASE_DEBOUNCE_MAX_WAIT_MS);
-
         free(data_path);
         free(meta_path);
-
-        if (db->storage == NULL) {
-            log_warn("Failed to initialize persistent storage, continuing in-memory only");
-        } else {
-            db->storage_cache_size = cache_size;
-            db->storage_max_tuple = section_concurrency;
-        }
     }
 
     // Load or create trie
-    db->trie = load_index(location, db->chunk_size, db->btree_node_size, db->storage);
+    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
     if (db->trie == NULL) {
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // If using storage, set trie_ref for defrag remapping
-    if (db->storage != NULL && db->trie->root != NULL) {
-        db->storage->trie_ref = db->trie;
-    }
-
     if (db->trie == NULL) {
-        if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
@@ -616,7 +483,6 @@ database_t* database_create_with_config(const char* location,
     db->tx_manager = tx_manager_create(db->trie, db->pool, db->wheel, 100);
     if (db->tx_manager == NULL) {
         hbtrie_destroy(db->trie);
-        if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
@@ -635,7 +501,6 @@ database_t* database_create_with_config(const char* location,
     if (db->wal_manager == NULL) {
         tx_manager_destroy(db->tx_manager);
         hbtrie_destroy(db->trie);
-        if (db->storage) sections_destroy(db->storage);
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
@@ -677,7 +542,7 @@ database_t* database_create_with_config(const char* location,
 database_t* database_create(const char* location, size_t lru_memory_mb,
                             wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
-                            uint8_t enable_persist, size_t storage_cache_size,
+                            uint8_t enable_persist,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
                             int* error_code) {
     // Create config from parameters
@@ -692,7 +557,6 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
     if (chunk_size > 0) config->chunk_size = chunk_size;
     if (btree_node_size > 0) config->btree_node_size = btree_node_size;
     config->enable_persist = enable_persist;
-    if (storage_cache_size > 0) config->storage_cache_size = storage_cache_size;
 
     // Set WAL config if provided
     if (wal_config != NULL) {
@@ -711,12 +575,11 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
     return db;
 }
 
-// Persist the trie to section storage (without GC — safe for teardown).
-// Returns 0 on success, -1 if storage not available or persist failed.
-// Phase 2: save_index_sections is stubbed, returns 0
+// Persist the trie to disk (CBOR snapshot, without GC -- safe for teardown).
+// Returns 0 on success, -1 if persist failed.
 static int database_persist(database_t* db) {
-    if (db == NULL || db->storage == NULL) return -1;
-    return save_index_sections(db);
+    if (db == NULL) return -1;
+    return save_index(db);
 }
 
 void database_destroy(database_t* db) {
@@ -745,9 +608,9 @@ void database_destroy(database_t* db) {
             wal_manager_flush(db->wal_manager);
         }
 
-        // Persist trie to section storage before teardown
+        // Persist trie before teardown (CBOR snapshot)
         // This ensures data survives across database_destroy/create cycles.
-        if (db->storage != NULL) {
+        {
             int persist_rc = database_persist(db);
             if (persist_rc == 0 && db->wal_manager != NULL) {
                 // Seal and compact WAL so entries already captured in the
@@ -777,11 +640,6 @@ void database_destroy(database_t* db) {
 
         // Destroy transaction manager
         if (db->tx_manager) tx_manager_destroy(db->tx_manager);
-
-        // Destroy storage if present
-        if (db->storage) {
-            sections_destroy(db->storage);
-        }
 
         // Destroy write lock shards
         for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
@@ -1118,12 +976,8 @@ int database_snapshot(database_t* db) {
     // MVCC: Trigger GC to clean up old versions
     tx_manager_gc(db->tx_manager);
 
-    // Save index to disk: use sections if available, otherwise monolithic CBOR
-    if (db->storage != NULL) {
-        return save_index_sections(db);
-    } else {
-        return save_index(db);
-    }
+    // Save index to disk (CBOR format)
+    return save_index(db);
 }
 
 size_t database_count(database_t* db) {

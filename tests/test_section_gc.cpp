@@ -271,7 +271,7 @@ TEST_F(SectionGCTest, InMemoryFallbackWorks) {
     int error = 0;
 
     // Create in-memory database (no section storage)
-    db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, pool, wheel, &error);
     ASSERT_NE(db, nullptr) << "Failed to create database, error=" << error;
     ASSERT_EQ(error, 0);
 

@@ -14,9 +14,6 @@
 #include "chunk.h"
 #include "identifier.h"
 
-// Forward declaration for section storage deallocation in GC
-typedef struct sections_t sections_t;
-
 // Maximum key bytes stored inline in bnode_entry_t.
 // Keys with size <= BNODE_INLINE_KEY_SIZE are stored directly in the entry,
 // eliminating pointer chasing during binary search.
@@ -42,11 +39,6 @@ typedef struct version_entry_t {
     transaction_id_t txn_id;            // Transaction that created this version
     identifier_t* value;                // Value for this version (or NULL if deleted)
     uint8_t is_deleted;                 // Tombstone marker (1 if deleted)
-
-    // Section storage tracking for value deallocation
-    size_t value_section_id;            // Section where value data is stored (0 = in-memory)
-    size_t value_offset;               // Offset within section
-    size_t value_data_size;             // Size of serialized value in section
 
     struct version_entry_t* next;       // Newer version (NULL if newest)
     struct version_entry_t* prev;      // Older version (NULL if oldest)
@@ -427,8 +419,7 @@ int version_entry_add(version_entry_t** versions,
  * @param min_active_txn_id  Oldest transaction ID that may still be active
  * @return Number of versions removed
  */
-size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id,
-                         sections_t* storage);
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id);
 
 // ============================================================================
 // Path Chunk Counts Functions

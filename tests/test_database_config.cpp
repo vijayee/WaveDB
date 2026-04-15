@@ -20,7 +20,6 @@ TEST(DatabaseConfig, DefaultCreatesValidConfig) {
     EXPECT_EQ(config->btree_node_size, 4096u);
     EXPECT_EQ(config->enable_persist, 1);
     EXPECT_EQ(config->lru_memory_mb, 50u);
-    EXPECT_EQ(config->storage_cache_size, 1024u);
     EXPECT_EQ(config->worker_threads, 4u);
     EXPECT_EQ(config->timer_resolution_ms, 10u);
     EXPECT_EQ(config->external_pool, nullptr);

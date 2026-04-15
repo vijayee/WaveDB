@@ -68,7 +68,7 @@ protected:
         ASSERT_NE(wheel, nullptr);
 
         int error = 0;
-        db = database_create(db_path.c_str(), 0, NULL, 4, 4096, 0, 0, pool, wheel, &error);
+        db = database_create(db_path.c_str(), 0, NULL, 4, 4096, 0, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
     }

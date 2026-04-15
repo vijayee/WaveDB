@@ -14,7 +14,6 @@
 #include "../Time/wheel.h"
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
-#include "../Storage/sections.h"
 #include "database_lru.h"
 #include "wal.h"
 #include "wal_manager.h"
@@ -37,7 +36,6 @@ extern "C" {
  *
  * Storage modes:
  * - In-memory only: storage = NULL, no persistence
- * - Section-based: storage != NULL, incremental persistence
  */
 // Number of shards for write locks (reduces contention)
 #define WRITE_LOCK_SHARDS 64
@@ -58,11 +56,6 @@ typedef struct {
     uint32_t btree_node_size;            // B+tree node size
     uint8_t is_rebuilding;               // Flag for recovery mode
     uint64_t next_index_id;              // Incrementing ID for index files
-
-    // Section-based storage (NULL for in-memory only)
-    sections_t* storage;              // Section pool for persistent storage
-    size_t storage_cache_size;         // LRU cache size for sections
-    size_t storage_max_tuple;          // Max open sections
 
     // Config ownership tracking
     bool owns_pool;                     // True if database created the pool
@@ -92,7 +85,6 @@ typedef struct {
  * @param chunk_size        HBTrie chunk size (0 for default)
  * @param btree_node_size   B+tree node size (0 for default)
  * @param enable_persist   Enable persistent storage (0 = in-memory only, 1 = persistent)
- * @param storage_cache_size Section LRU cache size (0 for default, ignored if in-memory)
  * @param pool              Work pool for async operations
  * @param wheel             Timing wheel for debouncer
  * @param error_code        Output error code (0 on success)
@@ -101,7 +93,7 @@ typedef struct {
 database_t* database_create(const char* location, size_t lru_memory_mb,
                             wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
-                            uint8_t enable_persist, size_t storage_cache_size,
+                            uint8_t enable_persist,
                             work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
                             int* error_code);
 

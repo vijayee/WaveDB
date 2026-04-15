@@ -432,7 +432,7 @@ static void setup_database(bench_context_t* ctx) {
     wal_config.max_file_size = 100 * 1024 * 1024;  // 100MB for benchmarks
 
     int error = 0;
-    ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, 0, ctx->pool, ctx->wheel, &error);
+    ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, ctx->pool, ctx->wheel, &error);
     if (error != 0 || ctx->db == NULL) {
         fprintf(stderr, "Failed to create database: error=%d\n", error);
         exit(1);

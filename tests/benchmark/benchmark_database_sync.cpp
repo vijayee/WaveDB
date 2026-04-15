@@ -52,7 +52,6 @@ static int sync_benchmark_init(sync_benchmark_ctx_t* ctx, const char* test_name)
         0,                     // Default chunk size
         0,                     // Default btree node size
         1,                     // Enable persistent storage
-        0,                     // Default storage cache size
         NULL,                  // No work pool (synchronous)
         NULL,                  // No timing wheel (synchronous)
         &error_code

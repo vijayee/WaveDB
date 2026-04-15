@@ -3,7 +3,6 @@
 //
 
 #include "bnode.h"
-#include "../Storage/sections.h"
 #include <stdatomic.h>
 #include "bs_array.h"
 #include "chunk.h"
@@ -579,8 +578,7 @@ int version_entry_add(version_entry_t** versions,
   return 0;
 }
 
-size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id,
-                         sections_t* storage) {
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id) {
   if (versions == NULL || *versions == NULL) return 0;
 
   size_t removed_count = 0;
@@ -606,12 +604,6 @@ size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_
       }
       if (to_remove->next != NULL) {
         to_remove->next->prev = to_remove->prev;
-      }
-
-      // Deallocate section storage for the removed version's value
-      if (storage != NULL && to_remove->value_section_id != 0) {
-        sections_deallocate(storage, to_remove->value_section_id,
-                            to_remove->value_offset, to_remove->value_data_size);
       }
 
       version_entry_destroy(to_remove);

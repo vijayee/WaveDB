@@ -84,8 +84,6 @@ set(WAVEDB_SOURCES
     src/Workers/join.c
 
     # Storage
-    src/Storage/section.c
-    src/Storage/sections.c
     src/Storage/node_serializer.c
     src/Storage/stale_region.c
     src/Storage/page_file.c
@@ -202,16 +200,6 @@ if(BUILD_TESTS)
     add_executable(test_transaction_id tests/test_transaction_id.cpp)
     target_link_libraries(test_transaction_id wavedb gtest gtest_main)
     add_test(NAME test_transaction_id COMMAND test_transaction_id)
-
-    # Test for section variable-size storage
-    add_executable(test_section_variable tests/test_section_variable.cpp)
-    target_link_libraries(test_section_variable wavedb gtest gtest_main)
-    add_test(NAME test_section_variable COMMAND test_section_variable)
-
-    # Test for section GC deallocation and persistence
-    add_executable(test_section_gc tests/test_section_gc.cpp)
-    target_link_libraries(test_section_gc wavedb gtest gtest_main Threads::Threads)
-    add_test(NAME test_section_gc COMMAND test_section_gc)
 
     # Test for memory pool
     add_executable(test_memory_pool tests/test_memory_pool.cpp)

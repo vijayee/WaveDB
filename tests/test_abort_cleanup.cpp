@@ -32,7 +32,7 @@ protected:
 
         // Create database
         int error = 0;
-        db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
     }

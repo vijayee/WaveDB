@@ -2054,7 +2054,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
           vec_push(&bnode_stack, entry->child_bnode);
         } else if (entry->has_value && entry->has_versions) {
           // Leaf entry with version chain - clean up old versions
-          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id, NULL);
+          size_t removed = version_entry_gc(&entry->versions, min_active_txn_id);
           total_removed += removed;
 
           // If only one version remains and it's not deleted, downgrade to legacy mode
