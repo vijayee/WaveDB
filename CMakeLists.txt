@@ -258,6 +258,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_bnode_cache wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_bnode_cache COMMAND test_bnode_cache)
 
+    # Test for page file + bnode cache integration
+    add_executable(test_page_cache_integration tests/test_page_cache_integration.cpp)
+    target_link_libraries(test_page_cache_integration wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_page_cache_integration COMMAND test_page_cache_integration)
+
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
     target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)
