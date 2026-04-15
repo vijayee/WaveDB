@@ -87,6 +87,7 @@ set(WAVEDB_SOURCES
     src/Storage/section.c
     src/Storage/sections.c
     src/Storage/node_serializer.c
+    src/Storage/stale_region.c
 
     # Database
     src/Database/wal.c
@@ -240,6 +241,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
     add_test(NAME test_database_config COMMAND test_database_config)
 
+    # Test for stale_region
+    add_executable(test_stale_region tests/test_stale_region.cpp)
+    target_link_libraries(test_stale_region wavedb gtest gtest_main)
+    add_test(NAME test_stale_region COMMAND test_stale_region)
+
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
     target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)
@@ -330,6 +336,10 @@ if(BUILD_BENCHMARKS)
     # Concurrent Database Benchmark
     add_executable(benchmark_concurrent tests/benchmark/benchmark_concurrent_only.cpp)
     target_link_libraries(benchmark_concurrent benchmark_base wavedb Threads::Threads)
+
+    # Persistence impact benchmark
+    add_executable(benchmark_persist tests/benchmark/benchmark_persist.cpp)
+    target_link_libraries(benchmark_persist benchmark_base wavedb Threads::Threads)
 
     # Thread-local WAL benchmark
     add_executable(benchmark_thread_wal tests/benchmark/benchmark_thread_wal.cpp)
