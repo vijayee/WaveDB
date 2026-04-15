@@ -701,14 +701,14 @@ static void defrag_remap_callback(size_t old_offset, size_t new_offset, void* ct
     defrag_remap_ctx_t* remap_ctx = (defrag_remap_ctx_t*) ctx;
     if (remap_ctx == NULL) return;
 
-    // Update hbtrie_node offsets that reference this (section_id, old_offset)
+    // Update hbtrie_node disk_offsets that reference the old offset
     hbtrie_t* trie = remap_ctx->sections->trie_ref;
     if (trie == NULL) return;
 
     hbtrie_node_t* root = atomic_load(&trie->root);
     if (root == NULL) return;
 
-    // Walk the trie to find nodes with matching section_id and block_index
+    // Walk the trie to find nodes with matching disk_offset
     vec_t(hbtrie_node_t*) stack;
     vec_init(&stack);
     vec_push(&stack, root);
@@ -717,10 +717,9 @@ static void defrag_remap_callback(size_t old_offset, size_t new_offset, void* ct
         hbtrie_node_t* node = vec_pop(&stack);
         if (node == NULL) continue;
 
-        // Check if this node is in the defragmented section at the old offset
-        if (node->section_id == remap_ctx->section_id &&
-            node->block_index == old_offset) {
-            node->block_index = new_offset;
+        // Check if this node's disk_offset matches the old offset in this section
+        if (node->disk_offset == old_offset) {
+            node->disk_offset = new_offset;
         }
 
         // Walk bnode tree to find child hbtrie_nodes
@@ -735,10 +734,9 @@ static void defrag_remap_callback(size_t old_offset, size_t new_offset, void* ct
                     bnode_entry_t* entry = bnode_get(bn, j);
                     if (entry == NULL) continue;
 
-                    // Update child location entries pointing to this section
-                    if (entry->child_section_id == remap_ctx->section_id &&
-                        entry->child_block_index == old_offset) {
-                        entry->child_block_index = new_offset;
+                    // Update child location entries pointing to old offset
+                    if (entry->child_disk_offset == old_offset) {
+                        entry->child_disk_offset = new_offset;
                     }
 
                     if (entry->is_bnode_child && entry->child_bnode != NULL) {

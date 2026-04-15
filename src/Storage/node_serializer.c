@@ -334,8 +334,8 @@ static void bnode_serialize_entries(bnode_t* node, uint8_t chunk_size, serialize
             memcpy(sb->data + length_pos, &net_size, 4);
         } else {
             // Child hbtrie_node location
-            sbuf_write_uint64(sb, entry->child_section_id);
-            sbuf_write_uint64(sb, entry->child_block_index);
+            sbuf_write_uint64(sb, entry->child_disk_offset);
+            sbuf_write_uint64(sb, 0);  // Reserved (was block_index, now unused)
         }
     }
 }
@@ -489,8 +489,7 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                         }
                         prev_version = version;
                     }
-                    (*locations)[i].section_id = 0;
-                    (*locations)[i].block_index = 0;
+                    (*locations)[i].offset = 0;
                 } else {
                     // Legacy single value
                     if (*remaining < 4) goto fail;
@@ -515,8 +514,7 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                     } else {
                         entry.value = NULL;
                     }
-                    (*locations)[i].section_id = 0;
-                    (*locations)[i].block_index = 0;
+                    (*locations)[i].offset = 0;
                 }
             } else if (entry.is_bnode_child) {
                 if (is_v2) {
@@ -550,22 +548,24 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                         *remaining -= consumed;
                     }
                 } else {
-                    // V1: section reference placeholders
+                    // V1: section reference placeholders (now stored as disk_offset)
                     if (*remaining < 16) goto fail;
-                    entry.child_section_id = read_uint64(ptr);
-                    entry.child_block_index = read_uint64(ptr);
-                    *remaining -= 16;
+                    entry.child_disk_offset = read_uint64(ptr);
+                    *remaining -= 8;
+                    uint64_t reserved = read_uint64(ptr);  // Was block_index
+                    *remaining -= 8;
+                    (void)reserved;
                 }
-                (*locations)[i].section_id = entry.child_section_id;
-                (*locations)[i].block_index = entry.child_block_index;
+                (*locations)[i].offset = entry.child_disk_offset;
             } else {
                 // Child hbtrie_node location
                 if (*remaining < 16) goto fail;
-                entry.child_section_id = read_uint64(ptr);
-                entry.child_block_index = read_uint64(ptr);
-                *remaining -= 16;
-                (*locations)[i].section_id = entry.child_section_id;
-                (*locations)[i].block_index = entry.child_block_index;
+                entry.child_disk_offset = read_uint64(ptr);
+                *remaining -= 8;
+                uint64_t reserved = read_uint64(ptr);  // Was block_index
+                *remaining -= 8;
+                (void)reserved;
+                (*locations)[i].offset = entry.child_disk_offset;
             }
         } else {
             // Old format: has_value was a uint8_t
@@ -596,13 +596,16 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                 } else {
                     entry.value = NULL;
                 }
-                (*locations)[i].section_id = 0;
-                (*locations)[i].block_index = 0;
+                (*locations)[i].offset = 0;
             } else {
                 if (*remaining < 16) goto fail;
-                (*locations)[i].section_id = read_uint64(ptr);
-                (*locations)[i].block_index = read_uint64(ptr);
-                *remaining -= 16;
+                uint64_t loc_offset = read_uint64(ptr);
+                *remaining -= 8;
+                uint64_t reserved = read_uint64(ptr);  // Was block_index
+                *remaining -= 8;
+                (void)reserved;
+                (*locations)[i].offset = loc_offset;
+                entry.child_disk_offset = loc_offset;
                 entry.child = NULL;
             }
         }
@@ -621,6 +624,11 @@ fail:
     return NULL;
 }
 
+// Forward declaration for V3 deserializer
+static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
+                                           uint8_t chunk_size, uint32_t btree_node_size,
+                                           node_location_t** locations, size_t* num_locations);
+
 // B+tree node deserialization (public API)
 bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
                            uint32_t btree_node_size,
@@ -629,8 +637,350 @@ bnode_t* bnode_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size,
         return NULL;
     }
 
+    // Check if V3 format
+    if (buf[0] == BNODE_SERIALIZE_MAGIC_V3) {
+        uint8_t* ptr = buf;
+        size_t remaining = len;
+        return bnode_deserialize_v3_impl(&ptr, &remaining, chunk_size, btree_node_size,
+                                          locations, num_locations);
+    }
+
     uint8_t* ptr = buf;
     size_t remaining = len;
     return bnode_deserialize_recursive(&ptr, &remaining, chunk_size, btree_node_size,
                                         locations, num_locations);
+}
+
+// ============================================================================
+// V3 Serializer: flat per-bnode with file_offset references
+// ============================================================================
+
+// V3 entries serializer: same as V2 for values and inline bnodes,
+// but non-inline children use child_disk_offset (8 bytes) instead of
+// section_id + block_index.
+static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serialize_buf_t* sb) {
+    for (int i = 0; i < node->entries.length; i++) {
+        bnode_entry_t* entry = &node->entries.data[i];
+
+        // Write chunk
+        chunk_t* key = bnode_entry_get_key(entry);
+        if (key != NULL) {
+            sbuf_write_bytes(sb, key->data, chunk_size);
+        } else {
+            uint8_t zero[8] = {0};
+            sbuf_write_bytes(sb, zero, chunk_size);
+        }
+
+        // Write flags byte
+        uint8_t flags = 0;
+        if (entry->has_value) flags |= 0x01;
+        if (entry->is_bnode_child) flags |= 0x02;
+        if (entry->has_value && entry->has_versions) flags |= 0x04;
+        sbuf_write_uint8(sb, flags);
+
+        if (entry->has_value) {
+            if (entry->has_versions && entry->versions != NULL) {
+                // MVCC: Serialize version chain (same as V2)
+                size_t version_count = 0;
+                version_entry_t* current = entry->versions;
+                while (current != NULL) {
+                    version_count++;
+                    current = current->next;
+                }
+                sbuf_write_uint16(sb, (uint16_t)version_count);
+
+                current = entry->versions;
+                while (current != NULL) {
+                    sbuf_write_uint8(sb, current->is_deleted);
+                    sbuf_write_uint64(sb, current->txn_id.time);
+                    sbuf_write_uint64(sb, current->txn_id.nanos);
+                    sbuf_write_uint64(sb, current->txn_id.count);
+
+                    if (!current->is_deleted && current->value != NULL) {
+                        buffer_t* ident_buf = identifier_to_buffer(current->value);
+                        if (ident_buf != NULL) {
+                            sbuf_write_uint32(sb, (uint32_t)ident_buf->size);
+                            if (ident_buf->size > 0) {
+                                sbuf_write_bytes(sb, ident_buf->data, ident_buf->size);
+                            }
+                            buffer_destroy(ident_buf);
+                        } else {
+                            sbuf_write_uint32(sb, 0);
+                        }
+                    } else {
+                        sbuf_write_uint32(sb, 0);
+                    }
+                    current = current->next;
+                }
+            } else {
+                // Legacy: single value (same as V2)
+                identifier_t* ident = entry->value;
+                if (ident != NULL) {
+                    buffer_t* ident_buf = identifier_to_buffer(ident);
+                    if (ident_buf != NULL) {
+                        sbuf_write_uint32(sb, (uint32_t)ident_buf->size);
+                        if (ident_buf->size > 0) {
+                            sbuf_write_bytes(sb, ident_buf->data, ident_buf->size);
+                        }
+                        buffer_destroy(ident_buf);
+                    } else {
+                        sbuf_write_uint32(sb, 0);
+                    }
+                } else {
+                    sbuf_write_uint32(sb, 0);
+                }
+            }
+        } else if (entry->is_bnode_child) {
+            // V3: Inline child bnodes still serialized recursively (same as V2)
+            size_t length_pos = sb->size;
+            sbuf_write_uint32(sb, 0);  // placeholder for child bnode size
+
+            bnode_t* child = entry->child_bnode;
+            if (child != NULL) {
+                sbuf_write_uint8(sb, BNODE_SERIALIZE_MAGIC_V3);
+                sbuf_write_uint16(sb, atomic_load(&child->level));
+                sbuf_write_uint16(sb, (uint16_t)child->entries.length);
+                bnode_serialize_entries_v3(child, chunk_size, sb);
+            } else {
+                sbuf_write_uint8(sb, BNODE_SERIALIZE_MAGIC_V3);
+                sbuf_write_uint16(sb, 1);
+                sbuf_write_uint16(sb, 0);
+            }
+
+            // Backfill the length
+            uint32_t child_size = (uint32_t)(sb->size - length_pos - 4);
+            uint32_t net_size = htonl(child_size);
+            memcpy(sb->data + length_pos, &net_size, 4);
+        } else {
+            // V3: Child hbtrie_node or bnode location — write child_disk_offset
+            sbuf_write_uint64(sb, entry->child_disk_offset);
+        }
+    }
+}
+
+int bnode_serialize_v3(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* len) {
+    if (node == NULL || buf == NULL || len == NULL) {
+        return -1;
+    }
+
+    serialize_buf_t sb;
+    sbuf_init(&sb);
+
+    // Write V3 magic byte
+    sbuf_write_uint8(&sb, BNODE_SERIALIZE_MAGIC_V3);
+
+    // Write level
+    sbuf_write_uint16(&sb, atomic_load(&node->level));
+
+    // Write number of entries
+    sbuf_write_uint16(&sb, (uint16_t)node->entries.length);
+
+    // Write entries
+    bnode_serialize_entries_v3(node, chunk_size, &sb);
+
+    *buf = sb.data;
+    *len = sb.size;
+    return 0;
+}
+
+// V3 deserializer implementation
+static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
+                                            uint8_t chunk_size, uint32_t btree_node_size,
+                                            node_location_t** locations, size_t* num_locations) {
+    if (*remaining < 1) return NULL;
+
+    // Skip V3 magic byte
+    (*ptr)++;
+    (*remaining)--;
+
+    if (*remaining < 4) return NULL;
+    uint16_t level = read_uint16(ptr);
+    *remaining -= 2;
+    uint16_t num_entries = read_uint16(ptr);
+    *remaining -= 2;
+
+    // Allocate locations array
+    *locations = get_memory(num_entries * sizeof(node_location_t));
+    *num_locations = num_entries;
+
+    bnode_t* node = bnode_create_with_level(btree_node_size, level);
+    if (node == NULL) {
+        free(*locations);
+        *locations = NULL;
+        *num_locations = 0;
+        return NULL;
+    }
+
+    for (uint16_t i = 0; i < num_entries; i++) {
+        bnode_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+
+        // Read chunk
+        if (*remaining < chunk_size) goto fail;
+        uint8_t* chunk_buf = get_memory(chunk_size);
+        read_bytes(ptr, chunk_buf, chunk_size);
+        *remaining -= chunk_size;
+        chunk_t* key = chunk_deserialize(chunk_buf, chunk_size);
+        if (key == NULL) {
+            free(chunk_buf);
+            goto fail;
+        }
+        bnode_entry_set_key(&entry, key);
+        chunk_destroy(key);
+        free(chunk_buf);
+
+        // Read flags
+        if (*remaining < 1) goto fail;
+        uint8_t flags = read_uint8(ptr);
+        (*remaining)--;
+        entry.has_value = (flags & 0x01) != 0;
+        entry.is_bnode_child = (flags & 0x02) != 0;
+        entry.has_versions = (flags & 0x04) != 0;
+
+        if (entry.has_value) {
+            if (entry.has_versions) {
+                // MVCC: Read version chain
+                if (*remaining < 2) goto fail;
+                uint16_t version_count = read_uint16(ptr);
+                *remaining -= 2;
+                entry.versions = NULL;
+                version_entry_t* prev_version = NULL;
+
+                for (uint16_t j = 0; j < version_count; j++) {
+                    if (*remaining < 1 + 24 + 4) goto fail;
+                    uint8_t is_deleted = read_uint8(ptr);
+                    (*remaining)--;
+
+                    transaction_id_t txn_id;
+                    txn_id.time = read_uint64(ptr);
+                    txn_id.nanos = read_uint64(ptr);
+                    txn_id.count = read_uint64(ptr);
+                    *remaining -= 24;
+
+                    identifier_t* val = NULL;
+                    uint32_t ident_len = read_uint32(ptr);
+                    *remaining -= 4;
+                    if (ident_len > 0 && !is_deleted) {
+                        if (*remaining < ident_len) goto fail;
+                        uint8_t* ident_buf = get_memory(ident_len);
+                        read_bytes(ptr, ident_buf, ident_len);
+                        *remaining -= ident_len;
+
+                        buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
+                        if (data_buf == NULL) {
+                            free(ident_buf);
+                            goto fail;
+                        }
+                        val = identifier_create(data_buf, chunk_size);
+                        buffer_destroy(data_buf);
+                        if (val == NULL) {
+                            goto fail;
+                        }
+                    }
+
+                    version_entry_t* version = version_entry_create(txn_id, val, is_deleted);
+                    if (version == NULL) {
+                        if (val != NULL) identifier_destroy(val);
+                        goto fail;
+                    }
+                    if (entry.versions == NULL) {
+                        entry.versions = version;
+                    } else {
+                        prev_version->next = version;
+                        version->prev = prev_version;
+                    }
+                    prev_version = version;
+                }
+                (*locations)[i].offset = 0;
+            } else {
+                // Legacy single value
+                if (*remaining < 4) goto fail;
+                uint32_t ident_len = read_uint32(ptr);
+                *remaining -= 4;
+                if (ident_len > 0) {
+                    if (*remaining < ident_len) goto fail;
+                    uint8_t* ident_buf = get_memory(ident_len);
+                    read_bytes(ptr, ident_buf, ident_len);
+                    *remaining -= ident_len;
+
+                    buffer_t* data_buf = buffer_create_from_existing_memory(ident_buf, ident_len);
+                    if (data_buf == NULL) {
+                        free(ident_buf);
+                        goto fail;
+                    }
+                    entry.value = identifier_create(data_buf, chunk_size);
+                    buffer_destroy(data_buf);
+                    if (entry.value == NULL) {
+                        goto fail;
+                    }
+                } else {
+                    entry.value = NULL;
+                }
+                (*locations)[i].offset = 0;
+            }
+        } else if (entry.is_bnode_child) {
+            // V3: inline child bnode with length prefix (same structure as V2)
+            if (*remaining < 4) goto fail;
+            uint32_t child_size = read_uint32(ptr);
+            *remaining -= 4;
+
+            if (child_size > 0 && *remaining >= child_size) {
+                uint8_t* child_start = *ptr;
+                size_t child_remaining = child_size;
+
+                node_location_t* child_locs = NULL;
+                size_t child_num_locs = 0;
+                bnode_t* child_bnode = bnode_deserialize_v3_impl(
+                    ptr, &child_remaining, chunk_size, btree_node_size,
+                    &child_locs, &child_num_locs);
+                free(child_locs);
+
+                if (child_bnode != NULL) {
+                    entry.child_bnode = child_bnode;
+                }
+
+                // Advance past any remaining child bytes
+                size_t consumed = (size_t)(*ptr - child_start);
+                if (consumed < child_size) {
+                    *ptr += (child_size - consumed);
+                    *remaining -= (child_size - consumed);
+                }
+                *remaining -= consumed;
+            }
+            (*locations)[i].offset = 0;
+        } else {
+            // V3: Child location — read child_disk_offset (8 bytes only)
+            if (*remaining < 8) goto fail;
+            entry.child_disk_offset = read_uint64(ptr);
+            *remaining -= 8;
+            // child and child_bnode stay NULL for lazy loading
+            (*locations)[i].offset = entry.child_disk_offset;
+        }
+
+        // Insert entry
+        bnode_insert(node, &entry);
+    }
+
+    return node;
+
+fail:
+    bnode_destroy_tree(node);
+    free(*locations);
+    *locations = NULL;
+    *num_locations = 0;
+    return NULL;
+}
+
+// V3 deserializer (public API)
+bnode_t* bnode_deserialize_v3(uint8_t* buf, size_t len, uint8_t chunk_size,
+                               uint32_t btree_node_size,
+                               node_location_t** locations, size_t* num_locations) {
+    if (buf == NULL || len < 1) {
+        return NULL;
+    }
+
+    uint8_t* ptr = buf;
+    size_t remaining = len;
+    return bnode_deserialize_v3_impl(&ptr, &remaining, chunk_size, btree_node_size,
+                                      locations, num_locations);
 }

@@ -22,8 +22,7 @@ extern "C" {
  * instead of the child data directly (for lazy loading).
  */
 typedef struct {
-    size_t section_id;    // Which section file contains the node
-    size_t block_index;   // Which block within the section
+    uint64_t offset;     // File offset in page file (0 if not on disk)
 } node_location_t;
 
 /**
@@ -48,11 +47,11 @@ typedef struct {
  *       - Child bnode size (uint32_t)
  *       - Child bnode data (recursively serialized bnode)
  *     - If !has_value and !is_bnode_child:
- *       - section_id (uint64_t)
- *       - block_index (uint64_t)
+ *       - child_disk_offset (uint64_t)
+ *       - reserved (uint64_t, was block_index)
  *
  * Legacy format (V1, magic 0xB3):
- *   Same as V2 except is_bnode_child entries use section_id + block_index
+ *   Same as V2 except is_bnode_child entries use child_disk_offset + reserved
  *   instead of inline child bnode data.
  *
  * Old format (no magic byte):
@@ -130,6 +129,43 @@ int chunk_serialize(chunk_t* chunk, uint8_t chunk_size, uint8_t** buf);
  * @return New chunk or NULL on failure
  */
 chunk_t* chunk_deserialize(uint8_t* buf, uint8_t chunk_size);
+
+#define BNODE_SERIALIZE_MAGIC_V3 0xB5  // V3: flat per-bnode with file_offset references
+
+/**
+ * Serialize a B+tree node to a V3 binary buffer.
+ *
+ * V3 format (magic 0xB5): flat per-bnode with file_offset references.
+ * Same as V2 for values and inline child bnodes, but non-inline children
+ * are stored as 8-byte file offsets (child_disk_offset) instead of
+ * child_disk_offset + reserved pairs.
+ *
+ * @param node        B+tree node to serialize
+ * @param chunk_size  Size of each chunk in bytes
+ * @param buf         Output: allocated buffer (caller must free)
+ * @param len         Output: buffer length
+ * @return 0 on success, -1 on failure
+ */
+int bnode_serialize_v3(bnode_t* node, uint8_t chunk_size, uint8_t** buf, size_t* len);
+
+/**
+ * Deserialize a B+tree node from a V3 binary buffer.
+ *
+ * Reads V3 format. For non-value, non-inline entries, reads child_disk_offset
+ * (8 bytes) and stores in entry->child_disk_offset, leaving child/child_bnode
+ * as NULL for lazy loading. Populates node_location_t array with offsets.
+ *
+ * @param buf             Binary buffer
+ * @param len             Buffer length
+ * @param chunk_size      Size of each chunk in bytes
+ * @param btree_node_size Max B+tree node size
+ * @param locations       Array of child locations (output)
+ * @param num_locations   Output: number of child locations
+ * @return New B+tree node or NULL on failure
+ */
+bnode_t* bnode_deserialize_v3(uint8_t* buf, size_t len, uint8_t chunk_size,
+                               uint32_t btree_node_size,
+                               node_location_t** locations, size_t* num_locations);
 
 #ifdef __cplusplus
 }
