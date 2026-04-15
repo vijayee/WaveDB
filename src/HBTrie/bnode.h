@@ -14,8 +14,8 @@
 #include "chunk.h"
 #include "identifier.h"
 
-// Forward declaration for section storage deallocation in GC
-typedef struct sections_t sections_t;
+// Forward declaration for bnode cache (lazy loading)
+typedef struct file_bnode_cache_t file_bnode_cache_t;
 
 // Maximum key bytes stored inline in bnode_entry_t.
 // Keys with size <= BNODE_INLINE_KEY_SIZE are stored directly in the entry,
@@ -42,11 +42,6 @@ typedef struct version_entry_t {
     transaction_id_t txn_id;            // Transaction that created this version
     identifier_t* value;                // Value for this version (or NULL if deleted)
     uint8_t is_deleted;                 // Tombstone marker (1 if deleted)
-
-    // Section storage tracking for value deallocation
-    size_t value_section_id;            // Section where value data is stored (0 = in-memory)
-    size_t value_offset;               // Offset within section
-    size_t value_data_size;             // Size of serialized value in section
 
     struct version_entry_t* next;       // Newer version (NULL if newest)
     struct version_entry_t* prev;      // Older version (NULL if oldest)
@@ -101,10 +96,9 @@ typedef struct bnode_entry_t {
     // When has_value==0, use the union's child field instead.
     struct hbtrie_node_t* trie_child;
 
-    // Storage location for lazy-loaded children
-    // Valid only when has_value == 0 and child pointer is loaded from disk
-    size_t child_section_id;           // Section where child is stored
-    size_t child_block_index;           // Block index within section
+    // File offset for lazy-loaded children
+    // Valid when has_value == 0 and child pointer is not in memory
+    uint64_t child_disk_offset;         // File offset of child hbtrie node (0 = not on disk)
 } bnode_entry_t;
 
 /**
@@ -125,6 +119,8 @@ typedef struct bnode_t {
     vec_t(bnode_entry_t) entries;      // Sorted by chunk key
     _Atomic(uint64_t) seq;             // Seqlock: even=stable, odd=writing
     PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
+    uint64_t disk_offset;              // File offset of this bnode (UINT64_MAX = not persisted)
+    uint8_t is_dirty;                   // 1 if modified since last write
 } bnode_t;
 
 /**
@@ -425,8 +421,7 @@ int version_entry_add(version_entry_t** versions,
  * @param min_active_txn_id  Oldest transaction ID that may still be active
  * @return Number of versions removed
  */
-size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id,
-                         sections_t* storage);
+size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id);
 
 // ============================================================================
 // Path Chunk Counts Functions

@@ -25,6 +25,9 @@ struct txn_desc_t;
 typedef struct txn_desc_t txn_desc_t;
 typedef struct txn_desc_t txn_desc_t;
 
+// Forward declaration for bnode cache (lazy loading)
+typedef struct file_bnode_cache_t file_bnode_cache_t;
+
 // Note: mvcc.h is NOT included here to avoid circular dependency
 // mvcc.h includes this file (hbtrie.h)
 
@@ -44,13 +47,10 @@ typedef struct hbtrie_node_t {
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
     uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)
 
-    // Storage location tracking for incremental persistence
-    struct sections_t* storage;       // Storage system (NULL if in-memory only)
-    size_t section_id;                // Section where this node is stored
-    size_t block_index;               // Block index within section
-    size_t data_size;                 // Serialized size in section (0 if not in section)
-    uint8_t is_loaded;                // 1 if in memory, 0 if on-disk stub
-    uint8_t is_dirty;                 // 1 if modified since last save
+    // Page file persistence tracking
+    uint64_t disk_offset;              // File offset of root bnode (UINT64_MAX = not persisted)
+    uint8_t is_loaded;                 // 1 if in memory, 0 if on-disk stub
+    uint8_t is_dirty;                  // 1 if modified since last save
 } hbtrie_node_t;
 
 /**
@@ -63,6 +63,7 @@ typedef struct hbtrie_t {
     uint32_t btree_node_size;         // Max B+tree node size in bytes
 
     _Atomic(hbtrie_node_t*) root;     // Root HBTrie node (atomic for lock-free reads)
+    file_bnode_cache_t* fcache;        // Bnode cache for lazy loading (NULL if in-memory)
 } hbtrie_t;
 
 /**
@@ -322,6 +323,28 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
  * @return Total number of versions removed
  */
 size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id);
+
+// ============================================================================
+// Lazy Loading Functions
+// ============================================================================
+
+/**
+ * Lazy-load an hbtrie child node from the page file.
+ *
+ * When an entry's child pointer is NULL but child_disk_offset is non-zero,
+ * this function reads the node from the page file via the bnode cache
+ * and deserializes it (V2 format with inline child bnodes).
+ *
+ * @param entry      Entry with NULL child and valid child_disk_offset
+ * @param fcache     Bnode cache for reading from page file
+ * @param chunk_size HBTrie chunk size for deserialization
+ * @param btree_node_size Max B+tree node size for deserialization
+ * @return 0 on success, -1 on failure
+ */
+int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
+                                        file_bnode_cache_t* fcache,
+                                        uint8_t chunk_size,
+                                        uint32_t btree_node_size);
 
 #ifdef __cplusplus
 }
