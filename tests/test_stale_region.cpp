@@ -85,10 +85,10 @@ TEST_F(StaleRegionTest, GetReusableBlocks) {
     stale_region_add(mgr, 600, 150);  // 150 bytes - above threshold
 
     size_t out_count = 0;
-    uint64_t result = stale_region_get_reusable(mgr, 1000, 0.1, &out_count);
+    stale_region_t* blocks = stale_region_get_reusable(mgr, 1000, 0.1, &out_count);
     EXPECT_EQ(out_count, 2u);
+    ASSERT_NE(blocks, nullptr);
 
-    stale_region_t* blocks = (stale_region_t*)(uintptr_t)result;
     EXPECT_EQ(blocks[0].offset, 0u);
     EXPECT_EQ(blocks[0].length, 200u);
     EXPECT_EQ(blocks[1].offset, 600u);

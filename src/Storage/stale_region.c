@@ -26,6 +26,7 @@ void stale_region_mgr_destroy(stale_region_mgr_t* mgr) {
 
 static void ensure_capacity(stale_region_mgr_t* mgr) {
     if (mgr->count < mgr->capacity) return;
+    if (mgr->capacity > SIZE_MAX / 2) return; // can't grow further
     size_t new_capacity = mgr->capacity * 2;
     stale_region_t* new_regions = get_clear_memory(sizeof(stale_region_t) * new_capacity);
     memcpy(new_regions, mgr->regions, sizeof(stale_region_t) * mgr->count);
@@ -35,7 +36,9 @@ static void ensure_capacity(stale_region_mgr_t* mgr) {
 }
 
 void stale_region_add(stale_region_mgr_t* mgr, uint64_t offset, uint64_t length) {
+    if (mgr == NULL) return;
     if (length == 0) return;
+    if (offset + length < offset) return; // overflow
 
     // Find insertion position and check for merge with existing regions
     // We merge if the new region touches or overlaps an existing region.
@@ -95,10 +98,10 @@ void stale_region_add(stale_region_mgr_t* mgr, uint64_t offset, uint64_t length)
     }
 }
 
-uint64_t stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
-                                   double threshold_ratio, size_t* out_count) {
-    *out_count = 0;
-    if (mgr->count == 0 || file_size == 0) return 0;
+stale_region_t* stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
+                                          double threshold_ratio, size_t* out_count) {
+    if (out_count != NULL) *out_count = 0;
+    if (mgr == NULL || mgr->count == 0 || file_size == 0) return NULL;
 
     uint64_t threshold_bytes = (uint64_t)(file_size * threshold_ratio);
 
@@ -110,7 +113,7 @@ uint64_t stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
         }
     }
 
-    if (result_count == 0) return 0;
+    if (result_count == 0) return NULL;
 
     // Allocate result array and fill it
     stale_region_t* result = get_clear_memory(sizeof(stale_region_t) * result_count);
@@ -123,11 +126,12 @@ uint64_t stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
         }
     }
 
-    *out_count = result_count;
-    return (uint64_t)(uintptr_t)result;
+    if (out_count != NULL) *out_count = result_count;
+    return result;
 }
 
 void stale_region_clear(stale_region_mgr_t* mgr) {
+    if (mgr == NULL) return;
     mgr->count = 0;
     mgr->total_stale_bytes = 0;
 }
@@ -145,8 +149,9 @@ uint8_t* stale_region_serialize(stale_region_mgr_t* mgr, size_t* out_len) {
     size_t len = 16 + sizeof(stale_region_t) * mgr->count;
     uint8_t* data = get_clear_memory(len);
 
-    // Write count
-    memcpy(data, &mgr->count, sizeof(uint64_t));
+    // Write count as uint64_t (portable)
+    uint64_t count_val = (uint64_t)mgr->count;
+    memcpy(data, &count_val, sizeof(uint64_t));
     // Write total_stale_bytes
     memcpy(data + 8, &mgr->total_stale_bytes, sizeof(uint64_t));
     // Write regions
@@ -163,10 +168,21 @@ stale_region_mgr_t* stale_region_deserialize(const uint8_t* data, size_t len) {
 
     stale_region_mgr_t* mgr = get_clear_memory(sizeof(stale_region_mgr_t));
 
-    // Read count
-    memcpy(&mgr->count, data, sizeof(uint64_t));
-    // Read total_stale_bytes
-    memcpy(&mgr->total_stale_bytes, data + 8, sizeof(uint64_t));
+    // Read count into uint64_t first (avoid size_t/uint64_t mismatch)
+    uint64_t count_val;
+    memcpy(&count_val, data, sizeof(uint64_t));
+    // Read total_stale_bytes into uint64_t
+    uint64_t total_val;
+    memcpy(&total_val, data + 8, sizeof(uint64_t));
+
+    // Validate count before any arithmetic to prevent overflow
+    if (count_val > (len - 16) / sizeof(stale_region_t)) {
+        free(mgr);
+        return NULL;
+    }
+
+    mgr->count = (size_t)count_val;
+    mgr->total_stale_bytes = total_val;
 
     // Validate: data must be large enough for all regions
     size_t expected_len = 16 + sizeof(stale_region_t) * mgr->count;
@@ -185,6 +201,12 @@ stale_region_mgr_t* stale_region_deserialize(const uint8_t* data, size_t len) {
     } else {
         mgr->capacity = INITIAL_CAPACITY;
         mgr->regions = get_clear_memory(sizeof(stale_region_t) * mgr->capacity);
+    }
+
+    // Recompute total_stale_bytes from actual region data instead of trusting stored value
+    mgr->total_stale_bytes = 0;
+    for (size_t i = 0; i < mgr->count; i++) {
+        mgr->total_stale_bytes += mgr->regions[i].length;
     }
 
     return mgr;

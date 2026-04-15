@@ -34,8 +34,8 @@ void stale_region_add(stale_region_mgr_t* mgr, uint64_t offset, uint64_t length)
 // Get reusable blocks above threshold ratio (0.0-1.0 of total file size)
 // Returns allocated array of {offset, length} blocks and sets out_count.
 // Caller must free the returned array.
-uint64_t stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
-                                   double threshold_ratio, size_t* out_count);
+stale_region_t* stale_region_get_reusable(stale_region_mgr_t* mgr, uint64_t file_size,
+                                          double threshold_ratio, size_t* out_count);
 
 // Clear all stale regions (used after compaction)
 void stale_region_clear(stale_region_mgr_t* mgr);
