@@ -84,8 +84,6 @@ set(WAVEDB_SOURCES
     src/Workers/join.c
 
     # Storage
-    src/Storage/section.c
-    src/Storage/sections.c
     src/Storage/node_serializer.c
     src/Storage/stale_region.c
     src/Storage/page_file.c
@@ -203,16 +201,6 @@ if(BUILD_TESTS)
     target_link_libraries(test_transaction_id wavedb gtest gtest_main)
     add_test(NAME test_transaction_id COMMAND test_transaction_id)
 
-    # Test for section variable-size storage
-    add_executable(test_section_variable tests/test_section_variable.cpp)
-    target_link_libraries(test_section_variable wavedb gtest gtest_main)
-    add_test(NAME test_section_variable COMMAND test_section_variable)
-
-    # Test for section GC deallocation and persistence
-    add_executable(test_section_gc tests/test_section_gc.cpp)
-    target_link_libraries(test_section_gc wavedb gtest gtest_main Threads::Threads)
-    add_test(NAME test_section_gc COMMAND test_section_gc)
-
     # Test for memory pool
     add_executable(test_memory_pool tests/test_memory_pool.cpp)
     target_link_libraries(test_memory_pool wavedb gtest gtest_main)
@@ -310,11 +298,6 @@ if(BUILD_TESTS)
     # Stress tests
     option(BUILD_STRESS_TESTS "Build stress tests" OFF)
     if(BUILD_STRESS_TESTS)
-        # Concurrent sections stress test
-        add_executable(test_stress_concurrent tests/stress/test_concurrent_sections.cpp)
-        target_link_libraries(test_stress_concurrent wavedb gtest gtest_main Threads::Threads)
-        add_test(NAME test_stress_concurrent COMMAND test_stress_concurrent)
-
         # Resource limits stress test
         add_executable(test_stress_resources tests/stress/test_resource_limits.cpp)
         target_link_libraries(test_stress_resources wavedb gtest gtest_main Threads::Threads)
@@ -338,10 +321,6 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_wal tests/benchmark/benchmark_wal.cpp)
     target_link_libraries(benchmark_wal benchmark_base wavedb Threads::Threads)
 
-    # Section benchmarks
-    add_executable(benchmark_sections tests/benchmark/benchmark_sections.cpp)
-    target_link_libraries(benchmark_sections benchmark_base wavedb Threads::Threads)
-
     # Database benchmarks
     add_executable(benchmark_database tests/benchmark/benchmark_database.cpp)
     target_link_libraries(benchmark_database benchmark_base wavedb Threads::Threads)
@@ -353,10 +332,6 @@ if(BUILD_BENCHMARKS)
     # Concurrent Database Benchmark
     add_executable(benchmark_concurrent tests/benchmark/benchmark_concurrent_only.cpp)
     target_link_libraries(benchmark_concurrent benchmark_base wavedb Threads::Threads)
-
-    # Persistence impact benchmark
-    add_executable(benchmark_persist tests/benchmark/benchmark_persist.cpp)
-    target_link_libraries(benchmark_persist benchmark_base wavedb Threads::Threads)
 
     # Thread-local WAL benchmark
     add_executable(benchmark_thread_wal tests/benchmark/benchmark_thread_wal.cpp)
@@ -384,13 +359,6 @@ if(BUILD_BENCHMARKS)
         COMMENT "Running WAL benchmarks"
     )
 
-    add_custom_target(run_benchmark_sections
-        COMMAND benchmark_sections
-        DEPENDS benchmark_sections benchmark_output_dir
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running Section benchmarks"
-    )
-
     add_custom_target(run_benchmark_database
         COMMAND benchmark_database
         DEPENDS benchmark_database benchmark_output_dir
@@ -407,14 +375,11 @@ if(BUILD_BENCHMARKS)
         COMMAND ${CMAKE_COMMAND} -E echo "WAL Benchmarks:"
         COMMAND benchmark_wal
         COMMAND echo ""
-        COMMAND ${CMAKE_COMMAND} -E echo "Section Benchmarks:"
-        COMMAND benchmark_sections
-        COMMAND echo ""
         COMMAND ${CMAKE_COMMAND} -E echo "Database Benchmarks:"
         COMMAND benchmark_database
-        DEPENDS benchmark_wal benchmark_sections benchmark_database benchmark_output_dir
+        DEPENDS benchmark_wal benchmark_database benchmark_output_dir
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        COMMENT "Running all benchmarks (WAL, Sections, Database)"
+        COMMENT "Running all benchmarks (WAL, Database)"
     )
 
     # Alias for convenience
@@ -424,28 +389,11 @@ if(BUILD_BENCHMARKS)
     add_custom_target(run_benchmarks_json
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
         COMMAND benchmark_wal > ${CMAKE_SOURCE_DIR}/.benchmarks/wal_results.txt 2>&1
-        COMMAND benchmark_sections > ${CMAKE_SOURCE_DIR}/.benchmarks/sections_results.txt 2>&1
         COMMAND benchmark_database > ${CMAKE_SOURCE_DIR}/.benchmarks/database_results.txt 2>&1
-        DEPENDS benchmark_wal benchmark_sections benchmark_database
+        DEPENDS benchmark_wal benchmark_database
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running benchmarks and saving results to .benchmarks/"
     )
-endif()
-
-# Stress tests
-option(BUILD_STRESS_TESTS "Build stress tests" OFF)
-if(BUILD_STRESS_TESTS)
-    # Stress test for concurrent sections
-    add_executable(test_concurrent_sections tests/stress/test_concurrent_sections.cpp)
-    target_link_libraries(test_concurrent_sections wavedb gtest gtest_main Threads::Threads)
-
-    # Stress test for resource limits
-    add_executable(test_resource_limits tests/stress/test_resource_limits.cpp)
-    target_link_libraries(test_resource_limits wavedb gtest gtest_main Threads::Threads)
-
-    # Stress test for long-running stability
-    add_executable(test_long_running tests/stress/test_long_running.cpp)
-    target_link_libraries(test_long_running wavedb gtest gtest_main Threads::Threads)
 endif()
 
 # Optional: Build examples

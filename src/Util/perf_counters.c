@@ -25,7 +25,6 @@ void perf_counters_destroy(perf_counters_t* counters) {
 void perf_counters_reset(perf_counters_t* counters) {
     memset(&counters->wal, 0, sizeof(perf_counter_wal_t));
     memset(&counters->transaction, 0, sizeof(perf_counter_transaction_t));
-    memset(&counters->section, 0, sizeof(perf_counter_section_t));
     memset(&counters->memory, 0, sizeof(perf_counter_memory_t));
     memset(&counters->lock, 0, sizeof(perf_counter_lock_t));
 }
@@ -62,27 +61,6 @@ void perf_counter_transaction_contention(perf_counters_t* counters) {
 
 void perf_counter_transaction_clock_backward(perf_counters_t* counters) {
     counters->transaction.clock_backward++;
-}
-
-// Section counter operations
-void perf_counter_section_write(perf_counters_t* counters, uint64_t time_ns) {
-    counters->section.writes++;
-    counters->section.write_time_ns += time_ns;
-}
-
-void perf_counter_section_fragment_scan(perf_counters_t* counters, uint64_t fragment_count, uint64_t time_ns) {
-    counters->section.fragment_scans++;
-    counters->section.fragment_count += fragment_count;
-    counters->section.scan_time_ns += time_ns;
-}
-
-void perf_counter_section_metadata_save(perf_counters_t* counters, uint64_t time_ns) {
-    counters->section.metadata_saves++;
-    counters->section.metadata_time_ns += time_ns;
-}
-
-void perf_counter_section_checkout_wait(perf_counters_t* counters) {
-    counters->section.checkout_waits++;
 }
 
 // Memory counter operations
@@ -134,20 +112,6 @@ void perf_counters_get_statistics(perf_counters_t* counters, perf_statistics_t* 
         stats->avg_generation_time_ns = (double)counters->transaction.generation_time_ns / counters->transaction.generations;
     }
 
-    // Section statistics
-    if (counters->section.writes > 0) {
-        stats->avg_write_time_ns = (double)counters->section.write_time_ns / counters->section.writes;
-    }
-
-    if (counters->section.fragment_scans > 0) {
-        stats->avg_fragment_scan_time_ns = (double)counters->section.scan_time_ns / counters->section.fragment_scans;
-        stats->fragments_per_scan = (double)counters->section.fragment_count / counters->section.fragment_scans;
-    }
-
-    if (counters->section.metadata_saves > 0) {
-        stats->avg_metadata_save_time_ns = (double)counters->section.metadata_time_ns / counters->section.metadata_saves;
-    }
-
     // Lock statistics
     if (counters->lock.contentions > 0) {
         stats->avg_lock_wait_time_ns = (double)counters->lock.wait_time_ns / counters->lock.contentions;
@@ -191,32 +155,6 @@ void perf_counters_print(perf_counters_t* counters) {
     if (counters->transaction.generations > 0) {
         printf("  Avg generation time: %.2f ns\n",
                (double)counters->transaction.generation_time_ns / counters->transaction.generations);
-    }
-    printf("\n");
-
-    // Section counters
-    printf("Section:\n");
-    printf("  Writes: %lu\n", counters->section.writes);
-    printf("  Fragment scans: %lu\n", counters->section.fragment_scans);
-    printf("  Total fragments checked: %lu\n", counters->section.fragment_count);
-    printf("  Metadata saves: %lu\n", counters->section.metadata_saves);
-    printf("  Checkout waits: %lu\n", counters->section.checkout_waits);
-
-    if (counters->section.writes > 0) {
-        printf("  Avg write time: %.2f μs\n",
-               (double)counters->section.write_time_ns / counters->section.writes / 1e3);
-    }
-
-    if (counters->section.fragment_scans > 0) {
-        printf("  Avg fragment scan time: %.2f μs\n",
-               (double)counters->section.scan_time_ns / counters->section.fragment_scans / 1e3);
-        printf("  Avg fragments/scan: %.2f\n",
-               (double)counters->section.fragment_count / counters->section.fragment_scans);
-    }
-
-    if (counters->section.metadata_saves > 0) {
-        printf("  Avg metadata save time: %.2f μs\n",
-               (double)counters->section.metadata_time_ns / counters->section.metadata_saves / 1e3);
     }
     printf("\n");
 
@@ -279,18 +217,6 @@ int perf_counters_save(perf_counters_t* counters, const char* filename) {
     fprintf(fp, "    \"lock_contentions\": %lu,\n", counters->transaction.lock_contentions);
     fprintf(fp, "    \"generation_time_ns\": %lu,\n", counters->transaction.generation_time_ns);
     fprintf(fp, "    \"clock_backward\": %lu\n", counters->transaction.clock_backward);
-    fprintf(fp, "  },\n");
-
-    // Section counters
-    fprintf(fp, "  \"section\": {\n");
-    fprintf(fp, "    \"writes\": %lu,\n", counters->section.writes);
-    fprintf(fp, "    \"fragment_scans\": %lu,\n", counters->section.fragment_scans);
-    fprintf(fp, "    \"fragment_count\": %lu,\n", counters->section.fragment_count);
-    fprintf(fp, "    \"metadata_saves\": %lu,\n", counters->section.metadata_saves);
-    fprintf(fp, "    \"checkout_waits\": %lu,\n", counters->section.checkout_waits);
-    fprintf(fp, "    \"write_time_ns\": %lu,\n", counters->section.write_time_ns);
-    fprintf(fp, "    \"scan_time_ns\": %lu,\n", counters->section.scan_time_ns);
-    fprintf(fp, "    \"metadata_time_ns\": %lu\n", counters->section.metadata_time_ns);
     fprintf(fp, "  },\n");
 
     // Memory counters
