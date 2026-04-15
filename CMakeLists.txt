@@ -88,6 +88,7 @@ set(WAVEDB_SOURCES
     src/Storage/sections.c
     src/Storage/node_serializer.c
     src/Storage/stale_region.c
+    src/Storage/page_file.c
 
     # Database
     src/Database/wal.c
@@ -245,6 +246,11 @@ if(BUILD_TESTS)
     add_executable(test_stale_region tests/test_stale_region.cpp)
     target_link_libraries(test_stale_region wavedb gtest gtest_main)
     add_test(NAME test_stale_region COMMAND test_stale_region)
+
+    # Test for page_file
+    add_executable(test_page_file tests/test_page_file.cpp)
+    target_link_libraries(test_page_file wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_page_file COMMAND test_page_file)
 
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
