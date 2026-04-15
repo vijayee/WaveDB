@@ -366,6 +366,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_thread_wal_simple tests/benchmark/benchmark_thread_wal_simple.cpp)
     target_link_libraries(benchmark_thread_wal_simple benchmark_base wavedb Threads::Threads)
 
+    # Page cache benchmark
+    add_executable(benchmark_page_cache tests/benchmark/benchmark_page_cache.cpp)
+    target_link_libraries(benchmark_page_cache benchmark_base wavedb Threads::Threads)
+
     # Create benchmark output directory
     add_custom_target(benchmark_output_dir
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_SOURCE_DIR}/.benchmarks
