@@ -48,7 +48,7 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
 
     // Set child_disk_offset on entries from locations
     for (size_t i = 0; i < num_locations && i < btree->entries.length; i++) {
-        btree->entries.data[i].child_disk_offset = locations[i].block_index;
+        btree->entries.data[i].child_disk_offset = locations[i].offset;
     }
     btree->disk_offset = entry->child_disk_offset;
     btree->is_dirty = 0;

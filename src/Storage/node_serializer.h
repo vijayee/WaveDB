@@ -22,8 +22,7 @@ extern "C" {
  * instead of the child data directly (for lazy loading).
  */
 typedef struct {
-    size_t section_id;    // Which section file contains the node
-    size_t block_index;   // Which block within the section
+    uint64_t offset;     // File offset in page file (0 if not on disk)
 } node_location_t;
 
 /**

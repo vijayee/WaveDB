@@ -334,8 +334,7 @@ static void bnode_serialize_entries(bnode_t* node, uint8_t chunk_size, serialize
             memcpy(sb->data + length_pos, &net_size, 4);
         } else {
             // Child hbtrie_node location
-            sbuf_write_uint64(sb, entry->child_section_id);
-            sbuf_write_uint64(sb, entry->child_block_index);
+            sbuf_write_uint64(sb, entry->child_disk_offset);
         }
     }
 }
@@ -489,8 +488,7 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                         }
                         prev_version = version;
                     }
-                    (*locations)[i].section_id = 0;
-                    (*locations)[i].block_index = 0;
+                    (*locations)[i].offset = 0;
                 } else {
                     // Legacy single value
                     if (*remaining < 4) goto fail;
@@ -515,8 +513,7 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                     } else {
                         entry.value = NULL;
                     }
-                    (*locations)[i].section_id = 0;
-                    (*locations)[i].block_index = 0;
+                    (*locations)[i].offset = 0;
                 }
             } else if (entry.is_bnode_child) {
                 if (is_v2) {
@@ -550,22 +547,19 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                         *remaining -= consumed;
                     }
                 } else {
-                    // V1: section reference placeholders
+                    // V1: section reference placeholders (16 bytes for backward compat)
                     if (*remaining < 16) goto fail;
-                    entry.child_section_id = read_uint64(ptr);
-                    entry.child_block_index = read_uint64(ptr);
+                    entry.child_disk_offset = read_uint64(ptr);
+                    read_uint64(ptr);  // Discard block_index (was child_block_index)
                     *remaining -= 16;
                 }
-                (*locations)[i].section_id = entry.child_section_id;
-                (*locations)[i].block_index = entry.child_block_index;
+                (*locations)[i].offset = entry.child_disk_offset;
             } else {
                 // Child hbtrie_node location
-                if (*remaining < 16) goto fail;
-                entry.child_section_id = read_uint64(ptr);
-                entry.child_block_index = read_uint64(ptr);
-                *remaining -= 16;
-                (*locations)[i].section_id = entry.child_section_id;
-                (*locations)[i].block_index = entry.child_block_index;
+                if (*remaining < 8) goto fail;
+                entry.child_disk_offset = read_uint64(ptr);
+                *remaining -= 8;
+                (*locations)[i].offset = entry.child_disk_offset;
             }
         } else {
             // Old format: has_value was a uint8_t
@@ -596,13 +590,13 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                 } else {
                     entry.value = NULL;
                 }
-                (*locations)[i].section_id = 0;
-                (*locations)[i].block_index = 0;
+                (*locations)[i].offset = 0;
             } else {
                 if (*remaining < 16) goto fail;
-                (*locations)[i].section_id = read_uint64(ptr);
-                (*locations)[i].block_index = read_uint64(ptr);
+                entry.child_disk_offset = read_uint64(ptr);
+                read_uint64(ptr);  // Discard (was block_index)
                 *remaining -= 16;
+                (*locations)[i].offset = entry.child_disk_offset;
                 entry.child = NULL;
             }
         }
