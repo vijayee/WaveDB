@@ -4,6 +4,7 @@
 #include <napi.h>
 #include <string>
 #include "../../../src/Database/database.h"
+#include "../../../src/Database/database_iterator.h"
 
 class Iterator : public Napi::ObjectWrap<Iterator> {
 public:

@@ -6,6 +6,7 @@
 #include <string>
 #include <unistd.h>
 #include "../../../src/Database/database.h"
+#include "../../../src/Database/database_iterator.h"
 #include "../../../src/Database/batch.h"
 #include "path.h"
 #include "identifier.h"
@@ -38,6 +39,12 @@ private:
   Napi::Value Get(const Napi::CallbackInfo& info);
   Napi::Value Delete(const Napi::CallbackInfo& info);
   Napi::Value Batch(const Napi::CallbackInfo& info);
+
+  // Callback-style async operations (use C async API with error-first callback)
+  Napi::Value PutCb(const Napi::CallbackInfo& info);
+  Napi::Value GetCb(const Napi::CallbackInfo& info);
+  Napi::Value DeleteCb(const Napi::CallbackInfo& info);
+  Napi::Value BatchCb(const Napi::CallbackInfo& info);
 
   // Sync operations
   Napi::Value PutSync(const Napi::CallbackInfo& info);
@@ -89,6 +96,10 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("get", &WaveDB::Get),
     InstanceMethod("del", &WaveDB::Delete),
     InstanceMethod("batch", &WaveDB::Batch),
+    InstanceMethod("putCb", &WaveDB::PutCb),
+    InstanceMethod("getCb", &WaveDB::GetCb),
+    InstanceMethod("delCb", &WaveDB::DeleteCb),
+    InstanceMethod("batchCb", &WaveDB::BatchCb),
     InstanceMethod("putSync", &WaveDB::PutSync),
     InstanceMethod("getSync", &WaveDB::GetSync),
     InstanceMethod("delSync", &WaveDB::DeleteSync),
@@ -442,6 +453,221 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
   }
 
   // Dispatch async batch operation
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    batch_destroy(batch);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+  ctx->batch = batch;
+
+  database_write_batch(db_, batch, promise_c);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+// --- Callback-style async operations (use C async API with error-first callback) ---
+
+Napi::Value WaveDB::GetCb(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 2 || !info[1].IsFunction()) {
+    Napi::TypeError::New(env, "Key and callback required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) return env.Null();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+
+  database_get(db_, path, promise_c);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+Napi::Value WaveDB::PutCb(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 3 || !info[2].IsFunction()) {
+    Napi::TypeError::New(env, "Key, value, and callback required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) return env.Null();
+
+  identifier_t* value = ValueFromJS(env, info[1]);
+  if (!value) {
+    path_destroy(path);
+    return env.Null();
+  }
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    identifier_destroy(value);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+
+  database_put(db_, path, value, promise_c);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+Napi::Value WaveDB::DeleteCb(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 2 || !info[1].IsFunction()) {
+    Napi::TypeError::New(env, "Key and callback required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  path_t* path = PathFromJS(env, info[0], delimiter_);
+  if (!path) return env.Null();
+
+  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
+
+  promise_t* promise_c = bridge_.CreatePromise(ctx);
+  if (!promise_c) {
+    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
+    napi_value promise_val = ctx->promise;
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    path_destroy(path);
+    return Napi::Value(env, promise_val);
+  }
+
+  ctx->promise_c = promise_c;
+
+  database_delete(db_, path, promise_c);
+
+  return Napi::Value(env, ctx->promise);
+}
+
+Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsFunction()) {
+    Napi::TypeError::New(env, "Array of operations and callback required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Array ops = info[0].As<Napi::Array>();
+
+  batch_t* batch = batch_create(ops.Length());
+  if (!batch) {
+    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  for (uint32_t i = 0; i < ops.Length(); i++) {
+    Napi::Object op = ops.Get(i).As<Napi::Object>();
+
+    if (!op.Has("type") || !op.Has("key")) {
+      batch_destroy(batch);
+      Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+
+    std::string type = op.Get("type").As<Napi::String>().Utf8Value();
+    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
+    if (!path) {
+      batch_destroy(batch);
+      return env.Null();
+    }
+
+    int rc;
+    if (type == "put") {
+      if (!op.Has("value")) {
+        path_destroy(path);
+        batch_destroy(batch);
+        Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+
+      identifier_t* value = ValueFromJS(env, op.Get("value"));
+      if (!value) {
+        path_destroy(path);
+        batch_destroy(batch);
+        return env.Null();
+      }
+
+      rc = batch_add_put(batch, path, value);
+      if (rc != 0) {
+        path_destroy(path);
+        identifier_destroy(value);
+        batch_destroy(batch);
+        Napi::Error::New(env, "Failed to add put to batch").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    } else if (type == "del") {
+      rc = batch_add_delete(batch, path);
+      if (rc != 0) {
+        path_destroy(path);
+        batch_destroy(batch);
+        Napi::Error::New(env, "Failed to add delete to batch").ThrowAsJavaScriptException();
+        return env.Null();
+      }
+    } else {
+      path_destroy(path);
+      batch_destroy(batch);
+      Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+  }
+
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
 
   promise_t* promise_c = bridge_.CreatePromise(ctx);

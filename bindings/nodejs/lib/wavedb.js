@@ -250,6 +250,137 @@ class WaveDB {
   }
 
   /**
+   * Store a key-value pair asynchronously using callback style
+   *
+   * @param {string|Array} key - Key path (string with delimiter or array of identifiers)
+   * @param {string|Buffer} value - Value to store
+   * @param {Function} callback - Callback(err)
+   * @returns {Promise<void>} Also returns a Promise for convenience
+   */
+  putCb(key, value, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback required for putCb');
+    }
+    if (value === undefined || value === null) {
+      throw new TypeError('Value is required for put operation');
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        this._db.putCb(key, value, (err) => {
+          if (err) {
+            const converted = convertError(err);
+            if (typeof callback === 'function') callback(converted);
+            reject(converted);
+          } else {
+            if (typeof callback === 'function') callback(null);
+            resolve();
+          }
+        });
+      } catch (err) {
+        const converted = convertError(err);
+        if (typeof callback === 'function') callback(converted);
+        reject(converted);
+      }
+    });
+  }
+
+  /**
+   * Retrieve a value by key asynchronously using callback style
+   *
+   * @param {string|Array} key - Key path (string with delimiter or array of identifiers)
+   * @param {Function} callback - Callback(err, value)
+   * @returns {Promise<string|Buffer|null>} Also returns a Promise for convenience
+   */
+  getCb(key, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback required for getCb');
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        this._db.getCb(key, (err, value) => {
+          if (err) {
+            const converted = convertError(err);
+            if (typeof callback === 'function') callback(converted, null);
+            reject(converted);
+          } else {
+            if (typeof callback === 'function') callback(null, value);
+            resolve(value);
+          }
+        });
+      } catch (err) {
+        const converted = convertError(err);
+        if (typeof callback === 'function') callback(converted, null);
+        reject(converted);
+      }
+    });
+  }
+
+  /**
+   * Delete a key-value pair asynchronously using callback style
+   *
+   * @param {string|Array} key - Key path (string with delimiter or array of identifiers)
+   * @param {Function} callback - Callback(err)
+   * @returns {Promise<void>} Also returns a Promise for convenience
+   */
+  delCb(key, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback required for delCb');
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        this._db.delCb(key, (err) => {
+          if (err) {
+            const converted = convertError(err);
+            if (typeof callback === 'function') callback(converted);
+            reject(converted);
+          } else {
+            if (typeof callback === 'function') callback(null);
+            resolve();
+          }
+        });
+      } catch (err) {
+        const converted = convertError(err);
+        if (typeof callback === 'function') callback(converted);
+        reject(converted);
+      }
+    });
+  }
+
+  /**
+   * Execute multiple operations atomically asynchronously using callback style
+   *
+   * @param {Array<Object>} ops - Array of operations {type: 'put'|'del', key: ..., value: ...}
+   * @param {Function} callback - Callback(err)
+   * @returns {Promise<void>} Also returns a Promise for convenience
+   */
+  batchCb(ops, callback) {
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback required for batchCb');
+    }
+    if (!Array.isArray(ops)) {
+      throw new TypeError('Array of operations required for batchCb');
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        this._db.batchCb(ops, (err) => {
+          if (err) {
+            const converted = convertError(err);
+            if (typeof callback === 'function') callback(converted);
+            reject(converted);
+          } else {
+            if (typeof callback === 'function') callback(null);
+            resolve();
+          }
+        });
+      } catch (err) {
+        const converted = convertError(err);
+        if (typeof callback === 'function') callback(converted);
+        reject(converted);
+      }
+    });
+  }
+
+  /**
    * Store a key-value pair synchronously
    *
    * @param {string|Array} key - Key path (string with delimiter or array of identifiers)
