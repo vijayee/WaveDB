@@ -1509,9 +1509,11 @@ int bnode_entry_lazy_load_bnode_child(bnode_entry_t* entry,
     if (item == NULL) return -1;
 
     // Deserialize with V3 format
+    // bnode_cache_item_t stores data WITH 4-byte size prefix.
+    // bnode_deserialize_v3 expects data starting with V3 magic byte.
     node_location_t* locations = NULL;
     size_t num_locations = 0;
-    bnode_t* child = bnode_deserialize_v3(item->data, item->data_len,
+    bnode_t* child = bnode_deserialize_v3(item->data + 4, item->data_len - 4,
                                            chunk_size, btree_node_size,
                                            &locations, &num_locations);
 
@@ -1548,9 +1550,11 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
     bnode_cache_item_t* item = bnode_cache_read(fcache, entry->child_disk_offset);
     if (item == NULL) return -1;
 
+    // bnode_cache_item_t stores data WITH 4-byte size prefix.
+    // bnode_deserialize_v3 expects data starting with V3 magic byte.
     node_location_t* locations = NULL;
     size_t num_locations = 0;
-    bnode_t* root_bnode = bnode_deserialize_v3(item->data, item->data_len,
+    bnode_t* root_bnode = bnode_deserialize_v3(item->data + 4, item->data_len - 4,
                                                  chunk_size, btree_node_size,
                                                  &locations, &num_locations);
 

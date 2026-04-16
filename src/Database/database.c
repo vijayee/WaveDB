@@ -696,8 +696,11 @@ database_t* database_create_with_config(const char* location,
                     if (root_data != NULL) {
                         node_location_t* locations = NULL;
                         size_t num_locations = 0;
+                        /* page_file_read_node returns buffer with 4-byte size prefix.
+                           root_len is the size WITHOUT the prefix.
+                           bnode_deserialize_v3 expects data starting with V3 magic byte. */
                         bnode_t* root_bnode = bnode_deserialize_v3(
-                            root_data, root_len,
+                            root_data + 4, root_len,
                             db->trie->chunk_size, db->trie->btree_node_size,
                             &locations, &num_locations);
                         free(root_data);
