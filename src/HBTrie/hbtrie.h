@@ -346,6 +346,24 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
                                         uint8_t chunk_size,
                                         uint32_t btree_node_size);
 
+/**
+ * Lazy-load a trie_child node from the page file.
+ *
+ * When an entry has has_value==1, trie_child==NULL, and child_disk_offset
+ * is non-zero, this function reads the node from the page file via the bnode
+ * cache and sets entry->trie_child (instead of entry->child).
+ *
+ * @param entry      Entry with NULL trie_child and valid child_disk_offset
+ * @param fcache     Bnode cache for reading from page file
+ * @param chunk_size HBTrie chunk size for deserialization
+ * @param btree_node_size Max B+tree node size for deserialization
+ * @return 0 on success, -1 on failure
+ */
+int bnode_entry_lazy_load_trie_child(bnode_entry_t* entry,
+                                      file_bnode_cache_t* fcache,
+                                      uint8_t chunk_size,
+                                      uint32_t btree_node_size);
+
 #ifdef __cplusplus
 }
 #endif

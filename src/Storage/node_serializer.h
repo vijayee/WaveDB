@@ -34,7 +34,7 @@ typedef struct {
  *   - Number of entries (uint16_t)
  *   - For each entry:
  *     - Chunk data (chunk_size bytes)
- *     - Flags byte: bit 0 = has_value, bit 1 = is_bnode_child, bit 2 = has_versions
+ *     - Flags byte: bit 0 = has_value, bit 1 = is_bnode_child, bit 2 = has_versions, bit 3 = has_trie_child
  *     - If has_value and has_versions:
  *       - Number of versions (uint16_t)
  *       - For each version:
@@ -43,6 +43,8 @@ typedef struct {
  *         - If not deleted: identifier length (uint32_t) + data
  *     - If has_value and !has_versions:
  *       - Identifier length (uint32_t) + data
+ *     - If has_value and has_trie_child (bit 3):
+ *       - child_disk_offset (uint64_t) for trie_child lazy loading
  *     - If !has_value and is_bnode_child (V2 inline):
  *       - Child bnode size (uint32_t)
  *       - Child bnode data (recursively serialized bnode)

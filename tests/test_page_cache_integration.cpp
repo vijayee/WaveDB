@@ -298,7 +298,7 @@ TEST_F(PageCacheIntegrationTest, SuperblockUpdateCycle) {
     bnode_cache_release(fcache, item);
 
     /* Write superblock pointing to root v1 */
-    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1);
+    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1, NULL);
     ASSERT_EQ(rc, 0);
 
     /* Read the superblock and verify it points to root v1 */
@@ -338,7 +338,7 @@ TEST_F(PageCacheIntegrationTest, SuperblockUpdateCycle) {
     bnode_cache_release(fcache, item);
 
     /* Write new superblock pointing to root v2 */
-    rc = page_file_write_superblock(pf, root_offset_v2, root_size_v2);
+    rc = page_file_write_superblock(pf, root_offset_v2, root_size_v2, NULL);
     ASSERT_EQ(rc, 0);
 
     /* Read latest superblock — should point to root v2 */
@@ -442,7 +442,7 @@ TEST_F(PageCacheIntegrationTest, CrashRecoverySimulation) {
     bnode_cache_release(fcache, item);
 
     /* Write superblock pointing to root v1 */
-    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1);
+    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1, NULL);
     ASSERT_EQ(rc, 0);
 
     /* Phase 2: Write a new root (v2) but do NOT flush it.
@@ -458,7 +458,7 @@ TEST_F(PageCacheIntegrationTest, CrashRecoverySimulation) {
        superblock update for v2 was written, but v2 data was not flushed).
        In a real crash scenario, the superblock might point to an offset
        that has no valid data because it wasn't flushed yet. */
-    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1);
+    rc = page_file_write_superblock(pf, root_offset_v1, root_size_v1, NULL);
     ASSERT_EQ(rc, 0);
 
     /* Close everything (simulating crash — v2 is in cache only, not on disk) */

@@ -35,9 +35,10 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
     if (item == NULL) return -1;
 
     // Deserialize using V2 format (inline child bnodes)
+    // item->data includes a 4-byte size prefix; skip it for deserialization.
     node_location_t* locations = NULL;
     size_t num_locations = 0;
-    bnode_t* btree = bnode_deserialize(item->data, item->data_len, chunk_size,
+    bnode_t* btree = bnode_deserialize(item->data + 4, item->data_len - 4, chunk_size,
                                         btree_node_size, &locations, &num_locations);
     bnode_cache_release(fcache, item);
 
@@ -68,6 +69,55 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
     hbnode->is_dirty = 0;
 
     entry->child = hbnode;
+    return 0;
+}
+
+int bnode_entry_lazy_load_trie_child(bnode_entry_t* entry,
+                                      file_bnode_cache_t* fcache,
+                                      uint8_t chunk_size,
+                                      uint32_t btree_node_size) {
+    if (entry == NULL || fcache == NULL) return -1;
+    if (entry->child_disk_offset == 0) return -1;  // Not on disk
+
+    // Read from page file via cache
+    bnode_cache_item_t* item = bnode_cache_read(fcache, entry->child_disk_offset);
+    if (item == NULL) return -1;
+
+    // Deserialize using V2 format (inline child bnodes)
+    // item->data includes a 4-byte size prefix; skip it for deserialization.
+    node_location_t* locations = NULL;
+    size_t num_locations = 0;
+    bnode_t* btree = bnode_deserialize(item->data + 4, item->data_len - 4, chunk_size,
+                                        btree_node_size, &locations, &num_locations);
+    bnode_cache_release(fcache, item);
+
+    if (btree == NULL) {
+        free(locations);
+        return -1;
+    }
+
+    // Set child_disk_offset on entries from locations
+    for (size_t i = 0; i < num_locations && i < btree->entries.length; i++) {
+        btree->entries.data[i].child_disk_offset = locations[i].offset;
+    }
+    btree->disk_offset = entry->child_disk_offset;
+    btree->is_dirty = 0;
+    free(locations);
+
+    // Create hbtrie_node wrapper
+    hbtrie_node_t* hbnode = hbtrie_node_create(btree_node_size);
+    if (hbnode == NULL) {
+        bnode_destroy_tree(btree);
+        return -1;
+    }
+    bnode_destroy(hbnode->btree);
+    hbnode->btree = btree;
+    hbnode->btree_height = atomic_load(&btree->level);
+    hbnode->disk_offset = entry->child_disk_offset;
+    hbnode->is_loaded = 1;
+    hbnode->is_dirty = 0;
+
+    entry->trie_child = hbnode;
     return 0;
 }
 
@@ -647,6 +697,13 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
       if (entry == NULL) continue;
 
       // When an entry has a trie_child (has_value=1 with child), push it for traversal
+      // Lazy-load trie_child from page file if needed
+      if (entry->trie_child == NULL && entry->has_value && entry->child_disk_offset != 0
+          && cursor->trie->fcache != NULL) {
+        bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
+                                         cursor->trie->chunk_size,
+                                         cursor->trie->btree_node_size);
+      }
       if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
         cursor->stack[cursor->stack_depth].node = entry->trie_child;
         cursor->stack[cursor->stack_depth].entry_index = 0;
@@ -1537,6 +1594,13 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
                                                   trie->chunk_size,
                                                   trie->btree_node_size);
             }
+            // Lazy-load trie_child from page file if needed
+            if (entry->trie_child == NULL && entry->has_value && entry->child_disk_offset != 0
+                && trie->fcache != NULL) {
+              bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                               trie->chunk_size,
+                                               trie->btree_node_size);
+            }
             next = entry->has_value ? entry->trie_child : entry->child;
           }
           if (next == NULL) {
@@ -1563,6 +1627,13 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
               bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
                                                   trie->chunk_size,
                                                   trie->btree_node_size);
+            }
+            // Lazy-load trie_child from page file if needed
+            if (entry->trie_child == NULL && entry->has_value && entry->child_disk_offset != 0
+                && trie->fcache != NULL) {
+              bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                               trie->chunk_size,
+                                               trie->btree_node_size);
             }
             next = entry->has_value ? entry->trie_child : entry->child;
           }
@@ -1815,6 +1886,13 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when key1 is stored and key10 (sharing the 'key1'
           // chunk prefix) needs to go deeper. Use trie_child (outside the
           // union) since the union holds the value.
+          // Lazy-load trie_child from page file if needed
+          if (entry->trie_child == NULL && entry->child_disk_offset != 0
+              && trie->fcache != NULL) {
+            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                             trie->chunk_size,
+                                             trie->btree_node_size);
+          }
           if (entry->trie_child == NULL) {
             // First time descending through this entry - create trie_child
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
@@ -1902,6 +1980,13 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when a shorter key (e.g. "key1") is stored and a longer
           // key sharing the same prefix (e.g. "key10") needs to go deeper.
           // Use trie_child (outside the union) since the union holds the value.
+          // Lazy-load trie_child from page file if needed
+          if (entry->trie_child == NULL && entry->child_disk_offset != 0
+              && trie->fcache != NULL) {
+            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                             trie->chunk_size,
+                                             trie->btree_node_size);
+          }
           if (entry->trie_child == NULL) {
             // First time descending through this entry - create trie_child
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
@@ -2079,6 +2164,13 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
                                                 trie->chunk_size,
                                                 trie->btree_node_size);
           }
+          // Lazy-load trie_child from page file if needed
+          if (entry->trie_child == NULL && entry->has_value && entry->child_disk_offset != 0
+              && trie->fcache != NULL) {
+            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                             trie->chunk_size,
+                                             trie->btree_node_size);
+          }
           next = entry->has_value ? entry->trie_child : entry->child;
         }
         if (next == NULL) {
@@ -2102,6 +2194,13 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
             bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
                                                 trie->chunk_size,
                                                 trie->btree_node_size);
+          }
+          // Lazy-load trie_child from page file if needed
+          if (entry->trie_child == NULL && entry->has_value && entry->child_disk_offset != 0
+              && trie->fcache != NULL) {
+            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
+                                             trie->chunk_size,
+                                             trie->btree_node_size);
           }
           next = entry->has_value ? entry->trie_child : entry->child;
         }

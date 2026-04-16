@@ -285,6 +285,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_graphql_resolve wavedb gtest gtest_main)
     add_test(NAME test_graphql_resolve COMMAND test_graphql_resolve)
 
+    # Test for Phase 1 persistence
+    add_executable(test_persistence_phase1 tests/test_persistence_phase1.cpp)
+    target_link_libraries(test_persistence_phase1 wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_persistence_phase1 COMMAND test_persistence_phase1)
+
     # Visualization examples removed (used non-MVCC API, will be revisited)
 
     # Example programs

@@ -4,6 +4,7 @@
 
 #include "database_iterator.h"
 #include "../HBTrie/chunk.h"
+#include "../HBTrie/hbtrie.h"
 #include "../Buffer/buffer.h"
 #include "../Util/allocator.h"
 #include <stdlib.h>
@@ -244,6 +245,13 @@ int database_scan_next(database_iterator_t* iter,
                 frame->entry_index++;  // Move past this entry since we're processing it
 
                 // If entry also has a trie_child, push it for later traversal
+                // Lazy-load trie_child from page file if needed
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                     iter->db->trie->chunk_size,
+                                                     iter->db->trie->btree_node_size);
+                }
                 if (entry->trie_child) {
                     if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
                         return -2;
@@ -387,8 +395,20 @@ int database_scan_next(database_iterator_t* iter,
                     return -2;  // Error
                 }
                 break;  // Will continue with child on next iteration
-            } else if (entry->trie_child) {
+            } else if (entry->trie_child || (entry->has_value && entry->child_disk_offset != 0
+                         && iter->db->trie != NULL && iter->db->trie->fcache != NULL)) {
                 // Entry has both value and trie_child - push trie_child for traversal
+                // Lazy-load trie_child from page file if needed
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                     iter->db->trie->chunk_size,
+                                                     iter->db->trie->btree_node_size);
+                }
+                if (entry->trie_child == NULL) {
+                    frame->entry_index++;
+                    continue;
+                }
                 frame->entry_index++;
                 pushed_child = 1;
                 if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {

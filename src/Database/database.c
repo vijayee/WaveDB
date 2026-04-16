@@ -265,18 +265,29 @@ static int save_index(database_t* db) {
 static hbtrie_t* load_index_from_page_file(const char* location, uint8_t chunk_size,
                                             uint32_t btree_node_size,
                                             page_file_t* page_file,
-                                            file_bnode_cache_t* bnode_cache) {
+                                            file_bnode_cache_t* bnode_cache,
+                                            transaction_id_t* out_last_txn) {
     page_superblock_t sb;
     int rc = page_file_read_superblock(page_file, &sb);
-    if (rc != 0 || sb.root_offset == 0) return NULL;
+    if (rc != 0 || sb.root_offset == 0) {
+        return NULL;
+    }
+    // Return the last committed transaction ID from the superblock
+    if (out_last_txn != NULL) {
+        out_last_txn->time = sb.last_txn_time;
+        out_last_txn->nanos = sb.last_txn_nanos;
+        out_last_txn->count = sb.last_txn_count;
+    }
 
     size_t root_len = 0;
     uint8_t* root_data = page_file_read_node(page_file, sb.root_offset, &root_len);
     if (root_data == NULL) return NULL;
 
+    // page_file_read_node returns buffer with 4-byte size prefix.
+    // root_len is the data size WITHOUT the prefix. Skip 4 bytes for bnode_deserialize.
     node_location_t* locations = NULL;
     size_t num_locations = 0;
-    bnode_t* root_bnode = bnode_deserialize(root_data, root_len, chunk_size,
+    bnode_t* root_bnode = bnode_deserialize(root_data + 4, root_len, chunk_size,
                                               btree_node_size, &locations, &num_locations);
     free(root_data);
     if (root_bnode == NULL) {
@@ -322,6 +333,14 @@ static hbtrie_t* load_index_from_page_file(const char* location, uint8_t chunk_s
 int database_flush_persist(database_t* db) {
     if (db == NULL || db->page_file == NULL || db->trie == NULL) return -1;
 
+    // Flush WAL to ensure all pending writes are durable
+    if (db->wal_manager != NULL) {
+        wal_manager_flush(db->wal_manager);
+    }
+
+    // MVCC: Trigger GC to clean up old versions before persisting
+    tx_manager_gc(db->tx_manager);
+
     hbtrie_node_t* root = atomic_load(&db->trie->root);
     if (root == NULL) return 0;
 
@@ -352,8 +371,30 @@ int database_flush_persist(database_t* db) {
 
                 if (entry->is_bnode_child && entry->child_bnode != NULL) {
                     vec_push(&bnode_stack, entry->child_bnode);
-                } else if (!entry->has_value && entry->child != NULL) {
-                    vec_push(&node_stack, entry->child);
+                } else if (!entry->has_value) {
+                    // Lazy-load child from page file if needed
+                    if (entry->child == NULL && entry->child_disk_offset != 0
+                        && db->trie->fcache != NULL) {
+                        bnode_entry_lazy_load_hbtrie_child(entry, db->trie->fcache,
+                                                          db->trie->chunk_size,
+                                                          db->trie->btree_node_size);
+                    }
+                    if (entry->child != NULL) {
+                        vec_push(&node_stack, entry->child);
+                    }
+                }
+                // Also follow trie_child for entries with both value and child
+                if (entry->has_value) {
+                    // Lazy-load trie_child from page file if needed
+                    if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                        && db->trie->fcache != NULL) {
+                        bnode_entry_lazy_load_trie_child(entry, db->trie->fcache,
+                                                         db->trie->chunk_size,
+                                                         db->trie->btree_node_size);
+                    }
+                    if (entry->trie_child != NULL) {
+                        vec_push(&node_stack, entry->trie_child);
+                    }
                 }
             }
         }
@@ -412,6 +453,9 @@ int database_flush_persist(database_t* db) {
                     if (!entry->has_value && entry->child == node) {
                         entry->child_disk_offset = new_offset;
                     }
+                    if (entry->has_value && entry->trie_child == node) {
+                        entry->child_disk_offset = new_offset;
+                    }
                     if (entry->is_bnode_child && entry->child_bnode != NULL) {
                         vec_push(&bs, entry->child_bnode);
                     }
@@ -422,8 +466,9 @@ int database_flush_persist(database_t* db) {
     }
     vec_deinit(&all_nodes);
 
-    // Write superblock with new root offset
-    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0);
+    // Write superblock with new root offset and last committed transaction ID
+    transaction_id_t last_txn = tx_manager_get_last_committed(db->tx_manager);
+    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0, &last_txn);
     if (sb_rc != 0) return -1;
 
     return 0;
@@ -498,12 +543,13 @@ static hbtrie_t* load_index_cbor(const char* location, uint8_t chunk_size,
 static hbtrie_t* load_index(const char* location, uint8_t chunk_size,
                              uint32_t btree_node_size,
                              page_file_t* page_file,
-                             file_bnode_cache_t* bnode_cache) {
+                             file_bnode_cache_t* bnode_cache,
+                             transaction_id_t* out_last_txn) {
     // Try page_file first if available
     if (page_file != NULL) {
         hbtrie_t* trie = load_index_from_page_file(location, chunk_size,
                                                     btree_node_size, page_file,
-                                                    bnode_cache);
+                                                    bnode_cache, out_last_txn);
         if (trie != NULL) return trie;
     }
     // Fall back to CBOR
@@ -669,7 +715,8 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Load or create trie
-    db->trie = load_index(location, db->chunk_size, db->btree_node_size, db->page_file, db->bnode_cache);
+    transaction_id_t last_txn = {0, 0, 0};
+    db->trie = load_index(location, db->chunk_size, db->btree_node_size, db->page_file, db->bnode_cache, &last_txn);
     if (db->trie == NULL) {
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
@@ -749,6 +796,15 @@ database_t* database_create_with_config(const char* location,
     db->is_rebuilding = 1;
     wal_manager_recover(db->wal_manager, db);
     db->is_rebuilding = 0;
+
+    // Advance transaction ID past the last committed txn from page file
+    // This ensures new transactions have IDs greater than any stored versions
+    if (last_txn.time != 0 || last_txn.nanos != 0 || last_txn.count != 0) {
+        transaction_id_advance_to(&last_txn);
+        // Also set last_committed_txn_id so that reads can see stored MVCC versions
+        // This is critical when WAL has 0 entries (clean reopen after flush_persist)
+        atomic_store(&db->tx_manager->last_committed_txn_id, last_txn);
+    }
 
     refcounter_init((refcounter_t*)db);
 

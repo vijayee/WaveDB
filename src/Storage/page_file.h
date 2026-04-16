@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../Util/threadding.h"
+#include "../Workers/transaction_id.h"
 #include "stale_region.h"
 
 #ifdef __cplusplus
@@ -19,7 +20,7 @@ extern "C" {
 #define PAGE_FILE_DEFAULT_BLOCK_SIZE 4096
 #define PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS 2
 #define INDEX_BLK_META_SIZE 16
-#define PAGE_FILE_SUPERBLOCK_SIZE 48  // magic(4)+version(2)+root_offset(8)+root_size(8)+revnum(8)+crc32(4)+padding
+#define PAGE_FILE_SUPERBLOCK_SIZE 72  // magic(4)+version(2)+root_offset(8)+root_size(8)+revnum(8)+last_txn_time(8)+last_txn_nanos(8)+last_txn_count(8)+crc32(4)+padding
 
 typedef struct {
     uint8_t magic[4];         // "WDBP"
@@ -27,6 +28,9 @@ typedef struct {
     uint64_t root_offset;      // Offset of root hbtrie_node's btree
     uint64_t root_size;        // Serialized size of root btree
     uint64_t revision;        // Monotonically increasing revision number
+    uint64_t last_txn_time;    // Last committed transaction time
+    uint64_t last_txn_nanos;   // Last committed transaction nanos
+    uint64_t last_txn_count;   // Last committed transaction count
     uint32_t crc32;            // CRC32 of all preceding fields
 } page_superblock_t;
 
@@ -83,7 +87,9 @@ void page_file_mark_stale(page_file_t* pf, uint64_t offset, uint64_t length);
 uint64_t* page_file_get_reusable_blocks(page_file_t* pf, double threshold_ratio, size_t* out_count);
 
 // Write superblock to the next slot (round-robin among num_superblocks)
-int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t root_size);
+// last_txn_id provides the last committed transaction ID for MVCC recovery
+int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t root_size,
+                               const transaction_id_t* last_txn_id);
 
 // Read the latest valid superblock
 int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb);
