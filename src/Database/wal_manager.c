@@ -26,9 +26,6 @@
 #include "../Util/log.h"  // For log_warn
 #include <cbor.h>
 
-// Forward declaration from wal.c
-int deserialize_batch(buffer_t* data, batch_op_t** ops, size_t* count);
-
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
 #define WAL_ERROR_IO -2
@@ -1254,17 +1251,80 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
         switch (entry->type) {
             case WAL_BATCH: {
-                // Deserialize batch
-                batch_op_t* ops = NULL;
-                size_t op_count = 0;
-
-                if (deserialize_batch(data, &ops, &op_count) != 0) {
-                    log_error("Failed to deserialize batch");
+                // Deserialize batch from CBOR format
+                // Format: CBOR array of [type_uint8, path_cbor, value_cbor?] entries
+                struct cbor_load_result result;
+                cbor_item_t* batch_cbor = cbor_load(data->data, data->size, &result);
+                if (batch_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
+                    if (batch_cbor) cbor_decref(&batch_cbor);
+                    log_error("WAL Recovery: Failed to load batch CBOR (error=%d)", result.error.code);
                     break;
                 }
 
-                // Apply each operation to trie
+                if (!cbor_isa_array(batch_cbor)) {
+                    cbor_decref(&batch_cbor);
+                    log_error("WAL Recovery: Batch CBOR is not an array");
+                    break;
+                }
+
+                size_t op_count = cbor_array_size(batch_cbor);
+                batch_op_t* ops = get_clear_memory(op_count * sizeof(batch_op_t));
+                if (ops == NULL) {
+                    cbor_decref(&batch_cbor);
+                    log_error("WAL Recovery: Failed to allocate batch ops");
+                    break;
+                }
+
+                memset(ops, 0, op_count * sizeof(batch_op_t));
+                cbor_item_t** entries = cbor_array_handle(batch_cbor);
+                size_t valid_ops = 0;
+
                 for (size_t j = 0; j < op_count; j++) {
+                    cbor_item_t* op_array = entries[j];
+                    if (!cbor_isa_array(op_array)) {
+                        log_error("WAL Recovery: Batch entry %zu is not an array", j);
+                        continue;
+                    }
+
+                    size_t array_size = cbor_array_size(op_array);
+                    if (array_size < 2) {
+                        log_error("WAL Recovery: Batch entry %zu has too few elements", j);
+                        continue;
+                    }
+
+                    cbor_item_t** op_items = cbor_array_handle(op_array);
+
+                    // Type (uint8)
+                    uint8_t op_type = cbor_get_uint8(op_items[0]);
+                    ops[valid_ops].type = (wal_type_e)op_type;
+
+                    // Path
+                    path_t* path = cbor_to_path(op_items[1], database->chunk_size);
+                    if (path == NULL) {
+                        log_error("WAL Recovery: Failed to deserialize path in batch entry %zu", j);
+                        continue;
+                    }
+                    ops[valid_ops].path = path;
+
+                    // Value (for PUT operations)
+                    if (op_type == WAL_PUT && array_size >= 3) {
+                        identifier_t* value = cbor_to_identifier(op_items[2], database->chunk_size);
+                        if (value == NULL) {
+                            log_error("WAL Recovery: Failed to deserialize value in batch entry %zu", j);
+                            path_destroy(path);
+                            ops[valid_ops].path = NULL;
+                            continue;
+                        }
+                        ops[valid_ops].value = value;
+                    } else {
+                        ops[valid_ops].value = NULL;
+                    }
+
+                    valid_ops++;
+                }
+
+                // Apply each operation to trie
+                for (size_t j = 0; j < valid_ops; j++) {
                     if (ops[j].type == WAL_PUT) {
                         hbtrie_insert(database->trie, ops[j].path, ops[j].value, entry->txn_id);
                     } else {
@@ -1279,6 +1339,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 }
 
                 free(ops);
+                cbor_decref(&batch_cbor);
                 break;
             }
             case WAL_PUT:
