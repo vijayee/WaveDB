@@ -56,7 +56,7 @@ TEST_F(PageFileTest, WriteReadSuperblock) {
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
 
-    rc = page_file_write_superblock(pf, 8192, 256);
+    rc = page_file_write_superblock(pf, 8192, 256, NULL);
     EXPECT_EQ(rc, 0);
 
     page_superblock_t sb;
@@ -249,11 +249,11 @@ TEST_F(PageFileTest, SuperblockRevisionIncrements) {
     EXPECT_EQ(rc, 0);
 
     // Write superblock first time
-    rc = page_file_write_superblock(pf, 100, 50);
+    rc = page_file_write_superblock(pf, 100, 50, NULL);
     EXPECT_EQ(rc, 0);
 
     // Write superblock second time
-    rc = page_file_write_superblock(pf, 200, 75);
+    rc = page_file_write_superblock(pf, 200, 75, NULL);
     EXPECT_EQ(rc, 0);
 
     // Read latest superblock
@@ -278,7 +278,7 @@ TEST_F(PageFileTest, CloseReopenPersist) {
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
 
-    rc = page_file_write_superblock(pf, 12345, 678);
+    rc = page_file_write_superblock(pf, 12345, 678, NULL);
     EXPECT_EQ(rc, 0);
 
     page_file_destroy(pf);

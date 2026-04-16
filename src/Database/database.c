@@ -524,8 +524,9 @@ int database_flush_dirty_bnodes(database_t* db) {
     root->disk_offset = root->btree->disk_offset;
     root->is_dirty = 0;
 
-    // 5. Write superblock with new root offset
-    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0);
+    // 5. Write superblock with new root offset and transaction ID
+    transaction_id_t last_txn = tx_manager_get_last_committed(db->tx_manager);
+    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0, &last_txn);
     if (sb_rc != 0) {
         vec_deinit(&dirty_list);
         return -1;
@@ -730,6 +731,20 @@ database_t* database_create_with_config(const char* location,
                                 bnode_destroy_tree(root_bnode);
                             }
                             free(locations);
+                        }
+                    }
+
+                    // Initialize MVCC transaction ID from superblock
+                    // This is needed so version chains are visible after restart
+                    // when WAL has 0 entries
+                    if (sb.last_txn_time != 0 || sb.last_txn_nanos != 0 || sb.last_txn_count != 0) {
+                        transaction_id_t last_txn;
+                        last_txn.time = sb.last_txn_time;
+                        last_txn.nanos = sb.last_txn_nanos;
+                        last_txn.count = sb.last_txn_count;
+                        transaction_id_advance_to(&last_txn);
+                        if (db->tx_manager != NULL) {
+                            atomic_store(&db->tx_manager->last_committed_txn_id, last_txn);
                         }
                     }
                 }

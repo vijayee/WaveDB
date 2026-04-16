@@ -31,9 +31,12 @@ static void serialize_superblock(const page_superblock_t* sb, uint8_t* buf, uint
     memcpy(buf + 6, &sb->root_offset, 8);
     memcpy(buf + 14, &sb->root_size, 8);
     memcpy(buf + 22, &sb->revision, 8);
-    // Compute CRC over the first 30 bytes
-    uint32_t crc = XXH32(buf, 30, 0);
-    memcpy(buf + 30, &crc, 4);
+    memcpy(buf + 30, &sb->last_txn_time, 8);
+    memcpy(buf + 38, &sb->last_txn_nanos, 8);
+    memcpy(buf + 46, &sb->last_txn_count, 8);
+    // Compute CRC over the first 54 bytes
+    uint32_t crc = XXH32(buf, 54, 0);
+    memcpy(buf + 54, &crc, 4);
 }
 
 // Read a superblock from a buffer, returns 0 on success, -1 on CRC failure
@@ -43,10 +46,13 @@ static int deserialize_superblock(const uint8_t* buf, page_superblock_t* out_sb)
     memcpy(&out_sb->root_offset, buf + 6, 8);
     memcpy(&out_sb->root_size, buf + 14, 8);
     memcpy(&out_sb->revision, buf + 22, 8);
-    memcpy(&out_sb->crc32, buf + 30, 4);
+    memcpy(&out_sb->last_txn_time, buf + 30, 8);
+    memcpy(&out_sb->last_txn_nanos, buf + 38, 8);
+    memcpy(&out_sb->last_txn_count, buf + 46, 8);
+    memcpy(&out_sb->crc32, buf + 54, 4);
 
     // Verify CRC
-    uint32_t computed = XXH32(buf, 30, 0);
+    uint32_t computed = XXH32(buf, 54, 0);
     if (computed != out_sb->crc32) {
         return -1;
     }
@@ -531,7 +537,8 @@ uint64_t* page_file_get_reusable_blocks(page_file_t* pf, double threshold_ratio,
     return offsets;
 }
 
-int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t root_size) {
+int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t root_size,
+                               const transaction_id_t* last_txn_id) {
     if (pf == NULL || !pf->is_writable) return -1;
 
     platform_lock(&pf->lock);
@@ -548,6 +555,13 @@ int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t r
     sb.root_offset = root_offset;
     sb.root_size = root_size;
     sb.revision = pf->revision;
+
+    // Store transaction ID if provided
+    if (last_txn_id != NULL) {
+        sb.last_txn_time = last_txn_id->time;
+        sb.last_txn_nanos = last_txn_id->nanos;
+        sb.last_txn_count = last_txn_id->count;
+    }
 
     // Write to the round-robin slot
     uint64_t slot = pf->revision % pf->num_superblocks;
