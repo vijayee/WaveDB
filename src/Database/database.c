@@ -336,11 +336,16 @@ typedef struct {
     bnode_t* parent_bnode;         // Parent bnode (or NULL for root)
     size_t parent_entry_index;      // Index of this bnode in parent's entries
     uint16_t level;                // B+tree level (for sorting)
+    int hbtrie_depth;              // HBTrie depth (root=0, child=1, etc.) for sorting
 } dirty_bnode_info_t;
 
 static int compare_dirty_by_level(const void* a, const void* b) {
     const dirty_bnode_info_t* da = (const dirty_bnode_info_t*)a;
     const dirty_bnode_info_t* db = (const dirty_bnode_info_t*)b;
+    // Deeper hbtrie nodes first (children before parents across hbtrie levels)
+    if (da->hbtrie_depth > db->hbtrie_depth) return -1;
+    if (da->hbtrie_depth < db->hbtrie_depth) return 1;
+    // Within same hbtrie depth, leaves first (lower level = leaf)
     if (da->level < db->level) return -1;
     if (da->level > db->level) return 1;
     return 0;
@@ -376,6 +381,7 @@ static void collect_dirty_bnodes_from_hbnode(
     hbtrie_node_t* hbnode,
     bnode_t* cross_parent_bnode,
     size_t cross_parent_entry_index,
+    int hbtrie_depth,
     vec_t(dirty_bnode_info_t)* dirty_list)
 {
     if (hbnode == NULL || !hbnode->is_dirty) return;
@@ -405,6 +411,7 @@ static void collect_dirty_bnodes_from_hbnode(
             info.parent_bnode = item.parent_bnode;
             info.parent_entry_index = item.parent_entry_index;
             info.level = atomic_load(&bn->level);
+            info.hbtrie_depth = hbtrie_depth;
             vec_push(dirty_list, info);
         }
 
@@ -442,10 +449,10 @@ static void collect_dirty_bnodes_from_hbnode(
             } else {
                 // Leaf entry — check for hbtrie children
                 if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
-                    collect_dirty_bnodes_from_hbnode(entry->child, bn, i, dirty_list);
+                    collect_dirty_bnodes_from_hbnode(entry->child, bn, i, hbtrie_depth + 1, dirty_list);
                 }
                 if (entry->trie_child != NULL) {
-                    collect_dirty_bnodes_from_hbnode(entry->trie_child, bn, i, dirty_list);
+                    collect_dirty_bnodes_from_hbnode(entry->trie_child, bn, i, hbtrie_depth + 1, dirty_list);
                 }
             }
         }
@@ -463,7 +470,7 @@ int database_flush_dirty_bnodes(database_t* db) {
     // 1. Collect all dirty bnodes
     vec_t(dirty_bnode_info_t) dirty_list;
     vec_init(&dirty_list);
-    collect_dirty_bnodes_from_hbnode(root, NULL, 0, &dirty_list);
+    collect_dirty_bnodes_from_hbnode(root, NULL, 0, 0, &dirty_list);
 
     if (dirty_list.length == 0) {
         vec_deinit(&dirty_list);
@@ -734,18 +741,14 @@ database_t* database_create_with_config(const char* location,
                         }
                     }
 
-                    // Initialize MVCC transaction ID from superblock
-                    // This is needed so version chains are visible after restart
-                    // when WAL has 0 entries
+                    // Save txn ID for later — tx_manager hasn't been created yet
+                    // We'll apply it after tx_manager_create
                     if (sb.last_txn_time != 0 || sb.last_txn_nanos != 0 || sb.last_txn_count != 0) {
-                        transaction_id_t last_txn;
-                        last_txn.time = sb.last_txn_time;
-                        last_txn.nanos = sb.last_txn_nanos;
-                        last_txn.count = sb.last_txn_count;
-                        transaction_id_advance_to(&last_txn);
-                        if (db->tx_manager != NULL) {
-                            atomic_store(&db->tx_manager->last_committed_txn_id, last_txn);
-                        }
+                        // Store in db's pending field for later application
+                        db->pending_txn_id.time = sb.last_txn_time;
+                        db->pending_txn_id.nanos = sb.last_txn_nanos;
+                        db->pending_txn_id.count = sb.last_txn_count;
+                        db->has_pending_txn_id = 1;
                     }
                 }
 
@@ -788,6 +791,15 @@ database_t* database_create_with_config(const char* location,
 
     // Create transaction manager
     db->tx_manager = tx_manager_create(db->trie, db->pool, db->wheel, 100);
+
+    // Apply pending MVCC transaction ID from page file superblock
+    // (page file loads before tx_manager is created, so we deferred this)
+    if (db->has_pending_txn_id && db->tx_manager != NULL) {
+        transaction_id_advance_to(&db->pending_txn_id);
+        atomic_store(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
+        db->has_pending_txn_id = 0;
+    }
+
     if (db->tx_manager == NULL) {
         hbtrie_destroy(db->trie);
         database_lru_cache_destroy(db->lru);

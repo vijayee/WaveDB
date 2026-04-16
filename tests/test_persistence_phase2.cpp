@@ -351,3 +351,41 @@ TEST_F(PersistencePhase2Test, InMemoryModeNoPageFile) {
     struct stat st;
     EXPECT_NE(stat(page_path, &st), 0) << "Page file should not exist in memory-only mode";
 }
+
+// Test 10: Persistence without WAL — verify page file load works independently
+TEST_F(PersistencePhase2Test, PersistenceWithoutWAL) {
+    db = create_db(1);
+    ASSERT_NE(db, nullptr);
+
+    // Write keys
+    path_t* key1 = make_path({"no_wal_key"});
+    identifier_t* val1 = make_value("no_wal_val");
+    database_put_sync(db, key1, val1);
+
+    // Snapshot to flush to page file
+    int rc = database_snapshot(db);
+    EXPECT_EQ(rc, 0);
+
+    database_destroy(db);
+    db = nullptr;
+
+    // Delete all WAL files to force page-file-only load
+    // WAL files are named thread_*.wal and current.wal and <sequence>.wal
+    // Also delete manifest.dat which tracks WAL files
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -f %s/*.wal %s/manifest.dat", tmpdir, tmpdir);
+    system(cmd);
+
+    // Reopen — must load from page file, not WAL
+    db = create_db(1);
+    ASSERT_NE(db, nullptr);
+
+    path_t* key2 = make_path({"no_wal_key"});
+    identifier_t* result = nullptr;
+    int get_rc = database_get_sync(db, key2, &result);
+
+    ASSERT_EQ(get_rc, 0) << "Key not found — page file load failed without WAL";
+    ASSERT_NE(result, nullptr);
+    expect_identifier_eq(result, "no_wal_val");
+    identifier_destroy(result);
+}

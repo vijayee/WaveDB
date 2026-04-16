@@ -63,6 +63,11 @@ typedef struct {
     file_bnode_cache_t* bnode_cache;
     uint64_t next_index_id;              // Incrementing ID for index files
 
+    // Pending MVCC transaction ID from page file superblock
+    // Applied after tx_manager is created (page file loads before tx_manager)
+    transaction_id_t pending_txn_id;
+    uint8_t has_pending_txn_id;
+
     // Config ownership tracking
     bool owns_pool;                     // True if database created the pool
     bool owns_wheel;                   // True if database created the wheel
