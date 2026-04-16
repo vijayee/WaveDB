@@ -3,6 +3,7 @@
 // WAL (Write-Ahead Log) micro-benchmarks
 //
 
+#include <atomic>
 #include "benchmark_base.h"
 #include "../../src/Database/wal.h"
 #include "../../src/Buffer/buffer.h"

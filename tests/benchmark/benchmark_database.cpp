@@ -17,13 +17,18 @@
 // management, not the database implementation.
 //
 
+// C++ headers that include <atomic> must come before benchmark_base.h
+// because it transitively includes C headers with ATOMIC_TYPE() macros
+// that expand to std::atomic<T> in C++ mode.
+#include <atomic>
+#include <thread>
+#include <future>
+#include <vector>
+#include <string>
+
 #include "benchmark_base.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <string>
-#include <future>
-#include <vector>
-#include <thread>
 #include <unistd.h>  // for getpid()
 extern "C" {
 #include "Database/database.h"

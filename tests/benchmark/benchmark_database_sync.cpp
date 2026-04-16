@@ -3,13 +3,17 @@
 // Single-threaded tests for synchronous database operations
 //
 
+// C++ headers with <atomic> must come before benchmark_base.h
+// which transitively includes C headers with ATOMIC_TYPE() macros
+#include <atomic>
+#include <chrono>
+
 #include "benchmark_base.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <chrono>
 extern "C" {
 #include "Database/database.h"
 #include "Database/wal_manager.h"

@@ -3,6 +3,7 @@
 // Performance comparison: legacy WAL vs thread-local WAL
 //
 
+#include <atomic>
 #include "benchmark_base.h"
 #include "../../src/Database/wal_manager.h"
 #include "../../src/Buffer/buffer.h"

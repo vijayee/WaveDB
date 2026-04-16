@@ -3,6 +3,7 @@
 // Performance comparison: IMMEDIATE vs ASYNC modes
 //
 
+#include <atomic>
 #include "benchmark_base.h"
 #include "../../src/Database/wal_manager.h"
 #include "../../src/Buffer/buffer.h"

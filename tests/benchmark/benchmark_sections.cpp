@@ -5,6 +5,7 @@
 // Actual section performance will be measured through database integration benchmarks.
 //
 
+#include <atomic>
 #include "benchmark_base.h"
 #include <stdio.h>
 #include <stdlib.h>

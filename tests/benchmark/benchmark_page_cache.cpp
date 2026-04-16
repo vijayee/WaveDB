@@ -3,6 +3,7 @@
 // Measures raw I/O throughput and cache hit rates
 //
 
+#include <atomic>
 #include "benchmark_base.h"
 #include <stdio.h>
 #include <stdlib.h>
