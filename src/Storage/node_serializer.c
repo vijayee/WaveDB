@@ -676,6 +676,7 @@ static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serial
         if (entry->has_value) flags |= 0x01;
         if (entry->is_bnode_child) flags |= 0x02;
         if (entry->has_value && entry->has_versions) flags |= 0x04;
+        if (entry->has_value && entry->trie_child != NULL) flags |= 0x08;
         sbuf_write_uint8(sb, flags);
 
         if (entry->has_value) {
@@ -729,6 +730,10 @@ static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serial
                 } else {
                     sbuf_write_uint32(sb, 0);
                 }
+            }
+            // If this entry also has a trie_child, write its disk offset
+            if (flags & 0x08) {
+                sbuf_write_uint64(sb, entry->child_disk_offset);
             }
         } else {
             // V3: All non-value entries (both is_bnode_child and hbtrie_node children)
@@ -817,6 +822,7 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
         entry.has_value = (flags & 0x01) != 0;
         entry.is_bnode_child = (flags & 0x02) != 0;
         entry.has_versions = (flags & 0x04) != 0;
+        uint8_t has_trie_child = (flags & 0x08) != 0;
 
         if (entry.has_value) {
             if (entry.has_versions) {
@@ -898,6 +904,13 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                     entry.value = NULL;
                 }
                 (*locations)[i].offset = 0;
+            }
+            // If this entry also has a trie_child, read its disk offset
+            if (has_trie_child) {
+                if (*remaining < 8) goto fail;
+                entry.child_disk_offset = read_uint64(ptr);
+                *remaining -= 8;
+                (*locations)[i].offset = entry.child_disk_offset;
             }
         } else {
             // V3: All non-value entries store child_disk_offset (8 bytes)

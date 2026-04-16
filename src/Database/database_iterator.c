@@ -244,6 +244,11 @@ int database_scan_next(database_iterator_t* iter,
                 frame->entry_index++;  // Move past this entry since we're processing it
 
                 // If entry also has a trie_child, push it for later traversal
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                     iter->db->trie->chunk_size,
+                                                     iter->db->trie->btree_node_size);
+                }
                 if (entry->trie_child) {
                     if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
                         return -2;
@@ -387,7 +392,17 @@ int database_scan_next(database_iterator_t* iter,
                     return -2;  // Error
                 }
                 break;  // Will continue with child on next iteration
-            } else if (entry->trie_child) {
+            } else if (entry->trie_child || entry->child_disk_offset != 0) {
+                // Lazy-load trie_child if needed
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                     iter->db->trie->chunk_size,
+                                                     iter->db->trie->btree_node_size);
+                }
+                if (entry->trie_child == NULL) {
+                    frame->entry_index++;
+                    continue;
+                }
                 // Entry has both value and trie_child - push trie_child for traversal
                 frame->entry_index++;
                 pushed_child = 1;

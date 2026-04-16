@@ -360,6 +360,15 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
                                         uint8_t chunk_size,
                                         uint32_t btree_node_size);
 
+/**
+ * Lazy-load a trie_child hbtrie_node from the page file cache.
+ * Used for entries that have both a value and a trie_child (prefix sharing).
+ */
+int bnode_entry_lazy_load_trie_child(bnode_entry_t* entry,
+                                      file_bnode_cache_t* fcache,
+                                      uint8_t chunk_size,
+                                      uint32_t btree_node_size);
+
 #ifdef __cplusplus
 }
 #endif
