@@ -384,51 +384,55 @@ static void collect_dirty_bnodes_from_hbnode(
     int hbtrie_depth,
     vec_t(dirty_bnode_info_t)* dirty_list)
 {
-    if (hbnode == NULL || !hbnode->is_dirty) return;
+    if (hbnode == NULL) return;
 
-    // Propagate dirty upward within this hbnode's btree
-    propagate_dirty_upward(hbnode->btree);
+    // Collect dirty bnodes from this hbtrie_node (even if it's clean,
+    // we still need to recurse into child hbtrie_nodes which may be dirty)
+    if (hbnode->is_dirty) {
+        // Propagate dirty upward within this hbnode's btree
+        propagate_dirty_upward(hbnode->btree);
 
-    // Walk all bnodes in this hbtrie_node's btree using DFS with parent tracking
-    vec_t(bnode_stack_item_t) stack;
-    vec_init(&stack);
+        // Walk all bnodes in this hbtrie_node's btree using DFS with parent tracking
+        vec_t(bnode_stack_item_t) stack;
+        vec_init(&stack);
 
-    // Root of this hbnode's B+tree: parent is the cross-hbtrie-node parent
-    bnode_stack_item_t root_item;
-    root_item.bnode = hbnode->btree;
-    root_item.parent_bnode = cross_parent_bnode;
-    root_item.parent_entry_index = cross_parent_entry_index;
-    vec_push(&stack, root_item);
+        // Root of this hbnode's B+tree: parent is the cross-hbtrie-node parent
+        bnode_stack_item_t root_item;
+        root_item.bnode = hbnode->btree;
+        root_item.parent_bnode = cross_parent_bnode;
+        root_item.parent_entry_index = cross_parent_entry_index;
+        vec_push(&stack, root_item);
 
-    while (stack.length > 0) {
-        bnode_stack_item_t item = vec_pop(&stack);
-        bnode_t* bn = item.bnode;
+        while (stack.length > 0) {
+            bnode_stack_item_t item = vec_pop(&stack);
+            bnode_t* bn = item.bnode;
 
-        if (bn->is_dirty) {
-            dirty_bnode_info_t info;
-            info.bnode = bn;
-            info.hbnode = hbnode;
-            info.parent_bnode = item.parent_bnode;
-            info.parent_entry_index = item.parent_entry_index;
-            info.level = atomic_load(&bn->level);
-            info.hbtrie_depth = hbtrie_depth;
-            vec_push(dirty_list, info);
-        }
+            if (bn->is_dirty) {
+                dirty_bnode_info_t info;
+                info.bnode = bn;
+                info.hbnode = hbnode;
+                info.parent_bnode = item.parent_bnode;
+                info.parent_entry_index = item.parent_entry_index;
+                info.level = atomic_load(&bn->level);
+                info.hbtrie_depth = hbtrie_depth;
+                vec_push(dirty_list, info);
+            }
 
-        // Push child bnodes for internal nodes, tracking within-B+tree parent
-        for (size_t i = 0; i < bn->entries.length; i++) {
-            bnode_entry_t* entry = &bn->entries.data[i];
-            if (entry->is_bnode_child && entry->child_bnode != NULL) {
-                bnode_stack_item_t child_item;
-                child_item.bnode = entry->child_bnode;
-                child_item.parent_bnode = bn;        // Within-B+tree parent
-                child_item.parent_entry_index = i;    // Index in parent's entries
-                vec_push(&stack, child_item);
+            // Push child bnodes for internal nodes, tracking within-B+tree parent
+            for (size_t i = 0; i < bn->entries.length; i++) {
+                bnode_entry_t* entry = &bn->entries.data[i];
+                if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                    bnode_stack_item_t child_item;
+                    child_item.bnode = entry->child_bnode;
+                    child_item.parent_bnode = bn;        // Within-B+tree parent
+                    child_item.parent_entry_index = i;    // Index in parent's entries
+                    vec_push(&stack, child_item);
+                }
             }
         }
-    }
 
-    vec_deinit(&stack);
+        vec_deinit(&stack);
+    }
 
     // Recurse into child hbtrie_nodes from ALL leaf bnodes (not just root)
     // In a multi-level B+tree, hbtrie child pointers live in leaf bnodes,
@@ -465,9 +469,9 @@ int database_flush_dirty_bnodes(database_t* db) {
     if (db == NULL || db->page_file == NULL || db->trie == NULL) return -1;
 
     hbtrie_node_t* root = atomic_load(&db->trie->root);
-    if (root == NULL || !root->is_dirty) return 0;
+    if (root == NULL) return 0;
 
-    // 1. Collect all dirty bnodes
+    // 1. Collect all dirty bnodes (including child hbtrie_nodes)
     vec_t(dirty_bnode_info_t) dirty_list;
     vec_init(&dirty_list);
     collect_dirty_bnodes_from_hbnode(root, NULL, 0, 0, &dirty_list);
@@ -527,7 +531,14 @@ int database_flush_dirty_bnodes(database_t* db) {
         }
     }
 
-    // 4. Update root hbtrie_node disk_offset
+    // 4. Clear is_dirty on all hbtrie_nodes that had dirty bnodes flushed
+    //    (root + any child hbtrie_nodes)
+    for (size_t i = 0; i < dirty_list.length; i++) {
+        hbtrie_node_t* hn = dirty_list.data[i].hbnode;
+        if (hn != NULL) hn->is_dirty = 0;
+    }
+
+    // 5. Update root hbtrie_node disk_offset
     root->disk_offset = root->btree->disk_offset;
     root->is_dirty = 0;
 
