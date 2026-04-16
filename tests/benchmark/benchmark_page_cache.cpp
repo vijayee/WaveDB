@@ -294,11 +294,16 @@ static void benchmark_cache_hit_rate() {
 
     // Phase 3: Flush again, then write enough new nodes to evict half the cache
     // Use large writes to force eviction of the earlier nodes
+    size_t evict_payload_len = payload_len * 2;
+    uint8_t* evict_data = (uint8_t*)calloc(1, evict_payload_len);
+    for (size_t i = 0; i < evict_payload_len; i++) {
+        evict_data[i] = (uint8_t)(i % 251);
+    }
     size_t evict_count = num_nodes / 2;
     for (size_t i = 0; i < evict_count; i++) {
         uint64_t evict_offset = (uint64_t)(BLOCK_SIZE * NUM_SUPERBLOCKS + (num_nodes + i) * BLOCK_SIZE);
         size_t total_len = 0;
-        uint8_t* data = make_prefixed_data(node_data, payload_len * 2, &total_len);
+        uint8_t* data = make_prefixed_data(evict_data, evict_payload_len, &total_len);
         // Use larger data to put pressure on memory
         rc = bnode_cache_write(fcache, evict_offset, data, total_len);
         free(data);
@@ -347,6 +352,7 @@ static void benchmark_cache_hit_rate() {
     printf("    Ops/sec: %.0f\n", (hits_phase4 + misses_phase4) > 0 ? (hits_phase4 + misses_phase4) / elapsed_phase4 : 0.0);
     printf("\n");
 
+    free(evict_data);
     free(node_data);
     bnode_cache_destroy_file_cache(fcache);
     bnode_cache_mgr_destroy(mgr);

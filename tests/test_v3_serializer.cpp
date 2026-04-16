@@ -77,7 +77,9 @@ TEST_F(V3SerializerTest, LeafNodeWithValueRoundTrip) {
     EXPECT_EQ(locations[1].offset, 0u);
 
     // Verify the values survived round-trip
-    bnode_entry_t* r_entry1 = bnode_find(result, make_chunk("abcd"), nullptr);
+    chunk_t* find_key1 = make_chunk("abcd");
+    bnode_entry_t* r_entry1 = bnode_find(result, find_key1, nullptr);
+    chunk_destroy(find_key1);
     ASSERT_NE(r_entry1, nullptr);
     EXPECT_EQ(r_entry1->has_value, 1);
 
@@ -132,13 +134,17 @@ TEST_F(V3SerializerTest, InternalNodeWithChildOffsetRoundTrip) {
     EXPECT_EQ(locations[1].offset, 8192u);  // hbtrie_node offset
 
     // Verify entries have child_disk_offset set, pointers NULL (lazy)
-    bnode_entry_t* r_entry1 = bnode_find(result, make_chunk("abcd"), nullptr);
+    chunk_t* find_key1 = make_chunk("abcd");
+    bnode_entry_t* r_entry1 = bnode_find(result, find_key1, nullptr);
+    chunk_destroy(find_key1);
     ASSERT_NE(r_entry1, nullptr);
     EXPECT_EQ(r_entry1->is_bnode_child, 1);
     EXPECT_EQ(r_entry1->child_disk_offset, 4096u);
     EXPECT_EQ(r_entry1->child_bnode, nullptr);  // Lazy: not loaded
 
-    bnode_entry_t* r_entry2 = bnode_find(result, make_chunk("efgh"), nullptr);
+    chunk_t* find_key2 = make_chunk("efgh");
+    bnode_entry_t* r_entry2 = bnode_find(result, find_key2, nullptr);
+    chunk_destroy(find_key2);
     ASSERT_NE(r_entry2, nullptr);
     EXPECT_EQ(r_entry2->child_disk_offset, 8192u);
     EXPECT_EQ(r_entry2->child, nullptr);  // Lazy: not loaded

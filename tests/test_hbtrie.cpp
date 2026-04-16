@@ -571,7 +571,8 @@ TEST_F(HbtrieTest, CborRoundTripMultiLevelBtree) {
     }
 
     // Check if multi-level B+tree was created (may or may not be depending on node fill)
-    int original_height = small_trie->root->btree_height;
+    hbtrie_node_t* small_root = atomic_load(&small_trie->root);
+    int original_height = small_root->btree_height;
 
     // Serialize
     cbor_item_t* cbor = hbtrie_to_cbor(small_trie);
@@ -582,7 +583,8 @@ TEST_F(HbtrieTest, CborRoundTripMultiLevelBtree) {
     ASSERT_NE(trie2, nullptr);
 
     // Verify btree_height preserved
-    EXPECT_EQ(trie2->root->btree_height, original_height);
+    hbtrie_node_t* trie2_root = atomic_load(&trie2->root);
+    EXPECT_EQ(trie2_root->btree_height, original_height);
 
     // Verify all values can be found
     for (int i = 0; i < 60; i++) {
