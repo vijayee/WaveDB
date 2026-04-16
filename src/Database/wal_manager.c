@@ -1273,7 +1273,8 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                     if (ops[j].type == WAL_PUT) {
                         hbtrie_insert(database->trie, ops[j].path, ops[j].value, entry->txn_id);
                     } else {
-                        hbtrie_delete(database->trie, ops[j].path, entry->txn_id);
+                        identifier_t* removed = hbtrie_delete(database->trie, ops[j].path, entry->txn_id);
+                        if (removed) identifier_destroy(removed);
                     }
 
                     // Clean up
