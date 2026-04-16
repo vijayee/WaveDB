@@ -1,3 +1,7 @@
+// C++ headers that include <atomic> must come before C headers
+// that use ATOMIC_TYPE() macros expanding to std::atomic<T> in C++.
+#include <atomic>
+
 #include "graphql_result_js.h"
 
 Napi::Value GraphQLResultNodeToJS(Napi::Env env, graphql_result_node_t* node) {

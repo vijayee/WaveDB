@@ -1,3 +1,7 @@
+// C++ headers that include <atomic> must come before C headers
+// that use ATOMIC_TYPE() macros expanding to std::atomic<T> in C++.
+#include <atomic>
+
 #include <napi.h>
 #include <string>
 #include <unistd.h>
@@ -161,11 +165,6 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
     if (options.Has("lruShards")) {
       Napi::Number val = options.Get("lruShards").As<Napi::Number>();
       config->lru_shards = static_cast<uint16_t>(val.Uint32Value());
-    }
-
-    if (options.Has("storageCacheSize")) {
-      Napi::Number val = options.Get("storageCacheSize").As<Napi::Number>();
-      config->storage_cache_size = static_cast<size_t>(val.Uint32Value());
     }
 
     if (options.Has("wal")) {
@@ -1070,7 +1069,12 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
     options = info[0].As<Napi::Object>();
   }
 
-  Napi::External<database_t> dbExternal = Napi::External<database_t>::New(env, db_);
+  // Napi::External without a finalizer creates a wrapper that V8 may not GC,
+  // causing ASan/LeakSan to report a 40-byte leak. Pass a no-op finalizer so
+  // V8 knows the wrapper can be collected. The db_ pointer is owned by the
+  // WaveDB wrapper, not the External — do NOT free db_ in the finalizer.
+  Napi::External<database_t> dbExternal = Napi::External<database_t>::New(
+    env, db_, [](Napi::Env, database_t*) { /* no-op: WaveDB owns the pointer */ });
   Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, Value() });
 
   return iterObj;

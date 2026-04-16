@@ -1,3 +1,7 @@
+// C++ headers that include <atomic> must come before C headers
+// that use ATOMIC_TYPE() macros expanding to std::atomic<T> in C++.
+#include <atomic>
+
 #include <napi.h>
 #include <string>
 #include "../../../src/Layers/graphql/graphql.h"
