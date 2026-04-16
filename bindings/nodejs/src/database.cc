@@ -225,6 +225,9 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
 
 WaveDB::~WaveDB() {
   if (db_) {
+    // Shutdown the async bridge before destroying the database
+    // to ensure pending operations complete before teardown
+    bridge_.Shutdown();
     database_destroy(db_);
     db_ = nullptr;
   }

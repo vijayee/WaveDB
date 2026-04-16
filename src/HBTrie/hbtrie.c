@@ -1896,8 +1896,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
         // Final position - insert value with version chain
         if (entry == NULL) {
           // Create new entry
-          log_info("MVCC: Creating NEW entry for path (txn=%lu.%09lu.%lu)",
-                  txn_id.time, txn_id.nanos, txn_id.count);
           bnode_entry_t new_entry = {0};
           bnode_entry_set_key(&new_entry, chunk);
           new_entry.has_value = 1;
@@ -1926,15 +1924,18 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           btree_split_after_insert(current, leaf, &bnode_path, trie->chunk_size);
           mark_dirty(current, leaf);
         } else {
-          log_info("MVCC: Found EXISTING entry for path (has_value=%d, has_versions=%d, current_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
-                  entry->has_value, entry->has_versions,
-                  entry->has_versions ? entry->versions->txn_id.time : entry->value_txn_id.time,
-                  entry->has_versions ? entry->versions->txn_id.nanos : entry->value_txn_id.nanos,
-                  entry->has_versions ? entry->versions->txn_id.count : entry->value_txn_id.count,
-                  txn_id.time, txn_id.nanos, txn_id.count);
           // Entry exists - upgrade to version chain or add version
           if (!entry->has_value) {
             // Entry exists but no value - set first value (legacy mode)
+            // IMPORTANT: If the entry has a child hbtrie_node (created by a
+            // concurrent or prior insert of a longer key sharing this chunk),
+            // we must preserve it in trie_child BEFORE overwriting the union
+            // (which holds child now and will hold value after this block).
+            if (!entry->is_bnode_child && entry->child != NULL) {
+              entry->trie_child = entry->child;
+              // Clear the union field so we don't double-free via child
+              entry->child = NULL;
+            }
             entry->has_value = 1;
             entry->has_versions = 0;
             entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
@@ -1943,12 +1944,9 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             bnode_entry_set_path_chunk_counts(entry,
                 identifier_chunk_counts.data,
                 (size_t)identifier_chunk_counts.length);
-            log_info("MVCC: Set first value (legacy mode) with txn_id=%lu.%09lu.%lu",
-                    txn_id.time, txn_id.nanos, txn_id.count);
             mark_dirty(current, leaf);
           } else if (entry->has_versions) {
             // Already has version chain - add new version
-            log_info("MVCC: Adding to existing version chain");
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
@@ -1965,9 +1963,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             mark_dirty(current, leaf);
           } else {
             // Legacy single value - upgrade to version chain
-            log_info("MVCC: Upgrading legacy entry to version chain (old_txn=%lu.%09lu.%lu, new_txn=%lu.%09lu.%lu)",
-                    entry->value_txn_id.time, entry->value_txn_id.nanos, entry->value_txn_id.count,
-                    txn_id.time, txn_id.nanos, txn_id.count);
             // Save the value pointer before upgrading (union will be reused)
             identifier_t* old_value = entry->value;
 
@@ -1990,8 +1985,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 
             // Add new version
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
-            log_info("MVCC: Added new version to chain (txn=%lu.%09lu.%lu)",
-                    txn_id.time, txn_id.nanos, txn_id.count);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
               version_entry_destroy(old_version);
