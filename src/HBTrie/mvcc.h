@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../RefCounter/refcounter.h"
+#include "../Util/atomic_compat.h"
 #include "../Util/vec.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
@@ -56,8 +57,8 @@ typedef struct txn_desc_t {
 typedef struct tx_shard_t {
     PLATFORMLOCKTYPE(lock);              // Per-shard lock
     vec_t(txn_desc_t*) txns;            // Active transactions in this shard
-    _Atomic transaction_id_t min_txn_id; // Minimum txn ID in this shard (SENTINEL if empty)
-    _Atomic uint32_t count;             // Number of active transactions (for fast empty check)
+    ATOMIC_TYPE(transaction_id_t) min_txn_id; // Minimum txn ID in this shard (SENTINEL if empty)
+    ATOMIC_TYPE(uint32_t) count;              // Number of active transactions (for fast empty check)
 } tx_shard_t;
 
 /**
@@ -71,8 +72,8 @@ typedef struct tx_manager_t {
     refcounter_t refcounter;           // MUST be first member
 
     tx_shard_t shards[TX_MANAGER_SHARDS]; // Sharded active transaction tracking
-    _Atomic transaction_id_t min_active_txn_id;  // Oldest active transaction (GC cutoff) - atomic for lock-free reads
-    _Atomic transaction_id_t last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
+    ATOMIC_TYPE(transaction_id_t) min_active_txn_id;  // Oldest active transaction (GC cutoff) - atomic for lock-free reads
+    ATOMIC_TYPE(transaction_id_t) last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
 
     hbtrie_t* trie;                      // Reference to trie
     work_pool_t* pool;                   // Work pool for async GC

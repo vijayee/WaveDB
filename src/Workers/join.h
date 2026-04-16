@@ -7,6 +7,7 @@
 #define WAVEDB_JOIN_H
 
 #include "../Util/threadding.h"
+#include "../Util/atomic_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -15,7 +16,7 @@ extern "C" {
 typedef struct {
     PLATFORMLOCKTYPE(lock);
     PLATFORMCONDITIONTYPE(condition);
-    _Atomic int pending;       // Number of outstanding operations
+    ATOMIC_TYPE(int) pending;    // Number of outstanding operations
     void** results;             // Array[index] = result payload from each op
     int count;                 // Total number of operations
 } async_join_t;

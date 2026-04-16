@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../RefCounter/refcounter.h"
+#include "../Util/atomic_compat.h"
 #include "../Util/vec.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
@@ -110,10 +111,10 @@ typedef struct bnode_entry_t {
  */
 typedef struct bnode_t {
     refcounter_t refcounter;          // MUST be first member (16-48 bytes)
-    _Atomic(uint16_t) level;           // B+tree level: 1 = leaf, > 1 = internal
+    ATOMIC_TYPE(uint16_t) level;        // B+tree level: 1 = leaf, > 1 = internal
     uint32_t node_size;                // Configurable max size in bytes
     vec_t(bnode_entry_t) entries;      // Sorted by chunk key
-    _Atomic(uint64_t) seq;             // Seqlock: even=stable, odd=writing
+    ATOMIC_TYPE(uint64_t) seq;         // Seqlock: even=stable, odd=writing
     PLATFORMLOCKTYPE(write_lock);       // Writer mutual exclusion
 
     // Per-bnode disk tracking (Phase 2: flat per-bnode persistence)

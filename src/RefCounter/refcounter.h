@@ -6,14 +6,7 @@
 #define WAVEDB_REFCOUNTER_H
 #include <stdint.h>
 #include "../Util/threadding.h"
-
-#ifdef REFCOUNTER_ATOMIC
-  #ifdef __cplusplus
-    #include <atomic>
-  #else
-    #include <stdatomic.h>
-  #endif
-#endif
+#include "../Util/atomic_compat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,13 +20,8 @@ extern "C" {
 
 typedef struct refcounter_t {
 #ifdef REFCOUNTER_ATOMIC
-  #ifdef __cplusplus
-    ::std::atomic<uint_fast16_t> count;
-    ::std::atomic<uint_fast8_t> yield;
-  #else
-    atomic_uint_fast16_t count;
-    atomic_uint_fast8_t yield;
-  #endif
+  ATOMIC_TYPE(uint_fast16_t) count;
+  ATOMIC_TYPE(uint_fast8_t) yield;
 #else
   uint16_t count;
   uint8_t yield;

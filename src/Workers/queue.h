@@ -5,7 +5,7 @@
 #ifndef WAVEDB_QUEUE_H
 #define WAVEDB_QUEUE_H
 #include "work.h"
-#include <stdatomic.h>  // Required for _Atomic uint64_t
+#include "../Util/atomic_compat.h"
 
 
 typedef struct work_queue_item_t work_queue_item_t;
@@ -25,7 +25,7 @@ typedef struct {
 typedef struct {
   work_queue_t queues[QUEUE_SHARDS];
   PLATFORMLOCKTYPE(locks[QUEUE_SHARDS]);
-  _Atomic uint64_t next_shard;  // Round-robin counter
+  ATOMIC_TYPE(uint64_t) next_shard;   // Round-robin counter
 } sharded_work_queue_t;
 
 void work_queue_init(work_queue_t* queue);
