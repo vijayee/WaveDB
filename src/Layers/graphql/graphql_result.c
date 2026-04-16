@@ -4,6 +4,7 @@
 //
 
 #include "graphql_result.h"
+#include "graphql_types.h"
 #include "../../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
@@ -20,7 +21,7 @@ typedef struct {
 } json_builder_t;
 
 static void json_builder_init(json_builder_t* b) {
-    b->capacity = 256;
+    b->capacity = GRAPHQL_BUF_SIZE;
     b->data = malloc(b->capacity);
     b->length = 0;
     if (b->data) b->data[0] = '\0';

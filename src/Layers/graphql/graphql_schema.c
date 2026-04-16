@@ -239,12 +239,14 @@ graphql_layer_t* graphql_layer_create(const char* path,
         db_path = (char*)path;
     } else {
         // Generate a temp directory for in-memory mode
-        db_path = malloc(256);
+        db_path = malloc(GRAPHQL_BUF_SIZE);
         if (db_path == NULL) {
             graphql_layer_config_destroy(cfg);
             return NULL;
         }
-        snprintf(db_path, 256, "/tmp/wavedb_graphql_XXXXXX");
+        const char* tmpdir = getenv("TMPDIR");
+        if (tmpdir == NULL) tmpdir = "/tmp";
+        snprintf(db_path, GRAPHQL_BUF_SIZE, "%s/wavedb_graphql_XXXXXX", tmpdir);
         if (mkdtemp(db_path) == NULL) {
             free(db_path);
             graphql_layer_config_destroy(cfg);
@@ -451,7 +453,7 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
 
         // Store default value if present (type-prefixed: s:hello, i:42, b:true, n:null, f:3.14, e:ENUMVAL)
         if (field->default_value != NULL) {
-            char val_buf[256];
+            char val_buf[GRAPHQL_BUF_SIZE];
             switch (field->default_value->kind) {
                 case GRAPHQL_LITERAL_STRING:
                     snprintf(val_buf, sizeof(val_buf), "s:%s", field->default_value->string_val ? field->default_value->string_val : "");

@@ -205,14 +205,6 @@ bnode_entry_t* hbtrie_cursor_get_entry(hbtrie_cursor_t* cursor);
 hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor);
 
 /**
- * Get current HBTrie node at cursor position.
- *
- * @param cursor  Cursor position
- * @return Current node, or NULL if none
- */
-hbtrie_node_t* hbtrie_cursor_get_node(hbtrie_cursor_t* cursor);
-
-/**
  * Serialize an HBTrie to CBOR.
  *
  * Format: map with keys:

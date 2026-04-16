@@ -178,7 +178,7 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
 
     // Step 3: Validate that the field exists on the parent type
     if (parent_type != NULL && type_field == NULL && target_type == NULL && errors != NULL) {
-        char msg[256];
+        char msg[GRAPHQL_BUF_SIZE];
         snprintf(msg, sizeof(msg), "Field '%s' does not exist on type '%s'",
                  field_name, parent_type->name);
         graphql_error_t err = graphql_error_create(msg, NULL);
@@ -204,7 +204,7 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
 
     // Step 4: Validate that scalar fields don't have sub-selections
     if (is_scalar && field_node->children.length > 0 && errors != NULL) {
-        char msg[256];
+        char msg[GRAPHQL_BUF_SIZE];
         snprintf(msg, sizeof(msg), "Cannot select sub-fields on scalar field '%s' of type '%s'",
                  field_name, parent_type ? parent_type->name : "unknown");
         graphql_error_t err = graphql_error_create(msg, NULL);
@@ -381,7 +381,7 @@ static graphql_plan_t* compile_field(graphql_layer_t* layer,
             if (frag_def == NULL) {
                 // Unknown fragment - report error
                 if (errors != NULL) {
-                    char msg[256];
+                    char msg[GRAPHQL_BUF_SIZE];
                     snprintf(msg, sizeof(msg), "Unknown fragment '%s'", spread_name);
                     graphql_error_t err = graphql_error_create(msg, NULL);
                     vec_push(errors, err);

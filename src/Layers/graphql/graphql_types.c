@@ -161,7 +161,7 @@ char* graphql_literal_to_string(const graphql_literal_t* literal) {
         case GRAPHQL_LITERAL_ENUM:
             return strdup(literal->string_val ? literal->string_val : "");
         case GRAPHQL_LITERAL_OBJECT: {
-            size_t buf_size = 256;
+            size_t buf_size = GRAPHQL_BUF_SIZE;
             char* buf = malloc(buf_size);
             if (buf == NULL) return strdup("{}");
             int pos = 0;
@@ -192,7 +192,7 @@ char* graphql_literal_to_string(const graphql_literal_t* literal) {
             return buf;
         }
         case GRAPHQL_LITERAL_LIST: {
-            size_t buf_size = 256;
+            size_t buf_size = GRAPHQL_BUF_SIZE;
             char* buf = malloc(buf_size);
             if (buf == NULL) return strdup("[]");
             int pos = 0;

@@ -275,6 +275,7 @@ struct graphql_layer_t {
 
 #define GRAPHQL_LAYER_VERSION "1.0.0"
 #define GRAPHQL_LAYER_DEFAULT_DELIMITER '/'
+#define GRAPHQL_BUF_SIZE 256  // Default buffer size for GraphQL string operations
 
 /**
  * Create default configuration for the GraphQL layer.

@@ -19,13 +19,20 @@
 // D3.js will be embedded as base64 in HTML output
 // Size: ~274KB minified, ~365KB base64 encoded
 static const char* D3_JS_URL = "https://d3js.org/d3.v7.min.js";
-static const char* D3_BASE64_PATH = "/tmp/d3.min.js.base64";
+static char D3_BASE64_PATH[512] = {0};  // Initialized from TMPDIR on first use
 
 /**
  * Fetch D3.js and encode as base64 if not already cached.
  * Returns 0 on success, -1 on failure.
  */
 static int ensure_d3js_cached(void) {
+    // Initialize cache path from TMPDIR on first call
+    if (D3_BASE64_PATH[0] == '\0') {
+        const char* tmpdir = getenv("TMPDIR");
+        if (tmpdir == NULL) tmpdir = "/tmp";
+        snprintf(D3_BASE64_PATH, sizeof(D3_BASE64_PATH), "%s/d3.min.js.base64", tmpdir);
+    }
+
     FILE* fp = fopen(D3_BASE64_PATH, "r");
     if (fp) {
         fclose(fp);
@@ -462,7 +469,10 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
     atomic_store(&g_node_id_counter, 0);
 
     // Create temporary file for JSON
-    char temp_path[] = "/tmp/hbtrie_viz_json_XXXXXX";
+    const char* tmpdir = getenv("TMPDIR");
+    if (tmpdir == NULL) tmpdir = "/tmp";
+    char temp_path[512];
+    snprintf(temp_path, sizeof(temp_path), "%s/hbtrie_viz_json_XXXXXX", tmpdir);
     int temp_fd = mkstemp(temp_path);
     if (temp_fd < 0) {
         log_error("Failed to create temp file");

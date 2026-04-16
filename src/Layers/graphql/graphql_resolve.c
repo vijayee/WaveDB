@@ -1353,7 +1353,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
         // Determine the type name from the field name
         // e.g., "createUser" -> "User", "createuser" -> "User"
         const char* type_name_start = field_name + strlen(prefix);
-        char type_name[256];
+        char type_name[GRAPHQL_BUF_SIZE];
         if (strlen(type_name_start) > 0) {
             type_name[0] = toupper((unsigned char)type_name_start[0]);
             strncpy(type_name + 1, type_name_start + 1, sizeof(type_name) - 2);
@@ -1558,7 +1558,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
 
             if (target_id != NULL) {
                 // Scan and delete all fields under type/id
-                char prefix[256];
+                char prefix[GRAPHQL_BUF_SIZE];
                 snprintf(prefix, sizeof(prefix), "%s/%s", plural, target_id);
 
                 path_t* start = path_from_string(prefix);
