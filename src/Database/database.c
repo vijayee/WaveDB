@@ -1741,6 +1741,8 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
         int op_result;
         if (batch->ops[i].type == WAL_PUT) {
             op_result = hbtrie_insert(db->trie, batch->ops[i].path, batch->ops[i].value, txn->txn_id);
+            // Invalidate LRU cache so subsequent reads see the new value
+            database_lru_cache_delete(db->lru, batch->ops[i].path);
         } else {
             identifier_t* removed = hbtrie_delete(db->trie, batch->ops[i].path, txn->txn_id);
             op_result = 0; // Delete always succeeds

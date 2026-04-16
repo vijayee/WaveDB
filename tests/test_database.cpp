@@ -914,6 +914,49 @@ TEST_F(DatabaseTest, WriteBatchSyncWithDelete) {
     batch_destroy(batch);
 }
 
+TEST_F(DatabaseTest, WriteBatchSyncUpdateExistingKey) {
+    int error = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(error, 0);
+
+    // Put initial value
+    path_t* path1 = make_path({"batch", "key1"});
+    identifier_t* value1 = make_value("original");
+    EXPECT_EQ(database_put_sync(db, path1, value1), 0);
+
+    // Verify initial value
+    path_t* get_path1 = make_path({"batch", "key1"});
+    identifier_t* result1 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path1, &result1), 0);
+    ASSERT_NE(result1, nullptr);
+    expect_identifier_eq(result1, "original");
+    identifier_destroy(result1);
+
+    // Create batch that updates key1 to "updated"
+    batch_t* batch = batch_create(10);
+    ASSERT_NE(batch, nullptr);
+
+    path_t* bpath = make_path({"batch", "key1"});
+    identifier_t* bval = make_value("updated");
+    EXPECT_EQ(batch_add_put(batch, bpath, bval), 0);
+
+    // Submit batch
+    int result = database_write_batch_sync(db, batch);
+    EXPECT_EQ(result, 0);
+
+    // Verify key1 now has "updated"
+    path_t* get_path2 = make_path({"batch", "key1"});
+    identifier_t* result2 = nullptr;
+    EXPECT_EQ(database_get_sync(db, get_path2, &result2), 0);
+    ASSERT_NE(result2, nullptr) << "key1 should still exist after batch update";
+    expect_identifier_eq(result2, "updated");
+    identifier_destroy(result2);
+
+    // Cleanup
+    batch_destroy(batch);
+}
+
 TEST_F(DatabaseTest, Snapshot) {
     int error = 0;
     db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
