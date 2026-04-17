@@ -233,26 +233,37 @@ Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALI
 
 ## Performance
 
-Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache.
+Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache, 4 worker threads.
 
-### C Library (ASYNC WAL, single-threaded)
+### C Library (ASYNC WAL, no work pool, single-threaded)
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.55M ops/sec | 625 ns | 791 ns |
-| Put | 138K ops/sec | 6.8 µs | 11.3 µs |
-| Delete | 181K ops/sec | 5.4 µs | 8.6 µs |
-| Mixed (70% read) | 1.49M ops/sec | 666 ns | 822 ns |
+| Get | 1.46M ops/sec | 679 ns | 777 ns |
+| Put | 160K ops/sec | 5.8 µs | 9.9 µs |
+| Delete | 216K ops/sec | 4.4 µs | 7.0 µs |
+| Mixed (70% read) | 1.49M ops/sec | 664 ns | 750 ns |
 
-### Node.js Binding Overhead
+### Node.js (DEBOUNCED WAL, 4 worker threads)
 
-| Operation | Throughput | Notes |
-|-----------|------------|-------|
-| `get` (async) | 46.5K ops/sec | Non-blocking, C worker pool |
-| `put` (async) | 896 ops/sec | Non-blocking, C worker pool |
-| `getSync` | 133K ops/sec | Blocking, direct FFI |
-| `putSync` | 1.1K ops/sec | Blocking, direct FFI |
-| `batch` (async) | 39.8K ops/sec | 1K ops/batch |
+| Operation | Throughput |
+|-----------|------------|
+| `getSync` | 203K ops/sec |
+| `putSync` | 1.2K ops/sec |
+| `get` (async) | 31K ops/sec |
+| `put` (async) | 950 ops/sec |
+| `batch` (async, 1K ops) | 54K ops/sec |
+
+### Node.js Concurrent Throughput (DEBOUNCED WAL)
+
+| Concurrency | `put` | `get` |
+|-------------|-------|-------|
+| 1 | 1.1K ops/sec | 41K ops/sec |
+| 2 | 1.7K ops/sec | 58K ops/sec |
+| 4 | 2.3K ops/sec | 67K ops/sec |
+| 8 | 2.0K ops/sec | 13K ops/sec |
+| 16 | 2.0K ops/sec | 11K ops/sec |
+| 32 | 2.0K ops/sec | 14K ops/sec |
 
 **Tips:** Use async operations in production. Use sync for scripts/initialization. Batch for bulk loads (10-100x faster than individual puts).
 
