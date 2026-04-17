@@ -4,7 +4,7 @@
   # WaveDB Node.js Bindings
 </div>
 
-[Node.js](https://nodejs.org/) bindings for [WaveDB](../../README.md) - A hierarchical B+trie database. It is a love child of ForrestDB and MUMPS.
+Node.js bindings for [WaveDB](../../README.md) — a hierarchical key-value database with MVCC, WAL durability, and schema layer access.
 
 ## Installation
 
@@ -17,262 +17,152 @@ npm install wavedb
 ```javascript
 const { WaveDB } = require('wavedb');
 
-// Open database
-const db = new WaveDB('/path/to/db');
+const db = new WaveDB('/path/to/db', {
+  delimiter: '/',
+  lruMemoryMb: 50,
+  wal: { syncMode: 'debounced' }
+});
 
-// Async operations
+// Async (Promise)
 await db.put('users/alice/name', 'Alice');
 const name = await db.get('users/alice/name');
 
-// Sync operations
+// Sync (blocking)
 db.putSync('users/bob/name', 'Bob');
 const name2 = db.getSync('users/bob/name');
 
-// Object operations
-await db.putObject({
-  users: {
-    alice: { name: 'Alice', age: '30' }
-  }
-});
+// Callback style
+db.putCb('users/charlie/name', 'Charlie', (err) => { /* ... */ });
+db.getCb('users/charlie/name', (err, val) => { /* ... */ });
 
-const user = await db.getObject('users/alice');
-// { name: 'Alice', age: '30' }
+// Object operations (nested data → flattened paths)
+await db.putObject('users/alice', { name: 'Alice', age: 30 });
+const user = await db.getObject('users/alice'); // { name: 'Alice', age: 30 }
 
-// Stream all entries
-db.createReadStream()
-  .on('data', ({ key, value }) => {
-    console.log(key, '=', value);
-  })
-  .on('end', () => {
-    console.log('Done');
-  });
+// Batch
+await db.batch([
+  { type: 'put', key: 'users/alice/name', value: 'Alice' },
+  { type: 'del', key: 'users/bob/name' }
+]);
 
-// Close database
+// Iterator
+const iter = new Iterator(db, { start: 'users/alice', end: 'users/alice~' });
+let entry;
+while ((entry = iter.read())) {
+  console.log(entry.key, entry.value);
+}
+iter.end();
+
+// Stream
+db.createReadStream({ start: 'users/', end: 'users/~' })
+  .on('data', ({ key, value }) => console.log(key, '=', value))
+  .on('end', () => console.log('Done'));
+
 db.close();
 ```
 
-## API Reference
-
-### Constructor
+## Configuration
 
 ```javascript
 const db = new WaveDB(path, options);
 ```
 
-- `path` (string): Path to database directory
-- `options` (object):
-  - `delimiter` (string): Key path delimiter (default: '/')
-  - `chunkSize` (number): HBTrie chunk size in bytes (default: 4)
-  - `btreeNodeSize` (number): B+tree node size in bytes (default: 4096)
-  - `enablePersist` (boolean): Enable persistence (default: true)
-  - `lruMemoryMb` (number): LRU cache size in megabytes (default: 50)
-  - `lruShards` (number): LRU cache shard count, 0 for auto-scale (default: 64)
-  - `storageCacheSize` (number): Section cache size (default: 1024)
-  - `workerThreads` (number): Number of worker threads (default: 4)
-  - `wal` (object): WAL configuration
-    - `syncMode` (string): 'immediate', 'debounced', or 'async' (default: 'debounced')
-    - `debounceMs` (number): Debounce window in ms (default: 100)
-    - `maxFileSize` (number): Max WAL file size before sealing (default: 131072)
+| Option | Default | Description |
+|--------|---------|-------------|
+| `delimiter` | `'/'` | Key path delimiter |
+| `chunkSize` | `4` | HBTrie chunk size (immutable, set at creation) |
+| `btreeNodeSize` | `4096` | B+tree node size (immutable) |
+| `enablePersist` | `true` | Persist data to disk (immutable) |
+| `lruMemoryMb` | `50` | LRU cache size in MB |
+| `lruShards` | `64` | LRU shard count (0 = auto-scale) |
+| `workerThreads` | `4` | Worker pool size |
+| `wal.syncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
+| `wal.debounceMs` | `100` | fsync debounce window (ms) |
+| `wal.maxFileSize` | `131072` | Max WAL file size before sealing |
 
-#### Example with Configuration
+### WAL Sync Modes
 
-```javascript
-const db = new WaveDB('/path/to/db', {
-  delimiter: '/',
-  lruMemoryMb: 100,      // 100 MB cache
-  lruShards: 0,         // auto-scale to CPU cores
-  wal: {
-    syncMode: 'debounced',
-    debounceMs: 50
-  }
-});
-```
+| Mode | Behavior | Durability | Throughput |
+|------|----------|------------|------------|
+| `'immediate'` | fsync after every write | Highest | ~1K ops/sec |
+| `'debounced'` | batched fsync (default 100ms) | High | ~300K ops/sec |
+| `'async'` | no fsync, OS cache only | Lowest | ~400K ops/sec |
 
-## Configuration
-
-WaveDB uses sensible defaults for most use cases.
-
-### Database Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `chunkSize` | 4 | HBTrie chunk size in bytes (atomic comparison unit) |
-| `btreeNodeSize` | 4096 | B+tree node size in bytes |
-| `enablePersist` | true | Persistence enabled (data saved to disk) |
-
-### Cache Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `lruMemoryMb` | 50 | LRU cache size in megabytes |
-| `lruShards` | 64 | LRU cache shard count (0 = auto-scale to CPU cores) |
-| `storageCacheSize` | 1024 | Section cache size (number of sections) |
-
-### WAL (Write-Ahead Log) Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `wal.syncMode` | 'debounced' | Durability mode: 'immediate', 'debounced', or 'async' |
-| `wal.debounceMs` | 100 | Debounce window for fsync (debounced mode) |
-| `wal.maxFileSize` | 131072 | Max WAL file size before sealing (128KB) |
-
-### Threading Configuration
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `workerThreads` | 4 | Number of background worker threads |
-
-### Sync Modes Explained
-
-- **'immediate'**: Each write calls `fsync()` - maximum durability, lowest performance
-- **'debounced'** (default): Batches fsync calls within debounce window - good balance
-- **'async'**: No fsync guarantees - highest performance, potential data loss on crash
-
-### Performance Tuning Tips
-
-1. **High write throughput**: Use `'async'` mode for bulk imports
-2. **Low latency reads**: Increase `lruMemoryMb` (50-500MB typical)
-3. **Many CPU cores**: Set `lruShards` to 0 for auto-scaling
-4. **Large datasets**: Increase `storageCacheSize` for better section locality
+## API Reference
 
 ### Async Operations
 
+All async methods return Promises and dispatch to the C worker pool (non-blocking).
+
 ```javascript
-// Put
-await db.put(key, value);
-
-// Get (returns null if not found)
-const value = await db.get(key);
-
-// Delete
-await db.del(key);
-
-// Batch
-await db.batch([
-  { type: 'put', key: 'k1', value: 'v1' },
-  { type: 'del', key: 'k2' }
-]);
+await db.put(key, value)           // Store a value
+const val = await db.get(key)      // Retrieve (null if not found)
+await db.del(key)                   // Delete
+await db.batch(operations)          // Atomic batch of put/del
+await db.putObject(key, obj)        // Store nested object as flattened paths
+const obj = await db.getObject(key) // Reconstruct nested object
 ```
 
-All async operations support both Promise and callback patterns:
+### Callback Operations
+
+Same as async, but with Node.js-style error-first callbacks. Also returns a Promise.
 
 ```javascript
-// Promise
-await db.put('key', 'value');
-
-// Callback
-db.put('key', 'value', (err) => {
-  if (err) throw err;
-});
+db.putCb(key, value, (err) => { /* ... */ })
+db.getCb(key, (err, value) => { /* ... */ })
+db.delCb(key, (err) => { /* ... */ })
+db.batchCb(operations, (err) => { /* ... */ })
 ```
 
 ### Sync Operations
 
+Block the event loop. Use for initialization/migration scripts, not hot paths.
+
 ```javascript
-db.putSync(key, value);
-const value = db.getSync(key);
-db.delSync(key);
-db.batchSync(ops);
+db.putSync(key, value)
+const val = db.getSync(key)      // null if not found
+db.delSync(key)
+db.batchSync(operations)
+db.putObjectSync(key, obj)
+const obj = db.getObjectSync(key)
 ```
 
-### Object Operations
+### Keys and Values
 
 ```javascript
-// Flatten object to paths
-await db.putObject({
-  users: {
-    alice: { name: 'Alice', roles: ['admin', 'user'] }
-  }
-});
-// Creates:
-//   users/alice/name → 'Alice'
-//   users/alice/roles/0 → 'admin'
-//   users/alice/roles/1 → 'user'
-
-// Reconstruct object from subtree
-const user = await db.getObject('users/alice');
-// { name: 'Alice', roles: ['admin', 'user'] }
-```
-
-### Streams
-
-```javascript
-db.createReadStream(options)
-  .on('data', ({ key, value }) => { })
-  .on('end', () => { });
-```
-
-**Options:**
-- `start`: Start path (inclusive)
-- `end`: End path (exclusive)
-- `reverse`: Reverse order (default: false)
-- `keys`: Include keys (default: true)
-- `values`: Include values (default: true)
-- `keyAsArray`: Return keys as arrays (default: false)
-
-**Early termination:**
-
-```javascript
-const stream = db.createReadStream();
-stream.on('data', ({ key, value }) => {
-  if (key === 'target') {
-    stream.destroy();  // End stream early
-  }
-});
-```
-
-### Keys
-
-Keys can be strings or arrays:
-
-```javascript
-// String with delimiter
+// String keys with delimiter
 await db.put('users/alice/name', 'Alice');
 
-// Array
+// Array keys
 await db.put(['users', 'bob', 'name'], 'Bob');
 
 // Custom delimiter
 const db = new WaveDB('/path/to/db', { delimiter: ':' });
 await db.put('users:charlie:name', 'Charlie');
-```
 
-### Values
-
-Values can be strings or Buffers:
-
-```javascript
-// String
-await db.put('key', 'value');
-
-// Buffer
+// String or Buffer values
+await db.put('key', 'text value');
 await db.put('binary/key', Buffer.from([0x01, 0x02]));
 ```
 
-### Error Handling
+### Streams
 
 ```javascript
-try {
-  await db.put('key', 'value');
-} catch (err) {
-  console.error('Database error:', err.message);
-}
-
-// With callbacks
-db.get('key', (err, value) => {
-  if (err) {
-    console.error('Error:', err.message);
-    return;
-  }
-  console.log('Value:', value);
-});
+db.createReadStream({ start, end, reverse, keys, values, keyAsArray })
+  .on('data', ({ key, value }) => { /* ... */ })
+  .on('end', () => { /* ... */ });
 ```
 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `start` | — | Start path (inclusive) |
+| `end` | — | End path (exclusive) |
+| `reverse` | `false` | Reverse order |
+| `keys` | `true` | Include keys |
+| `values` | `true` | Include values |
+| `keyAsArray` | `false` | Return keys as arrays |
+
 ## GraphQL Schema Layer
-
-WaveDB includes a GraphQL layer that provides schema definition, queries, and mutations on top of the hierarchical key-value store.
-
-### Setup
 
 ```javascript
 const { GraphQLLayer } = require('wavedb');
@@ -280,228 +170,108 @@ const { GraphQLLayer } = require('wavedb');
 const layer = new GraphQLLayer('/path/to/db', {
   enablePersist: true,
   chunkSize: 4,
-  workerThreads: 4,
+  workerThreads: 4
 });
-```
 
-Pass `null` as the path for an in-memory database.
-
-### Define a Schema
-
-Use GraphQL Schema Definition Language (SDL) to define types:
-
-```javascript
+// Define schema
 layer.parseSchema(`
   type User {
     name: String
     age: Int
-    friends: [User]
   }
 `);
-```
 
-### Queries
-
-**Sync:**
-
-```javascript
+// Query
 const result = layer.querySync('{ User { name } }');
 // { success: true, data: { User: { name: null } }, errors: [] }
-```
 
-**Async:**
-
-```javascript
-const result = await layer.query('{ User { name } }');
-// { success: true, data: { User: { name: null } }, errors: [] }
-```
-
-### Mutations
-
-Create records with auto-generated IDs:
-
-```javascript
-// Sync
-const result = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// Mutation
+const created = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
 // { success: true, data: { createUser: { id: "abc123", name: "Alice" } } }
 
-// Async
-const result = await layer.mutate('mutation { createUser(name: "Bob") { id name } }');
-```
-
-Then query the data:
-
-```javascript
+// Async variants
 const result = await layer.query('{ User { name } }');
-// { success: true, data: { User: { name: "Alice" } } }
+const created = await layer.mutate('mutation { createUser(name: "Bob") { id } }');
+
+layer.close();
 ```
 
 ### Introspection
 
 ```javascript
-// List all types
 const schema = await layer.query('{ __schema { types { name kind } } }');
-
-// Inspect a specific type
 const userType = await layer.query('{ __type(name: "User") { name kind fields { name } } }');
-```
-
-### Field Aliases
-
-```javascript
-const result = await layer.query('{ admin: User { name } }');
-// { admin: { name: "Alice" } }
-```
-
-### Error Handling
-
-```javascript
-try {
-  const result = await layer.query('{ InvalidType { name } }');
-  if (!result.success) {
-    console.error('GraphQL errors:', result.errors);
-  }
-} catch (err) {
-  console.error('Layer error:', err.message);
-}
 ```
 
 ### Required Fields
 
-Fields marked with `!` in the schema are required for create mutations. Providing a create mutation without a required field returns an error:
+Fields marked `!` in the schema are required for create mutations:
 
 ```javascript
-layer.parseSchema(`
-  type User {
-    name: String!
-    age: Int
-  }
-`);
+layer.parseSchema('type User { name: String! age: Int }');
 
-// Missing required field "name" — fails with error
-const result = layer.mutateSync('mutation { createUser(age: "30") { id } }');
-// { success: false, data: null, errors: ['Missing required fields: name'] }
+// Missing required field — fails
+layer.mutateSync('mutation { createUser(age: "30") { id } }');
+// { success: false, errors: ['Missing required fields: name'] }
 
 // Providing required field — succeeds
-const result2 = layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
-// { success: true, data: { createUser: { id: '1', name: 'Alice' } }, errors: [] }
+layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
+// { success: true, data: { createUser: { id: '1', name: 'Alice' } } }
 ```
 
-Update mutations skip required field validation since updates are partial.
-
-### Cleanup
+## Error Handling
 
 ```javascript
-layer.close();
+try {
+  await db.put('key', 'value');
+} catch (err) {
+  console.error('Database error:', err.message);
+}
 ```
 
-## Building from Source
-
-### Prerequisites
-
-- Node.js >= 14.0.0
-- CMake >= 3.14
-- C compiler (gcc, clang, or MSVC)
-
-### Build Steps
-
-```bash
-# Clone repository
-git clone https://github.com/vijayee/WaveDB.git
-cd WaveDB
-
-# Build WaveDB library
-mkdir build && cd build
-cmake ..
-make
-
-# Build Node.js bindings
-cd ../bindings/nodejs
-npm install
-npm run build
-```
-
-### Run Tests
-
-```bash
-npm test
-```
-
-### Memory Leak Detection
-
-```bash
-npm run test:valgrind
-```
-
-## Architecture
-
-The bindings use [node-addon-api](https://github.com/nodejs/node-addon-api) (C++ wrapper for N-API) with a `Napi::ThreadSafeFunction` bridge to the C `promise_t` and worker pool infrastructure for true async operations.
-
-**Key components:**
-- `binding.cpp`: Module initialization
-- `database.cc`: WaveDB class wrapper with async operations via C promise/pool
-- `async_bridge.cc`: ThreadSafeFunction + C promise_t bridge for async operations
-- `path.cc`: JavaScript ↔ path_t conversion
-- `identifier.cc`: JavaScript ↔ identifier_t conversion
-- `iterator.cc`: Stream iterator
-
-Async operations dispatch work to the C worker pool via `database_put`, `database_get`, `database_delete`, and `database_write_batch`, bridging C promise callbacks back to the Node.js main thread through `napi_threadsafe_function`.
+Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALID_ARGUMENT`
 
 ## Performance
 
-Benchmarks run on Linux x86_64 with Node.js v24.14.1:
+Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache.
 
-### Native C Library Performance
+### C Library (ASYNC WAL, single-threaded)
 
-**Single-Threaded Operations:**
+| Operation | Throughput | P50 Latency | P99 Latency |
+|-----------|------------|-------------|-------------|
+| Get | 1.55M ops/sec | 625 ns | 791 ns |
+| Put | 138K ops/sec | 6.8 µs | 11.3 µs |
+| Delete | 181K ops/sec | 5.4 µs | 8.6 µs |
+| Mixed (70% read) | 1.49M ops/sec | 666 ns | 822 ns |
 
-| Operation | Throughput | Avg Latency |
-|-----------|------------|-------------|
-| Put | 84K ops/sec | 12 µs |
-| Get | 2.2M ops/sec | 0.5 µs |
-| Batch | 70K ops/sec | 14 µs |
-| Mixed | 2.3M ops/sec | 0.4 µs |
-| Delete | 167K ops/sec | 6 µs |
+### Node.js Binding Overhead
 
-**Concurrent Operations (Multi-Threaded):**
+| Operation | Throughput | Notes |
+|-----------|------------|-------|
+| `get` (async) | 46.5K ops/sec | Non-blocking, C worker pool |
+| `put` (async) | 896 ops/sec | Non-blocking, C worker pool |
+| `getSync` | 133K ops/sec | Blocking, direct FFI |
+| `putSync` | 1.1K ops/sec | Blocking, direct FFI |
+| `batch` (async) | 39.8K ops/sec | 1K ops/batch |
 
-| Threads | Write | Read | Mixed |
-|---------|-------|------|-------|
-| 1 | 33K ops/sec | 138K ops/sec | 97K ops/sec |
-| 4 | 148K ops/sec | 191K ops/sec | 148K ops/sec |
-| 8 | 149K ops/sec | 210K ops/sec | 142K ops/sec |
-| 16 | 200K ops/sec | 209K ops/sec | 158K ops/sec |
-| 32 | 278K ops/sec | 454K ops/sec | 355K ops/sec |
+**Tips:** Use async operations in production. Use sync for scripts/initialization. Batch for bulk loads (10-100x faster than individual puts).
 
-### Node.js Bindings Performance
+## Building from Source
 
-Benchmarks run on Node.js v24.14.1 with 10,000 iterations:
+```bash
+# Build C library
+cd WaveDB && mkdir build && cd build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
 
-**Async Operations (C promise/pool-based, non-blocking):**
-- `put`: ~896 ops/sec
-- `get`: ~46,500 ops/sec
-- `batch`: ~39,800 ops/sec (1,000 operations per batch)
+# Build Node.js addon
+cd ../bindings/nodejs
+npm install
+npm run build
 
-**Sync Operations (blocking, direct C++ calls):**
-- `putSync`: ~1,100 ops/sec
-- `getSync`: ~133,000 ops/sec
-
-**Stream Operations:**
-- Internal buffer of 100 entries
-- Backpressure handled automatically
-- Suitable for large dataset iteration
-
-**Performance Tips:**
-- Use async operations for production (non-blocking event loop)
-- Use sync operations for initialization/migration scripts
-- Batch operations for bulk data loading (10-100x faster than individual puts)
-- Streams for iterating over large datasets
-
-**MVCC & WAL:**
-- Multi-Version Concurrency Control enables lock-free reads
-- Write-Ahead Logging ensures durability
-- Atomic transaction IDs with CLOCK_MONOTONIC for stable ordering
-- Optimized with atomic operations (no mutex contention)
+# Run tests
+npm test
+```
 
 ## License
 
