@@ -2912,3 +2912,81 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
   vec_deinit(&stack);
   return total_removed;
 }
+
+size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
+    if (trie == NULL || offset == 0) return 0;
+
+    hbtrie_node_t* root = atomic_load(&trie->root);
+    if (root == NULL) return 0;
+
+    size_t nulled = 0;
+
+    // Iterative DFS using a stack
+    hbtrie_node_t* stack[HBTRIE_CURSOR_MAX_DEPTH];
+    size_t stack_depth = 0;
+    stack[stack_depth++] = root;
+
+    while (stack_depth > 0) {
+        hbtrie_node_t* node = stack[--stack_depth];
+        if (node == NULL || node->btree == NULL) continue;
+
+        // Walk all bnodes in this hbtrie_node's btree
+        bnode_t* bnodes[64];
+        size_t bnode_depth = 0;
+        bnodes[bnode_depth++] = node->btree;
+
+        while (bnode_depth > 0) {
+            bnode_t* bn = bnodes[--bnode_depth];
+            if (bn == NULL) continue;
+
+            for (size_t i = 0; i < (size_t)bn->entries.length; i++) {
+                bnode_entry_t* entry = &bn->entries.data[i];
+                if (entry == NULL) continue;
+
+                // Check child (hbtrie child)
+                if (!entry->has_value && !entry->is_bnode_child &&
+                    entry->child_disk_offset == offset && entry->child != NULL) {
+                    entry->child->is_loaded = 0;
+                    entry->child = NULL;
+                    nulled++;
+                }
+
+                // Check trie_child (prefix sharing)
+                if (entry->has_value && entry->trie_child != NULL &&
+                    entry->child_disk_offset == offset) {
+                    entry->trie_child->is_loaded = 0;
+                    entry->trie_child = NULL;
+                    nulled++;
+                }
+
+                // Check child_bnode (internal B+tree child)
+                if (!entry->has_value && entry->is_bnode_child &&
+                    entry->child_disk_offset == offset && entry->child_bnode != NULL) {
+                    entry->child_bnode = NULL;
+                    nulled++;
+                }
+
+                // Push child hbtrie_nodes for further traversal
+                if (!entry->has_value && !entry->is_bnode_child && entry->child != NULL) {
+                    if (stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+                        stack[stack_depth++] = entry->child;
+                    }
+                }
+                if (entry->has_value && entry->trie_child != NULL) {
+                    if (stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+                        stack[stack_depth++] = entry->trie_child;
+                    }
+                }
+
+                // Push internal bnode children for further bnode tree walk
+                if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                    if (bnode_depth < 64) {
+                        bnodes[bnode_depth++] = entry->child_bnode;
+                    }
+                }
+            }
+        }
+    }
+
+    return nulled;
+}

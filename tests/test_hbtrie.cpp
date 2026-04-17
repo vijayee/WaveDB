@@ -614,3 +614,74 @@ TEST_F(HbtrieTest, CborRoundTripMultiLevelBtree) {
     hbtrie_destroy(trie2);
     hbtrie_destroy(small_trie);
 }
+
+TEST_F(HbtrieTest, NullEntriesByOffset) {
+    // Create a separate trie (not the fixture's trie) so we can destroy it
+    // without conflicting with TearDown
+    hbtrie_t* evict_trie = hbtrie_create(4, 4096);
+    ASSERT_NE(evict_trie, nullptr);
+
+    // Insert multi-level paths to create hbtrie_nodes with child pointers
+    // Single-level paths only create leaf entries (has_value=1).
+    // Multi-level paths create descent entries (has_value=0, child != NULL).
+    for (int i = 0; i < 5; i++) {
+        char prefix[32], suffix[32];
+        snprintf(prefix, sizeof(prefix), "pfx%d", i / 3);
+        snprintf(suffix, sizeof(suffix), "sfx%d", i);
+        path_t* path = make_path({prefix, suffix});
+        char val[32];
+        snprintf(val, sizeof(val), "val%d", i);
+        identifier_t* value = make_value(val);
+        hbtrie_insert(evict_trie, path, value, next_txn_id());
+        path_destroy(path);
+        identifier_destroy(value);
+    }
+
+    hbtrie_node_t* root = atomic_load(&evict_trie->root);
+    ASSERT_NE(root, nullptr);
+    ASSERT_NE(root->btree, nullptr);
+
+    // With no child_disk_offset set, searching for a non-existent offset returns 0
+    uint64_t fake_offset = 9999;
+    size_t nulled = hbtrie_null_entries_by_offset(evict_trie, fake_offset);
+    EXPECT_EQ(nulled, 0u);
+
+    // Find an entry in the root btree that has a child (has_value=0) or
+    // trie_child (has_value=1 with prefix sharing)
+    bnode_entry_t* target_entry = nullptr;
+    int target_type = 0;  // 1=child, 2=trie_child
+    for (int i = 0; i < root->btree->entries.length; i++) {
+        bnode_entry_t* e = &root->btree->entries.data[i];
+        if (!e->has_value && !e->is_bnode_child && e->child != NULL) {
+            target_entry = e;
+            target_type = 1;
+            break;
+        }
+        if (e->has_value && e->trie_child != NULL) {
+            target_entry = e;
+            target_type = 2;
+            break;
+        }
+    }
+
+    if (target_entry != nullptr) {
+        // Set child_disk_offset on the found entry
+        target_entry->child_disk_offset = fake_offset;
+
+        size_t result = hbtrie_null_entries_by_offset(evict_trie, fake_offset);
+        EXPECT_EQ(result, 1u);
+
+        // Verify the pointer was nulled
+        if (target_type == 1) {
+            EXPECT_EQ(target_entry->child, nullptr);
+        } else {
+            EXPECT_EQ(target_entry->trie_child, nullptr);
+        }
+    }
+
+    // Test NULL and zero-offset edge cases
+    EXPECT_EQ(hbtrie_null_entries_by_offset(NULL, fake_offset), 0u);
+    EXPECT_EQ(hbtrie_null_entries_by_offset(evict_trie, 0), 0u);
+
+    hbtrie_destroy(evict_trie);
+}

@@ -373,6 +373,20 @@ int bnode_entry_lazy_load_trie_child(bnode_entry_t* entry,
                                       uint8_t chunk_size,
                                       uint32_t btree_node_size);
 
+/**
+ * Null all parent entry pointers that reference the given disk offset.
+ *
+ * Walks the entire hbtrie tree. For each entry where
+ * entry->child_disk_offset == offset and entry->child (or child_bnode or
+ * trie_child) is non-NULL, NULLs the pointer and sets is_loaded = 0 on
+ * the child hbtrie_node.
+ *
+ * @param trie    HBTrie to walk
+ * @param offset  Disk offset of the evicted bnode
+ * @return Number of entries nulled
+ */
+size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset);
+
 #ifdef __cplusplus
 }
 #endif
