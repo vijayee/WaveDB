@@ -1192,8 +1192,11 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         // Batch limit reached — flush immediately (IMMEDIATE mode)
         thread_wal_flush_buffer_locked(twal);
     } else if (twal->batch_count == 1 && !twal->timer_active) {
-        // First entry — start one-shot timer (DEBOUNCED mode only)
-        if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->wheel != NULL && twal->debounce_ms > 0) {
+        // First entry — start one-shot idle drain timer.
+        // DEBOUNCED: flush buffer + fsync on timer fire.
+        // ASYNC: flush buffer to kernel only (survives process crash, not power failure).
+        // IMMEDIATE: no timer needed (batch_size=1 flushes every entry).
+        if (twal->sync_mode != WAL_SYNC_IMMEDIATE && twal->wheel != NULL && twal->debounce_ms > 0) {
             twal->timer_active = 1;
             twal->timer_id = hierarchical_timing_wheel_set_timer(
                 twal->wheel, twal,
