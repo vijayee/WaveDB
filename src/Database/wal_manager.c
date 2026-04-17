@@ -2,6 +2,7 @@
 #include "database.h"
 #include "batch.h"
 #include "crc32.h"
+#include "wal.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/path.h"
 #include "../HBTrie/identifier.h"
@@ -12,6 +13,7 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
+#include "../Util/endian.h"
 #include "../Time/debouncer.h"
 #include <cbor.h>
 #include <string.h>
@@ -36,6 +38,157 @@
 
 // Maximum entries to prevent DoS
 #define MANIFEST_MAX_ENTRIES 10000
+
+/**
+ * Detect whether WAL payload data is binary or CBOR format.
+ *
+ * Binary format starts with path_count (2 bytes BE).
+ * For realistic path counts (< 256), the first byte is 0x00.
+ * CBOR arrays start with 0x80-0x9F (definite) or 0x9F (indefinite).
+ */
+static int wal_detect_format(const uint8_t* data, size_t data_len) {
+    if (data_len < 2) return WAL_FORMAT_CBOR;  // Too short for binary, try CBOR
+    // Binary format: first byte is 0x00 for path counts < 256
+    // CBOR array: first byte is 0x80-0x9F for definite arrays, 0x9F for indefinite
+    if (data[0] == 0x00) {
+        return WAL_FORMAT_BINARY;
+    }
+    return WAL_FORMAT_CBOR;
+}
+
+/**
+ * Decode a binary-encoded PUT entry payload.
+ *
+ * Binary format:
+ *   [path_count:2B BE][path_len:4B BE]
+ *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+ *   [value_len:4B BE][value:value_len bytes]
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int decode_put_entry_binary(uint8_t* data, size_t data_len,
+                                    path_t** out_path, identifier_t** out_value,
+                                    uint8_t chunk_size) {
+    size_t pos = 0;
+
+    // Read path_count
+    if (pos + 2 > data_len) return -1;
+    uint16_t path_count = read_be16(data + pos);
+    pos += 2;
+
+    // Read path_len (validation)
+    if (pos + 4 > data_len) return -1;
+    uint32_t path_len = read_be32(data + pos);
+    pos += 4;
+
+    (void)path_len;  // Used for validation; we read identifiers individually
+
+    // Build path
+    path_t* path = path_create();
+    if (path == NULL) return -1;
+
+    size_t total_id_bytes = 0;
+    for (uint16_t i = 0; i < path_count; i++) {
+        if (pos + 2 > data_len) { path_destroy(path); return -1; }
+        uint16_t id_len = read_be16(data + pos);
+        pos += 2;
+
+        if (pos + id_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* id_buf = buffer_create_from_pointer_copy(data + pos, id_len);
+        if (id_buf == NULL) { path_destroy(path); return -1; }
+        identifier_t* ident = identifier_create(id_buf, chunk_size);
+        buffer_destroy(id_buf);
+        if (ident == NULL) { path_destroy(path); return -1; }
+        path_append(path, ident);
+        DEREFERENCE(ident);
+        pos += id_len;
+        total_id_bytes += id_len;
+    }
+
+    // Validate path_len matches
+    if (total_id_bytes != path_len) {
+        log_warn("WAL Recovery: Binary path_len mismatch (expected=%u, actual=%zu)",
+                 path_len, total_id_bytes);
+    }
+
+    // Read value
+    if (pos + 4 > data_len) { path_destroy(path); return -1; }
+    uint32_t value_len = read_be32(data + pos);
+    pos += 4;
+
+    identifier_t* value = NULL;
+    if (value_len > 0) {
+        if (pos + value_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* val_buf = buffer_create_from_pointer_copy(data + pos, value_len);
+        if (val_buf == NULL) { path_destroy(path); return -1; }
+        value = identifier_create(val_buf, chunk_size);
+        buffer_destroy(val_buf);
+        if (value == NULL) { path_destroy(path); return -1; }
+        pos += value_len;
+    }
+
+    *out_path = path;
+    *out_value = value;
+    return 0;
+}
+
+/**
+ * Decode a binary-encoded DELETE entry payload (path only, no value).
+ *
+ * Binary format:
+ *   [path_count:2B BE][path_len:4B BE]
+ *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
+                                       path_t** out_path,
+                                       uint8_t chunk_size) {
+    size_t pos = 0;
+
+    // Read path_count
+    if (pos + 2 > data_len) return -1;
+    uint16_t path_count = read_be16(data + pos);
+    pos += 2;
+
+    // Read path_len (validation)
+    if (pos + 4 > data_len) return -1;
+    uint32_t path_len = read_be32(data + pos);
+    pos += 4;
+
+    (void)path_len;
+
+    // Build path
+    path_t* path = path_create();
+    if (path == NULL) return -1;
+
+    size_t total_id_bytes = 0;
+    for (uint16_t i = 0; i < path_count; i++) {
+        if (pos + 2 > data_len) { path_destroy(path); return -1; }
+        uint16_t id_len = read_be16(data + pos);
+        pos += 2;
+
+        if (pos + id_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* id_buf = buffer_create_from_pointer_copy(data + pos, id_len);
+        if (id_buf == NULL) { path_destroy(path); return -1; }
+        identifier_t* ident = identifier_create(id_buf, chunk_size);
+        buffer_destroy(id_buf);
+        if (ident == NULL) { path_destroy(path); return -1; }
+        path_append(path, ident);
+        DEREFERENCE(ident);
+        pos += id_len;
+        total_id_bytes += id_len;
+    }
+
+    // Validate path_len matches
+    if (total_id_bytes != path_len) {
+        log_warn("WAL Recovery: Binary delete path_len mismatch (expected=%u, actual=%zu)",
+                 path_len, total_id_bytes);
+    }
+
+    *out_path = path;
+    return 0;
+}
 
 // Thread-local storage for WAL
 static __thread thread_wal_t* thread_local_wal = NULL;
@@ -1289,52 +1442,78 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
             }
             case WAL_PUT:
             case WAL_DELETE: {
-                // Deserialize individual PUT/DELETE entry
-                // Format: CBOR array [path, value]
-                struct cbor_load_result result;
-                cbor_item_t* entry_cbor;
-
-                log_info("WAL Recovery: Deserializing entry (type=%s, data_size=%zu)",
-                         entry->type == WAL_PUT ? "PUT" : "DELETE", data ? data->size : 0);
-
-                entry_cbor = cbor_load(data->data, data->size, &result);
-                if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
-                    if (entry_cbor) cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Failed to load entry CBOR (error=%d)", result.error.code);
-                    break;
-                }
-
-                // Verify it's an array with correct number of elements
-                // PUT operations have 2 elements [path, value]
-                // DELETE operations have 1 element [path]
-                size_t expected_size = (entry->type == WAL_PUT) ? 2 : 1;
-                if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != expected_size) {
-                    cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Invalid entry format (expected %zu elements, got %zu)",
-                              expected_size, cbor_isa_array(entry_cbor) ? cbor_array_size(entry_cbor) : 0);
-                    break;
-                }
-
-                // Get path
-                cbor_item_t* path_cbor = cbor_array_handle(entry_cbor)[0];
-                path_t* path = cbor_to_path(path_cbor, database->chunk_size);
-                if (path == NULL) {
-                    cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Failed to deserialize path");
-                    break;
-                }
-
-                // Get value (for PUT operations)
+                // Detect payload format: binary or CBOR
+                int format = wal_detect_format(data->data, data->size);
+                path_t* path = NULL;
                 identifier_t* value = NULL;
-                if (entry->type == WAL_PUT) {
-                    cbor_item_t* value_cbor = cbor_array_handle(entry_cbor)[1];
-                    value = cbor_to_identifier(value_cbor, database->chunk_size);
-                    if (value == NULL) {
-                        path_destroy(path);
-                        cbor_decref(&entry_cbor);
-                        log_error("WAL Recovery: Failed to deserialize value");
+
+                log_info("WAL Recovery: Deserializing entry (type=%s, data_size=%zu, format=%s)",
+                         entry->type == WAL_PUT ? "PUT" : "DELETE",
+                         data ? data->size : 0,
+                         format == WAL_FORMAT_BINARY ? "binary" : "CBOR");
+
+                if (format == WAL_FORMAT_BINARY) {
+                    // Binary format
+                    if (entry->type == WAL_PUT) {
+                        if (decode_put_entry_binary(data->data, data->size,
+                                                    &path, &value,
+                                                    database->chunk_size) != 0) {
+                            log_error("WAL Recovery: Failed to decode binary PUT entry");
+                            break;
+                        }
+                    } else {
+                        if (decode_delete_entry_binary(data->data, data->size,
+                                                       &path,
+                                                       database->chunk_size) != 0) {
+                            log_error("WAL Recovery: Failed to decode binary DELETE entry");
+                            break;
+                        }
+                    }
+                } else {
+                    // Legacy CBOR format
+                    struct cbor_load_result result;
+                    cbor_item_t* entry_cbor;
+
+                    entry_cbor = cbor_load(data->data, data->size, &result);
+                    if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
+                        if (entry_cbor) cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Failed to load entry CBOR (error=%d)", result.error.code);
                         break;
                     }
+
+                    // Verify it's an array with correct number of elements
+                    // PUT operations have 2 elements [path, value]
+                    // DELETE operations have 1 element [path]
+                    size_t expected_size = (entry->type == WAL_PUT) ? 2 : 1;
+                    if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != expected_size) {
+                        cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Invalid entry format (expected %zu elements, got %zu)",
+                                  expected_size, cbor_isa_array(entry_cbor) ? cbor_array_size(entry_cbor) : 0);
+                        break;
+                    }
+
+                    // Get path
+                    cbor_item_t* path_cbor = cbor_array_handle(entry_cbor)[0];
+                    path = cbor_to_path(path_cbor, database->chunk_size);
+                    if (path == NULL) {
+                        cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Failed to deserialize path");
+                        break;
+                    }
+
+                    // Get value (for PUT operations)
+                    if (entry->type == WAL_PUT) {
+                        cbor_item_t* value_cbor = cbor_array_handle(entry_cbor)[1];
+                        value = cbor_to_identifier(value_cbor, database->chunk_size);
+                        if (value == NULL) {
+                            path_destroy(path);
+                            cbor_decref(&entry_cbor);
+                            log_error("WAL Recovery: Failed to deserialize value");
+                            break;
+                        }
+                    }
+
+                    cbor_decref(&entry_cbor);
                 }
 
                 // Apply operation to trie
@@ -1342,8 +1521,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                     if (path == NULL) {
                         log_error("WAL Recovery: Path is NULL, skipping entry");
                         if (value) identifier_destroy(value);
-                        cbor_decref(&entry_cbor);
-                        continue;
+                        break;
                     }
 
                     // Convert first identifier to string for logging
@@ -1368,8 +1546,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 } else {
                     if (path == NULL) {
                         log_error("WAL Recovery: Path is NULL for DELETE, skipping entry");
-                        cbor_decref(&entry_cbor);
-                        continue;
+                        break;
                     }
 
                     identifier_t* removed = hbtrie_delete(database->trie, path, entry->txn_id);
@@ -1381,7 +1558,6 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 // Clean up
                 path_destroy(path);
                 if (value) identifier_destroy(value);
-                cbor_decref(&entry_cbor);
                 break;
             }
             default:

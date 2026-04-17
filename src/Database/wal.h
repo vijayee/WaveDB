@@ -27,6 +27,14 @@ typedef enum {
 } wal_type_e;
 
 /**
+ * WAL payload format constants.
+ * Used to distinguish CBOR-encoded payloads from binary-encoded payloads
+ * during WAL recovery.
+ */
+#define WAL_FORMAT_CBOR   0
+#define WAL_FORMAT_BINARY 1
+
+/**
  * WAL entry header structure (written before CBOR data)
  */
 typedef struct {

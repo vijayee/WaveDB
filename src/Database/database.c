@@ -14,6 +14,7 @@
 #include "../Storage/page_file.h"
 #include "../Storage/bnode_cache.h"
 #include "../Util/memory_pool.h"
+#include "../Util/endian.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -127,6 +128,136 @@ static buffer_t* encode_delete_entry(path_t* path) {
     if (buf == NULL) return NULL;
 
     buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
+    return buffer;
+}
+
+// Helper to encode path+value for WAL using binary format
+// Binary payload format:
+//   [path_count:2B BE][path_len:4B BE]
+//   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+//   [value_len:4B BE][value:value_len bytes]
+static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
+    // Calculate total size
+    size_t path_count = path_length(path);
+    size_t total_size = 2 + 4;  // path_count + path_len
+
+    // Calculate size for each identifier and accumulate path_len
+    size_t path_byte_len = 0;
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+        total_size += 2 + id_len;  // id_len field + id_data
+        path_byte_len += id_len;
+    }
+
+    // Value
+    size_t value_len = (value != NULL) ? value->length : 0;
+    total_size += 4 + value_len;  // value_len field + value_data
+
+    // Allocate buffer
+    buffer_t* buffer = buffer_create(total_size);
+    if (buffer == NULL) return NULL;
+
+    uint8_t* pos = buffer->data;
+
+    // Write path_count (2 bytes BE)
+    write_be16(pos, (uint16_t)path_count);
+    pos += 2;
+
+    // Write path_len (4 bytes BE) - total byte length of all identifier data
+    write_be32(pos, (uint32_t)path_byte_len);
+    pos += 4;
+
+    // Write each identifier
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+
+        write_be16(pos, (uint16_t)id_len);
+        pos += 2;
+
+        // Get raw identifier data
+        buffer_t* id_buf = identifier_to_buffer(id);
+        if (id_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, id_buf->data, id_buf->size);
+        pos += id_buf->size;
+        buffer_destroy(id_buf);
+    }
+
+    // Write value
+    write_be32(pos, (uint32_t)value_len);
+    pos += 4;
+
+    if (value_len > 0) {
+        buffer_t* val_buf = identifier_to_buffer(value);
+        if (val_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, val_buf->data, val_buf->size);
+        pos += val_buf->size;
+        buffer_destroy(val_buf);
+    }
+
+    buffer->size = (size_t)(pos - buffer->data);
+    return buffer;
+}
+
+// Helper to encode path for WAL delete using binary format
+// Binary payload format (no value):
+//   [path_count:2B BE][path_len:4B BE]
+//   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+static buffer_t* encode_delete_entry_binary(path_t* path) {
+    // Calculate total size
+    size_t path_count = path_length(path);
+    size_t total_size = 2 + 4;  // path_count + path_len
+
+    // Calculate size for each identifier
+    size_t path_byte_len = 0;
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+        total_size += 2 + id_len;  // id_len field + id_data
+        path_byte_len += id_len;
+    }
+
+    // Allocate buffer
+    buffer_t* buffer = buffer_create(total_size);
+    if (buffer == NULL) return NULL;
+
+    uint8_t* pos = buffer->data;
+
+    // Write path_count (2 bytes BE)
+    write_be16(pos, (uint16_t)path_count);
+    pos += 2;
+
+    // Write path_len (4 bytes BE)
+    write_be32(pos, (uint32_t)path_byte_len);
+    pos += 4;
+
+    // Write each identifier
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+
+        write_be16(pos, (uint16_t)id_len);
+        pos += 2;
+
+        // Get raw identifier data
+        buffer_t* id_buf = identifier_to_buffer(id);
+        if (id_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, id_buf->data, id_buf->size);
+        pos += id_buf->size;
+        buffer_destroy(id_buf);
+    }
+
+    buffer->size = (size_t)(pos - buffer->data);
     return buffer;
 }
 
@@ -1053,7 +1184,7 @@ static void _database_put(database_put_ctx_t* ctx) {
     }
 
     // Write to thread-local WAL first (durability)
-    buffer_t* entry = encode_put_entry(path, value);
+    buffer_t* entry = encode_put_entry_binary(path, value);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1161,7 +1292,7 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_delete_entry(path);
+    buffer_t* entry = encode_delete_entry_binary(path);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1354,7 +1485,7 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_put_entry(path, value);
+    buffer_t* entry = encode_put_entry_binary(path, value);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1371,7 +1502,7 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         }
         buffer_destroy(entry);
     } else {
-        log_error("encode_put_entry returned NULL - cannot write to WAL");
+        log_error("encode_put_entry_binary returned NULL - cannot write to WAL");
     }
 
     // Acquire sharded write lock
@@ -1470,7 +1601,7 @@ int database_delete_sync(database_t* db, path_t* path) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_delete_entry(path);
+    buffer_t* entry = encode_delete_entry_binary(path);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
