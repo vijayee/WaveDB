@@ -217,20 +217,23 @@ static void wal_flush_timer_callback(void* ctx) {
     thread_wal_t* twal = (thread_wal_t*)ctx;
     if (twal == NULL) return;
     platform_lock(&twal->lock);
-    if (twal->batch_count > 0) {
-        // Flush buffered entries
-        if (twal->entry_buf_used > 0 && twal->fd >= 0) {
-            ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
-            if (written > 0) {
-                twal->current_size += (size_t)written;
-            }
-            twal->entry_buf_used = 0;
-            twal->batch_count = 0;
-            if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
-                fsync(twal->fd);
-            }
+
+    // Flush any remaining buffered entries
+    if (twal->batch_count > 0 && twal->entry_buf_used > 0 && twal->fd >= 0) {
+        ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
+        if (written > 0) {
+            twal->current_size += (size_t)written;
         }
+        twal->entry_buf_used = 0;
+        twal->batch_count = 0;
     }
+
+    // DEBOUNCED mode: fsync all pending writes to disk
+    if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->fd >= 0) {
+        fsync(twal->fd);
+        twal->pending_writes = 0;
+    }
+
     twal->timer_active = 0;
     platform_unlock(&twal->lock);
 }
@@ -249,16 +252,15 @@ static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
 
     twal->current_size += twal->entry_buf_used;
 
-    // Handle sync modes
+    // Handle sync modes:
+    // - IMMEDIATE: fsync after every flush (data is on disk)
+    // - DEBOUNCED: defer fsync to the timer; just track pending writes
+    // - ASYNC: no fsync at all
     if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
         fsync(twal->fd);
         twal->pending_writes = 0;
     } else {
         twal->pending_writes += twal->batch_count;
-        if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
-            fsync(twal->fd);
-            twal->pending_writes = 0;
-        }
     }
 
     // Reset buffer
@@ -599,7 +601,7 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     twal->wheel = manager->wheel;
     twal->entry_buf_used = 0;
     twal->batch_count = 0;
-    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 4;
+    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 0;  // 0 = flush when buffer full
     twal->timer_active = 0;
     twal->timer_id = 0;
     twal->debounce_ms = manager->config.debounce_ms;
@@ -1186,8 +1188,8 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     twal->newest_txn_id = txn_id;
 
     // Handle flush triggers
-    if (twal->batch_count >= twal->batch_size) {
-        // Batch full — flush immediately
+    if (twal->batch_size > 0 && twal->batch_count >= twal->batch_size) {
+        // Batch limit reached — flush immediately (IMMEDIATE mode)
         thread_wal_flush_buffer_locked(twal);
     } else if (twal->batch_count == 1 && !twal->timer_active) {
         // First entry — start one-shot timer (DEBOUNCED mode only)

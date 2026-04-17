@@ -1146,8 +1146,15 @@ static void _database_put(database_put_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Apply to trie with MVCC (per-node spinlocks provide fine-grained exclusion)
+    // Acquire sharded write lock (prevents root-node contention)
+    size_t shard = get_write_lock_shard(path);
+    spinlock_lock(&db->write_locks[shard]);
+
+    // Apply to trie with MVCC
     hbtrie_insert(db->trie, path, value, txn->txn_id);
+
+    // Release write lock
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1247,8 +1254,15 @@ static void _database_delete(database_delete_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Remove from trie with MVCC (per-node spinlocks provide fine-grained exclusion)
+    // Acquire sharded write lock (prevents root-node contention)
+    size_t shard = get_write_lock_shard(path);
+    spinlock_lock(&db->write_locks[shard]);
+
+    // Remove from trie with MVCC (creates tombstone)
     identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
+
+    // Release write lock
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1441,24 +1455,19 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         log_error("encode_put_entry_binary returned NULL - cannot write to WAL");
     }
 
-    // Apply to trie with MVCC using two-phase write.
-    // Per-node spinlocks in hbtrie_insert provide fine-grained mutual
-    // exclusion — the shard lock is not needed for correctness. The
-    // reserve+commit API allows the shard lock to be released between
-    // the trie walk and value writing in a future optimization.
-    hbtrie_reservation_t* res = hbtrie_reserve(db->trie, path, value, txn->txn_id);
-    if (res != NULL) {
-        int commit_result = hbtrie_commit(res);
-        if (commit_result != 0) {
-            hbtrie_reservation_destroy(res);
-        }
-    } else {
-        // Fallback: direct insert (should not happen in normal operation)
-        size_t shard = get_write_lock_shard(path);
-        spinlock_lock(&db->write_locks[shard]);
-        hbtrie_insert(db->trie, path, value, txn->txn_id);
-        spinlock_unlock(&db->write_locks[shard]);
-    }
+    // Acquire sharded write lock. Per-node spinlocks in hbtrie_insert
+    // provide fine-grained exclusion within the trie, but the shard lock
+    // prevents root-node contention when many threads write concurrently.
+    // Without it, all writers contend on the root spinlock, serializing
+    // access regardless of key distribution.
+    size_t shard = get_write_lock_shard(path);
+    spinlock_lock(&db->write_locks[shard]);
+
+    // Apply to trie with MVCC
+    hbtrie_insert(db->trie, path, value, txn->txn_id);
+
+    // Release write lock
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
