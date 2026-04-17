@@ -1,12 +1,12 @@
 {
   "name": "Sync Mixed",
   "operations_count": 10000,
-  "total_time_ns": 6600000,
-  "min_time_ns": 642,
-  "max_time_ns": 11308,
-  "p50_time_ns": 655,
-  "p95_time_ns": 662,
-  "p99_time_ns": 694,
-  "operations_per_second": 1515691.42,
-  "avg_latency_ns": 659.76
+  "total_time_ns": 5840000,
+  "min_time_ns": 556,
+  "max_time_ns": 12288,
+  "p50_time_ns": 582,
+  "p95_time_ns": 610,
+  "p99_time_ns": 709,
+  "operations_per_second": 1712858.46,
+  "avg_latency_ns": 583.82
 }

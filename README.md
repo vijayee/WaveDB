@@ -270,18 +270,19 @@ Benchmarks on Linux x86_64, 8-core CPU, 50MB LRU cache.
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.55M ops/sec | 625 ns | 791 ns |
-| Put | 138K ops/sec | 6.8 µs | 11.3 µs |
-| Delete | 181K ops/sec | 5.4 µs | 8.6 µs |
-| Mixed (70% read) | 1.49M ops/sec | 666 ns | 822 ns |
+| Get | 1.71M ops/sec | 565 ns | 919 ns |
+| Put | 352K ops/sec | 2.35 µs | 6.34 µs |
+| Delete | 278K ops/sec | 3.49 µs | 5.78 µs |
+| Mixed (70% read) | 1.71M ops/sec | 582 ns | 709 ns |
 
-### Concurrent Throughput (DEBOUNCED WAL mode)
+### Concurrent Throughput (DEBOUNCED WAL mode, 250ms)
 
 | Threads | Write | Read | Mixed (70R/20W/10D) |
 |---------|-------|------|---------------------|
-| 4 | 142K ops/sec | 820K ops/sec | 269K ops/sec |
-| 16 | 161K ops/sec | 2.53M ops/sec | 418K ops/sec |
-| 32 | 107K ops/sec | 3.18M ops/sec | 437K ops/sec |
+| 1 | 201K ops/sec | 838K ops/sec | 298K ops/sec |
+| 4 | 413K ops/sec | 2.38M ops/sec | 613K ops/sec |
+| 16 | 693K ops/sec | 7.25M ops/sec | 905K ops/sec |
+| 32 | 938K ops/sec | 9.06M ops/sec | 1.02M ops/sec |
 
 ## Building
 
