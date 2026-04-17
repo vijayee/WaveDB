@@ -109,7 +109,7 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code);
  * @param max_size    Maximum file size before rotation (0 for default)
  * @param sync_mode   Sync mode (IMMEDIATE/DEBOUNCED/ASYNC)
  * @param wheel       Timing wheel for debounced fsync (required if DEBOUNCED)
- * @param debounce_ms Debounce wait time in milliseconds (0 for default 100ms)
+ * @param debounce_ms Debounce wait time in milliseconds (0 for default 250ms)
  * @param error_code  Output parameter for error code (0 on success)
  * @return New WAL or NULL on failure
  */

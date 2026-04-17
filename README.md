@@ -98,7 +98,7 @@ WaveDB stores values at hierarchical key paths using an HBTrie — a B+tree wher
 
 **Concurrency:** MVCC (Multi-Version Concurrency Control) provides snapshot isolation — readers never block writers and never see partial updates. Each write creates a versioned entry; reads see the latest committed version at their transaction ID.
 
-**Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync, recommended), ASYNC (OS cache only).
+**Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync every 250ms, recommended), ASYNC (buffer flushed to kernel on 250ms idle timer, survives process crash but not power failure).
 
 **Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans.
 
@@ -111,7 +111,7 @@ database_config_t* config = database_config_default();
 config->lru_memory_mb = 100;       // LRU cache size (default: 50 MB)
 config->lru_shards = 64;           // LRU shards (default: 64, 0 = auto-scale)
 config->wal_config.sync_mode = WAL_SYNC_DEBOUNCED;  // WAL mode
-config->wal_config.debounce_ms = 100;                // fsync window (default: 100ms)
+config->wal_config.debounce_ms = 250;                // fsync window (default: 250ms)
 config->worker_threads = 4;        // Worker pool size (default: 4)
 
 // Immutable — set at creation, persisted
@@ -130,8 +130,8 @@ Config is persisted as CBOR at `<db_path>/.config` and automatically loaded on r
 | Mode | Behavior | Durability | Performance |
 |------|----------|------------|-------------|
 | `WAL_SYNC_IMMEDIATE` | fsync after every write | Highest | ~1K ops/sec |
-| `WAL_SYNC_DEBOUNCED` | batched fsync (default 100ms) | High | ~300K ops/sec |
-| `WAL_SYNC_ASYNC` | no fsync, OS cache only | Lowest | ~400K ops/sec |
+| `WAL_SYNC_DEBOUNCED` | batched fsync (default 250ms) | High | ~300K ops/sec |
+| `WAL_SYNC_ASYNC` | buffered write, idle drain every 250ms | Process crash only | ~400K ops/sec |
 
 ### Database Operations
 

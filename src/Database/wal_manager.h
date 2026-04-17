@@ -63,7 +63,7 @@ typedef struct {
  */
 typedef struct {
     wal_sync_mode_e sync_mode;           // IMMEDIATE, DEBOUNCED, ASYNC
-    uint64_t debounce_ms;                // Debounce window (default 100ms)
+    uint64_t debounce_ms;                // Debounce window (default 250ms)
     uint64_t idle_threshold_ms;          // Compaction idle trigger (default 10s)
     uint64_t compact_interval_ms;        // Compaction interval (default 60s)
     size_t max_file_size;                // Max file size before seal (default 128KB)
@@ -130,7 +130,7 @@ typedef struct {
 } wal_recovery_options_t;
 
 // Default configuration
-#define WAL_DEFAULT_DEBOUNCE_MS 100
+#define WAL_DEFAULT_DEBOUNCE_MS 250
 #define WAL_DEFAULT_IDLE_THRESHOLD_MS 10000
 #define WAL_DEFAULT_COMPACT_INTERVAL_MS 60000
 #define WAL_DEFAULT_MAX_FILE_SIZE (128 * 1024)
