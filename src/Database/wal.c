@@ -20,8 +20,8 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-// Default debounce wait time for fsync (100ms)
-#define WAL_DEFAULT_DEBOUNCE_MS 100
+// Default debounce wait time for fsync (250ms)
+#define WAL_DEFAULT_DEBOUNCE_MS 250
 
 // Fsync callback for debounced fsync
 static void wal_fsync_callback(void* ctx) {

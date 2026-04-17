@@ -852,7 +852,7 @@ class WaveDBNative {
   ///   - storageCacheSize: Section cache size (default: 1024)
   ///   - workerThreads: Number of worker threads (default: 4)
   ///   - walSyncMode: WAL sync mode: 'immediate', 'debounced', 'async' (default: 'debounced')
-  ///   - walDebounceMs: Debounce window for fsync (default: 100)
+  ///   - walDebounceMs: Debounce window for fsync (default: 250)
   ///   - walMaxFileSize: Max WAL file size (default: 131072)
   ///
   /// Returns a pointer to the database handle.
