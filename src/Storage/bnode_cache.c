@@ -131,6 +131,7 @@ static void shard_init(bnode_cache_shard_t* shard) {
     shard->bucket_count = BNODE_CACHE_INITIAL_BUCKET_COUNT;
     shard->buckets = get_clear_memory(shard->bucket_count * sizeof(bnode_cache_item_t*));
     shard->item_count = 0;
+    shard->deferred_first = NULL;
 }
 
 static void shard_destroy(bnode_cache_shard_t* shard) {
@@ -143,6 +144,16 @@ static void shard_destroy(bnode_cache_shard_t* shard) {
         }
         free(item);
         item = next;
+    }
+    /* Free deferred-evict items */
+    bnode_cache_item_t* deferred = shard->deferred_first;
+    while (deferred != NULL) {
+        bnode_cache_item_t* next = deferred->lru_next;
+        if (deferred->data != NULL) {
+            free(deferred->data);
+        }
+        free(deferred);
+        deferred = next;
     }
     if (shard->buckets != NULL) {
         free(shard->buckets);
@@ -166,8 +177,16 @@ static void evict_if_needed(file_bnode_cache_t* fcache, bnode_cache_shard_t* sha
         if (fcache->mgr != NULL) {
             fcache->mgr->current_total_memory -= victim->data_len;
         }
-        free(victim->data);
-        free(victim);
+
+        // Deferred free: mark as evict_pending, add to deferred list, call callback
+        victim->evict_pending = 1;
+        victim->lru_next = shard->deferred_first;
+        victim->lru_prev = NULL;
+        shard->deferred_first = victim;
+
+        if (fcache->on_evict != NULL) {
+            fcache->on_evict(victim->offset, fcache->on_evict_data);
+        }
     }
 }
 
@@ -660,4 +679,30 @@ size_t bnode_cache_dirty_bytes(file_bnode_cache_t* fcache) {
         total += fcache->shards[i].dirty_bytes;
     }
     return total;
+}
+
+void bnode_cache_complete_evict(file_bnode_cache_t* fcache, uint64_t offset) {
+    if (fcache == NULL) return;
+
+    size_t shard_idx = (size_t)(offset % fcache->num_shards);
+    bnode_cache_shard_t* shard = &fcache->shards[shard_idx];
+
+    platform_lock(&shard->lock);
+
+    bnode_cache_item_t** pp = &shard->deferred_first;
+    while (*pp != NULL) {
+        if ((*pp)->offset == offset && (*pp)->evict_pending) {
+            bnode_cache_item_t* item = *pp;
+            *pp = item->lru_next;
+            if (item->data != NULL) {
+                free(item->data);
+            }
+            free(item);
+            platform_unlock(&shard->lock);
+            return;
+        }
+        pp = &(*pp)->lru_next;
+    }
+
+    platform_unlock(&shard->lock);
 }

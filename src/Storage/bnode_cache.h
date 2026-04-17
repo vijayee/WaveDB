@@ -19,12 +19,15 @@ typedef struct bnode_cache_shard_t bnode_cache_shard_t;
 typedef struct file_bnode_cache_t file_bnode_cache_t;
 typedef struct bnode_cache_mgr_t bnode_cache_mgr_t;
 
+typedef void (*bnode_evict_fn)(uint64_t disk_offset, void* user_data);
+
 struct bnode_cache_item_t {
     uint64_t offset;
     uint8_t* data;
     size_t data_len;
     uint8_t is_dirty;
     uint8_t invalidate_pending;  // Set when invalidated while ref_count > 0
+    uint8_t evict_pending;       // 1 when evicted but data not yet freed (deferred)
     uint32_t ref_count;
     bnode_cache_item_t* lru_next;
     bnode_cache_item_t* lru_prev;
@@ -39,6 +42,7 @@ struct bnode_cache_shard_t {
     bnode_cache_item_t** buckets;
     size_t bucket_count;
     size_t item_count;
+    bnode_cache_item_t* deferred_first;  // Head of deferred-free list
 };
 
 struct file_bnode_cache_t {
@@ -49,6 +53,8 @@ struct file_bnode_cache_t {
     size_t max_memory;
     size_t current_memory;
     size_t dirty_threshold;
+    bnode_evict_fn on_evict;       // Called when a bnode is evicted (before deferred free)
+    void* on_evict_data;           // User data for eviction callback
     bnode_cache_mgr_t* mgr;
 };
 
@@ -74,6 +80,7 @@ int bnode_cache_flush_dirty(file_bnode_cache_t* fcache);
 int bnode_cache_invalidate(file_bnode_cache_t* fcache, uint64_t offset);
 size_t bnode_cache_dirty_count(file_bnode_cache_t* fcache);
 size_t bnode_cache_dirty_bytes(file_bnode_cache_t* fcache);
+void bnode_cache_complete_evict(file_bnode_cache_t* fcache, uint64_t offset);
 
 #ifdef __cplusplus
 }
