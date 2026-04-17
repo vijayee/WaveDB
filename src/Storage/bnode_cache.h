@@ -24,6 +24,7 @@ struct bnode_cache_item_t {
     uint8_t* data;
     size_t data_len;
     uint8_t is_dirty;
+    uint8_t invalidate_pending;  // Set when invalidated while ref_count > 0
     uint32_t ref_count;
     bnode_cache_item_t* lru_next;
     bnode_cache_item_t* lru_prev;

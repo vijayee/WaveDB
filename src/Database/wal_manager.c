@@ -12,7 +12,7 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
-#include "../Time/debouncer.h"
+#include "../Time/wheel.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -50,13 +50,55 @@ static void init_default_config(wal_config_t* config) {
     config->max_sealed_wals = WAL_DEFAULT_MAX_SEALED_WALS;
 }
 
-// Fsync callback for debouncer
-static void thread_wal_fsync_callback(void* ctx) {
+// Forward declaration — defined below
+static int thread_wal_flush_buffer_locked(thread_wal_t* twal);
+
+// One-shot timer callback: flush buffer if entries exist
+static void wal_flush_timer_callback(void* ctx) {
     thread_wal_t* twal = (thread_wal_t*)ctx;
-    if (twal && twal->fd >= 0) {
-        fsync(twal->fd);
-        twal->pending_writes = 0;
+    if (twal == NULL) return;
+
+    platform_lock(&twal->lock);
+    if (twal->batch_count > 0) {
+        thread_wal_flush_buffer_locked(twal);
     }
+    twal->timer_active = 0;
+    platform_unlock(&twal->lock);
+}
+
+// Flush all buffered entries to disk (called under twal->lock)
+static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
+    if (twal == NULL || twal->batch_count == 0 || twal->entry_buf_used == 0) return 0;
+
+    // Write all buffered entries
+    ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
+    if (written != (ssize_t)twal->entry_buf_used) {
+        return -1;
+    }
+
+    twal->current_size += twal->entry_buf_used;
+
+    // Handle sync modes
+    if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+        if (fsync(twal->fd) != 0) {
+            log_warn("fsync failed on WAL flush (IMMEDIATE, fd=%d, errno=%d)", twal->fd, errno);
+        }
+        twal->pending_writes = 0;
+    } else {
+        twal->pending_writes += twal->batch_count;
+        if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
+            if (fsync(twal->fd) != 0) {
+                log_warn("fsync failed on WAL flush (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
+            }
+            twal->pending_writes = 0;
+        }
+    }
+
+    // Reset buffer
+    twal->entry_buf_used = 0;
+    twal->batch_count = 0;
+
+    return 0;
 }
 
 // Write uint32 in big-endian
@@ -222,7 +264,7 @@ static int scan_wal_directory(const char* location, char*** wal_files, size_t* c
 }
 
 // Write manifest entry atomically
-static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
+static int write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
                                  const char* file_path, wal_file_status_e status,
                                  transaction_id_t* txn_id) {
     manifest_entry_t entry;
@@ -239,10 +281,19 @@ static void write_manifest_entry(wal_manager_t* manager, uint64_t thread_id,
 
     // Atomic append (O_APPEND ensures atomicity for < PIPE_BUF)
     ssize_t bytes_written = write(manager->manifest_fd, &entry, sizeof(entry));
-    (void)bytes_written;  // Suppress unused variable warning
+    if (bytes_written != (ssize_t)sizeof(entry)) {
+        log_error("Manifest write failed: expected %zu, wrote %zd",
+                  sizeof(entry), bytes_written);
+        return -1;
+    }
 
     // Fsync for correctness (manifest must be durable)
-    fsync(manager->manifest_fd);
+    if (fsync(manager->manifest_fd) != 0) {
+        log_error("Manifest fsync failed: fd=%d, errno=%d", manager->manifest_fd, errno);
+        return -1;
+    }
+
+    return 0;
 }
 
 // Read manifest file
@@ -400,30 +451,27 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     }
     log_info("Created WAL file: %s (thread_id=%lu, fd=%d)", twal->file_path, (unsigned long)thread_id, twal->fd);
 
-    // Create debouncer if needed
-    if (twal->sync_mode == WAL_SYNC_DEBOUNCED && manager->config.debounce_ms > 0) {
-        twal->wheel = manager->wheel;  // Use manager's timing wheel
-        twal->fsync_debouncer = debouncer_create(manager->wheel, twal,
-                                                  thread_wal_fsync_callback,
-                                                  NULL,
-                                                  manager->config.debounce_ms,
-                                                  manager->config.debounce_ms);
-        if (twal->fsync_debouncer == NULL) {
-            close(twal->fd);
-            free(twal->file_path);
-            free(twal);
-            return NULL;
-        }
-    }
+    // Initialize write buffer and timer
+    twal->wheel = manager->wheel;  // Use manager's timing wheel
+    twal->entry_buf_used = 0;
+    twal->batch_count = 0;
+    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 4;
+    twal->timer_active = 0;
+    twal->timer_id = 0;
+    twal->debounce_ms = manager->config.debounce_ms;
 
     platform_lock_init(&twal->lock);
     refcounter_init((refcounter_t*)twal);
 
     // Write initial manifest entry (ACTIVE) - protected by manifest lock
     platform_lock(&manager->manifest_lock);
-    write_manifest_entry(manager, twal->thread_id, twal->file_path,
+    int rc = write_manifest_entry(manager, twal->thread_id, twal->file_path,
                         WAL_FILE_ACTIVE, &twal->newest_txn_id);
     platform_unlock(&manager->manifest_lock);
+
+    if (rc != 0) {
+        log_warn("Failed to write ACTIVE manifest entry for thread %lu", twal->thread_id);
+    }
 
     return twal;
 }
@@ -460,7 +508,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->thread_count = 0;
     manager->thread_capacity = 0;
     manager->sealed_count = 0;
-    manager->wheel = wheel;  // Store timing wheel for debouncer
+    manager->wheel = wheel;  // Store timing wheel for one-shot timer
 
     // Create manifest file
     manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -525,13 +573,15 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     }
 
     ssize_t bytes_written = write(manager->manifest_fd, &header, sizeof(header));
-    if (bytes_written != sizeof(header)) {
+    if (bytes_written != (ssize_t)sizeof(header)) {
         platform_unlock(&manager->manifest_lock);
         wal_manager_destroy(manager);
         if (error_code) *error_code = EIO;
         return NULL;
     }
-    fsync(manager->manifest_fd);
+    if (fsync(manager->manifest_fd) != 0) {
+        log_warn("Manifest header fsync failed (fd=%d, errno=%d)", manager->manifest_fd, errno);
+    }
 
     // 3. Backup legacy WAL
     char* legacy_wal = path_join(location, "current.wal");
@@ -586,9 +636,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
         return NULL;
     }
 
-    fsync(manager->manifest_fd);
-
-    // Release lock before calling get_thread_wal (which also acquires manifest_lock)
+    fsync(manager->manifest_fd);  // Best-effort: migration path
     platform_unlock(&manager->manifest_lock);
 
     // 4. Read legacy WAL and write to thread-local WAL
@@ -635,7 +683,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
         return NULL;
     }
 
-    fsync(manager->manifest_fd);
+    fsync(manager->manifest_fd);  // Best-effort: migration path
 
     platform_unlock(&manager->manifest_lock);
 
@@ -700,15 +748,18 @@ void wal_manager_destroy(wal_manager_t* manager) {
                         thread_local_wal = NULL;
                     }
 
-                    // Flush and destroy debouncer before closing fd
-                    // (debouncer_destroy flushes any pending fsync callback
-                    // which needs the fd to still be open)
-                    if (twal->fsync_debouncer != NULL) {
-                        debouncer_flush(twal->fsync_debouncer);
-                        debouncer_destroy(twal->fsync_debouncer);
+                    // Flush buffer and cancel timer before closing fd
+                    platform_lock(&twal->lock);
+                    if (twal->batch_count > 0) {
+                        thread_wal_flush_buffer_locked(twal);
                     }
+                    if (twal->timer_active && twal->wheel != NULL) {
+                        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                        twal->timer_active = 0;
+                    }
+                    platform_unlock(&twal->lock);
 
-                    // Close file descriptor (after debouncer callback has fsync'd)
+                    // Close file descriptor (after buffer flush and timer cancel)
                     if (twal->fd >= 0) {
                         fsync(twal->fd);
                         close(twal->fd);
@@ -731,7 +782,7 @@ void wal_manager_destroy(wal_manager_t* manager) {
 
         // Close manifest file
         if (manager->manifest_fd >= 0) {
-            fsync(manager->manifest_fd);
+            fsync(manager->manifest_fd);  // Best-effort: destroy path
             close(manager->manifest_fd);
         }
 
@@ -804,9 +855,6 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
                 if (thread_local_wal->file_path != NULL) {
                     free(thread_local_wal->file_path);
                 }
-                if (thread_local_wal->fsync_debouncer != NULL) {
-                    debouncer_destroy(thread_local_wal->fsync_debouncer);
-                }
                 platform_lock_destroy(&thread_local_wal->lock);
                 free(thread_local_wal);
                 thread_local_wal = NULL;
@@ -833,25 +881,42 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
 static int thread_wal_rotate(thread_wal_t* twal) {
     if (twal == NULL) return -1;
 
+    // Save old file info for potential rollback
+    char* old_file_path = twal->file_path;
+    int old_fd = twal->fd;
+
     // Seal the current file (flush, close, mark SEALED in manifest)
-    if (twal->fd >= 0) {
-        fsync(twal->fd);
-        close(twal->fd);
+    if (old_fd >= 0) {
+        if (fsync(old_fd) != 0) {
+            log_warn("fsync failed on WAL seal (fd=%d, errno=%d)", old_fd, errno);
+        }
+        close(old_fd);
         twal->fd = -1;
     }
 
-    // Update manifest to mark old file as SEALED
-    write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
+    // Update manifest to mark old file as SEALED (under manifest_lock)
+    platform_lock(&twal->manager->manifest_lock);
+    int rc = write_manifest_entry(twal->manager, twal->thread_id, old_file_path,
                         WAL_FILE_SEALED, &twal->newest_txn_id);
+    platform_unlock(&twal->manager->manifest_lock);
+
+    if (rc != 0) {
+        log_error("Failed to write SEALED manifest entry for %s", old_file_path);
+        // Attempt rollback: reopen old file
+        twal->fd = open(old_file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (twal->fd < 0) {
+            log_error("Rollback failed: cannot reopen old WAL file %s", old_file_path);
+        }
+        free(old_file_path);
+        return -1;
+    }
 
     // Track sealed file count
     twal->manager->sealed_count++;
 
-    // Free old file path
-    if (twal->file_path) {
-        free(twal->file_path);
-        twal->file_path = NULL;
-    }
+    // Free old file path (now committed as SEALED)
+    free(old_file_path);
+    twal->file_path = NULL;
 
     // Generate new file path with a unique suffix (timestamp-based)
     char filename[96];
@@ -860,6 +925,7 @@ static int thread_wal_rotate(thread_wal_t* twal) {
              (unsigned long)twal->newest_txn_id.time);
     twal->file_path = path_join(twal->manager->location, filename);
     if (twal->file_path == NULL) {
+        log_error("Failed to allocate path for rotated WAL file");
         return -1;
     }
 
@@ -884,9 +950,13 @@ static int thread_wal_rotate(thread_wal_t* twal) {
 
     // Write initial manifest entry (ACTIVE) for new file
     platform_lock(&twal->manager->manifest_lock);
-    write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
+    rc = write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
                         WAL_FILE_ACTIVE, &twal->newest_txn_id);
     platform_unlock(&twal->manager->manifest_lock);
+
+    if (rc != 0) {
+        log_warn("Failed to write ACTIVE manifest entry for new WAL file %s", twal->file_path);
+    }
 
     return 0;
 }
@@ -897,41 +967,13 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         return -1;
     }
 
-    // Acquire lock for thread safety
-    platform_lock(&twal->lock);
-
-    // Check file size limit — rotate if needed
-    if (twal->current_size >= twal->max_size) {
-        // Check sealed WAL limit before rotating
-        size_t max_sealed = twal->manager->config.max_sealed_wals;
-        if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
-            // Too many sealed WALs — try compaction first
-            platform_unlock(&twal->lock);
-            int compact_rc = compact_wal_files(twal->manager);
-            platform_lock(&twal->lock);
-            if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
-                log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
-                         twal->manager->sealed_count, max_sealed);
-                platform_unlock(&twal->lock);
-                return -1;
-            }
-        }
-
-        if (thread_wal_rotate(twal) != 0) {
-            log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
-                     (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
-            platform_unlock(&twal->lock);
-            return -1;
-        }
-    }
-
     // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
     // Calculate CRC32 of data
     uint32_t crc = wal_crc32(data->data, data->size);
 
     // Prepare header buffer: type(1) + txn_id(24) + crc32(4) + data_len(4)
-    uint8_t header_buf[33];  // 1 + 24 + 4 + 4 = 33 bytes
-    uint8_t* ptr = header_buf;
+    uint8_t header[33];  // 1 + 24 + 4 + 4 = 33 bytes
+    uint8_t* ptr = header;
 
     // Write type (1 byte)
     *ptr++ = (uint8_t)type;
@@ -947,20 +989,122 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     // Write data length (4 bytes, big-endian)
     write_uint32_be(ptr, (uint32_t)data->size);
 
-    // Write header and data atomically using writev() with O_APPEND
-    struct iovec iov[2];
-    iov[0].iov_base = header_buf;
-    iov[0].iov_len = sizeof(header_buf);
-    iov[1].iov_base = data->data;
-    iov[1].iov_len = data->size;
-    ssize_t bytes_written = writev(twal->fd, iov, 2);
-    if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
-        platform_unlock(&twal->lock);
-        return -1;
+    size_t entry_size = 33 + data->size;
+
+    // Acquire lock for thread safety
+    platform_lock(&twal->lock);
+
+    // Check file size limit — rotate if needed (account for buffered data)
+    if (twal->current_size + twal->entry_buf_used >= twal->max_size) {
+        // Flush buffer before rotation check
+        if (twal->batch_count > 0) {
+            if (thread_wal_flush_buffer_locked(twal) != 0) {
+                platform_unlock(&twal->lock);
+                return -1;
+            }
+        }
+
+        if (twal->current_size >= twal->max_size) {
+            // Check sealed WAL limit before rotating
+            size_t max_sealed = twal->manager->config.max_sealed_wals;
+            if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
+                // Too many sealed WALs — try compaction first
+                platform_unlock(&twal->lock);
+                int compact_rc = compact_wal_files(twal->manager);
+                platform_lock(&twal->lock);
+                if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
+                    log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
+                             twal->manager->sealed_count, max_sealed);
+                    platform_unlock(&twal->lock);
+                    return -1;
+                }
+            }
+
+            if (thread_wal_rotate(twal) != 0) {
+                log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
+                         (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
+                platform_unlock(&twal->lock);
+                return -1;
+            }
+        }
     }
 
-    // Update file size
-    twal->current_size += sizeof(header_buf) + data->size;
+    // If entry is too large for buffer, write directly
+    if (entry_size > sizeof(twal->entry_buf)) {
+        // Flush any buffered entries first
+        if (twal->batch_count > 0) {
+            if (thread_wal_flush_buffer_locked(twal) != 0) {
+                platform_unlock(&twal->lock);
+                return -1;
+            }
+        }
+
+        // Write header and data atomically using writev() with O_APPEND
+        struct iovec iov[2];
+        iov[0].iov_base = header;
+        iov[0].iov_len = 33;
+        iov[1].iov_base = data->data;
+        iov[1].iov_len = data->size;
+        ssize_t bytes_written = writev(twal->fd, iov, 2);
+        if (bytes_written != (ssize_t)(33 + data->size)) {
+            platform_unlock(&twal->lock);
+            return -1;
+        }
+
+        twal->current_size += bytes_written;
+
+        // Update transaction ID tracking
+        if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
+            twal->oldest_txn_id = txn_id;
+        }
+        twal->newest_txn_id = txn_id;
+
+        // Handle sync modes for direct write
+        int result = 0;
+        if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+            if (fsync(twal->fd) != 0) {
+                result = -1;
+            }
+            twal->pending_writes = 0;
+        } else {
+            twal->pending_writes++;
+            if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
+                if (fsync(twal->fd) != 0) {
+                    log_warn("fsync failed on WAL direct write (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
+                    result = -1;
+                }
+                twal->pending_writes = 0;
+            }
+        }
+
+        platform_unlock(&twal->lock);
+        return result;
+    }
+
+    // Check if buffer needs flushing before adding new entry
+    if (twal->entry_buf_used + entry_size > sizeof(twal->entry_buf)) {
+        if (thread_wal_flush_buffer_locked(twal) != 0) {
+            platform_unlock(&twal->lock);
+            return -1;
+        }
+    }
+
+    // Copy header + data to buffer
+    memcpy(twal->entry_buf + twal->entry_buf_used, header, 33);
+    twal->entry_buf_used += 33;
+    memcpy(twal->entry_buf + twal->entry_buf_used, data->data, data->size);
+    twal->entry_buf_used += data->size;
+    twal->batch_count++;
+
+    // Safety: flush if buffer is more than half full (prevents entry_buf overflow)
+    if (twal->entry_buf_used > sizeof(twal->entry_buf) / 2) {
+        if (thread_wal_flush_buffer_locked(twal) != 0) {
+            platform_unlock(&twal->lock);
+            return -1;
+        }
+        platform_unlock(&twal->lock);
+        return 0;
+    }
 
     // Update transaction ID tracking
     if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
@@ -968,33 +1112,24 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     }
     twal->newest_txn_id = txn_id;
 
-    // Handle sync modes
+    // Handle flush triggers
     int result = 0;
-    switch (twal->sync_mode) {
-        case WAL_SYNC_IMMEDIATE:
-            // Fsync immediately
-            if (fsync(twal->fd) != 0) {
-                result = -1;
-            }
-            twal->pending_writes = 0;
-            break;
-
-        case WAL_SYNC_DEBOUNCED:
-            // Debounce fsync
-            if (twal->fsync_debouncer != NULL) {
-                twal->pending_writes++;
-                debouncer_debounce(twal->fsync_debouncer);
-            }
-            break;
-
-        case WAL_SYNC_ASYNC:
-            // No fsync, rely on OS page cache
-            twal->pending_writes++;
-            break;
-
-        default:
-            result = -1;
-            break;
+    if (twal->batch_count >= twal->batch_size) {
+        // Batch full — flush immediately
+        if (thread_wal_flush_buffer_locked(twal) != 0) {
+            platform_unlock(&twal->lock);
+            return -1;
+        }
+    } else if (twal->batch_count == 1 && !twal->timer_active) {
+        // First entry — start one-shot timer (DEBOUNCED only)
+        if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->wheel != NULL &&
+            twal->debounce_ms > 0) {
+            twal->timer_active = 1;
+            twal->timer_id = hierarchical_timing_wheel_set_timer(
+                twal->wheel, twal,
+                wal_flush_timer_callback, NULL,
+                (timer_duration_t){.milliseconds = twal->debounce_ms});
+        }
     }
 
     platform_unlock(&twal->lock);
@@ -1008,20 +1143,39 @@ int thread_wal_seal(thread_wal_t* twal) {
 
     platform_lock(&twal->lock);
 
+    // Flush any buffered entries before sealing
+    if (twal->batch_count > 0) {
+        thread_wal_flush_buffer_locked(twal);
+    }
+
+    // Cancel one-shot timer if active
+    if (twal->timer_active && twal->wheel != NULL) {
+        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+        twal->timer_active = 0;
+    }
+
     if (twal->fd >= 0) {
         // Flush pending writes
-        fsync(twal->fd);
+        if (fsync(twal->fd) != 0) {
+            log_warn("fsync failed on WAL seal (fd=%d, errno=%d)", twal->fd, errno);
+        }
         close(twal->fd);
         twal->fd = -1;
     }
 
     // Update manifest to mark file as SEALED
-    write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
+    platform_lock(&twal->manager->manifest_lock);
+    int rc = write_manifest_entry(twal->manager, twal->thread_id, twal->file_path,
                         WAL_FILE_SEALED, &twal->newest_txn_id);
+    platform_unlock(&twal->manager->manifest_lock);
+
+    if (rc != 0) {
+        log_warn("Failed to write SEALED manifest entry for %s", twal->file_path);
+    }
 
     platform_unlock(&twal->lock);
 
-    return 0;
+    return rc;
 }
 
 int wal_manager_recover(wal_manager_t* manager, void* db) {
@@ -1562,7 +1716,9 @@ int compact_wal_files(wal_manager_t* manager) {
             return WAL_ERROR_IO;
         }
     }
-    fsync(fd);
+    if (fsync(fd) != 0) {
+        log_warn("fsync failed on compacted WAL file (errno=%d)", errno);
+    }
     close(fd);
 
     // Update manifest: mark sealed files as COMPACTED, add compacted file as SEALED
@@ -1570,9 +1726,12 @@ int compact_wal_files(wal_manager_t* manager) {
     size_t compacted_count = 0;
     for (size_t i = 0; i < count; i++) {
         if (entries[i].status == WAL_FILE_SEALED) {
-            write_manifest_entry(manager, entries[i].thread_id,
+            int rc = write_manifest_entry(manager, entries[i].thread_id,
                                 entries[i].file_path, WAL_FILE_COMPACTED,
                                 &entries[i].newest_txn_id);
+            if (rc != 0) {
+                log_warn("Failed to write COMPACTED manifest entry for %s", entries[i].file_path);
+            }
             compacted_count++;
         }
     }
@@ -1586,7 +1745,10 @@ int compact_wal_files(wal_manager_t* manager) {
 
     // Add compacted file
     transaction_id_t empty_txn = {0, 0, 0};
-    write_manifest_entry(manager, 0, compacted_path, WAL_FILE_SEALED, &empty_txn);
+    rc = write_manifest_entry(manager, 0, compacted_path, WAL_FILE_SEALED, &empty_txn);
+    if (rc != 0) {
+        log_warn("Failed to write SEALED manifest entry for compacted file %s", compacted_path);
+    }
 
     platform_unlock(&manager->manifest_lock);
 
@@ -1622,15 +1784,21 @@ int wal_manager_flush(wal_manager_t* manager) {
         if (twal != NULL) {
             platform_lock(&twal->lock);
 
-            // Flush any pending writes to disk
-            if (twal->fd >= 0) {
-                fsync(twal->fd);
-                log_info("  Flushed WAL file: %s", twal->file_path);
+            // Flush any buffered entries and cancel pending timer
+            if (twal->batch_count > 0) {
+                thread_wal_flush_buffer_locked(twal);
+            }
+            if (twal->timer_active && twal->wheel != NULL) {
+                hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                twal->timer_active = 0;
             }
 
-            // Flush debouncer if present
-            if (twal->fsync_debouncer != NULL) {
-                debouncer_flush(twal->fsync_debouncer);
+            // Flush any pending writes to disk
+            if (twal->fd >= 0) {
+                if (fsync(twal->fd) != 0) {
+                    log_warn("fsync failed on WAL flush (fd=%d, errno=%d)", twal->fd, errno);
+                }
+                log_info("  Flushed WAL file: %s", twal->file_path);
             }
 
             platform_unlock(&twal->lock);
@@ -1640,7 +1808,7 @@ int wal_manager_flush(wal_manager_t* manager) {
     // Flush manifest
     platform_lock(&manager->manifest_lock);
     if (manager->manifest_fd >= 0) {
-        fsync(manager->manifest_fd);
+        fsync(manager->manifest_fd);  // Best-effort: flush path
     }
     platform_unlock(&manager->manifest_lock);
 

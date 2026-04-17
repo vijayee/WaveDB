@@ -7,7 +7,7 @@
 #include "../Buffer/buffer.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
-#include "../Time/debouncer.h"
+#include "../Time/wheel.h"
 #include "wal.h"
 
 #ifdef __cplusplus
@@ -82,8 +82,14 @@ typedef struct {
     char* file_path;                     // Path to thread-local file
     int fd;                              // File descriptor
     wal_sync_mode_e sync_mode;          // Durability mode
-    debouncer_t* fsync_debouncer;       // For DEBOUNCED mode
-    hierarchical_timing_wheel_t* wheel; // Timing wheel
+    uint8_t entry_buf[4096];            // Pre-allocated entry buffer
+    size_t entry_buf_used;              // Bytes used in entry_buf
+    uint16_t batch_count;               // Entries accumulated in current batch
+    uint16_t batch_size;                 // Max entries before flush (1=IMMEDIATE, 4=DEBOUNCED/ASYNC)
+    int timer_active;                    // 1 if one-shot timer is pending
+    uint64_t timer_id;                   // ID of the pending one-shot timer
+    uint64_t debounce_ms;               // Timer delay in milliseconds
+    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timer
     transaction_id_t oldest_txn_id;      // First transaction in file
     transaction_id_t newest_txn_id;      // Last transaction in file
     size_t current_size;                 // Current file size
@@ -106,7 +112,7 @@ struct wal_manager {
     size_t thread_count;                 // Number of threads
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
+    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timer
     size_t sealed_count;                 // Number of sealed WAL files not yet compacted
 };
 

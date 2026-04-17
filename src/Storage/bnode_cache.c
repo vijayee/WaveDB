@@ -425,6 +425,30 @@ void bnode_cache_release(file_bnode_cache_t* fcache, bnode_cache_item_t* item) {
         item->ref_count--;
     }
 
+    /* If invalidated while we held a reference, free it now */
+    if (item->ref_count == 0 && item->invalidate_pending) {
+        shard_remove(shard, item->offset);
+        lru_remove(shard, item);
+        if (item->is_dirty) {
+            shard->dirty_count--;
+            shard->dirty_bytes -= item->data_len;
+        }
+        shard->item_count--;
+        fcache->current_memory -= item->data_len;
+        if (fcache->mgr != NULL) {
+            fcache->mgr->current_total_memory -= item->data_len;
+        }
+        if (fcache->page_file != NULL) {
+            page_file_mark_stale(fcache->page_file, item->offset, item->data_len);
+        }
+        if (item->data != NULL) {
+            free(item->data);
+        }
+        free(item);
+        platform_unlock(&shard->lock);
+        return;
+    }
+
     /* Move to front on release so recently released items are last to evict */
     if (item->ref_count == 0 && shard_find(shard, item->offset) != NULL) {
         lru_move_to_front(shard, item);
@@ -460,11 +484,12 @@ int bnode_cache_flush_dirty(file_bnode_cache_t* fcache) {
         bnode_cache_shard_t* shard = &fcache->shards[s];
         platform_lock(&shard->lock);
 
-        /* Walk the LRU to find dirty items */
+        /* Walk the LRU to find dirty items, pin them to prevent UAF */
         bnode_cache_item_t* item = shard->lru_first;
         while (item != NULL) {
-            if (item->is_dirty) {
+            if (item->is_dirty && !item->invalidate_pending) {
                 if (dirty_idx < total_dirty) {
+                    item->ref_count++;
                     dirty_items[dirty_idx++] = item;
                 }
             }
@@ -496,6 +521,10 @@ int bnode_cache_flush_dirty(file_bnode_cache_t* fcache) {
                                        item->data + 4, item->data_len - 4,
                                        &new_offset, bids, 64, &num_bids);
         if (rc != 0) {
+            /* Release pins for remaining items (including this one) */
+            for (size_t j = i; j < dirty_idx; j++) {
+                bnode_cache_release(fcache, dirty_items[j]);
+            }
             free(dirty_items);
             return -1;
         }
@@ -521,6 +550,9 @@ int bnode_cache_flush_dirty(file_bnode_cache_t* fcache) {
             shard->dirty_count--;
             shard->dirty_bytes -= item->data_len;
 
+            /* Release our pin (under lock) */
+            if (item->ref_count > 0) item->ref_count--;
+
             platform_unlock(&shard->lock);
         } else {
             /* Different shards: move between shards */
@@ -533,6 +565,7 @@ int bnode_cache_flush_dirty(file_bnode_cache_t* fcache) {
             old_shard->item_count--;
             old_shard->dirty_count--;
             old_shard->dirty_bytes -= item->data_len;
+            if (item->ref_count > 0) item->ref_count--;
             platform_unlock(&old_shard->lock);
 
             item->offset = new_offset;
@@ -562,6 +595,16 @@ int bnode_cache_invalidate(file_bnode_cache_t* fcache, uint64_t offset) {
     if (item == NULL) {
         platform_unlock(&shard->lock);
         return -1;
+    }
+
+    if (item->ref_count > 0) {
+        // Item is in use by another thread — mark for deletion on release
+        // rather than freeing it now (would cause use-after-free).
+        // bnode_cache_release will check this flag and free the item.
+        item->invalidate_pending = 1;
+        item->is_dirty = 0;  // Don't flush a doomed item
+        platform_unlock(&shard->lock);
+        return 0;  // Deferred invalidation
     }
 
     /* Remove from hash map */
