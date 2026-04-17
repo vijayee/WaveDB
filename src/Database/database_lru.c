@@ -13,27 +13,7 @@
 // Hash function for path_t*
 static size_t hash_path(const path_t* path) {
     if (path == NULL) return 0;
-
-    size_t hash = 0;
-    size_t len = path_length((path_t*)path);
-
-    for (size_t i = 0; i < len; i++) {
-        identifier_t* id = path_get((path_t*)path, i);
-        if (id != NULL) {
-            // Hash each chunk in the identifier
-            for (int j = 0; j < id->chunks.length; j++) {
-                chunk_t* chunk = id->chunks.data[j];
-                if (chunk != NULL) {
-                    // Simple hash combining - faster for short keys than xxHash
-                    for (size_t k = 0; k < chunk->size; k++) {
-                        hash = hash * 31 + chunk->data[k];
-                    }
-                }
-            }
-        }
-    }
-
-    return hash;
+    return (size_t)path_hash((path_t*)path);
 }
 
 // Compare function for path_t*
@@ -41,13 +21,20 @@ static int compare_path(const path_t* a, const path_t* b) {
     if (a == NULL && b == NULL) return 0;
     if (a == NULL) return -1;
     if (b == NULL) return 1;
+
+    // Fast path: compare cached hashes first (O(1))
+    uint64_t hash_a = path_hash((path_t*)a);
+    uint64_t hash_b = path_hash((path_t*)b);
+    if (hash_a != hash_b) return (hash_a < hash_b) ? -1 : 1;
+
+    // Hashes match (or both are zero) — fall back to full comparison
     return path_compare((path_t*)a, (path_t*)b);
 }
 
-// Duplicate path for hashmap key
+// Duplicate path for hashmap key — uses reference counting instead of deep copy
 static path_t* dup_path(const path_t* path) {
     if (path == NULL) return NULL;
-    return path_copy((path_t*)path);
+    return path_reference((path_t*)path);
 }
 
 // Free path key
@@ -108,6 +95,7 @@ static database_lru_node_t* lru_node_create(path_t* path, identifier_t* value) {
     if (node == NULL) return NULL;
 
     node->path = path;
+    node->key_hash = path != NULL ? path_hash(path) : 0;
     node->value = value;
     node->memory_size = calculate_entry_memory(path, value);  // Calculate memory usage
     node->next = NULL;

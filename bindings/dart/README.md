@@ -66,7 +66,7 @@ final db = WaveDB(
     lruMemoryMb: 100,       // 100 MB cache
     lruShards: 0,           // auto-scale to CPU cores
     walSyncMode: 'debounced',
-    walDebounceMs: 50,
+    walDebounceMs: 250,
   ),
 );
 ```
@@ -80,7 +80,7 @@ final db = WaveDB(
 | `lruShards` | `64` | LRU shard count (0 = auto-scale) |
 | `workerThreads` | `4` | Worker pool size |
 | `walSyncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
-| `walDebounceMs` | `100` | fsync debounce window (ms) |
+| `walDebounceMs` | `250` | fsync debounce window (ms) |
 | `walMaxFileSize` | `131072` | Max WAL file size before sealing |
 
 ### WAL Sync Modes
@@ -88,8 +88,8 @@ final db = WaveDB(
 | Mode | Behavior | Durability | Throughput |
 |------|----------|------------|------------|
 | `'immediate'` | fsync after every write | Highest | ~1K ops/sec |
-| `'debounced'` | batched fsync (default 100ms) | High | ~300K ops/sec |
-| `'async'` | no fsync, OS cache only | Lowest | ~400K ops/sec |
+| `'debounced'` | batched fsync (default 250ms) | High | ~300K ops/sec |
+| `'async'` | buffered write, idle drain every 250ms | Process crash only | ~400K ops/sec |
 
 ## API Reference
 
@@ -253,10 +253,10 @@ Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 4 worker threads.
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.46M ops/sec | 679 ns | 777 ns |
-| Put | 160K ops/sec | 5.8 µs | 9.9 µs |
-| Delete | 216K ops/sec | 4.4 µs | 7.0 µs |
-| Mixed (70% read) | 1.49M ops/sec | 664 ns | 750 ns |
+| Get | 1.71M ops/sec | 565 ns | 919 ns |
+| Put | 352K ops/sec | 2.35 µs | 6.34 µs |
+| Delete | 278K ops/sec | 3.49 µs | 5.78 µs |
+| Mixed (70% read) | 1.71M ops/sec | 582 ns | 709 ns |
 
 ### Dart FFI (DEBOUNCED WAL, 4 worker threads)
 

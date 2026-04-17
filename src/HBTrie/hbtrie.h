@@ -42,7 +42,7 @@ typedef struct file_bnode_cache_t file_bnode_cache_t;
 typedef struct hbtrie_node_t {
     refcounter_t refcounter;          // MUST be first member
     ATOMIC_TYPE(uint64_t) seq;        // Seqlock: even=stable, odd=writing
-    PLATFORMLOCKTYPE(write_lock);      // Writer mutual exclusion
+    spinlock_t write_lock;             // Writer mutual exclusion (adaptive spinlock)
 
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
     uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)
@@ -52,6 +52,18 @@ typedef struct hbtrie_node_t {
     uint8_t is_loaded;                // 1 if in memory, 0 if on-disk stub
     uint8_t is_dirty;                 // 1 if modified since last save
 } hbtrie_node_t;
+
+/**
+ * hbtrie_combined_t - Combined allocation for hbtrie_node + its root bnode.
+ *
+ * Since every hbtrie_node always has exactly one root bnode, allocating
+ * them together improves cache locality and reduces allocation overhead.
+ * The hbtrie_node_t's btree field points to &combined->bnode.
+ */
+typedef struct hbtrie_combined_t {
+    hbtrie_node_t node;
+    bnode_t bnode;
+} hbtrie_combined_t;
 
 /**
  * hbtrie_t - Top-level HBTrie structure.

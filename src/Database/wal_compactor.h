@@ -6,6 +6,7 @@
 #define WAVEDB_WAL_COMPACTOR_H
 
 #include "wal_manager.h"
+#include "../Util/threadding.h"
 
 #ifdef __cplusplus
 extern "C" {

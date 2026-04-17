@@ -26,6 +26,7 @@ extern "C" {
 typedef struct {
     refcounter_t refcounter;     // MUST be first member
     vec_t(identifier_t*) identifiers; // Path components
+    uint64_t hash;               // Cached hash (0 = not computed yet)
 } path_t;
 
 /**
@@ -91,6 +92,29 @@ int path_is_empty(path_t* path);
  * @return New path or NULL on failure
  */
 path_t* path_copy(path_t* path);
+
+/**
+ * Increment reference count on a path.
+ *
+ * Returns the same pointer with an incremented reference count.
+ * Use this instead of path_copy() when you don't need an independent copy.
+ *
+ * @param path  Path to reference
+ * @return Same path pointer with incremented refcount, NULL if path is NULL
+ */
+path_t* path_reference(path_t* path);
+
+/**
+ * Compute and cache the hash of a path.
+ *
+ * The hash is computed on first call and cached in path->hash.
+ * Subsequent calls return the cached value (O(1)).
+ * Calling path_append() invalidates the cached hash.
+ *
+ * @param path  Path to hash
+ * @return Hash value, 0 if path is NULL
+ */
+uint64_t path_hash(path_t* path);
 
 /**
  * Compare two paths.

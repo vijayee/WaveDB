@@ -309,7 +309,6 @@ graphql_layer_t* graphql_layer_create(const char* path,
         if (layer->registry) graphql_type_registry_destroy(layer->registry);
         free(layer->version);
         free(layer->db_path);
-        refcounter_destroy_lock((refcounter_t*)layer);
         database_destroy(db);
         free(layer);
         graphql_layer_config_destroy(cfg);
@@ -362,7 +361,6 @@ void graphql_layer_destroy(graphql_layer_t* layer) {
         free(layer->version);
         free(layer->query_type);
         free(layer->mutation_type);
-        refcounter_destroy_lock((refcounter_t*)layer);
         free(layer);
     }
 }

@@ -44,7 +44,6 @@ void path_destroy(path_t* path) {
     }
     vec_deinit(&path->identifiers);
 
-    refcounter_destroy_lock((refcounter_t*)path);
     memory_pool_free(path, sizeof(path_t));
   }
 }
@@ -57,6 +56,10 @@ int path_append(path_t* path, identifier_t* id) {
   if (ref == NULL) return -1;
 
   vec_push(&path->identifiers, ref);
+
+  // Invalidate cached hash since content changed
+  path->hash = 0;
+
   return 0;
 }
 
@@ -91,7 +94,45 @@ path_t* path_copy(path_t* path) {
     vec_push(&copy->identifiers, id_copy);
   }
 
+  // Copy cached hash since content is identical
+  copy->hash = path->hash;
+
   return copy;
+}
+
+path_t* path_reference(path_t* path) {
+  if (path == NULL) return NULL;
+  refcounter_reference((refcounter_t*)path);
+  return path;
+}
+
+uint64_t path_hash(path_t* path) {
+  if (path == NULL) return 0;
+
+  // Return cached hash if already computed
+  if (path->hash != 0) return path->hash;
+
+  // Compute hash from identifiers and chunks
+  uint64_t hash = 0;
+  size_t len = (size_t)path->identifiers.length;
+
+  for (size_t i = 0; i < len; i++) {
+    identifier_t* id = path->identifiers.data[i];
+    if (id != NULL) {
+      for (int j = 0; j < id->chunks.length; j++) {
+        chunk_t* chunk = id->chunks.data[j];
+        if (chunk != NULL) {
+          for (size_t k = 0; k < chunk->size; k++) {
+            hash = hash * 31 + chunk->data[k];
+          }
+        }
+      }
+    }
+  }
+
+  // Store 0 hash as 1 to distinguish "not computed" from actual 0
+  path->hash = hash != 0 ? hash : 1;
+  return path->hash;
 }
 
 int path_compare(path_t* a, path_t* b) {

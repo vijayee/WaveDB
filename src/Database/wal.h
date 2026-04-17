@@ -27,6 +27,22 @@ typedef enum {
 } wal_type_e;
 
 /**
+ * WAL payload format constants.
+ * Used to distinguish CBOR-encoded payloads from binary-encoded payloads
+ * during WAL recovery.
+ */
+#define WAL_FORMAT_CBOR   0
+#define WAL_FORMAT_BINARY 1
+
+/**
+ * Magic byte prefix for binary WAL payloads.
+ * Binary payloads start with this byte to unambiguously distinguish
+ * them from CBOR-encoded payloads. CBOR arrays start with 0x80-0x9F
+ * (definite) or 0x9F (indefinite), so 0xB1 never conflicts.
+ */
+#define WAL_BINARY_MAGIC  0xB1
+
+/**
  * WAL entry header structure (written before CBOR data)
  */
 typedef struct {
@@ -93,7 +109,7 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code);
  * @param max_size    Maximum file size before rotation (0 for default)
  * @param sync_mode   Sync mode (IMMEDIATE/DEBOUNCED/ASYNC)
  * @param wheel       Timing wheel for debounced fsync (required if DEBOUNCED)
- * @param debounce_ms Debounce wait time in milliseconds (0 for default 100ms)
+ * @param debounce_ms Debounce wait time in milliseconds (0 for default 250ms)
  * @param error_code  Output parameter for error code (0 on success)
  * @return New WAL or NULL on failure
  */

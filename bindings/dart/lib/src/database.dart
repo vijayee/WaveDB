@@ -36,7 +36,7 @@ class WaveDBConfig {
   /// WAL sync mode: 'immediate', 'debounced', 'async' (default: 'debounced')
   final String? walSyncMode;
 
-  /// Debounce window for fsync in ms (default: 100)
+  /// Debounce window for fsync in ms (default: 250)
   final int? walDebounceMs;
 
   /// Max WAL file size before sealing (default: 131072)

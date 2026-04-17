@@ -28,11 +28,44 @@ typedef struct {
 typedef void (*log_LogFn)(log_Event *ev);
 typedef void (*log_LockFn)(bool lock, void *udata);
 
-enum { LOG_TRACE, LOG_DEBUG, LOG_INFO, LOG_WARN, LOG_ERROR, LOG_FATAL };
+#define LOG_LEVEL_TRACE 0
+#define LOG_LEVEL_DEBUG 1
+#define LOG_LEVEL_INFO  2
+#define LOG_LEVEL_WARN  3
+#define LOG_LEVEL_ERROR 4
+#define LOG_LEVEL_FATAL 5
 
+/* Legacy aliases used in log_log() calls */
+#define LOG_TRACE  LOG_LEVEL_TRACE
+#define LOG_DEBUG  LOG_LEVEL_DEBUG
+#define LOG_INFO   LOG_LEVEL_INFO
+#define LOG_WARN   LOG_LEVEL_WARN
+#define LOG_ERROR  LOG_LEVEL_ERROR
+#define LOG_FATAL  LOG_LEVEL_FATAL
+
+#ifndef LOG_COMPILE_LEVEL
+#define LOG_COMPILE_LEVEL LOG_LEVEL_INFO
+#endif
+
+#if LOG_COMPILE_LEVEL <= LOG_LEVEL_TRACE
 #define log_trace(...) log_log(LOG_TRACE, __FILE__, __LINE__, __VA_ARGS__)
+#else
+#define log_trace(...) ((void)0)
+#endif
+
+#if LOG_COMPILE_LEVEL <= LOG_LEVEL_DEBUG
 #define log_debug(...) log_log(LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
+#else
+#define log_debug(...) ((void)0)
+#endif
+
+#if LOG_COMPILE_LEVEL <= LOG_LEVEL_INFO
 #define log_info(...)  log_log(LOG_INFO,  __FILE__, __LINE__, __VA_ARGS__)
+#else
+#define log_info(...)  ((void)0)
+#endif
+
+/* warn, error, fatal are always compiled in — they're rare and important */
 #define log_warn(...)  log_log(LOG_WARN,  __FILE__, __LINE__, __VA_ARGS__)
 #define log_error(...) log_log(LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
 #define log_fatal(...) log_log(LOG_FATAL, __FILE__, __LINE__, __VA_ARGS__)

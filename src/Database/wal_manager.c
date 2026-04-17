@@ -2,6 +2,7 @@
 #include "database.h"
 #include "batch.h"
 #include "crc32.h"
+#include "wal.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/path.h"
 #include "../HBTrie/identifier.h"
@@ -11,7 +12,7 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
-#include "../Util/log.h"
+#include "../Util/endian.h"
 #include "../Time/wheel.h"
 #include <cbor.h>
 #include <string.h>
@@ -24,8 +25,6 @@
 #include <stdatomic.h>
 #include <sys/uio.h>
 #include <dirent.h>
-#include "../Util/log.h"  // For log_warn
-#include <cbor.h>
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
@@ -36,6 +35,169 @@
 
 // Maximum entries to prevent DoS
 #define MANIFEST_MAX_ENTRIES 10000
+
+/**
+ * Detect whether WAL payload data is binary or CBOR format.
+ *
+ * Binary payloads start with WAL_BINARY_MAGIC (0xB1).
+ * CBOR arrays start with 0x80-0x9F (definite) or 0x9F (indefinite).
+ * This is unambiguous since 0xB1 is not a valid CBOR array header.
+ */
+static int wal_detect_format(const uint8_t* data, size_t data_len) {
+    if (data_len < 1) return WAL_FORMAT_CBOR;  // Too short, try CBOR
+    if (data[0] == WAL_BINARY_MAGIC) {
+        return WAL_FORMAT_BINARY;
+    }
+    return WAL_FORMAT_CBOR;
+}
+
+/**
+ * Decode a binary-encoded PUT entry payload.
+ *
+ * Binary format:
+ *   [0xB1 magic][path_count:2B BE][path_len:4B BE]
+ *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+ *   [value_len:4B BE][value:value_len bytes]
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int decode_put_entry_binary(uint8_t* data, size_t data_len,
+                                    path_t** out_path, identifier_t** out_value,
+                                    uint8_t chunk_size) {
+    size_t pos = 0;
+
+    // Skip magic byte
+    if (pos + 1 > data_len) return -1;
+    if (data[pos] != WAL_BINARY_MAGIC) return -1;
+    pos += 1;
+
+    // Read path_count
+    if (pos + 2 > data_len) return -1;
+    uint16_t path_count = read_be16(data + pos);
+    pos += 2;
+
+    // Read path_len (validation)
+    if (pos + 4 > data_len) return -1;
+    uint32_t path_len = read_be32(data + pos);
+    pos += 4;
+
+    // path_len validated against total_id_bytes below
+
+    // Build path
+    path_t* path = path_create();
+    if (path == NULL) return -1;
+
+    size_t total_id_bytes = 0;
+    for (uint16_t i = 0; i < path_count; i++) {
+        if (pos + 2 > data_len) { path_destroy(path); return -1; }
+        uint16_t id_len = read_be16(data + pos);
+        pos += 2;
+
+        if (pos + id_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* id_buf = buffer_create_from_pointer_copy(data + pos, id_len);
+        if (id_buf == NULL) { path_destroy(path); return -1; }
+        identifier_t* ident = identifier_create(id_buf, chunk_size);
+        buffer_destroy(id_buf);
+        if (ident == NULL) { path_destroy(path); return -1; }
+        path_append(path, ident);
+        DEREFERENCE(ident);
+        pos += id_len;
+        total_id_bytes += id_len;
+    }
+
+    // Validate path_len matches
+    if (total_id_bytes != path_len) {
+        log_error("WAL Recovery: Binary path_len mismatch (expected=%u, actual=%zu)",
+                  path_len, total_id_bytes);
+        path_destroy(path);
+        return -1;
+    }
+
+    // Read value
+    if (pos + 4 > data_len) { path_destroy(path); return -1; }
+    uint32_t value_len = read_be32(data + pos);
+    pos += 4;
+
+    identifier_t* value = NULL;
+    if (value_len > 0) {
+        if (pos + value_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* val_buf = buffer_create_from_pointer_copy(data + pos, value_len);
+        if (val_buf == NULL) { path_destroy(path); return -1; }
+        value = identifier_create(val_buf, chunk_size);
+        buffer_destroy(val_buf);
+        if (value == NULL) { path_destroy(path); return -1; }
+        pos += value_len;
+    }
+
+    *out_path = path;
+    *out_value = value;
+    return 0;
+}
+
+/**
+ * Decode a binary-encoded DELETE entry payload (path only, no value).
+ *
+ * Binary format:
+ *   [0xB1 magic][path_count:2B BE][path_len:4B BE]
+ *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+ *
+ * Returns 0 on success, -1 on error.
+ */
+static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
+                                       path_t** out_path,
+                                       uint8_t chunk_size) {
+    size_t pos = 0;
+
+    // Skip magic byte
+    if (pos + 1 > data_len) return -1;
+    if (data[pos] != WAL_BINARY_MAGIC) return -1;
+    pos += 1;
+
+    // Read path_count
+    if (pos + 2 > data_len) return -1;
+    uint16_t path_count = read_be16(data + pos);
+    pos += 2;
+
+    // Read path_len (validation)
+    if (pos + 4 > data_len) return -1;
+    uint32_t path_len = read_be32(data + pos);
+    pos += 4;
+
+    // path_len validated against total_id_bytes below
+
+    // Build path
+    path_t* path = path_create();
+    if (path == NULL) return -1;
+
+    size_t total_id_bytes = 0;
+    for (uint16_t i = 0; i < path_count; i++) {
+        if (pos + 2 > data_len) { path_destroy(path); return -1; }
+        uint16_t id_len = read_be16(data + pos);
+        pos += 2;
+
+        if (pos + id_len > data_len) { path_destroy(path); return -1; }
+        buffer_t* id_buf = buffer_create_from_pointer_copy(data + pos, id_len);
+        if (id_buf == NULL) { path_destroy(path); return -1; }
+        identifier_t* ident = identifier_create(id_buf, chunk_size);
+        buffer_destroy(id_buf);
+        if (ident == NULL) { path_destroy(path); return -1; }
+        path_append(path, ident);
+        DEREFERENCE(ident);
+        pos += id_len;
+        total_id_bytes += id_len;
+    }
+
+    // Validate path_len matches
+    if (total_id_bytes != path_len) {
+        log_error("WAL Recovery: Binary delete path_len mismatch (expected=%u, actual=%zu)",
+                  path_len, total_id_bytes);
+        path_destroy(path);
+        return -1;
+    }
+
+    *out_path = path;
+    return 0;
+}
 
 // Thread-local storage for WAL
 static __thread thread_wal_t* thread_local_wal = NULL;
@@ -62,6 +224,20 @@ static void wal_flush_timer_callback(void* ctx) {
     if (twal->batch_count > 0) {
         thread_wal_flush_buffer_locked(twal);
     }
+
+    // DEBOUNCED mode: fsync all pending writes to disk
+    if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->fd >= 0) {
+        if (fsync(twal->fd) != 0) {
+            log_warn("fsync failed on WAL timer (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
+        }
+        twal->pending_writes = 0;
+    }
+
+    // ASYNC mode: data is now in kernel buffer after write
+    if (twal->sync_mode == WAL_SYNC_ASYNC) {
+        twal->pending_writes = 0;
+    }
+
     twal->timer_active = 0;
     platform_unlock(&twal->lock);
 }
@@ -73,25 +249,26 @@ static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
     // Write all buffered entries
     ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
     if (written != (ssize_t)twal->entry_buf_used) {
+        log_error("WAL: Failed to write buffered entries (expected %zu, wrote %zd)",
+                  twal->entry_buf_used, written);
         return -1;
     }
 
     twal->current_size += twal->entry_buf_used;
 
-    // Handle sync modes
+    // Handle sync modes:
+    // - IMMEDIATE: fsync after every flush (data is on disk)
+    // - DEBOUNCED: defer fsync to the timer; just track pending writes
+    // - ASYNC: data is in kernel buffer after write(), no fsync needed
     if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
         if (fsync(twal->fd) != 0) {
             log_warn("fsync failed on WAL flush (IMMEDIATE, fd=%d, errno=%d)", twal->fd, errno);
         }
         twal->pending_writes = 0;
+    } else if (twal->sync_mode == WAL_SYNC_ASYNC) {
+        twal->pending_writes = 0;  // Data is in kernel buffer, safe from process crash
     } else {
-        twal->pending_writes += twal->batch_count;
-        if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
-            if (fsync(twal->fd) != 0) {
-                log_warn("fsync failed on WAL flush (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
-            }
-            twal->pending_writes = 0;
-        }
+        twal->pending_writes += twal->batch_count;  // DEBOUNCED: track for timer fsync
     }
 
     // Reset buffer
@@ -99,20 +276,6 @@ static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
     twal->batch_count = 0;
 
     return 0;
-}
-
-// Write uint32 in big-endian
-static void write_uint32_be(uint8_t* buf, uint32_t val) {
-    buf[0] = (val >> 24) & 0xFF;
-    buf[1] = (val >> 16) & 0xFF;
-    buf[2] = (val >> 8) & 0xFF;
-    buf[3] = val & 0xFF;
-}
-
-// Read uint32 from big-endian
-static uint32_t read_uint32_be_local(const uint8_t* buf) {
-    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
 }
 
 // Structure to hold WAL entry during recovery
@@ -159,8 +322,8 @@ static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* c
         wal_type_e type = (wal_type_e)header[0];
         transaction_id_t txn_id;
         transaction_id_deserialize(&txn_id, header + 1);
-        uint32_t expected_crc = read_uint32_be_local(header + 25);
-        uint32_t data_len = read_uint32_be_local(header + 29);
+        uint32_t expected_crc = read_be32(header + 25);
+        uint32_t data_len = read_be32(header + 29);
 
         // Read data
         buffer_t* data = buffer_create(data_len);
@@ -451,11 +614,17 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     }
     log_info("Created WAL file: %s (thread_id=%lu, fd=%d)", twal->file_path, (unsigned long)thread_id, twal->fd);
 
-    // Initialize write buffer and timer
-    twal->wheel = manager->wheel;  // Use manager's timing wheel
+    // Initialize batch write buffer
+    twal->wheel = manager->wheel;
     twal->entry_buf_used = 0;
     twal->batch_count = 0;
-    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 4;
+    // IMMEDIATE mode requires batch_size=1 (fsync after every entry).
+    // Defensive: if someone passes batch_size=0 with IMMEDIATE, force it to 1.
+    if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+        twal->batch_size = 1;
+    } else {
+        twal->batch_size = 0;  // 0 = flush when buffer full
+    }
     twal->timer_active = 0;
     twal->timer_id = 0;
     twal->debounce_ms = manager->config.debounce_ms;
@@ -508,7 +677,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->thread_count = 0;
     manager->thread_capacity = 0;
     manager->sealed_count = 0;
-    manager->wheel = wheel;  // Store timing wheel for one-shot timer
+    manager->wheel = wheel;  // Store timing wheel for one-shot timers
 
     // Create manifest file
     manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -759,7 +928,7 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     }
                     platform_unlock(&twal->lock);
 
-                    // Close file descriptor (after buffer flush and timer cancel)
+                    // Close file descriptor (after flushing buffered entries)
                     if (twal->fd >= 0) {
                         fsync(twal->fd);
                         close(twal->fd);
@@ -793,7 +962,6 @@ void wal_manager_destroy(wal_manager_t* manager) {
         // Destroy locks
         platform_lock_destroy(&manager->manifest_lock);
         platform_lock_destroy(&manager->threads_lock);
-        refcounter_destroy_lock((refcounter_t*)manager);
 
         free(manager);
     }
@@ -854,6 +1022,10 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
                 }
                 if (thread_local_wal->file_path != NULL) {
                     free(thread_local_wal->file_path);
+                }
+                // Cancel timer if active
+                if (thread_local_wal->timer_active && thread_local_wal->wheel != NULL) {
+                    hierarchical_timing_wheel_cancel_timer(thread_local_wal->wheel, thread_local_wal->timer_id);
                 }
                 platform_lock_destroy(&thread_local_wal->lock);
                 free(thread_local_wal);
@@ -968,35 +1140,27 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     }
 
     // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
-    // Calculate CRC32 of data
+    size_t entry_size = 33 + data->size;
+
+    // Calculate CRC32 of data (before acquiring lock)
     uint32_t crc = wal_crc32(data->data, data->size);
 
-    // Prepare header buffer: type(1) + txn_id(24) + crc32(4) + data_len(4)
-    uint8_t header[33];  // 1 + 24 + 4 + 4 = 33 bytes
-    uint8_t* ptr = header;
-
-    // Write type (1 byte)
+    // Prepare header buffer (before acquiring lock)
+    uint8_t header_buf[33];
+    uint8_t* ptr = header_buf;
     *ptr++ = (uint8_t)type;
-
-    // Write transaction ID (24 bytes, serialized)
     transaction_id_serialize(&txn_id, ptr);
     ptr += 24;
-
-    // Write CRC32 (4 bytes, big-endian)
-    write_uint32_be(ptr, crc);
+    write_be32(ptr, crc);
     ptr += 4;
-
-    // Write data length (4 bytes, big-endian)
-    write_uint32_be(ptr, (uint32_t)data->size);
-
-    size_t entry_size = 33 + data->size;
+    write_be32(ptr, (uint32_t)data->size);
 
     // Acquire lock for thread safety
     platform_lock(&twal->lock);
 
-    // Check file size limit — rotate if needed (account for buffered data)
-    if (twal->current_size + twal->entry_buf_used >= twal->max_size) {
-        // Flush buffer before rotation check
+    // Check file size limit — rotate if needed (accounting for buffered data)
+    if (twal->current_size + twal->entry_buf_used + entry_size >= twal->max_size) {
+        // Flush buffer first
         if (twal->batch_count > 0) {
             if (thread_wal_flush_buffer_locked(twal) != 0) {
                 platform_unlock(&twal->lock);
@@ -1004,97 +1168,92 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             }
         }
 
-        if (twal->current_size >= twal->max_size) {
-            // Check sealed WAL limit before rotating
-            size_t max_sealed = twal->manager->config.max_sealed_wals;
-            if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
-                // Too many sealed WALs — try compaction first
-                platform_unlock(&twal->lock);
-                int compact_rc = compact_wal_files(twal->manager);
-                platform_lock(&twal->lock);
-                if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
-                    log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
-                             twal->manager->sealed_count, max_sealed);
-                    platform_unlock(&twal->lock);
-                    return -1;
-                }
-            }
-
-            if (thread_wal_rotate(twal) != 0) {
-                log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
-                         (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
+        // Check sealed WAL limit before rotating
+        size_t max_sealed = twal->manager->config.max_sealed_wals;
+        if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
+            platform_unlock(&twal->lock);
+            int compact_rc = compact_wal_files(twal->manager);
+            platform_lock(&twal->lock);
+            if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
+                log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
+                         twal->manager->sealed_count, max_sealed);
                 platform_unlock(&twal->lock);
                 return -1;
             }
+        }
+
+        if (thread_wal_rotate(twal) != 0) {
+            log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
+                     (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
+            platform_unlock(&twal->lock);
+            return -1;
         }
     }
 
-    // If entry is too large for buffer, write directly
-    if (entry_size > sizeof(twal->entry_buf)) {
-        // Flush any buffered entries first
-        if (twal->batch_count > 0) {
-            if (thread_wal_flush_buffer_locked(twal) != 0) {
-                platform_unlock(&twal->lock);
-                return -1;
-            }
-        }
-
-        // Write header and data atomically using writev() with O_APPEND
-        struct iovec iov[2];
-        iov[0].iov_base = header;
-        iov[0].iov_len = 33;
-        iov[1].iov_base = data->data;
-        iov[1].iov_len = data->size;
-        ssize_t bytes_written = writev(twal->fd, iov, 2);
-        if (bytes_written != (ssize_t)(33 + data->size)) {
+    // Check if entry fits in buffer — if not, flush first
+    if (twal->entry_buf_used + entry_size > sizeof(twal->entry_buf)) {
+        // Buffer full — flush before adding
+        if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
             return -1;
         }
 
-        twal->current_size += bytes_written;
-
-        // Update transaction ID tracking
-        if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
-            twal->oldest_txn_id = txn_id;
-        }
-        twal->newest_txn_id = txn_id;
-
-        // Handle sync modes for direct write
-        int result = 0;
-        if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
-            if (fsync(twal->fd) != 0) {
-                result = -1;
+        // If entry itself is too large for the buffer, write directly
+        if (entry_size > sizeof(twal->entry_buf)) {
+            struct iovec iov[2];
+            iov[0].iov_base = header_buf;
+            iov[0].iov_len = sizeof(header_buf);
+            iov[1].iov_base = data->data;
+            iov[1].iov_len = data->size;
+            ssize_t bytes_written = writev(twal->fd, iov, 2);
+            if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
+                platform_unlock(&twal->lock);
+                return -1;
             }
-            twal->pending_writes = 0;
-        } else {
-            twal->pending_writes++;
-            if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
+            twal->current_size += sizeof(header_buf) + data->size;
+
+            // Handle sync for direct write with error checking
+            int result = 0;
+            if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+                if (fsync(twal->fd) != 0) {
+                    log_warn("fsync failed on WAL direct write (IMMEDIATE, fd=%d, errno=%d)", twal->fd, errno);
+                    result = -1;
+                }
+                twal->pending_writes = 0;
+            } else if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
                 if (fsync(twal->fd) != 0) {
                     log_warn("fsync failed on WAL direct write (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
                     result = -1;
                 }
                 twal->pending_writes = 0;
+            } else {
+                // ASYNC: data is in kernel buffer
+                twal->pending_writes = 0;
             }
-        }
 
-        platform_unlock(&twal->lock);
-        return result;
-    }
+            // Update transaction ID tracking
+            if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
+                twal->oldest_txn_id = txn_id;
+            }
+            twal->newest_txn_id = txn_id;
 
-    // Check if buffer needs flushing before adding new entry
-    if (twal->entry_buf_used + entry_size > sizeof(twal->entry_buf)) {
-        if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
-            return -1;
+            return result;
         }
     }
 
     // Copy header + data to buffer
-    memcpy(twal->entry_buf + twal->entry_buf_used, header, 33);
-    twal->entry_buf_used += 33;
+    memcpy(twal->entry_buf + twal->entry_buf_used, header_buf, sizeof(header_buf));
+    twal->entry_buf_used += sizeof(header_buf);
     memcpy(twal->entry_buf + twal->entry_buf_used, data->data, data->size);
     twal->entry_buf_used += data->size;
     twal->batch_count++;
+
+    // Update transaction ID tracking
+    if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
+        twal->oldest_txn_id = txn_id;
+    }
+    twal->newest_txn_id = txn_id;
 
     // Safety: flush if buffer is more than half full (prevents entry_buf overflow)
     if (twal->entry_buf_used > sizeof(twal->entry_buf) / 2) {
@@ -1106,24 +1265,19 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         return 0;
     }
 
-    // Update transaction ID tracking
-    if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
-        twal->oldest_txn_id = txn_id;
-    }
-    twal->newest_txn_id = txn_id;
-
     // Handle flush triggers
-    int result = 0;
-    if (twal->batch_count >= twal->batch_size) {
-        // Batch full — flush immediately
+    if (twal->batch_size > 0 && twal->batch_count >= twal->batch_size) {
+        // Batch limit reached — flush immediately (IMMEDIATE mode)
         if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
             return -1;
         }
     } else if (twal->batch_count == 1 && !twal->timer_active) {
-        // First entry — start one-shot timer (DEBOUNCED only)
-        if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->wheel != NULL &&
-            twal->debounce_ms > 0) {
+        // First entry — start one-shot idle drain timer.
+        // DEBOUNCED: flush buffer + fsync on timer fire.
+        // ASYNC: flush buffer to kernel only (survives process crash, not power failure).
+        // IMMEDIATE: no timer needed (batch_size=1 flushes every entry).
+        if (twal->sync_mode != WAL_SYNC_IMMEDIATE && twal->wheel != NULL && twal->debounce_ms > 0) {
             twal->timer_active = 1;
             twal->timer_id = hierarchical_timing_wheel_set_timer(
                 twal->wheel, twal,
@@ -1133,7 +1287,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     }
 
     platform_unlock(&twal->lock);
-    return result;
+    return 0;
 }
 
 int thread_wal_seal(thread_wal_t* twal) {
@@ -1143,7 +1297,7 @@ int thread_wal_seal(thread_wal_t* twal) {
 
     platform_lock(&twal->lock);
 
-    // Flush any buffered entries before sealing
+    // Flush buffer and cancel timer before sealing
     if (twal->batch_count > 0) {
         thread_wal_flush_buffer_locked(twal);
     }
@@ -1444,52 +1598,78 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
             }
             case WAL_PUT:
             case WAL_DELETE: {
-                // Deserialize individual PUT/DELETE entry
-                // Format: CBOR array [path, value]
-                struct cbor_load_result result;
-                cbor_item_t* entry_cbor;
-
-                log_info("WAL Recovery: Deserializing entry (type=%s, data_size=%zu)",
-                         entry->type == WAL_PUT ? "PUT" : "DELETE", data ? data->size : 0);
-
-                entry_cbor = cbor_load(data->data, data->size, &result);
-                if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
-                    if (entry_cbor) cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Failed to load entry CBOR (error=%d)", result.error.code);
-                    break;
-                }
-
-                // Verify it's an array with correct number of elements
-                // PUT operations have 2 elements [path, value]
-                // DELETE operations have 1 element [path]
-                size_t expected_size = (entry->type == WAL_PUT) ? 2 : 1;
-                if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != expected_size) {
-                    cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Invalid entry format (expected %zu elements, got %zu)",
-                              expected_size, cbor_isa_array(entry_cbor) ? cbor_array_size(entry_cbor) : 0);
-                    break;
-                }
-
-                // Get path
-                cbor_item_t* path_cbor = cbor_array_handle(entry_cbor)[0];
-                path_t* path = cbor_to_path(path_cbor, database->chunk_size);
-                if (path == NULL) {
-                    cbor_decref(&entry_cbor);
-                    log_error("WAL Recovery: Failed to deserialize path");
-                    break;
-                }
-
-                // Get value (for PUT operations)
+                // Detect payload format: binary or CBOR
+                int format = wal_detect_format(data->data, data->size);
+                path_t* path = NULL;
                 identifier_t* value = NULL;
-                if (entry->type == WAL_PUT) {
-                    cbor_item_t* value_cbor = cbor_array_handle(entry_cbor)[1];
-                    value = cbor_to_identifier(value_cbor, database->chunk_size);
-                    if (value == NULL) {
-                        path_destroy(path);
-                        cbor_decref(&entry_cbor);
-                        log_error("WAL Recovery: Failed to deserialize value");
+
+                log_info("WAL Recovery: Deserializing entry (type=%s, data_size=%zu, format=%s)",
+                         entry->type == WAL_PUT ? "PUT" : "DELETE",
+                         data ? data->size : 0,
+                         format == WAL_FORMAT_BINARY ? "binary" : "CBOR");
+
+                if (format == WAL_FORMAT_BINARY) {
+                    // Binary format
+                    if (entry->type == WAL_PUT) {
+                        if (decode_put_entry_binary(data->data, data->size,
+                                                    &path, &value,
+                                                    database->chunk_size) != 0) {
+                            log_error("WAL Recovery: Failed to decode binary PUT entry");
+                            break;
+                        }
+                    } else {
+                        if (decode_delete_entry_binary(data->data, data->size,
+                                                       &path,
+                                                       database->chunk_size) != 0) {
+                            log_error("WAL Recovery: Failed to decode binary DELETE entry");
+                            break;
+                        }
+                    }
+                } else {
+                    // Legacy CBOR format
+                    struct cbor_load_result result;
+                    cbor_item_t* entry_cbor;
+
+                    entry_cbor = cbor_load(data->data, data->size, &result);
+                    if (entry_cbor == NULL || result.error.code != CBOR_ERR_NONE) {
+                        if (entry_cbor) cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Failed to load entry CBOR (error=%d)", result.error.code);
                         break;
                     }
+
+                    // Verify it's an array with correct number of elements
+                    // PUT operations have 2 elements [path, value]
+                    // DELETE operations have 1 element [path]
+                    size_t expected_size = (entry->type == WAL_PUT) ? 2 : 1;
+                    if (!cbor_isa_array(entry_cbor) || cbor_array_size(entry_cbor) != expected_size) {
+                        cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Invalid entry format (expected %zu elements, got %zu)",
+                                  expected_size, cbor_isa_array(entry_cbor) ? cbor_array_size(entry_cbor) : 0);
+                        break;
+                    }
+
+                    // Get path
+                    cbor_item_t* path_cbor = cbor_array_handle(entry_cbor)[0];
+                    path = cbor_to_path(path_cbor, database->chunk_size);
+                    if (path == NULL) {
+                        cbor_decref(&entry_cbor);
+                        log_error("WAL Recovery: Failed to deserialize path");
+                        break;
+                    }
+
+                    // Get value (for PUT operations)
+                    if (entry->type == WAL_PUT) {
+                        cbor_item_t* value_cbor = cbor_array_handle(entry_cbor)[1];
+                        value = cbor_to_identifier(value_cbor, database->chunk_size);
+                        if (value == NULL) {
+                            path_destroy(path);
+                            cbor_decref(&entry_cbor);
+                            log_error("WAL Recovery: Failed to deserialize value");
+                            break;
+                        }
+                    }
+
+                    cbor_decref(&entry_cbor);
                 }
 
                 // Apply operation to trie
@@ -1497,8 +1677,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                     if (path == NULL) {
                         log_error("WAL Recovery: Path is NULL, skipping entry");
                         if (value) identifier_destroy(value);
-                        cbor_decref(&entry_cbor);
-                        continue;
+                        break;
                     }
 
                     // Convert first identifier to string for logging
@@ -1523,8 +1702,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 } else {
                     if (path == NULL) {
                         log_error("WAL Recovery: Path is NULL for DELETE, skipping entry");
-                        cbor_decref(&entry_cbor);
-                        continue;
+                        break;
                     }
 
                     identifier_t* removed = hbtrie_delete(database->trie, path, entry->txn_id);
@@ -1536,7 +1714,6 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
                 // Clean up
                 path_destroy(path);
                 if (value) identifier_destroy(value);
-                cbor_decref(&entry_cbor);
                 break;
             }
             default:
@@ -1687,8 +1864,8 @@ int compact_wal_files(wal_manager_t* manager) {
         header[0] = (uint8_t)all_entries[i].type;
         transaction_id_serialize(&all_entries[i].txn_id, header + 1);
         uint32_t crc = wal_crc32(all_entries[i].data->data, all_entries[i].data->size);
-        write_uint32_be(header + 25, crc);
-        write_uint32_be(header + 29, (uint32_t)all_entries[i].data->size);
+        write_be32(header + 25, crc);
+        write_be32(header + 29, (uint32_t)all_entries[i].data->size);
         ssize_t bytes_written = write(fd, header, 33);
         if (bytes_written != 33) {
             close(fd);
@@ -1784,21 +1961,25 @@ int wal_manager_flush(wal_manager_t* manager) {
         if (twal != NULL) {
             platform_lock(&twal->lock);
 
-            // Flush any buffered entries and cancel pending timer
+            // Flush buffer first (writes buffered entries to kernel),
+            // then fsync (ensures data is on disk for DEBOUNCED/IMMEDIATE).
+            // Order matters: fsync before buffer flush would miss the
+            // most recently buffered entries.
             if (twal->batch_count > 0) {
                 thread_wal_flush_buffer_locked(twal);
             }
-            if (twal->timer_active && twal->wheel != NULL) {
-                hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
-                twal->timer_active = 0;
-            }
-
-            // Flush any pending writes to disk
             if (twal->fd >= 0) {
                 if (fsync(twal->fd) != 0) {
                     log_warn("fsync failed on WAL flush (fd=%d, errno=%d)", twal->fd, errno);
                 }
                 log_info("  Flushed WAL file: %s", twal->file_path);
+                twal->pending_writes = 0;
+            }
+            // Cancel timer if active
+            if (twal->timer_active && twal->wheel != NULL) {
+                hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                twal->timer_active = 0;
+            }
             }
 
             platform_unlock(&twal->lock);

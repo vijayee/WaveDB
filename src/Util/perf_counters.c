@@ -17,7 +17,6 @@ perf_counters_t* perf_counters_create(void) {
 void perf_counters_destroy(perf_counters_t* counters) {
     refcounter_dereference((refcounter_t*) counters);
     if (refcounter_count((refcounter_t*) counters) == 0) {
-        refcounter_destroy_lock((refcounter_t*) counters);
         free(counters);
     }
 }

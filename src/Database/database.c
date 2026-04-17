@@ -14,6 +14,7 @@
 #include "../Storage/page_file.h"
 #include "../Storage/bnode_cache.h"
 #include "../Util/memory_pool.h"
+#include "../Util/endian.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -74,59 +75,139 @@ static void abort_database_delete(void* ctx) {
     free(del_ctx);
 }
 
-// Helper to encode path+value for WAL
-static buffer_t* encode_put_entry(path_t* path, identifier_t* value) {
-    cbor_item_t* array = cbor_new_definite_array(2);
-    if (array == NULL) return NULL;
+// Helper to encode path+value for WAL using binary format
+// Binary payload format:
+//   [0xB1 magic][path_count:2B BE][path_len:4B BE]
+//   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+//   [value_len:4B BE][value:value_len bytes]
+static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
+    // Calculate total size
+    size_t path_count = path_length(path);
+    size_t total_size = 1 + 2 + 4;  // magic + path_count + path_len
 
-    cbor_item_t* path_cbor = path_to_cbor(path);
-    if (path_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
+    // Calculate size for each identifier and accumulate path_len
+    size_t path_byte_len = 0;
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+        total_size += 2 + id_len;  // id_len field + id_data
+        path_byte_len += id_len;
     }
-    cbor_array_push(array, path_cbor);
-    cbor_decref(&path_cbor);
 
-    cbor_item_t* value_cbor = identifier_to_cbor(value);
-    if (value_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
+    // Value
+    size_t value_len = (value != NULL) ? value->length : 0;
+    total_size += 4 + value_len;  // value_len field + value_data
+
+    // Allocate buffer
+    buffer_t* buffer = buffer_create(total_size);
+    if (buffer == NULL) return NULL;
+
+    uint8_t* pos = buffer->data;
+
+    // Write magic byte for unambiguous format detection
+    *pos++ = WAL_BINARY_MAGIC;
+
+    // Write path_count (2 bytes BE)
+    write_be16(pos, (uint16_t)path_count);
+    pos += 2;
+
+    // Write path_len (4 bytes BE) - total byte length of all identifier data
+    write_be32(pos, (uint32_t)path_byte_len);
+    pos += 4;
+
+    // Write each identifier
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+
+        write_be16(pos, (uint16_t)id_len);
+        pos += 2;
+
+        // Get raw identifier data
+        buffer_t* id_buf = identifier_to_buffer(id);
+        if (id_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, id_buf->data, id_len);
+        pos += id_len;
+        buffer_destroy(id_buf);
     }
-    cbor_array_push(array, value_cbor);
-    cbor_decref(&value_cbor);
 
-    unsigned char* buf = NULL;
-    size_t buf_size = 0;
-    cbor_serialize_alloc(array, &buf, &buf_size);
-    cbor_decref(&array);
+    // Write value
+    write_be32(pos, (uint32_t)value_len);
+    pos += 4;
 
-    if (buf == NULL) return NULL;
+    if (value_len > 0) {
+        buffer_t* val_buf = identifier_to_buffer(value);
+        if (val_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, val_buf->data, value_len);
+        pos += value_len;
+        buffer_destroy(val_buf);
+    }
 
-    buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
+    buffer->size = (size_t)(pos - buffer->data);
     return buffer;
 }
 
-// Helper to encode path for WAL
-static buffer_t* encode_delete_entry(path_t* path) {
-    cbor_item_t* array = cbor_new_definite_array(1);
-    if (array == NULL) return NULL;
+// Helper to encode path for WAL delete using binary format
+// Binary payload format (no value):
+//   [0xB1 magic][path_count:2B BE][path_len:4B BE]
+//   For each identifier: [id_len:2B BE][id_data:id_len bytes]
+static buffer_t* encode_delete_entry_binary(path_t* path) {
+    // Calculate total size
+    size_t path_count = path_length(path);
+    size_t total_size = 1 + 2 + 4;  // magic + path_count + path_len
 
-    cbor_item_t* path_cbor = path_to_cbor(path);
-    if (path_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
+    // Calculate size for each identifier
+    size_t path_byte_len = 0;
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+        total_size += 2 + id_len;  // id_len field + id_data
+        path_byte_len += id_len;
     }
-    cbor_array_push(array, path_cbor);
-    cbor_decref(&path_cbor);
 
-    unsigned char* buf = NULL;
-    size_t buf_size = 0;
-    cbor_serialize_alloc(array, &buf, &buf_size);
-    cbor_decref(&array);
+    // Allocate buffer
+    buffer_t* buffer = buffer_create(total_size);
+    if (buffer == NULL) return NULL;
 
-    if (buf == NULL) return NULL;
+    uint8_t* pos = buffer->data;
 
-    buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
+    // Write magic byte for unambiguous format detection
+    *pos++ = WAL_BINARY_MAGIC;
+
+    // Write path_count (2 bytes BE)
+    write_be16(pos, (uint16_t)path_count);
+    pos += 2;
+
+    // Write path_len (4 bytes BE)
+    write_be32(pos, (uint32_t)path_byte_len);
+    pos += 4;
+
+    // Write each identifier
+    for (size_t i = 0; i < path_count; i++) {
+        identifier_t* id = path_get(path, i);
+        size_t id_len = id->length;
+
+        write_be16(pos, (uint16_t)id_len);
+        pos += 2;
+
+        // Get raw identifier data
+        buffer_t* id_buf = identifier_to_buffer(id);
+        if (id_buf == NULL) {
+            buffer_destroy(buffer);
+            return NULL;
+        }
+        memcpy(pos, id_buf->data, id_len);
+        pos += id_len;
+        buffer_destroy(id_buf);
+    }
+
+    buffer->size = (size_t)(pos - buffer->data);
     return buffer;
 }
 
@@ -676,7 +757,7 @@ database_t* database_create_with_config(const char* location,
 
     // Initialize write locks
     for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        platform_lock_init(&db->write_locks[i]);
+        spinlock_init(&db->write_locks[i]);
     }
 
     // Create storage directories if persistent
@@ -735,7 +816,7 @@ database_t* database_create_with_config(const char* location,
                             // Create hbtrie_node wrapper for loaded root
                             hbtrie_node_t* root_hbnode = hbtrie_node_create(db->trie->btree_node_size);
                             if (root_hbnode != NULL) {
-                                bnode_destroy(root_hbnode->btree);
+                                bnode_deinit(root_hbnode->btree);
                                 root_hbnode->btree = root_bnode;
                                 root_hbnode->btree_height = atomic_load(&root_bnode->level);
                                 root_hbnode->disk_offset = sb.root_offset;
@@ -791,7 +872,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -817,7 +898,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -835,7 +916,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -986,7 +1067,7 @@ void database_destroy(database_t* db) {
 
         // Destroy write lock shards
         for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
 
         // Destroy active config
@@ -1003,7 +1084,6 @@ void database_destroy(database_t* db) {
         }
 
         free(db->location);
-        refcounter_destroy_lock((refcounter_t*)db);
         free(db);
     }
     // If count > 0, other references exist and will handle cleanup when they dereference
@@ -1054,7 +1134,7 @@ static void _database_put(database_put_ctx_t* ctx) {
     }
 
     // Write to thread-local WAL first (durability)
-    buffer_t* entry = encode_put_entry(path, value);
+    buffer_t* entry = encode_put_entry_binary(path, value);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1066,15 +1146,15 @@ static void _database_put(database_put_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock (allows concurrent writes to different paths)
+    // Acquire sharded write lock (prevents root-node contention)
     size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Apply to trie with MVCC
     hbtrie_insert(db->trie, path, value, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_locks[shard]);
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1162,7 +1242,7 @@ static void _database_delete(database_delete_ctx_t* ctx) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_delete_entry(path);
+    buffer_t* entry = encode_delete_entry_binary(path);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1174,15 +1254,15 @@ static void _database_delete(database_delete_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock (allows concurrent writes to different paths)
+    // Acquire sharded write lock (prevents root-node contention)
     size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Remove from trie with MVCC (creates tombstone)
     identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_locks[shard]);
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1355,7 +1435,7 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_put_entry(path, value);
+    buffer_t* entry = encode_put_entry_binary(path, value);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1372,18 +1452,22 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         }
         buffer_destroy(entry);
     } else {
-        log_error("encode_put_entry returned NULL - cannot write to WAL");
+        log_error("encode_put_entry_binary returned NULL - cannot write to WAL");
     }
 
-    // Acquire sharded write lock
+    // Acquire sharded write lock. Per-node spinlocks in hbtrie_insert
+    // provide fine-grained exclusion within the trie, but the shard lock
+    // prevents root-node contention when many threads write concurrently.
+    // Without it, all writers contend on the root spinlock, serializing
+    // access regardless of key distribution.
     size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Apply to trie with MVCC
     hbtrie_insert(db->trie, path, value, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_locks[shard]);
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1471,7 +1555,7 @@ int database_delete_sync(database_t* db, path_t* path) {
     }
 
     // Write to thread-local WAL
-    buffer_t* entry = encode_delete_entry(path);
+    buffer_t* entry = encode_delete_entry_binary(path);
     if (entry != NULL) {
         thread_wal_t* twal = get_thread_wal(db->wal_manager);
         if (twal != NULL) {
@@ -1483,15 +1567,15 @@ int database_delete_sync(database_t* db, path_t* path) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock
+    // Acquire sharded write lock (prevents root-node contention)
     size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Remove from trie with MVCC (creates tombstone)
     identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
 
     // Release write lock
-    platform_unlock(&db->write_locks[shard]);
+    spinlock_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1512,11 +1596,7 @@ int database_delete_sync(database_t* db, path_t* path) {
 int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     if (db == NULL || path == NULL) return -1;
 
-    // Acquire sharded write lock for atomic read-modify-write
-    size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
-
-    // Read current value
+    // Read current value (lock-free via MVCC — no shard lock needed)
     transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
     identifier_t* current = hbtrie_find(db->trie, path, read_txn_id);
     int64_t old_val = 0;
@@ -1538,17 +1618,15 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
 
     int64_t new_val = old_val + delta;
 
-    // Write new value
+    // Prepare new value (outside shard lock — no blocking under spinlock)
     char val_str[32];
     snprintf(val_str, sizeof(val_str), "%lld", (long long)new_val);
 
-    // Create copies for the insert
     path_t* ins_path = path_copy(path);
     buffer_t* val_buf = buffer_create(strlen(val_str));
     if (val_buf == NULL || ins_path == NULL) {
         if (val_buf) buffer_destroy(val_buf);
         if (ins_path) path_destroy(ins_path);
-        platform_unlock(&db->write_locks[shard]);
         return -1;
     }
     memcpy(val_buf->data, val_str, strlen(val_str));
@@ -1557,18 +1635,20 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     buffer_destroy(val_buf);
     if (new_id == NULL) {
         path_destroy(ins_path);
-        platform_unlock(&db->write_locks[shard]);
         return -1;
     }
 
-    // Begin transaction
+    // Begin transaction (outside shard lock)
     txn_desc_t* txn = tx_manager_begin(db->tx_manager);
     if (txn == NULL) {
         path_destroy(ins_path);
         identifier_destroy(new_id);
-        platform_unlock(&db->write_locks[shard]);
         return -1;
     }
+
+    // Acquire shard lock only for the trie mutation
+    size_t shard = get_write_lock_shard(path);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Insert into trie
     hbtrie_insert(db->trie, ins_path, new_id, txn->txn_id);
@@ -1579,13 +1659,15 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     identifier_t* ejected = database_lru_cache_put(db->lru, cache_path, cache_val);
     if (ejected) identifier_destroy(ejected);
 
-    // Commit and cleanup
+    // Release shard lock
+    spinlock_unlock(&db->write_locks[shard]);
+
+    // Commit and cleanup (outside shard lock)
     tx_manager_commit(db->tx_manager, txn);
     txn_desc_destroy(txn);
     path_destroy(ins_path);
     identifier_destroy(new_id);
 
-    platform_unlock(&db->write_locks[shard]);
     return new_val;
 }
 
@@ -1695,18 +1777,9 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     batch->submitted = 1;
     platform_unlock(&batch->lock);
 
-    // Acquire ALL write locks (in order: 0-63)
-    for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        platform_lock(&db->write_locks[i]);
-    }
-
     // Serialize batch
     buffer_t* data = serialize_batch(batch);
     if (data == NULL) {
-        // Release locks
-        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
-        }
         txn_desc_destroy(txn);
         return -1;
     }
@@ -1715,10 +1788,6 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     thread_wal_t* twal = get_thread_wal(db->wal_manager);
     if (twal == NULL) {
         buffer_destroy(data);
-        // Release locks
-        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
-        }
         txn_desc_destroy(txn);
         return -1;
     }
@@ -1727,24 +1796,26 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     buffer_destroy(data);
 
     if (result != 0) {
-        // Release locks
-        for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
-        }
         txn_desc_destroy(txn);
         return result;
     }
 
-    // Apply to trie with MVCC
+    // Apply to trie with MVCC (acquire per-key shard lock per operation)
     platform_lock(&batch->lock);
     for (size_t i = 0; i < batch->count; i++) {
         int op_result;
         if (batch->ops[i].type == WAL_PUT) {
+            size_t shard = get_write_lock_shard(batch->ops[i].path);
+            spinlock_lock(&db->write_locks[shard]);
             op_result = hbtrie_insert(db->trie, batch->ops[i].path, batch->ops[i].value, txn->txn_id);
+            spinlock_unlock(&db->write_locks[shard]);
             // Invalidate LRU cache so subsequent reads see the new value
             database_lru_cache_delete(db->lru, batch->ops[i].path);
         } else {
+            size_t shard = get_write_lock_shard(batch->ops[i].path);
+            spinlock_lock(&db->write_locks[shard]);
             identifier_t* removed = hbtrie_delete(db->trie, batch->ops[i].path, txn->txn_id);
+            spinlock_unlock(&db->write_locks[shard]);
             op_result = 0; // Delete always succeeds
             if (removed) {
                 identifier_destroy(removed);
@@ -1756,10 +1827,6 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
         if (op_result != 0) {
             platform_unlock(&batch->lock);
             log_error("Batch apply failed at operation %zu", i);
-            // Release locks
-            for (size_t j = WRITE_LOCK_SHARDS; j > 0; j--) {
-                platform_unlock(&db->write_locks[j - 1]);
-            }
             txn_desc_destroy(txn);
             return -1;
         }
@@ -1769,11 +1836,6 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
     txn_desc_destroy(txn);
-
-    // Release locks (in reverse order: 63-0)
-    for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-        platform_unlock(&db->write_locks[i - 1]);
-    }
 
     return 0;
 }

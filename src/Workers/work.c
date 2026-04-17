@@ -21,7 +21,6 @@ void work_abort(work_t* work) {
 void work_destroy(work_t* work) {
   refcounter_dereference((refcounter_t*) work);
   if(refcounter_count((refcounter_t*) work) == 0) {
-    refcounter_destroy_lock((refcounter_t*) work);
     free(work);
   }
 }

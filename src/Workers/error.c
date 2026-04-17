@@ -26,7 +26,6 @@ void error_destroy(async_error_t* error) {
     free(error->message);
     free(error->file);
     free(error->function);
-    refcounter_destroy_lock((refcounter_t*) error);
     free(error);
   }
 }

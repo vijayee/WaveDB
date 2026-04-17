@@ -35,10 +35,68 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
   vec_init(&node->entries);
   atomic_init(&node->seq, 0);
-  platform_lock_init(&node->write_lock);
+  spinlock_init(&node->write_lock);
   refcounter_init((refcounter_t*)node);
 
   return node;
+}
+
+void bnode_init(bnode_t* node, uint32_t node_size) {
+  if (node == NULL) return;
+
+  if (node_size == 0) {
+    node_size = DEFAULT_NODE_SIZE;
+  }
+
+  // Zero-initialize the struct, then properly init atomic/lock fields
+  memset(node, 0, sizeof(bnode_t));
+
+  // Initialize fields that need proper initialization (not just zero)
+  atomic_init(&node->level, 1);
+  node->node_size = node_size;
+  node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
+  node->is_inline = 1;               // Embedded in combined allocation
+  vec_init(&node->entries);
+  atomic_init(&node->seq, 0);
+  spinlock_init(&node->write_lock);
+  refcounter_init((refcounter_t*)node);
+}
+
+void bnode_deinit(bnode_t* node) {
+  if (node == NULL) return;
+
+  spinlock_destroy(&node->write_lock);
+
+  // Free all entries
+  for (int i = 0; i < node->entries.length; i++) {
+    bnode_entry_t* entry = &node->entries.data[i];
+    bnode_entry_destroy_key(entry);
+    if (entry->has_value) {
+      if (entry->has_versions && entry->versions != NULL) {
+        // MVCC: destroy version chain
+        version_entry_t* current = entry->versions;
+        while (current != NULL) {
+          version_entry_t* next = current->next;
+          version_entry_destroy(current);
+          current = next;
+        }
+      } else if (entry->value != NULL) {
+        // Legacy: single value
+        identifier_destroy(entry->value);
+      }
+      // Free path chunk counts
+      if (entry->path_chunk_counts.data != NULL) {
+        vec_deinit(&entry->path_chunk_counts);
+      }
+    } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
+      // Internal B+tree child - do NOT destroy here (handled by bnode_destroy_tree)
+    } else if (entry->child != NULL) {
+      // Child hbtrie node should be destroyed separately
+      // (reference counting handles this)
+    }
+  }
+
+  vec_deinit(&node->entries);
 }
 
 void bnode_destroy(bnode_t* node) {
@@ -46,7 +104,7 @@ void bnode_destroy(bnode_t* node) {
 
   refcounter_dereference((refcounter_t*)node);
   if (refcounter_count((refcounter_t*)node) == 0) {
-    platform_lock_destroy(&node->write_lock);
+    spinlock_destroy(&node->write_lock);
 
     // Free all entries
     for (int i = 0; i < node->entries.length; i++) {
@@ -79,7 +137,11 @@ void bnode_destroy(bnode_t* node) {
     }
 
     vec_deinit(&node->entries);
-    memory_pool_free(node, sizeof(bnode_t));
+    // Inline bnodes are embedded in a combined allocation (e.g., hbtrie_combined_t)
+    // and must not be freed separately
+    if (!node->is_inline) {
+      memory_pool_free(node, sizeof(bnode_t));
+    }
   }
 }
 

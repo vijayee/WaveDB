@@ -98,7 +98,7 @@ WaveDB stores values at hierarchical key paths using an HBTrie — a B+tree wher
 
 **Concurrency:** MVCC (Multi-Version Concurrency Control) provides snapshot isolation — readers never block writers and never see partial updates. Each write creates a versioned entry; reads see the latest committed version at their transaction ID.
 
-**Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync, recommended), ASYNC (OS cache only).
+**Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync every 250ms, recommended), ASYNC (buffer flushed to kernel on 250ms idle timer, survives process crash but not power failure).
 
 **Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans.
 
@@ -111,7 +111,7 @@ database_config_t* config = database_config_default();
 config->lru_memory_mb = 100;       // LRU cache size (default: 50 MB)
 config->lru_shards = 64;           // LRU shards (default: 64, 0 = auto-scale)
 config->wal_config.sync_mode = WAL_SYNC_DEBOUNCED;  // WAL mode
-config->wal_config.debounce_ms = 100;                // fsync window (default: 100ms)
+config->wal_config.debounce_ms = 250;                // fsync window (default: 250ms)
 config->worker_threads = 4;        // Worker pool size (default: 4)
 
 // Immutable — set at creation, persisted
@@ -130,8 +130,8 @@ Config is persisted as CBOR at `<db_path>/.config` and automatically loaded on r
 | Mode | Behavior | Durability | Performance |
 |------|----------|------------|-------------|
 | `WAL_SYNC_IMMEDIATE` | fsync after every write | Highest | ~1K ops/sec |
-| `WAL_SYNC_DEBOUNCED` | batched fsync (default 100ms) | High | ~300K ops/sec |
-| `WAL_SYNC_ASYNC` | no fsync, OS cache only | Lowest | ~400K ops/sec |
+| `WAL_SYNC_DEBOUNCED` | batched fsync (default 250ms) | High | ~300K ops/sec |
+| `WAL_SYNC_ASYNC` | buffered write, idle drain every 250ms | Process crash only | ~400K ops/sec |
 
 ### Database Operations
 
@@ -270,18 +270,19 @@ Benchmarks on Linux x86_64, 8-core CPU, 50MB LRU cache.
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.55M ops/sec | 625 ns | 791 ns |
-| Put | 138K ops/sec | 6.8 µs | 11.3 µs |
-| Delete | 181K ops/sec | 5.4 µs | 8.6 µs |
-| Mixed (70% read) | 1.49M ops/sec | 666 ns | 822 ns |
+| Get | 1.71M ops/sec | 565 ns | 919 ns |
+| Put | 352K ops/sec | 2.35 µs | 6.34 µs |
+| Delete | 278K ops/sec | 3.49 µs | 5.78 µs |
+| Mixed (70% read) | 1.71M ops/sec | 582 ns | 709 ns |
 
-### Concurrent Throughput (DEBOUNCED WAL mode)
+### Concurrent Throughput (DEBOUNCED WAL mode, 250ms)
 
 | Threads | Write | Read | Mixed (70R/20W/10D) |
 |---------|-------|------|---------------------|
-| 4 | 142K ops/sec | 820K ops/sec | 269K ops/sec |
-| 16 | 161K ops/sec | 2.53M ops/sec | 418K ops/sec |
-| 32 | 107K ops/sec | 3.18M ops/sec | 437K ops/sec |
+| 1 | 201K ops/sec | 838K ops/sec | 298K ops/sec |
+| 4 | 413K ops/sec | 2.38M ops/sec | 613K ops/sec |
+| 16 | 693K ops/sec | 7.25M ops/sec | 905K ops/sec |
+| 32 | 938K ops/sec | 9.06M ops/sec | 1.02M ops/sec |
 
 ## Building
 

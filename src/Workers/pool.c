@@ -40,7 +40,6 @@ void work_pool_destroy(work_pool_t* pool) {
 #if _WIN32
     free(pool->workerIds);
 #endif
-    refcounter_destroy_lock((refcounter_t*) pool);
     free(pool);
   }
 }

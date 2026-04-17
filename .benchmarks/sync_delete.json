@@ -1,12 +1,12 @@
 {
   "name": "Sync Delete",
   "operations_count": 10000,
-  "total_time_ns": 46198432,
-  "min_time_ns": 4244,
-  "max_time_ns": 15030,
-  "p50_time_ns": 4382,
-  "p95_time_ns": 5198,
-  "p99_time_ns": 7005,
-  "operations_per_second": 216457.56,
-  "avg_latency_ns": 4619.84
+  "total_time_ns": 35960000,
+  "min_time_ns": 3396,
+  "max_time_ns": 16054,
+  "p50_time_ns": 3489,
+  "p95_time_ns": 3671,
+  "p99_time_ns": 5784,
+  "operations_per_second": 278109.73,
+  "avg_latency_ns": 3595.70
 }

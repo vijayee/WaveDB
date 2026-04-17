@@ -63,7 +63,7 @@ typedef struct {
  */
 typedef struct {
     wal_sync_mode_e sync_mode;           // IMMEDIATE, DEBOUNCED, ASYNC
-    uint64_t debounce_ms;                // Debounce window (default 100ms)
+    uint64_t debounce_ms;                // Debounce window (default 250ms)
     uint64_t idle_threshold_ms;          // Compaction idle trigger (default 10s)
     uint64_t compact_interval_ms;        // Compaction interval (default 60s)
     size_t max_file_size;                // Max file size before seal (default 128KB)
@@ -82,19 +82,22 @@ typedef struct {
     char* file_path;                     // Path to thread-local file
     int fd;                              // File descriptor
     wal_sync_mode_e sync_mode;          // Durability mode
-    uint8_t entry_buf[4096];            // Pre-allocated entry buffer
-    size_t entry_buf_used;              // Bytes used in entry_buf
-    uint16_t batch_count;               // Entries accumulated in current batch
-    uint16_t batch_size;                 // Max entries before flush (1=IMMEDIATE, 4=DEBOUNCED/ASYNC)
-    int timer_active;                    // 1 if one-shot timer is pending
-    uint64_t timer_id;                   // ID of the pending one-shot timer
-    uint64_t debounce_ms;               // Timer delay in milliseconds
     hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timer
     transaction_id_t oldest_txn_id;      // First transaction in file
     transaction_id_t newest_txn_id;      // Last transaction in file
     size_t current_size;                 // Current file size
     size_t max_size;                     // Max before seal
     uint64_t pending_writes;             // Count of writes since last fsync
+
+    // Batch write buffer (replaces debouncer)
+    uint8_t entry_buf[4096];            // Pre-allocated entry buffer
+    size_t entry_buf_used;              // Bytes used in entry_buf
+    uint16_t batch_count;                // Entries accumulated in current batch
+    uint16_t batch_size;                // Max entries before flush (1=IMMEDIATE, 0=buffer-full)
+    int timer_active;                   // 1 if one-shot timer is pending
+    uint64_t timer_id;                  // ID of the pending one-shot timer
+    uint64_t debounce_ms;               // Timer delay in milliseconds
+
     wal_manager_t* manager;              // Back-reference to manager
 } thread_wal_t;
 
@@ -112,7 +115,7 @@ struct wal_manager {
     size_t thread_count;                 // Number of threads
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timer
+    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timers
     size_t sealed_count;                 // Number of sealed WAL files not yet compacted
 };
 
@@ -127,7 +130,7 @@ typedef struct {
 } wal_recovery_options_t;
 
 // Default configuration
-#define WAL_DEFAULT_DEBOUNCE_MS 100
+#define WAL_DEFAULT_DEBOUNCE_MS 250
 #define WAL_DEFAULT_IDLE_THRESHOLD_MS 10000
 #define WAL_DEFAULT_COMPACT_INTERVAL_MS 60000
 #define WAL_DEFAULT_MAX_FILE_SIZE (128 * 1024)

@@ -71,7 +71,6 @@ void buffer_destroy(buffer_t* buf) {
   refcounter_dereference((refcounter_t*) buf);
   if (refcounter_count((refcounter_t*) buf) == 0) {
     free(buf->data);                      // Free internal resources first
-    refcounter_destroy_lock(&buf->refcounter);  // Destroy lock before freeing struct
     free(buf);                            // Free the struct last
   }
 }
@@ -81,8 +80,7 @@ void buffer_destroy(buffer_t* buf) {
 1. Always call `refcounter_dereference()` first
 2. Check if `refcounter_count() == 0` before cleanup
 3. Free internal resources first
-4. Call `refcounter_destroy_lock()` before freeing the struct
-5. Free the struct last
+4. Free the struct last
 
 ### Lock Initialization in Create Functions
 
@@ -119,8 +117,7 @@ void mytype_destroy(mytype_t* obj) {
     platform_rw_lock_destroy(&obj->rwlock);
     platform_condition_destroy(&obj->cond);
 
-    // Destroy refcounter lock and free struct
-    refcounter_destroy_lock((refcounter_t*)obj);
+    // Free struct
     free(obj);
   }
 }
@@ -183,9 +180,9 @@ work_t* mine = CONSUME(some_work, work);  // Takes ownership, nulls original
 ```
 
 ### Thread Safety
-The refcounter supports both lock-based and atomic operations:
-- Default: Uses platform mutex (`PLATFORMLOCKTYPE`)
-- With `OFFS_ATOMIC` defined: Uses C11 atomics
+The refcounter uses C11 `_Atomic` operations for lock-free reference counting:
+- `refcounter_reference()` and `refcounter_dereference()` are lock-free
+- Safe for concurrent use across threads without external synchronization
 
 ## Asynchronous Code: Work Pools and Promises
 
@@ -528,7 +525,6 @@ void my_object_destroy(my_object_t* obj) {
 
         // Destroy other resources
         free(obj->data);
-        refcounter_destroy_lock(&obj->refcounter);
         free(obj);
     }
 }
@@ -845,8 +841,7 @@ void my_object_destroy(my_object_t* obj) {
         if (obj->data) free(obj->data);
         if (obj->buffer) buffer_destroy(obj->buffer);
 
-        // Destroy locks and free struct
-        refcounter_destroy_lock((refcounter_t*)obj);
+        // Free struct (refcounter uses atomic ops, no lock to destroy)
         free(obj);
     }
 }
@@ -965,7 +960,6 @@ void my_object_destroy(my_object_t* obj) {
         // 4. Destroy locks and free object
         platform_lock_destroy(&obj->lock);
         platform_condition_destroy(&obj->callback_done);
-        refcounter_destroy_lock((refcounter_t*)obj);
         free(obj);
     }
 }
