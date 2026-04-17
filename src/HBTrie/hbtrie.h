@@ -42,7 +42,7 @@ typedef struct file_bnode_cache_t file_bnode_cache_t;
 typedef struct hbtrie_node_t {
     refcounter_t refcounter;          // MUST be first member
     ATOMIC_TYPE(uint64_t) seq;        // Seqlock: even=stable, odd=writing
-    PLATFORMLOCKTYPE(write_lock);      // Writer mutual exclusion
+    spinlock_t write_lock;             // Writer mutual exclusion (adaptive spinlock)
 
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
     uint16_t btree_height;           // Height of B+tree (1 = single leaf, > 1 = has internal nodes)

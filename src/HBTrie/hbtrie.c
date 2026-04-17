@@ -424,7 +424,7 @@ hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
   node->is_dirty = 0;                // Not modified yet
 
   atomic_init(&node->seq, 0);
-  platform_lock_init(&node->write_lock);
+  spinlock_init(&node->write_lock);
   refcounter_init((refcounter_t*)node);
 
   return node;
@@ -487,7 +487,7 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
         // will be cleaned up by bnode_destroy but not separately freed.
         bnode_destroy_tree(current->btree);
       }
-      platform_lock_destroy(&current->write_lock);
+      spinlock_destroy(&current->write_lock);
       hbtrie_combined_t* combined = container_of(current, hbtrie_combined_t, node);
       memory_pool_free(combined, sizeof(hbtrie_combined_t));
     }
@@ -574,7 +574,7 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   bnode_deinit(&copy_combined->bnode);
   copy->btree = bnode_tree_copy(node->btree);
   if (copy->btree == NULL) {
-    platform_lock_destroy(&copy->write_lock);
+    spinlock_destroy(&copy->write_lock);
     memory_pool_free(copy_combined, sizeof(hbtrie_combined_t));
     return NULL;
   }
@@ -1852,7 +1852,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
 
   // Acquire write lock on root node and mark as writing
-  platform_lock(&current->write_lock);
+  spinlock_lock(&current->write_lock);
   atomic_fetch_add(&current->seq, 1);  // seq becomes odd (writing)
 
   // Traverse/create path
@@ -1860,7 +1860,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
       atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-      platform_unlock(&current->write_lock);
+      spinlock_unlock(&current->write_lock);
       vec_deinit(&path_stack);
       vec_deinit(&identifier_chunk_counts);
       return -1;
@@ -1873,7 +1873,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-        platform_unlock(&current->write_lock);
+        spinlock_unlock(&current->write_lock);
         vec_deinit(&path_stack);
         vec_deinit(&identifier_chunk_counts);
         return -1;
@@ -1909,7 +1909,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           if (bnode_insert(leaf, &new_entry) != 0) {
             bnode_entry_destroy_key(&new_entry);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             vec_deinit(&path_stack);
             vec_deinit(&identifier_chunk_counts);
             return -1;
@@ -1954,7 +1954,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&path_stack);
               vec_deinit(&identifier_chunk_counts);
               return -1;
@@ -1976,7 +1976,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             );
             if (old_version == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -1994,7 +1994,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
               entry->has_versions = 0;
               entry->versions = NULL;
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -2009,7 +2009,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             return -1;
@@ -2024,7 +2024,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             return -1;
@@ -2035,10 +2035,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           mark_dirty(current, leaf);
 
           // Crab: lock child before unlocking parent
-          platform_lock(&child->write_lock);
+          spinlock_lock(&child->write_lock);
           atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
           // Entry exists with a value but we need to descend further.
@@ -2055,7 +2055,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -2065,10 +2065,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
 
           // Crab: lock child before unlocking parent
-          platform_lock(&entry->trie_child->write_lock);
+          spinlock_lock(&entry->trie_child->write_lock);
           atomic_fetch_add(&entry->trie_child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
@@ -2083,7 +2083,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -2092,10 +2092,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             mark_dirty(current, leaf);
           }
           // Crab: lock child before unlocking parent
-          platform_lock(&entry->child->write_lock);
+          spinlock_lock(&entry->child->write_lock);
           atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = entry->child;
         }
       } else {
@@ -2104,7 +2104,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             return -1;
@@ -2119,7 +2119,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             vec_deinit(&identifier_chunk_counts);
             vec_deinit(&path_stack);
             return -1;
@@ -2130,10 +2130,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           mark_dirty(current, leaf);
 
           // Crab: lock child before unlocking parent
-          platform_lock(&child->write_lock);
+          spinlock_lock(&child->write_lock);
           atomic_fetch_add(&child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = child;
         } else if (entry->has_value) {
           // Intermediate chunk: entry has a value but we need to descend further.
@@ -2150,7 +2150,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -2160,10 +2160,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           }
 
           // Crab: lock child before unlocking parent
-          platform_lock(&entry->trie_child->write_lock);
+          spinlock_lock(&entry->trie_child->write_lock);
           atomic_fetch_add(&entry->trie_child->seq, 1);
           atomic_fetch_add(&current->seq, 1);
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
@@ -2178,7 +2178,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               vec_deinit(&identifier_chunk_counts);
               vec_deinit(&path_stack);
               return -1;
@@ -2187,10 +2187,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
             mark_dirty(current, leaf);
           }
           // Crab: lock child before unlocking parent
-          platform_lock(&entry->child->write_lock);
+          spinlock_lock(&entry->child->write_lock);
           atomic_fetch_add(&entry->child->seq, 1);  // child seq odd (writing)
           atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           current = entry->child;
         }
       }
@@ -2200,7 +2200,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   (void)path_stack;  // Splits are now handled inline after each insert
 
   atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-  platform_unlock(&current->write_lock);
+  spinlock_unlock(&current->write_lock);
   vec_deinit(&identifier_chunk_counts);
   vec_deinit(&path_stack);
   return 0;
@@ -2220,7 +2220,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
   }
 
   // Acquire write lock on root node and mark as writing
-  platform_lock(&current->write_lock);
+  spinlock_lock(&current->write_lock);
   atomic_fetch_add(&current->seq, 1);  // seq becomes odd (writing)
 
   // Navigate to the final position
@@ -2228,7 +2228,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
       atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-      platform_unlock(&current->write_lock);
+      spinlock_unlock(&current->write_lock);
       return NULL;
     }
 
@@ -2238,7 +2238,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-        platform_unlock(&current->write_lock);
+        spinlock_unlock(&current->write_lock);
         return NULL;
       }
 
@@ -2255,7 +2255,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         if (entry == NULL || !entry->has_value) {
           // No entry or no value to delete
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           return NULL;
         }
 
@@ -2272,7 +2272,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
           if (version_entry_add(&entry->versions, txn_id, NULL, 1) != 0) {
             if (last_visible) identifier_destroy(last_visible);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-            platform_unlock(&current->write_lock);
+            spinlock_unlock(&current->write_lock);
             return NULL;
           }
           mark_dirty(current, leaf);
@@ -2290,7 +2290,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
             if (old_version == NULL) {
               if (last_visible) identifier_destroy(last_visible);
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               return NULL;
             }
 
@@ -2305,7 +2305,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
               entry->versions = NULL;
               if (last_visible) identifier_destroy(last_visible);
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-              platform_unlock(&current->write_lock);
+              spinlock_unlock(&current->write_lock);
               return NULL;
             }
             mark_dirty(current, leaf);
@@ -2313,7 +2313,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         }
 
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-        platform_unlock(&current->write_lock);
+        spinlock_unlock(&current->write_lock);
         return last_visible;
       } else if (is_last_chunk) {
         // End of identifier - move to next HBTrie level
@@ -2337,14 +2337,14 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         }
         if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&next->write_lock);
+        spinlock_lock(&next->write_lock);
         atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-        platform_unlock(&current->write_lock);
+        spinlock_unlock(&current->write_lock);
         current = next;
       } else {
         // Intermediate chunk
@@ -2368,21 +2368,21 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         }
         if (next == NULL) {
           atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-          platform_unlock(&current->write_lock);
+          spinlock_unlock(&current->write_lock);
           return NULL;
         }
         // Crab: lock child before unlocking parent
-        platform_lock(&next->write_lock);
+        spinlock_lock(&next->write_lock);
         atomic_fetch_add(&next->seq, 1);  // child seq odd (writing)
         atomic_fetch_add(&current->seq, 1);  // parent seq even (stable)
-        platform_unlock(&current->write_lock);
+        spinlock_unlock(&current->write_lock);
         current = next;
       }
     }
   }
 
   atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
-  platform_unlock(&current->write_lock);
+  spinlock_unlock(&current->write_lock);
   return NULL;
 }
 
@@ -2408,7 +2408,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
     if (node == NULL) continue;
 
     // Acquire write lock on this node for GC modifications
-    platform_lock(&node->write_lock);
+    spinlock_lock(&node->write_lock);
     atomic_fetch_add(&node->seq, 1);  // seq odd (writing)
 
     // Walk the entire bnode tree to find all leaf entries
@@ -2488,7 +2488,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
     }
 
     atomic_fetch_add(&node->seq, 1);  // seq even (stable)
-    platform_unlock(&node->write_lock);
+    spinlock_unlock(&node->write_lock);
     vec_deinit(&bnode_stack);
   }
 

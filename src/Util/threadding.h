@@ -12,6 +12,7 @@ extern "C" {
 
 #if _WIN32
 #include <windows.h>
+#define sched_yield() SwitchToThread()
 #define PLATFORMLOCKTYPE(N) CRITICAL_SECTION N
 #define PLATFORMLOCKTYPEPTR(N) CRITICAL_SECTION* N
 #define PLATFORMCONDITIONTYPE(N) CONDITION_VARIABLE N
@@ -42,6 +43,7 @@ int platform_core_count();
 uint64_t platform_self();
 #else
 #include <pthread.h>
+#include <sched.h>
 #define PLATFORMLOCKTYPE(N) pthread_mutex_t N
 #define PLATFORMLOCKTYPEPTR(N) pthread_mutex_t* N
 #define PLATFORMCONDITIONTYPE(N) pthread_cond_t N
@@ -81,6 +83,35 @@ uint64_t platform_self();
 #else
 #define cpu_relax() ((void)0)
 #endif
+
+/* Adaptive spinlock - spins up to 128 iterations, then yields */
+typedef struct {
+    uint8_t state;  /* 0=unlocked, 1=exclusive (accessed via __atomic builtins) */
+} spinlock_t;
+
+static inline void spinlock_init(spinlock_t* l) {
+    __atomic_store_n(&l->state, 0, __ATOMIC_RELEASE);
+}
+
+static inline void spinlock_lock(spinlock_t* l) {
+    int spins = 0;
+    while (__atomic_exchange_n(&l->state, 1, __ATOMIC_ACQUIRE)) {
+        spins++;
+        if (spins > 128) {
+            sched_yield();
+            spins = 0;
+        }
+        cpu_relax();
+    }
+}
+
+static inline void spinlock_unlock(spinlock_t* l) {
+    __atomic_store_n(&l->state, 0, __ATOMIC_RELEASE);
+}
+
+static inline void spinlock_destroy(spinlock_t* l) {
+    (void)l; /* No-op — nothing to destroy */
+}
 
 // Cache-line-aware memory layout macros
 // Apple M-series uses 128-byte L1 cache lines; most others use 64 bytes

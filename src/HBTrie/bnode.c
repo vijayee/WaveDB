@@ -35,7 +35,7 @@ bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level) {
   node->disk_offset = (uint64_t)-1;  // UINT64_MAX = not yet persisted
   vec_init(&node->entries);
   atomic_init(&node->seq, 0);
-  platform_lock_init(&node->write_lock);
+  spinlock_init(&node->write_lock);
   refcounter_init((refcounter_t*)node);
 
   return node;
@@ -58,14 +58,14 @@ void bnode_init(bnode_t* node, uint32_t node_size) {
   node->is_inline = 1;               // Embedded in combined allocation
   vec_init(&node->entries);
   atomic_init(&node->seq, 0);
-  platform_lock_init(&node->write_lock);
+  spinlock_init(&node->write_lock);
   refcounter_init((refcounter_t*)node);
 }
 
 void bnode_deinit(bnode_t* node) {
   if (node == NULL) return;
 
-  platform_lock_destroy(&node->write_lock);
+  spinlock_destroy(&node->write_lock);
 
   // Free all entries
   for (int i = 0; i < node->entries.length; i++) {
@@ -104,7 +104,7 @@ void bnode_destroy(bnode_t* node) {
 
   refcounter_dereference((refcounter_t*)node);
   if (refcounter_count((refcounter_t*)node) == 0) {
-    platform_lock_destroy(&node->write_lock);
+    spinlock_destroy(&node->write_lock);
 
     // Free all entries
     for (int i = 0; i < node->entries.length; i++) {
