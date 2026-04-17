@@ -120,6 +120,7 @@ typedef struct bnode_t {
     // Per-bnode disk tracking (Phase 2: flat per-bnode persistence)
     uint64_t disk_offset;              // File offset of this bnode (UINT64_MAX if not persisted)
     uint8_t is_dirty;                  // 1 if modified since last write
+    uint8_t is_inline;                // 1 if embedded in combined allocation (don't free separately)
 } bnode_t;
 
 /**
@@ -138,6 +139,28 @@ bnode_t* bnode_create(uint32_t node_size);
  * @return New node or NULL on failure
  */
 bnode_t* bnode_create_with_level(uint32_t node_size, uint16_t level);
+
+/**
+ * Initialize a B+tree node in-place (without allocation).
+ *
+ * Used for combined allocations where the bnode struct is embedded
+ * in a larger allocation (e.g., hbtrie_combined_t).
+ *
+ * @param node       Pre-allocated node to initialize
+ * @param node_size  Maximum node size in bytes (0 for default)
+ */
+void bnode_init(bnode_t* node, uint32_t node_size);
+
+/**
+ * Deinitialize a B+tree node in-place (without freeing the struct).
+ *
+ * Cleans up entries, keys, values, and version chains but does NOT
+ * free the struct itself. Used for combined allocations where the
+ * bnode struct is part of a larger allocation.
+ *
+ * @param node  Node to deinitialize
+ */
+void bnode_deinit(bnode_t* node);
 
 /**
  * Destroy a B+tree node.

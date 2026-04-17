@@ -54,6 +54,18 @@ typedef struct hbtrie_node_t {
 } hbtrie_node_t;
 
 /**
+ * hbtrie_combined_t - Combined allocation for hbtrie_node + its root bnode.
+ *
+ * Since every hbtrie_node always has exactly one root bnode, allocating
+ * them together improves cache locality and reduces allocation overhead.
+ * The hbtrie_node_t's btree field points to &combined->bnode.
+ */
+typedef struct hbtrie_combined_t {
+    hbtrie_node_t node;
+    bnode_t bnode;
+} hbtrie_combined_t;
+
+/**
  * hbtrie_t - Top-level HBTrie structure.
  */
 typedef struct hbtrie_t {

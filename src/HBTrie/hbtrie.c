@@ -408,13 +408,14 @@ void hbtrie_destroy(hbtrie_t* trie) {
 }
 
 hbtrie_node_t* hbtrie_node_create(uint32_t btree_node_size) {
-  hbtrie_node_t* node = memory_pool_alloc(sizeof(hbtrie_node_t));
+  hbtrie_combined_t* combined = memory_pool_alloc(sizeof(hbtrie_combined_t));
+  if (combined == NULL) return NULL;
+  memset(combined, 0, sizeof(hbtrie_combined_t));
 
-  node->btree = bnode_create(btree_node_size);
-  if (node->btree == NULL) {
-    memory_pool_free(node, sizeof(hbtrie_node_t));
-    return NULL;
-  }
+  hbtrie_node_t* node = &combined->node;
+  bnode_init(&combined->bnode, btree_node_size);
+
+  node->btree = &combined->bnode;
   node->btree_height = 1;  // Single leaf bnode
 
   // Initialize page file storage tracking (in-memory by default)
@@ -482,10 +483,13 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
       // CoW handles stale marking; no explicit deallocation needed here
 
       if (current->btree != NULL) {
+        // Destroy the entire bnode tree. The inline root bnode (is_inline=1)
+        // will be cleaned up by bnode_destroy but not separately freed.
         bnode_destroy_tree(current->btree);
       }
       platform_lock_destroy(&current->write_lock);
-      memory_pool_free(current, sizeof(hbtrie_node_t));
+      hbtrie_combined_t* combined = container_of(current, hbtrie_combined_t, node);
+      memory_pool_free(combined, sizeof(hbtrie_combined_t));
     }
 
     vec_deinit(&nodes);
@@ -564,12 +568,14 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   if (copy == NULL) return NULL;
   copy->btree_height = node->btree_height;
 
-  // Deep-copy the bnode tree
-  bnode_destroy(copy->btree);
+  // Deep-copy the bnode tree: deinit the inline root bnode, then replace
+  // with a separately-allocated copy from bnode_tree_copy
+  hbtrie_combined_t* copy_combined = container_of(copy, hbtrie_combined_t, node);
+  bnode_deinit(&copy_combined->bnode);
   copy->btree = bnode_tree_copy(node->btree);
   if (copy->btree == NULL) {
     platform_lock_destroy(&copy->write_lock);
-    free(copy);
+    memory_pool_free(copy_combined, sizeof(hbtrie_combined_t));
     return NULL;
   }
 
@@ -1186,7 +1192,7 @@ static hbtrie_node_t* cbor_to_hbtrie_node(cbor_item_t* item, uint32_t btree_node
 
     cbor_item_t* btree_item = cbor_map_find_key(item, "btree");
     if (btree_item != NULL && !cbor_is_null(btree_item)) {
-      bnode_destroy(node->btree);
+      bnode_deinit(node->btree);
       node->btree = cbor_to_bnode(btree_item, btree_node_size);
       if (node->btree == NULL) {
         hbtrie_node_destroy(node);
@@ -1587,7 +1593,7 @@ int bnode_entry_lazy_load_hbtrie_child(bnode_entry_t* entry,
     }
 
     // Replace the default btree with the loaded one
-    bnode_destroy(hbnode->btree);
+    bnode_deinit(hbnode->btree);
     hbnode->btree = root_bnode;
     hbnode->btree_height = atomic_load(&root_bnode->level);
     hbnode->disk_offset = entry->child_disk_offset;
@@ -1643,7 +1649,7 @@ int bnode_entry_lazy_load_trie_child(bnode_entry_t* entry,
     }
 
     // Replace the default btree with the loaded one
-    bnode_destroy(hbnode->btree);
+    bnode_deinit(hbnode->btree);
     hbnode->btree = root_bnode;
     hbnode->btree_height = atomic_load(&root_bnode->level);
     hbnode->disk_offset = entry->child_disk_offset;

@@ -735,7 +735,7 @@ database_t* database_create_with_config(const char* location,
                             // Create hbtrie_node wrapper for loaded root
                             hbtrie_node_t* root_hbnode = hbtrie_node_create(db->trie->btree_node_size);
                             if (root_hbnode != NULL) {
-                                bnode_destroy(root_hbnode->btree);
+                                bnode_deinit(root_hbnode->btree);
                                 root_hbnode->btree = root_bnode;
                                 root_hbnode->btree_height = atomic_load(&root_bnode->level);
                                 root_hbnode->disk_offset = sb.root_offset;
