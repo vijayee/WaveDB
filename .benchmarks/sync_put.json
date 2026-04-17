@@ -1,12 +1,12 @@
 {
   "name": "Sync Put",
   "operations_count": 10000,
-  "total_time_ns": 27700000,
-  "min_time_ns": 1800,
-  "max_time_ns": 121000,
-  "p50_time_ns": 1900,
-  "p95_time_ns": 3400,
-  "p99_time_ns": 4900,
-  "operations_per_second": 361016.07,
-  "avg_latency_ns": 2770.00
+  "total_time_ns": 34360000,
+  "min_time_ns": 2606,
+  "max_time_ns": 159043,
+  "p50_time_ns": 2843,
+  "p95_time_ns": 5093,
+  "p99_time_ns": 7430,
+  "operations_per_second": 291016.15,
+  "avg_latency_ns": 3436.24
 }
