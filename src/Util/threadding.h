@@ -78,8 +78,10 @@ uint64_t platform_self();
 // on SMT/HT processors during busy-wait loops
 #if defined(__x86_64__) || defined(__i386__)
 #define cpu_relax() __asm__ __volatile__("pause" ::: "memory")
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(__arm__)
 #define cpu_relax() __asm__ __volatile__("yield" ::: "memory")
+#elif defined(__powerpc__) || defined(__ppc__)
+#define cpu_relax() __asm__ __volatile__("or 27,27,27" ::: "memory")
 #else
 #define cpu_relax() ((void)0)
 #endif

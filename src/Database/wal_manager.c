@@ -221,16 +221,34 @@ static void wal_flush_timer_callback(void* ctx) {
     // Flush any remaining buffered entries
     if (twal->batch_count > 0 && twal->entry_buf_used > 0 && twal->fd >= 0) {
         ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
-        if (written > 0) {
+        if (written == (ssize_t)twal->entry_buf_used) {
             twal->current_size += (size_t)written;
+            twal->entry_buf_used = 0;
+            twal->batch_count = 0;
+        } else if (written > 0) {
+            // Partial write — shift unwritten data to buffer start
+            twal->current_size += (size_t)written;
+            size_t remaining = twal->entry_buf_used - (size_t)written;
+            memmove(twal->entry_buf, twal->entry_buf + written, remaining);
+            twal->entry_buf_used = remaining;
+            // Don't reset batch_count — buffer still has data
+            log_warn("WAL timer: partial write (%zd of %zu bytes), %zu remain",
+                     written, twal->entry_buf_used + remaining, remaining);
+        } else {
+            // Write error — keep buffer intact for retry on next flush
+            log_error("WAL timer: write error (%zd), keeping %zu bytes buffered",
+                      written, twal->entry_buf_used);
         }
-        twal->entry_buf_used = 0;
-        twal->batch_count = 0;
     }
 
     // DEBOUNCED mode: fsync all pending writes to disk
     if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->fd >= 0) {
         fsync(twal->fd);
+        twal->pending_writes = 0;
+    }
+
+    // ASYNC mode: data is now in kernel buffer after write
+    if (twal->sync_mode == WAL_SYNC_ASYNC) {
         twal->pending_writes = 0;
     }
 
@@ -255,12 +273,14 @@ static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
     // Handle sync modes:
     // - IMMEDIATE: fsync after every flush (data is on disk)
     // - DEBOUNCED: defer fsync to the timer; just track pending writes
-    // - ASYNC: no fsync at all
+    // - ASYNC: data is in kernel buffer after write(), no fsync needed
     if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
         fsync(twal->fd);
         twal->pending_writes = 0;
+    } else if (twal->sync_mode == WAL_SYNC_ASYNC) {
+        twal->pending_writes = 0;  // Data is in kernel buffer, safe from process crash
     } else {
-        twal->pending_writes += twal->batch_count;
+        twal->pending_writes += twal->batch_count;  // DEBOUNCED: track for timer fsync
     }
 
     // Reset buffer
@@ -601,7 +621,13 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     twal->wheel = manager->wheel;
     twal->entry_buf_used = 0;
     twal->batch_count = 0;
-    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 0;  // 0 = flush when buffer full
+    // IMMEDIATE mode requires batch_size=1 (fsync after every entry).
+    // Defensive: if someone passes batch_size=0 with IMMEDIATE, force it to 1.
+    if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+        twal->batch_size = 1;
+    } else {
+        twal->batch_size = 0;  // 0 = flush when buffer full
+    }
     twal->timer_active = 0;
     twal->timer_id = 0;
     twal->debounce_ms = manager->config.debounce_ms;
@@ -1161,6 +1187,8 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
                 fsync(twal->fd);
                 twal->pending_writes = 0;
+            } else {
+                twal->pending_writes++;
             }
 
             // Update transaction ID tracking
@@ -1862,15 +1890,17 @@ int wal_manager_flush(wal_manager_t* manager) {
         if (twal != NULL) {
             platform_lock(&twal->lock);
 
-            // Flush any pending writes to disk
+            // Flush buffer first (writes buffered entries to kernel),
+            // then fsync (ensures data is on disk for DEBOUNCED/IMMEDIATE).
+            // Order matters: fsync before buffer flush would miss the
+            // most recently buffered entries.
+            if (twal->batch_count > 0) {
+                thread_wal_flush_buffer_locked(twal);
+            }
             if (twal->fd >= 0) {
                 fsync(twal->fd);
                 log_info("  Flushed WAL file: %s", twal->file_path);
-            }
-
-            // Flush buffer if entries are pending
-            if (twal->batch_count > 0) {
-                thread_wal_flush_buffer_locked(twal);
+                twal->pending_writes = 0;
             }
             // Cancel timer if active
             if (twal->timer_active && twal->wheel != NULL) {

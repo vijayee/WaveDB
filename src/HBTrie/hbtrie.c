@@ -1507,6 +1507,68 @@ hbtrie_t* hbtrie_deserialize(uint8_t* buf, size_t len, uint8_t chunk_size, uint3
 // Lazy Loading (Phase 2: load child nodes from page file on demand)
 // ============================================================================
 
+/**
+ * Load an hbtrie_node from disk without modifying any bnode entry.
+ *
+ * Reads the root bnode from the page file cache, deserializes it,
+ * and wraps it in an hbtrie_node. The caller must set the entry's
+ * child pointer after re-acquiring any necessary locks.
+ *
+ * This function is safe to call outside a spinlock — it does its own
+ * I/O and acquires the bnode cache shard lock internally.
+ *
+ * @param fcache            File bnode cache
+ * @param child_disk_offset Disk offset to read from
+ * @param chunk_size        Chunk size for deserialization
+ * @param btree_node_size   Max btree node size for deserialization
+ * @return Loaded hbtrie_node (caller owns), or NULL on failure
+ */
+static hbtrie_node_t* hbtrie_load_child_node(file_bnode_cache_t* fcache,
+                                              uint64_t child_disk_offset,
+                                              uint8_t chunk_size,
+                                              uint32_t btree_node_size) {
+  if (fcache == NULL || child_disk_offset == 0) return NULL;
+
+  bnode_cache_item_t* item = bnode_cache_read(fcache, child_disk_offset);
+  if (item == NULL) return NULL;
+
+  node_location_t* locations = NULL;
+  size_t num_locations = 0;
+  bnode_t* root_bnode = bnode_deserialize_v3(item->data + 4, item->data_len - 4,
+                                               chunk_size, btree_node_size,
+                                               &locations, &num_locations);
+  bnode_cache_release(fcache, item);
+
+  if (root_bnode == NULL) {
+    free(locations);
+    return NULL;
+  }
+
+  for (size_t i = 0; i < num_locations && i < root_bnode->entries.length; i++) {
+    root_bnode->entries.data[i].child_disk_offset = locations[i].offset;
+  }
+
+  root_bnode->disk_offset = child_disk_offset;
+  root_bnode->is_dirty = 0;
+
+  hbtrie_node_t* hbnode = hbtrie_node_create(btree_node_size);
+  if (hbnode == NULL) {
+    bnode_destroy_tree(root_bnode);
+    free(locations);
+    return NULL;
+  }
+
+  bnode_deinit(hbnode->btree);
+  hbnode->btree = root_bnode;
+  hbnode->btree_height = atomic_load(&root_bnode->level);
+  hbnode->disk_offset = child_disk_offset;
+  hbnode->is_loaded = 1;
+  hbnode->is_dirty = 0;
+
+  free(locations);
+  return hbnode;
+}
+
 int bnode_entry_lazy_load_bnode_child(bnode_entry_t* entry,
                                        file_bnode_cache_t* fcache,
                                        uint8_t chunk_size,
@@ -2045,10 +2107,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when key1 is stored and key10 (sharing the 'key1'
           // chunk prefix) needs to go deeper. Use trie_child (outside the
           // union) since the union holds the value.
-          // Lazy load trie_child if needed
+          // Lazy load trie_child if needed (release spinlock for I/O)
           if (entry->trie_child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
-                                              trie->chunk_size, trie->btree_node_size);
+            uint64_t disk_offset = entry->child_disk_offset;
+            atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+            spinlock_unlock(&current->write_lock);
+
+            hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                            trie->chunk_size, trie->btree_node_size);
+
+            spinlock_lock(&current->write_lock);
+            atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+            // Re-find entry — btree may have been modified while lock was released
+            leaf = btree_descend_with_path_lazy(current->btree, chunk, &bnode_path,
+                                                  trie->fcache, trie->chunk_size,
+                                                  trie->btree_node_size);
+            entry = bnode_find(leaf, chunk, &index);
+            if (entry != NULL && entry->trie_child == NULL && loaded != NULL) {
+              entry->trie_child = loaded;
+              mark_dirty(current, leaf);
+            } else if (loaded != NULL) {
+              hbtrie_node_destroy(loaded);
+            }
           }
           if (entry->trie_child == NULL) {
             // First time descending through this entry - create trie_child
@@ -2072,10 +2152,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
-            // Try lazy loading from disk first
+            // Try lazy loading from disk first (release spinlock for I/O)
             if (entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
-                                                  trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              // Re-find entry — btree may have been modified while lock was released
+              leaf = btree_descend_with_path_lazy(current->btree, chunk, &bnode_path,
+                                                    trie->fcache, trie->chunk_size,
+                                                    trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->child == NULL && loaded != NULL) {
+                entry->child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
           }
           if (entry->child == NULL) {
@@ -2140,10 +2238,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           // This happens when a shorter key (e.g. "key1") is stored and a longer
           // key sharing the same prefix (e.g. "key10") needs to go deeper.
           // Use trie_child (outside the union) since the union holds the value.
-          // Lazy load trie_child if needed
+          // Lazy load trie_child if needed (release spinlock for I/O)
           if (entry->trie_child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-            bnode_entry_lazy_load_trie_child(entry, trie->fcache,
-                                              trie->chunk_size, trie->btree_node_size);
+            uint64_t disk_offset = entry->child_disk_offset;
+            atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+            spinlock_unlock(&current->write_lock);
+
+            hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                            trie->chunk_size, trie->btree_node_size);
+
+            spinlock_lock(&current->write_lock);
+            atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+            // Re-find entry — btree may have been modified while lock was released
+            leaf = btree_descend_with_path_lazy(current->btree, chunk, &bnode_path,
+                                                  trie->fcache, trie->chunk_size,
+                                                  trie->btree_node_size);
+            entry = bnode_find(leaf, chunk, &index);
+            if (entry != NULL && entry->trie_child == NULL && loaded != NULL) {
+              entry->trie_child = loaded;
+              mark_dirty(current, leaf);
+            } else if (loaded != NULL) {
+              hbtrie_node_destroy(loaded);
+            }
           }
           if (entry->trie_child == NULL) {
             // First time descending through this entry - create trie_child
@@ -2167,10 +2283,28 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
           current = entry->trie_child;
         } else {
           if (entry->child == NULL) {
-            // Try lazy loading from disk first
+            // Try lazy loading from disk first (release spinlock for I/O)
             if (entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
-                                                  trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              // Re-find entry — btree may have been modified while lock was released
+              leaf = btree_descend_with_path_lazy(current->btree, chunk, &bnode_path,
+                                                    trie->fcache, trie->chunk_size,
+                                                    trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->child == NULL && loaded != NULL) {
+                entry->child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
           }
           if (entry->child == NULL) {
@@ -2204,59 +2338,6 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   vec_deinit(&identifier_chunk_counts);
   vec_deinit(&path_stack);
   return 0;
-}
-
-hbtrie_reservation_t* hbtrie_reserve(hbtrie_t* trie, path_t* path,
-                                      identifier_t* value, transaction_id_t txn_id) {
-  if (trie == NULL || path == NULL || value == NULL) {
-    return NULL;
-  }
-
-  hbtrie_reservation_t* res = memory_pool_alloc(sizeof(hbtrie_reservation_t));
-  if (res == NULL) return NULL;
-
-  res->trie = trie;
-  res->path = (path_t*)refcounter_reference((refcounter_t*)path);
-  res->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
-  res->txn_id = txn_id;
-
-  // Perform the full insert using per-node spinlocks for mutual exclusion.
-  // The reserve phase handles all structural mutations (trie walk, node
-  // creation, splits) under fine-grained per-node spinlocks. No shard lock
-  // is needed — concurrent writers to different keys serialize only at
-  // shared nodes in the trie path.
-  res->result = hbtrie_insert(trie, path, value, txn_id);
-
-  if (res->result != 0) {
-    path_destroy(res->path);
-    identifier_destroy(res->value);
-    memory_pool_free(res, sizeof(hbtrie_reservation_t));
-    return NULL;
-  }
-
-  return res;
-}
-
-int hbtrie_commit(hbtrie_reservation_t* res) {
-  if (res == NULL) return -1;
-
-  int result = res->result;
-
-  // Release references held by the reservation
-  path_destroy(res->path);
-  identifier_destroy(res->value);
-  memory_pool_free(res, sizeof(hbtrie_reservation_t));
-
-  return result;
-}
-
-void hbtrie_reservation_destroy(hbtrie_reservation_t* res) {
-  if (res == NULL) return;
-
-  // Release references held by the reservation
-  if (res->path != NULL) path_destroy(res->path);
-  if (res->value != NULL) identifier_destroy(res->value);
-  memory_pool_free(res, sizeof(hbtrie_reservation_t));
 }
 
 identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_id) {
@@ -2373,19 +2454,51 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         hbtrie_node_t* next = NULL;
         if (entry != NULL) {
           if (entry->has_value) {
-            // Lazy load trie_child if needed
+            // Lazy load trie_child if needed (release spinlock for I/O)
             if (entry->trie_child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_trie_child(entry, trie->fcache,
-                                                trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              leaf = bnode_descend_lazy(current->btree, chunk, trie->fcache,
+                                         trie->chunk_size, trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->trie_child == NULL && loaded != NULL) {
+                entry->trie_child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
-            next = entry->trie_child;
+            next = entry ? entry->trie_child : NULL;
           } else {
-            // Lazy load hbtrie child if needed
+            // Lazy load hbtrie child if needed (release spinlock for I/O)
             if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
-                                                  trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              leaf = bnode_descend_lazy(current->btree, chunk, trie->fcache,
+                                         trie->chunk_size, trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->child == NULL && loaded != NULL) {
+                entry->child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
-            next = entry->child;
+            next = entry ? entry->child : NULL;
           }
         }
         if (next == NULL) {
@@ -2404,19 +2517,51 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
         hbtrie_node_t* next = NULL;
         if (entry != NULL) {
           if (entry->has_value) {
-            // Lazy load trie_child if needed
+            // Lazy load trie_child if needed (release spinlock for I/O)
             if (entry->trie_child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_trie_child(entry, trie->fcache,
-                                                trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              leaf = bnode_descend_lazy(current->btree, chunk, trie->fcache,
+                                         trie->chunk_size, trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->trie_child == NULL && loaded != NULL) {
+                entry->trie_child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
-            next = entry->trie_child;
+            next = entry ? entry->trie_child : NULL;
           } else {
-            // Lazy load hbtrie child if needed
+            // Lazy load hbtrie child if needed (release spinlock for I/O)
             if (entry->child == NULL && entry->child_disk_offset != 0 && trie->fcache != NULL) {
-              bnode_entry_lazy_load_hbtrie_child(entry, trie->fcache,
-                                                  trie->chunk_size, trie->btree_node_size);
+              uint64_t disk_offset = entry->child_disk_offset;
+              atomic_fetch_add(&current->seq, 1);  // seq even (stable)
+              spinlock_unlock(&current->write_lock);
+
+              hbtrie_node_t* loaded = hbtrie_load_child_node(trie->fcache, disk_offset,
+                                                              trie->chunk_size, trie->btree_node_size);
+
+              spinlock_lock(&current->write_lock);
+              atomic_fetch_add(&current->seq, 1);  // seq odd (writing)
+              leaf = bnode_descend_lazy(current->btree, chunk, trie->fcache,
+                                         trie->chunk_size, trie->btree_node_size);
+              entry = bnode_find(leaf, chunk, &index);
+              if (entry != NULL && entry->child == NULL && loaded != NULL) {
+                entry->child = loaded;
+                mark_dirty(current, leaf);
+              } else if (loaded != NULL) {
+                hbtrie_node_destroy(loaded);
+              }
             }
-            next = entry->child;
+            next = entry ? entry->child : NULL;
           }
         }
         if (next == NULL) {
@@ -2460,7 +2605,12 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
     hbtrie_node_t* node = vec_pop(&stack);
     if (node == NULL) continue;
 
-    // Acquire write lock on this node for GC modifications
+    // Acquire write lock on this node for GC modifications.
+    // Note: lock is held for the entire btree traversal under this node.
+    // This is acceptable because GC is a background operation with no I/O
+    // under the lock, so hold time is bounded by btree size. If this
+    // becomes a contention issue, we could switch to a scan-modify-apply
+    // pattern (collect work under lock, apply changes after re-acquiring).
     spinlock_lock(&node->write_lock);
     atomic_fetch_add(&node->seq, 1);  // seq odd (writing)
 

@@ -92,7 +92,7 @@ typedef struct {
     // Batch write buffer (replaces debouncer)
     uint8_t entry_buf[4096];            // Pre-allocated entry buffer
     size_t entry_buf_used;              // Bytes used in entry_buf
-    uint8_t batch_count;                // Entries accumulated in current batch
+    uint16_t batch_count;                // Entries accumulated in current batch
     uint8_t batch_size;                 // Max entries before flush (1=IMMEDIATE, 0=buffer-full)
     int timer_active;                   // 1 if one-shot timer is pending
     uint64_t timer_id;                  // ID of the pending one-shot timer
