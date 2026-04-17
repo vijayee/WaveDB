@@ -13,7 +13,7 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/endian.h"
-#include "../Time/debouncer.h"
+#include "../Time/wheel.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -212,13 +212,60 @@ static void init_default_config(wal_config_t* config) {
     config->max_sealed_wals = WAL_DEFAULT_MAX_SEALED_WALS;
 }
 
-// Fsync callback for debouncer
-static void thread_wal_fsync_callback(void* ctx) {
+// One-shot timer callback: flush buffer if entries exist
+static void wal_flush_timer_callback(void* ctx) {
     thread_wal_t* twal = (thread_wal_t*)ctx;
-    if (twal && twal->fd >= 0) {
+    if (twal == NULL) return;
+    platform_lock(&twal->lock);
+    if (twal->batch_count > 0) {
+        // Flush buffered entries
+        if (twal->entry_buf_used > 0 && twal->fd >= 0) {
+            ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
+            if (written > 0) {
+                twal->current_size += (size_t)written;
+            }
+            twal->entry_buf_used = 0;
+            twal->batch_count = 0;
+            if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
+                fsync(twal->fd);
+            }
+        }
+    }
+    twal->timer_active = 0;
+    platform_unlock(&twal->lock);
+}
+
+// Flush all buffered entries to disk (called under twal->lock)
+static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
+    if (twal->batch_count == 0 || twal->entry_buf_used == 0) return 0;
+
+    // Write all buffered entries
+    ssize_t written = write(twal->fd, twal->entry_buf, twal->entry_buf_used);
+    if (written != (ssize_t)twal->entry_buf_used) {
+        log_error("WAL: Failed to write buffered entries (expected %zu, wrote %zd)",
+                  twal->entry_buf_used, written);
+        return -1;
+    }
+
+    twal->current_size += twal->entry_buf_used;
+
+    // Handle sync modes
+    if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
         fsync(twal->fd);
         twal->pending_writes = 0;
+    } else {
+        twal->pending_writes += twal->batch_count;
+        if (twal->sync_mode == WAL_SYNC_DEBOUNCED) {
+            fsync(twal->fd);
+            twal->pending_writes = 0;
+        }
     }
+
+    // Reset buffer
+    twal->entry_buf_used = 0;
+    twal->batch_count = 0;
+
+    return 0;
 }
 
 // Structure to hold WAL entry during recovery
@@ -548,21 +595,14 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     }
     log_info("Created WAL file: %s (thread_id=%lu, fd=%d)", twal->file_path, (unsigned long)thread_id, twal->fd);
 
-    // Create debouncer if needed
-    if (twal->sync_mode == WAL_SYNC_DEBOUNCED && manager->config.debounce_ms > 0) {
-        twal->wheel = manager->wheel;  // Use manager's timing wheel
-        twal->fsync_debouncer = debouncer_create(manager->wheel, twal,
-                                                  thread_wal_fsync_callback,
-                                                  NULL,
-                                                  manager->config.debounce_ms,
-                                                  manager->config.debounce_ms);
-        if (twal->fsync_debouncer == NULL) {
-            close(twal->fd);
-            free(twal->file_path);
-            free(twal);
-            return NULL;
-        }
-    }
+    // Initialize batch write buffer
+    twal->wheel = manager->wheel;
+    twal->entry_buf_used = 0;
+    twal->batch_count = 0;
+    twal->batch_size = (twal->sync_mode == WAL_SYNC_IMMEDIATE) ? 1 : 4;
+    twal->timer_active = 0;
+    twal->timer_id = 0;
+    twal->debounce_ms = manager->config.debounce_ms;
 
     platform_lock_init(&twal->lock);
     refcounter_init((refcounter_t*)twal);
@@ -608,7 +648,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->thread_count = 0;
     manager->thread_capacity = 0;
     manager->sealed_count = 0;
-    manager->wheel = wheel;  // Store timing wheel for debouncer
+    manager->wheel = wheel;  // Store timing wheel for one-shot timers
 
     // Create manifest file
     manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -848,15 +888,18 @@ void wal_manager_destroy(wal_manager_t* manager) {
                         thread_local_wal = NULL;
                     }
 
-                    // Flush and destroy debouncer before closing fd
-                    // (debouncer_destroy flushes any pending fsync callback
-                    // which needs the fd to still be open)
-                    if (twal->fsync_debouncer != NULL) {
-                        debouncer_flush(twal->fsync_debouncer);
-                        debouncer_destroy(twal->fsync_debouncer);
+                    // Flush buffer and cancel timer before closing fd
+                    platform_lock(&twal->lock);
+                    if (twal->batch_count > 0) {
+                        thread_wal_flush_buffer_locked(twal);
                     }
+                    if (twal->timer_active && twal->wheel != NULL) {
+                        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                        twal->timer_active = 0;
+                    }
+                    platform_unlock(&twal->lock);
 
-                    // Close file descriptor (after debouncer callback has fsync'd)
+                    // Close file descriptor (after flushing buffered entries)
                     if (twal->fd >= 0) {
                         fsync(twal->fd);
                         close(twal->fd);
@@ -951,8 +994,9 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
                 if (thread_local_wal->file_path != NULL) {
                     free(thread_local_wal->file_path);
                 }
-                if (thread_local_wal->fsync_debouncer != NULL) {
-                    debouncer_destroy(thread_local_wal->fsync_debouncer);
+                // Cancel timer if active (no debouncer to destroy)
+                if (thread_local_wal->timer_active && thread_local_wal->wheel != NULL) {
+                    hierarchical_timing_wheel_cancel_timer(thread_local_wal->wheel, thread_local_wal->timer_id);
                 }
                 platform_lock_destroy(&thread_local_wal->lock);
                 free(thread_local_wal);
@@ -1044,15 +1088,35 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         return -1;
     }
 
+    // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
+    size_t entry_size = 33 + data->size;
+
+    // Calculate CRC32 of data (before acquiring lock)
+    uint32_t crc = wal_crc32(data->data, data->size);
+
+    // Prepare header buffer (before acquiring lock)
+    uint8_t header_buf[33];
+    uint8_t* ptr = header_buf;
+    *ptr++ = (uint8_t)type;
+    transaction_id_serialize(&txn_id, ptr);
+    ptr += 24;
+    write_be32(ptr, crc);
+    ptr += 4;
+    write_be32(ptr, (uint32_t)data->size);
+
     // Acquire lock for thread safety
     platform_lock(&twal->lock);
 
-    // Check file size limit — rotate if needed
-    if (twal->current_size >= twal->max_size) {
+    // Check file size limit — rotate if needed (accounting for buffered data)
+    if (twal->current_size + twal->entry_buf_used + entry_size >= twal->max_size) {
+        // Flush buffer first
+        if (twal->batch_count > 0) {
+            thread_wal_flush_buffer_locked(twal);
+        }
+
         // Check sealed WAL limit before rotating
         size_t max_sealed = twal->manager->config.max_sealed_wals;
         if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
-            // Too many sealed WALs — try compaction first
             platform_unlock(&twal->lock);
             int compact_rc = compact_wal_files(twal->manager);
             platform_lock(&twal->lock);
@@ -1072,42 +1136,48 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         }
     }
 
-    // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
-    // Calculate CRC32 of data
-    uint32_t crc = wal_crc32(data->data, data->size);
+    // Check if entry fits in buffer — if not, flush first
+    if (twal->entry_buf_used + entry_size > sizeof(twal->entry_buf)) {
+        // Buffer full — flush before adding
+        thread_wal_flush_buffer_locked(twal);
 
-    // Prepare header buffer: type(1) + txn_id(24) + crc32(4) + data_len(4)
-    uint8_t header_buf[33];  // 1 + 24 + 4 + 4 = 33 bytes
-    uint8_t* ptr = header_buf;
+        // If entry itself is too large for the buffer, write directly
+        if (entry_size > sizeof(twal->entry_buf)) {
+            struct iovec iov[2];
+            iov[0].iov_base = header_buf;
+            iov[0].iov_len = sizeof(header_buf);
+            iov[1].iov_base = data->data;
+            iov[1].iov_len = data->size;
+            ssize_t bytes_written = writev(twal->fd, iov, 2);
+            if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
+                platform_unlock(&twal->lock);
+                return -1;
+            }
+            twal->current_size += sizeof(header_buf) + data->size;
 
-    // Write type (1 byte)
-    *ptr++ = (uint8_t)type;
+            // Handle sync for direct write
+            if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
+                fsync(twal->fd);
+                twal->pending_writes = 0;
+            }
 
-    // Write transaction ID (24 bytes, serialized)
-    transaction_id_serialize(&txn_id, ptr);
-    ptr += 24;
+            // Update transaction ID tracking
+            if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
+                twal->oldest_txn_id = txn_id;
+            }
+            twal->newest_txn_id = txn_id;
 
-    // Write CRC32 (4 bytes, big-endian)
-    write_be32(ptr, crc);
-    ptr += 4;
-
-    // Write data length (4 bytes, big-endian)
-    write_be32(ptr, (uint32_t)data->size);
-
-    // Write header and data atomically using writev() with O_APPEND
-    struct iovec iov[2];
-    iov[0].iov_base = header_buf;
-    iov[0].iov_len = sizeof(header_buf);
-    iov[1].iov_base = data->data;
-    iov[1].iov_len = data->size;
-    ssize_t bytes_written = writev(twal->fd, iov, 2);
-    if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
-        platform_unlock(&twal->lock);
-        return -1;
+            platform_unlock(&twal->lock);
+            return 0;
+        }
     }
 
-    // Update file size
-    twal->current_size += sizeof(header_buf) + data->size;
+    // Copy header + data to buffer
+    memcpy(twal->entry_buf + twal->entry_buf_used, header_buf, sizeof(header_buf));
+    twal->entry_buf_used += sizeof(header_buf);
+    memcpy(twal->entry_buf + twal->entry_buf_used, data->data, data->size);
+    twal->entry_buf_used += data->size;
+    twal->batch_count++;
 
     // Update transaction ID tracking
     if (twal->oldest_txn_id.time == 0 && twal->oldest_txn_id.count == 0) {
@@ -1115,37 +1185,23 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     }
     twal->newest_txn_id = txn_id;
 
-    // Handle sync modes
-    int result = 0;
-    switch (twal->sync_mode) {
-        case WAL_SYNC_IMMEDIATE:
-            // Fsync immediately
-            if (fsync(twal->fd) != 0) {
-                result = -1;
-            }
-            twal->pending_writes = 0;
-            break;
-
-        case WAL_SYNC_DEBOUNCED:
-            // Debounce fsync
-            if (twal->fsync_debouncer != NULL) {
-                twal->pending_writes++;
-                debouncer_debounce(twal->fsync_debouncer);
-            }
-            break;
-
-        case WAL_SYNC_ASYNC:
-            // No fsync, rely on OS page cache
-            twal->pending_writes++;
-            break;
-
-        default:
-            result = -1;
-            break;
+    // Handle flush triggers
+    if (twal->batch_count >= twal->batch_size) {
+        // Batch full — flush immediately
+        thread_wal_flush_buffer_locked(twal);
+    } else if (twal->batch_count == 1 && !twal->timer_active) {
+        // First entry — start one-shot timer (DEBOUNCED mode only)
+        if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->wheel != NULL && twal->debounce_ms > 0) {
+            twal->timer_active = 1;
+            twal->timer_id = hierarchical_timing_wheel_set_timer(
+                twal->wheel, twal,
+                wal_flush_timer_callback, NULL,
+                (timer_duration_t){.milliseconds = twal->debounce_ms});
+        }
     }
 
     platform_unlock(&twal->lock);
-    return result;
+    return 0;
 }
 
 int thread_wal_seal(thread_wal_t* twal) {
@@ -1154,6 +1210,15 @@ int thread_wal_seal(thread_wal_t* twal) {
     }
 
     platform_lock(&twal->lock);
+
+    // Flush buffer and cancel timer before sealing
+    if (twal->batch_count > 0) {
+        thread_wal_flush_buffer_locked(twal);
+    }
+    if (twal->timer_active && twal->wheel != NULL) {
+        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+        twal->timer_active = 0;
+    }
 
     if (twal->fd >= 0) {
         // Flush pending writes
@@ -1798,9 +1863,14 @@ int wal_manager_flush(wal_manager_t* manager) {
                 log_info("  Flushed WAL file: %s", twal->file_path);
             }
 
-            // Flush debouncer if present
-            if (twal->fsync_debouncer != NULL) {
-                debouncer_flush(twal->fsync_debouncer);
+            // Flush buffer if entries are pending
+            if (twal->batch_count > 0) {
+                thread_wal_flush_buffer_locked(twal);
+            }
+            // Cancel timer if active
+            if (twal->timer_active && twal->wheel != NULL) {
+                hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                twal->timer_active = 0;
             }
 
             platform_unlock(&twal->lock);
