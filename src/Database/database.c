@@ -75,71 +75,15 @@ static void abort_database_delete(void* ctx) {
     free(del_ctx);
 }
 
-// Helper to encode path+value for WAL
-static buffer_t* encode_put_entry(path_t* path, identifier_t* value) {
-    cbor_item_t* array = cbor_new_definite_array(2);
-    if (array == NULL) return NULL;
-
-    cbor_item_t* path_cbor = path_to_cbor(path);
-    if (path_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
-    }
-    cbor_array_push(array, path_cbor);
-    cbor_decref(&path_cbor);
-
-    cbor_item_t* value_cbor = identifier_to_cbor(value);
-    if (value_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
-    }
-    cbor_array_push(array, value_cbor);
-    cbor_decref(&value_cbor);
-
-    unsigned char* buf = NULL;
-    size_t buf_size = 0;
-    cbor_serialize_alloc(array, &buf, &buf_size);
-    cbor_decref(&array);
-
-    if (buf == NULL) return NULL;
-
-    buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
-    return buffer;
-}
-
-// Helper to encode path for WAL
-static buffer_t* encode_delete_entry(path_t* path) {
-    cbor_item_t* array = cbor_new_definite_array(1);
-    if (array == NULL) return NULL;
-
-    cbor_item_t* path_cbor = path_to_cbor(path);
-    if (path_cbor == NULL) {
-        cbor_decref(&array);
-        return NULL;
-    }
-    cbor_array_push(array, path_cbor);
-    cbor_decref(&path_cbor);
-
-    unsigned char* buf = NULL;
-    size_t buf_size = 0;
-    cbor_serialize_alloc(array, &buf, &buf_size);
-    cbor_decref(&array);
-
-    if (buf == NULL) return NULL;
-
-    buffer_t* buffer = buffer_create_from_existing_memory(buf, buf_size);
-    return buffer;
-}
-
 // Helper to encode path+value for WAL using binary format
 // Binary payload format:
-//   [path_count:2B BE][path_len:4B BE]
+//   [0xB1 magic][path_count:2B BE][path_len:4B BE]
 //   For each identifier: [id_len:2B BE][id_data:id_len bytes]
 //   [value_len:4B BE][value:value_len bytes]
 static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
     // Calculate total size
     size_t path_count = path_length(path);
-    size_t total_size = 2 + 4;  // path_count + path_len
+    size_t total_size = 1 + 2 + 4;  // magic + path_count + path_len
 
     // Calculate size for each identifier and accumulate path_len
     size_t path_byte_len = 0;
@@ -159,6 +103,9 @@ static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
     if (buffer == NULL) return NULL;
 
     uint8_t* pos = buffer->data;
+
+    // Write magic byte for unambiguous format detection
+    *pos++ = WAL_BINARY_MAGIC;
 
     // Write path_count (2 bytes BE)
     write_be16(pos, (uint16_t)path_count);
@@ -182,8 +129,8 @@ static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
             buffer_destroy(buffer);
             return NULL;
         }
-        memcpy(pos, id_buf->data, id_buf->size);
-        pos += id_buf->size;
+        memcpy(pos, id_buf->data, id_len);
+        pos += id_len;
         buffer_destroy(id_buf);
     }
 
@@ -197,8 +144,8 @@ static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
             buffer_destroy(buffer);
             return NULL;
         }
-        memcpy(pos, val_buf->data, val_buf->size);
-        pos += val_buf->size;
+        memcpy(pos, val_buf->data, value_len);
+        pos += value_len;
         buffer_destroy(val_buf);
     }
 
@@ -208,12 +155,12 @@ static buffer_t* encode_put_entry_binary(path_t* path, identifier_t* value) {
 
 // Helper to encode path for WAL delete using binary format
 // Binary payload format (no value):
-//   [path_count:2B BE][path_len:4B BE]
+//   [0xB1 magic][path_count:2B BE][path_len:4B BE]
 //   For each identifier: [id_len:2B BE][id_data:id_len bytes]
 static buffer_t* encode_delete_entry_binary(path_t* path) {
     // Calculate total size
     size_t path_count = path_length(path);
-    size_t total_size = 2 + 4;  // path_count + path_len
+    size_t total_size = 1 + 2 + 4;  // magic + path_count + path_len
 
     // Calculate size for each identifier
     size_t path_byte_len = 0;
@@ -229,6 +176,9 @@ static buffer_t* encode_delete_entry_binary(path_t* path) {
     if (buffer == NULL) return NULL;
 
     uint8_t* pos = buffer->data;
+
+    // Write magic byte for unambiguous format detection
+    *pos++ = WAL_BINARY_MAGIC;
 
     // Write path_count (2 bytes BE)
     write_be16(pos, (uint16_t)path_count);
@@ -252,8 +202,8 @@ static buffer_t* encode_delete_entry_binary(path_t* path) {
             buffer_destroy(buffer);
             return NULL;
         }
-        memcpy(pos, id_buf->data, id_buf->size);
-        pos += id_buf->size;
+        memcpy(pos, id_buf->data, id_len);
+        pos += id_len;
         buffer_destroy(id_buf);
     }
 

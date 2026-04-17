@@ -5,6 +5,7 @@
 #include "wal.h"
 #include "batch.h"
 #include "crc32.h"
+#include "../Util/endian.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -29,20 +30,6 @@ static void wal_fsync_callback(void* ctx) {
         fsync(wal->fd);
         wal->pending_writes = 0;
     }
-}
-
-// Write uint32 in big-endian
-static void write_uint32_be(uint8_t* buf, uint32_t val) {
-    buf[0] = (val >> 24) & 0xFF;
-    buf[1] = (val >> 16) & 0xFF;
-    buf[2] = (val >> 8) & 0xFF;
-    buf[3] = val & 0xFF;
-}
-
-// Read uint32 from big-endian
-static uint32_t read_uint32_be(const uint8_t* buf) {
-    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
 }
 
 // Open or create WAL file
@@ -329,8 +316,8 @@ int wal_write(wal_t* wal, transaction_id_t txn_id, wal_type_e type, buffer_t* da
     uint8_t header[33];
     header[0] = (uint8_t)type;
     transaction_id_serialize(&txn_id, header + 1);
-    write_uint32_be(header + 25, crc);
-    write_uint32_be(header + 29, (uint32_t)data->size);
+    write_be32(header + 25, crc);
+    write_be32(header + 29, (uint32_t)data->size);
 
     ssize_t written = write(wal->fd, header, 33);
     if (written != 33) {
@@ -398,8 +385,8 @@ int wal_read(wal_t* wal, transaction_id_t* txn_id, wal_type_e* type, buffer_t** 
     // Parse header
     *type = (wal_type_e)header[0];
     transaction_id_deserialize(txn_id, header + 1);
-    uint32_t expected_crc = read_uint32_be(header + 25);
-    uint32_t data_len = read_uint32_be(header + 29);
+    uint32_t expected_crc = read_be32(header + 25);
+    uint32_t data_len = read_be32(header + 29);
 
     // Read data
     buffer_t* buf = buffer_create(data_len);

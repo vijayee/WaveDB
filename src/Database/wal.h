@@ -35,6 +35,14 @@ typedef enum {
 #define WAL_FORMAT_BINARY 1
 
 /**
+ * Magic byte prefix for binary WAL payloads.
+ * Binary payloads start with this byte to unambiguously distinguish
+ * them from CBOR-encoded payloads. CBOR arrays start with 0x80-0x9F
+ * (definite) or 0x9F (indefinite), so 0xB1 never conflicts.
+ */
+#define WAL_BINARY_MAGIC  0xB1
+
+/**
  * WAL entry header structure (written before CBOR data)
  */
 typedef struct {

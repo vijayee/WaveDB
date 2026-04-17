@@ -12,7 +12,6 @@
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
-#include "../Util/log.h"
 #include "../Util/endian.h"
 #include "../Time/debouncer.h"
 #include <cbor.h>
@@ -26,8 +25,6 @@
 #include <stdatomic.h>
 #include <sys/uio.h>
 #include <dirent.h>
-#include "../Util/log.h"  // For log_warn
-#include <cbor.h>
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
@@ -42,15 +39,13 @@
 /**
  * Detect whether WAL payload data is binary or CBOR format.
  *
- * Binary format starts with path_count (2 bytes BE).
- * For realistic path counts (< 256), the first byte is 0x00.
+ * Binary payloads start with WAL_BINARY_MAGIC (0xB1).
  * CBOR arrays start with 0x80-0x9F (definite) or 0x9F (indefinite).
+ * This is unambiguous since 0xB1 is not a valid CBOR array header.
  */
 static int wal_detect_format(const uint8_t* data, size_t data_len) {
-    if (data_len < 2) return WAL_FORMAT_CBOR;  // Too short for binary, try CBOR
-    // Binary format: first byte is 0x00 for path counts < 256
-    // CBOR array: first byte is 0x80-0x9F for definite arrays, 0x9F for indefinite
-    if (data[0] == 0x00) {
+    if (data_len < 1) return WAL_FORMAT_CBOR;  // Too short, try CBOR
+    if (data[0] == WAL_BINARY_MAGIC) {
         return WAL_FORMAT_BINARY;
     }
     return WAL_FORMAT_CBOR;
@@ -60,7 +55,7 @@ static int wal_detect_format(const uint8_t* data, size_t data_len) {
  * Decode a binary-encoded PUT entry payload.
  *
  * Binary format:
- *   [path_count:2B BE][path_len:4B BE]
+ *   [0xB1 magic][path_count:2B BE][path_len:4B BE]
  *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
  *   [value_len:4B BE][value:value_len bytes]
  *
@@ -70,6 +65,11 @@ static int decode_put_entry_binary(uint8_t* data, size_t data_len,
                                     path_t** out_path, identifier_t** out_value,
                                     uint8_t chunk_size) {
     size_t pos = 0;
+
+    // Skip magic byte
+    if (pos + 1 > data_len) return -1;
+    if (data[pos] != WAL_BINARY_MAGIC) return -1;
+    pos += 1;
 
     // Read path_count
     if (pos + 2 > data_len) return -1;
@@ -81,7 +81,7 @@ static int decode_put_entry_binary(uint8_t* data, size_t data_len,
     uint32_t path_len = read_be32(data + pos);
     pos += 4;
 
-    (void)path_len;  // Used for validation; we read identifiers individually
+    // path_len validated against total_id_bytes below
 
     // Build path
     path_t* path = path_create();
@@ -107,8 +107,10 @@ static int decode_put_entry_binary(uint8_t* data, size_t data_len,
 
     // Validate path_len matches
     if (total_id_bytes != path_len) {
-        log_warn("WAL Recovery: Binary path_len mismatch (expected=%u, actual=%zu)",
-                 path_len, total_id_bytes);
+        log_error("WAL Recovery: Binary path_len mismatch (expected=%u, actual=%zu)",
+                  path_len, total_id_bytes);
+        path_destroy(path);
+        return -1;
     }
 
     // Read value
@@ -136,7 +138,7 @@ static int decode_put_entry_binary(uint8_t* data, size_t data_len,
  * Decode a binary-encoded DELETE entry payload (path only, no value).
  *
  * Binary format:
- *   [path_count:2B BE][path_len:4B BE]
+ *   [0xB1 magic][path_count:2B BE][path_len:4B BE]
  *   For each identifier: [id_len:2B BE][id_data:id_len bytes]
  *
  * Returns 0 on success, -1 on error.
@@ -145,6 +147,11 @@ static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
                                        path_t** out_path,
                                        uint8_t chunk_size) {
     size_t pos = 0;
+
+    // Skip magic byte
+    if (pos + 1 > data_len) return -1;
+    if (data[pos] != WAL_BINARY_MAGIC) return -1;
+    pos += 1;
 
     // Read path_count
     if (pos + 2 > data_len) return -1;
@@ -156,7 +163,7 @@ static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
     uint32_t path_len = read_be32(data + pos);
     pos += 4;
 
-    (void)path_len;
+    // path_len validated against total_id_bytes below
 
     // Build path
     path_t* path = path_create();
@@ -182,8 +189,10 @@ static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
 
     // Validate path_len matches
     if (total_id_bytes != path_len) {
-        log_warn("WAL Recovery: Binary delete path_len mismatch (expected=%u, actual=%zu)",
-                 path_len, total_id_bytes);
+        log_error("WAL Recovery: Binary delete path_len mismatch (expected=%u, actual=%zu)",
+                  path_len, total_id_bytes);
+        path_destroy(path);
+        return -1;
     }
 
     *out_path = path;
@@ -210,20 +219,6 @@ static void thread_wal_fsync_callback(void* ctx) {
         fsync(twal->fd);
         twal->pending_writes = 0;
     }
-}
-
-// Write uint32 in big-endian
-static void write_uint32_be(uint8_t* buf, uint32_t val) {
-    buf[0] = (val >> 24) & 0xFF;
-    buf[1] = (val >> 16) & 0xFF;
-    buf[2] = (val >> 8) & 0xFF;
-    buf[3] = val & 0xFF;
-}
-
-// Read uint32 from big-endian
-static uint32_t read_uint32_be_local(const uint8_t* buf) {
-    return ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
 }
 
 // Structure to hold WAL entry during recovery
@@ -270,8 +265,8 @@ static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* c
         wal_type_e type = (wal_type_e)header[0];
         transaction_id_t txn_id;
         transaction_id_deserialize(&txn_id, header + 1);
-        uint32_t expected_crc = read_uint32_be_local(header + 25);
-        uint32_t data_len = read_uint32_be_local(header + 29);
+        uint32_t expected_crc = read_be32(header + 25);
+        uint32_t data_len = read_be32(header + 29);
 
         // Read data
         buffer_t* data = buffer_create(data_len);
@@ -1093,11 +1088,11 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     ptr += 24;
 
     // Write CRC32 (4 bytes, big-endian)
-    write_uint32_be(ptr, crc);
+    write_be32(ptr, crc);
     ptr += 4;
 
     // Write data length (4 bytes, big-endian)
-    write_uint32_be(ptr, (uint32_t)data->size);
+    write_be32(ptr, (uint32_t)data->size);
 
     // Write header and data atomically using writev() with O_APPEND
     struct iovec iov[2];
@@ -1708,8 +1703,8 @@ int compact_wal_files(wal_manager_t* manager) {
         header[0] = (uint8_t)all_entries[i].type;
         transaction_id_serialize(&all_entries[i].txn_id, header + 1);
         uint32_t crc = wal_crc32(all_entries[i].data->data, all_entries[i].data->size);
-        write_uint32_be(header + 25, crc);
-        write_uint32_be(header + 29, (uint32_t)all_entries[i].data->size);
+        write_be32(header + 25, crc);
+        write_be32(header + 29, (uint32_t)all_entries[i].data->size);
         ssize_t bytes_written = write(fd, header, 33);
         if (bytes_written != 33) {
             close(fd);
