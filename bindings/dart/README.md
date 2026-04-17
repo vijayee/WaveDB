@@ -247,35 +247,46 @@ layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
 
 ## Performance
 
-Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache.
+Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 4 worker threads.
 
-### C Library (ASYNC WAL, single-threaded)
+### C Library (ASYNC WAL, no work pool, single-threaded)
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.55M ops/sec | 625 ns | 791 ns |
-| Put | 138K ops/sec | 6.8 µs | 11.3 µs |
-| Delete | 181K ops/sec | 5.4 µs | 8.6 µs |
-| Mixed (70% read) | 1.49M ops/sec | 666 ns | 822 ns |
+| Get | 1.46M ops/sec | 679 ns | 777 ns |
+| Put | 160K ops/sec | 5.8 µs | 9.9 µs |
+| Delete | 216K ops/sec | 4.4 µs | 7.0 µs |
+| Mixed (70% read) | 1.49M ops/sec | 664 ns | 750 ns |
 
-### Dart FFI Binding Overhead
+### Dart FFI (DEBOUNCED WAL, 4 worker threads)
 
-| Operation | Throughput | Notes |
-|-----------|------------|-------|
-| `get` (async) | ~69.4K ops/sec | Non-blocking, C worker pool |
-| `put` (async) | ~1K ops/sec | Non-blocking, C worker pool |
-| `getSync` | ~435K ops/sec | Blocking, direct FFI |
-| `putSync` | ~1.2K ops/sec | Blocking, direct FFI |
-| `batch` (async) | ~103K ops/sec | 1K ops/batch |
+| Operation | Throughput |
+|-----------|------------|
+| `getSync` | 526K ops/sec |
+| `putSync` | 1.2K ops/sec |
+| `get` (async) | 26K ops/sec |
+| `put` (async) | 900 ops/sec |
+| `batch` (async, 1K ops) | 85K ops/sec |
+
+### Dart Concurrent Throughput (DEBOUNCED WAL)
+
+| Concurrency | `put` | `get` |
+|-------------|-------|-------|
+| 1 | 1.1K ops/sec | 46K ops/sec |
+| 2 | 1.9K ops/sec | 66K ops/sec |
+| 4 | 2.3K ops/sec | 94K ops/sec |
+| 8 | 2.4K ops/sec | 111K ops/sec |
+| 16 | 2.4K ops/sec | 123K ops/sec |
+| 32 | 2.1K ops/sec | 21K ops/sec |
 
 ### Comparison with Node.js
 
 | Operation | Dart FFI | Node.js N-API | Ratio |
 |-----------|-----------|---------------|-------|
-| `getSync` | 435K ops/sec | 133K ops/sec | Dart 3.3x |
-| `get` (async) | 69.4K ops/sec | 46.5K ops/sec | Dart 1.5x |
-| `batch` (async) | 103K ops/sec | 39.8K ops/sec | Dart 2.6x |
-| `putSync` | 1.2K ops/sec | 1.1K ops/sec | Similar |
+| `getSync` | 526K ops/sec | 203K ops/sec | Dart 2.6x |
+| `get` (async) | 26K ops/sec | 31K ops/sec | Similar |
+| `batch` (async) | 85K ops/sec | 54K ops/sec | Dart 1.6x |
+| `putSync` | 1.2K ops/sec | 1.2K ops/sec | Similar |
 
 Both bindings use the same C async API (`promise_t` + worker pool) for non-blocking operations.
 
