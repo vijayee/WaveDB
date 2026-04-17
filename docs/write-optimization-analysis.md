@@ -2,11 +2,14 @@
 
 **Date:** 2026-04-16  
 **Branch:** write-optimization  
-**Baseline:** Put ~63K ops/sec (sync), Get ~743K ops/sec (sync)
+**Baseline:** Put ~63K ops/sec (sync single-thread), Get ~743K ops/sec (sync)  
+**Concurrent:** Write 82K ops/sec (4 threads), degrades to 61K at 32 threads
 
 ## Profiling Results
 
-`perf record` of `benchmark_database_sync` (10K puts), self-time breakdown:
+### Single-Threaded (`benchmark_database_sync`, 10K puts)
+
+`perf record` of `benchmark_database_sync`, self-time breakdown:
 
 | Category | % Total | Key Functions |
 |----------|---------|---------------|
@@ -21,6 +24,51 @@
 | hbtrie traversal | ~6% | `hbtrie_insert`, `bnode_search`, `inline_key_compare` |
 | memcpy/memcmp | ~4% | `__memcmp_avx2_movbe`, `memcpy` |
 | LRU cache | <1% | `database_lru_cache_put` |
+
+### Multi-Threaded (`benchmark_database`, 4-32 threads, concurrent writes)
+
+`perf record` with 8 concurrent writer threads (31K samples):
+
+| Category | % Total | Change vs Single-Thread | Key Functions |
+|----------|---------|------------------------|---------------|
+| malloc/free | ~21% | Same | `_int_malloc`, `_int_free`, `__libc_calloc` |
+| WAL I/O | ~18% | Same | `writev`, `write`, `wal_crc32` |
+| hbtrie traversal | ~15% | **+9%** | `hbtrie_insert`, `hbtrie_find`, `hbtrie_compute_hash`, `bnode_search` |
+| CBOR encoding | ~12% | Same | `cbor_typeof` |
+| mutex locking | **~10%** | **+2%** | `pthread_mutex_lock`, `pthread_mutex_unlock` |
+| path/identifier | ~10% | Same | `path_compare`, `identifier_compare`, `hash_path` |
+| refcount | ~9% | -4% | `refcounter_init`, `refcounter_dereference`, `refcounter_reference` |
+| hashmap | ~5% | -2% | `hashmap_hash_default`, `hashmap_entry_find` |
+| memcpy/memcmp | ~3% | -1% | `__memcmp_avx2_movbe` |
+| logging | ~1% | -6% | `__vfprintf_internal` (reduced — concurrent throughput is lower) |
+| LRU cache | <1% | Same | `database_lru_cache_put`, `database_lru_cache_get` |
+
+**Key differences from single-threaded:**
+
+1. **`hbtrie_compute_hash` appears at 5.6%** — absent in single-threaded. This is the hash function used to select the write lock shard. Under contention, threads compute the hash before acquiring the lock, and the hash itself becomes a bottleneck.
+
+2. **Mutex time nearly doubles** (8% → 10%) — The `pthread_mutex_lock` call graph shows contention in two places:
+   - `hbtrie_insert` → write_lock crabbing (acquiring per-node locks during descent)
+   - `hierarchical_timing_wheel_cancel_timer` → debounce timer cancellation in WAL write path
+
+3. **Read-path functions appear** — `hbtrie_find` (1.6%), `database_lru_cache_get` (0.5%), `database_get_sync` in the call graph. Under concurrent mixed workload, reads compete with writes for hashmap access and path comparison.
+
+4. **`path_compare` + `identifier_compare` together at 4%** — These are called during LRU cache lookup (`hashmap_entry_find` → `compare_path`). Under concurrent access, multiple threads do cache lookups simultaneously.
+
+5. **Write throughput degrades past 4 threads** — 82K at 4 threads, drops to 61K at 32 threads. This is classic contention collapse: the mutex overhead grows faster than the parallelism gains.
+
+### Throughput Scaling
+
+| Threads | Write ops/sec | Read ops/sec | Mixed ops/sec |
+|---------|-------------|-------------|---------------|
+| 1 | 32K | 86K | — |
+| 2 | 40K | 264K | — |
+| 4 | 82K | 443K | — |
+| 8 | 74K | 1.09M | — |
+| 16 | 70K | 1.24M | — |
+| 32 | 61K | 1.59M | — |
+
+Reads scale well (1.6M at 32 threads). Writes plateau at 4 threads and degrade — confirming that write mutex contention is the bottleneck.
 
 ## Why Writes Are Slow: Root Cause Analysis
 
