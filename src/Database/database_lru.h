@@ -24,7 +24,8 @@ extern "C" {
  */
 typedef struct database_lru_node_t database_lru_node_t;
 struct database_lru_node_t {
-    path_t* path;                   // Key (owned by node)
+    path_t* path;                   // Key (reference counted, shared with hashmap)
+    uint64_t key_hash;              // hash_path() result, compared first
     identifier_t* value;            // Value (reference counted)
     size_t memory_size;             // Approximate memory for this entry
     database_lru_node_t* next;      // Next in LRU list (more recently used)
