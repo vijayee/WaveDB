@@ -2206,6 +2206,59 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   return 0;
 }
 
+hbtrie_reservation_t* hbtrie_reserve(hbtrie_t* trie, path_t* path,
+                                      identifier_t* value, transaction_id_t txn_id) {
+  if (trie == NULL || path == NULL || value == NULL) {
+    return NULL;
+  }
+
+  hbtrie_reservation_t* res = memory_pool_alloc(sizeof(hbtrie_reservation_t));
+  if (res == NULL) return NULL;
+
+  res->trie = trie;
+  res->path = (path_t*)refcounter_reference((refcounter_t*)path);
+  res->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
+  res->txn_id = txn_id;
+
+  // Perform the full insert using per-node spinlocks for mutual exclusion.
+  // The reserve phase handles all structural mutations (trie walk, node
+  // creation, splits) under fine-grained per-node spinlocks. No shard lock
+  // is needed — concurrent writers to different keys serialize only at
+  // shared nodes in the trie path.
+  res->result = hbtrie_insert(trie, path, value, txn_id);
+
+  if (res->result != 0) {
+    path_destroy(res->path);
+    identifier_destroy(res->value);
+    memory_pool_free(res, sizeof(hbtrie_reservation_t));
+    return NULL;
+  }
+
+  return res;
+}
+
+int hbtrie_commit(hbtrie_reservation_t* res) {
+  if (res == NULL) return -1;
+
+  int result = res->result;
+
+  // Release references held by the reservation
+  path_destroy(res->path);
+  identifier_destroy(res->value);
+  memory_pool_free(res, sizeof(hbtrie_reservation_t));
+
+  return result;
+}
+
+void hbtrie_reservation_destroy(hbtrie_reservation_t* res) {
+  if (res == NULL) return;
+
+  // Release references held by the reservation
+  if (res->path != NULL) path_destroy(res->path);
+  if (res->value != NULL) identifier_destroy(res->value);
+  memory_pool_free(res, sizeof(hbtrie_reservation_t));
+}
+
 identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_id) {
   if (trie == NULL || path == NULL) {
     return NULL;

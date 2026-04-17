@@ -757,7 +757,7 @@ database_t* database_create_with_config(const char* location,
 
     // Initialize write locks
     for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        platform_lock_init(&db->write_locks[i]);
+        spinlock_init(&db->write_locks[i]);
     }
 
     // Create storage directories if persistent
@@ -872,7 +872,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -898,7 +898,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -916,7 +916,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
         free(db->location);
         free(db);
@@ -1067,7 +1067,7 @@ void database_destroy(database_t* db) {
 
         // Destroy write lock shards
         for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            platform_lock_destroy(&db->write_locks[i]);
+            spinlock_destroy(&db->write_locks[i]);
         }
 
         // Destroy active config
@@ -1146,15 +1146,8 @@ static void _database_put(database_put_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock (allows concurrent writes to different paths)
-    size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
-
-    // Apply to trie with MVCC
+    // Apply to trie with MVCC (per-node spinlocks provide fine-grained exclusion)
     hbtrie_insert(db->trie, path, value, txn->txn_id);
-
-    // Release write lock
-    platform_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1254,15 +1247,8 @@ static void _database_delete(database_delete_ctx_t* ctx) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock (allows concurrent writes to different paths)
-    size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
-
-    // Remove from trie with MVCC (creates tombstone)
+    // Remove from trie with MVCC (per-node spinlocks provide fine-grained exclusion)
     identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
-
-    // Release write lock
-    platform_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1455,15 +1441,24 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         log_error("encode_put_entry_binary returned NULL - cannot write to WAL");
     }
 
-    // Acquire sharded write lock
-    size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
-
-    // Apply to trie with MVCC
-    hbtrie_insert(db->trie, path, value, txn->txn_id);
-
-    // Release write lock
-    platform_unlock(&db->write_locks[shard]);
+    // Apply to trie with MVCC using two-phase write.
+    // Per-node spinlocks in hbtrie_insert provide fine-grained mutual
+    // exclusion — the shard lock is not needed for correctness. The
+    // reserve+commit API allows the shard lock to be released between
+    // the trie walk and value writing in a future optimization.
+    hbtrie_reservation_t* res = hbtrie_reserve(db->trie, path, value, txn->txn_id);
+    if (res != NULL) {
+        int commit_result = hbtrie_commit(res);
+        if (commit_result != 0) {
+            hbtrie_reservation_destroy(res);
+        }
+    } else {
+        // Fallback: direct insert (should not happen in normal operation)
+        size_t shard = get_write_lock_shard(path);
+        spinlock_lock(&db->write_locks[shard]);
+        hbtrie_insert(db->trie, path, value, txn->txn_id);
+        spinlock_unlock(&db->write_locks[shard]);
+    }
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1563,15 +1558,10 @@ int database_delete_sync(database_t* db, path_t* path) {
         buffer_destroy(entry);
     }
 
-    // Acquire sharded write lock
-    size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
-
-    // Remove from trie with MVCC (creates tombstone)
+    // Remove from trie with MVCC (creates tombstone).
+    // Per-node spinlocks in hbtrie_delete provide fine-grained mutual
+    // exclusion — the shard lock is not needed.
     identifier_t* removed = hbtrie_delete(db->trie, path, txn->txn_id);
-
-    // Release write lock
-    platform_unlock(&db->write_locks[shard]);
 
     // Commit transaction
     tx_manager_commit(db->tx_manager, txn);
@@ -1594,7 +1584,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
 
     // Acquire sharded write lock for atomic read-modify-write
     size_t shard = get_write_lock_shard(path);
-    platform_lock(&db->write_locks[shard]);
+    spinlock_lock(&db->write_locks[shard]);
 
     // Read current value
     transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
@@ -1628,7 +1618,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     if (val_buf == NULL || ins_path == NULL) {
         if (val_buf) buffer_destroy(val_buf);
         if (ins_path) path_destroy(ins_path);
-        platform_unlock(&db->write_locks[shard]);
+        spinlock_unlock(&db->write_locks[shard]);
         return -1;
     }
     memcpy(val_buf->data, val_str, strlen(val_str));
@@ -1637,7 +1627,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     buffer_destroy(val_buf);
     if (new_id == NULL) {
         path_destroy(ins_path);
-        platform_unlock(&db->write_locks[shard]);
+        spinlock_unlock(&db->write_locks[shard]);
         return -1;
     }
 
@@ -1646,7 +1636,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     if (txn == NULL) {
         path_destroy(ins_path);
         identifier_destroy(new_id);
-        platform_unlock(&db->write_locks[shard]);
+        spinlock_unlock(&db->write_locks[shard]);
         return -1;
     }
 
@@ -1665,7 +1655,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     path_destroy(ins_path);
     identifier_destroy(new_id);
 
-    platform_unlock(&db->write_locks[shard]);
+    spinlock_unlock(&db->write_locks[shard]);
     return new_val;
 }
 
@@ -1777,7 +1767,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
 
     // Acquire ALL write locks (in order: 0-63)
     for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        platform_lock(&db->write_locks[i]);
+        spinlock_lock(&db->write_locks[i]);
     }
 
     // Serialize batch
@@ -1785,7 +1775,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     if (data == NULL) {
         // Release locks
         for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
+            spinlock_unlock(&db->write_locks[i - 1]);
         }
         txn_desc_destroy(txn);
         return -1;
@@ -1797,7 +1787,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
         buffer_destroy(data);
         // Release locks
         for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
+            spinlock_unlock(&db->write_locks[i - 1]);
         }
         txn_desc_destroy(txn);
         return -1;
@@ -1809,7 +1799,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     if (result != 0) {
         // Release locks
         for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-            platform_unlock(&db->write_locks[i - 1]);
+            spinlock_unlock(&db->write_locks[i - 1]);
         }
         txn_desc_destroy(txn);
         return result;
@@ -1838,7 +1828,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
             log_error("Batch apply failed at operation %zu", i);
             // Release locks
             for (size_t j = WRITE_LOCK_SHARDS; j > 0; j--) {
-                platform_unlock(&db->write_locks[j - 1]);
+                spinlock_unlock(&db->write_locks[j - 1]);
             }
             txn_desc_destroy(txn);
             return -1;
@@ -1852,7 +1842,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
 
     // Release locks (in reverse order: 63-0)
     for (size_t i = WRITE_LOCK_SHARDS; i > 0; i--) {
-        platform_unlock(&db->write_locks[i - 1]);
+        spinlock_unlock(&db->write_locks[i - 1]);
     }
 
     return 0;

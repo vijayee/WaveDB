@@ -306,6 +306,57 @@ identifier_t* hbtrie_find_with_txn(hbtrie_t* trie, path_t* path, txn_desc_t* txn
 int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction_id_t txn_id);
 
 /**
+ * Two-phase write reservation.
+ *
+ * Captures the result of the reserve phase so the commit phase
+ * can complete the write without holding the shard lock.
+ */
+typedef struct {
+    hbtrie_t* trie;                   // Back-reference to the trie
+    path_t* path;                     // Path being inserted (referenced)
+    identifier_t* value;              // Value being inserted (referenced)
+    transaction_id_t txn_id;          // Transaction ID
+    int result;                       // Result code: 0 = success, -1 = failure
+} hbtrie_reservation_t;
+
+/**
+ * Reserve a position in the HBTrie for a two-phase write.
+ *
+ * Walks the trie under per-node spinlocks and performs the full
+ * insert operation. The reservation captures all necessary state
+ * for the commit phase.
+ *
+ * @param trie    HBTrie to insert into
+ * @param path    Path key (sequence of identifiers)
+ * @param value   Value to store (referenced, not consumed)
+ * @param txn_id  Transaction ID for this write
+ * @return Reservation on success (caller must commit or destroy), NULL on failure
+ */
+hbtrie_reservation_t* hbtrie_reserve(hbtrie_t* trie, path_t* path,
+                                      identifier_t* value, transaction_id_t txn_id);
+
+/**
+ * Commit a two-phase write reservation.
+ *
+ * Completes the write operation. For the current implementation,
+ * the reserve phase already performs the full insert, so this
+ * just handles cleanup and reference counting.
+ *
+ * @param res  Reservation to commit
+ * @return 0 on success, -1 on failure
+ */
+int hbtrie_commit(hbtrie_reservation_t* res);
+
+/**
+ * Destroy a reservation (abort).
+ *
+ * Cleans up a reservation if the commit cannot proceed.
+ *
+ * @param res  Reservation to destroy
+ */
+void hbtrie_reservation_destroy(hbtrie_reservation_t* res);
+
+/**
  * Delete a value from the HBTrie.
  *
  * Creates a tombstone version for the given transaction ID.

@@ -45,7 +45,7 @@ extern "C" {
 
 typedef struct {
     refcounter_t refcounter;
-    PLATFORMLOCKTYPE(write_locks[WRITE_LOCK_SHARDS]);  // Sharded write locks
+    spinlock_t write_locks[WRITE_LOCK_SHARDS];  // Sharded write locks (adaptive spinlocks)
     hbtrie_t* trie;                      // Single trie with MVCC (renamed from write_trie)
     tx_manager_t* tx_manager;           // Transaction manager for MVCC
     database_lru_cache_t* lru;          // In-memory LRU cache
