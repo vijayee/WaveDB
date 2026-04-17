@@ -5,6 +5,7 @@
 #ifndef WAVEDB_QUEUE_H
 #define WAVEDB_QUEUE_H
 #include "work.h"
+#include "../Util/threadding.h"
 #include "../Util/atomic_compat.h"
 
 

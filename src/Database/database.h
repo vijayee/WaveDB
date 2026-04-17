@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include "../RefCounter/refcounter.h"
+#include "../Util/threadding.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/mvcc.h"
 #include "../Time/wheel.h"

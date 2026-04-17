@@ -19,7 +19,6 @@ promise_t* promise_create(void (*resolve)(void*, void*), void (*reject)(void*, a
 void promise_destroy(promise_t* promise) {
   refcounter_dereference((refcounter_t*) promise);
   if (refcounter_count((refcounter_t*) promise) == 0) {
-    refcounter_destroy_lock((refcounter_t*) promise);
     free(promise);
   }
 }

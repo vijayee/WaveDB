@@ -73,7 +73,6 @@ void identifier_destroy(identifier_t* id) {
     }
     vec_deinit(&id->chunks);
 
-    refcounter_destroy_lock((refcounter_t*)id);
     memory_pool_free(id, sizeof(identifier_t));
   }
 }

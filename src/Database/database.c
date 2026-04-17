@@ -1003,7 +1003,6 @@ void database_destroy(database_t* db) {
         }
 
         free(db->location);
-        refcounter_destroy_lock((refcounter_t*)db);
         free(db);
     }
     // If count > 0, other references exist and will handle cleanup when they dereference

@@ -24,7 +24,6 @@ void timer_duration_rectify(timer_duration_t* duration);
 static void timer_destroy(timer_st* timer) {
   if (timer == NULL) return;
   free(timer->plan.steps);
-  refcounter_destroy_lock((refcounter_t*) timer);
   free(timer);
 }
 

@@ -74,7 +74,6 @@ void buffer_destroy(buffer_t* buf) {
   refcounter_dereference((refcounter_t*)buf);
   if (refcounter_count((refcounter_t*)buf) == 0) {
     free(buf->data);
-    refcounter_destroy_lock(&buf->refcounter);
     memory_pool_free(buf, sizeof(buffer_t));
   }
 }

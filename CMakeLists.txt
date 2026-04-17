@@ -112,9 +112,6 @@ set(WAVEDB_SOURCES
 # Create WaveDB library
 add_library(wavedb STATIC ${WAVEDB_SOURCES})
 
-# Use atomic operations for reference counting (eliminates lock overhead)
-target_compile_definitions(wavedb PUBLIC REFCOUNTER_ATOMIC)
-
 # Link with atomic library for C11 atomics
 target_link_libraries(wavedb PUBLIC atomic)
 
@@ -130,9 +127,6 @@ target_include_directories(wavedb
 )
 
 target_link_libraries(wavedb PUBLIC xxhash cbor)
-
-# Enable atomic reference counting for better performance and thread safety
-target_compile_definitions(wavedb PRIVATE REFCOUNTER_ATOMIC)
 
 # Create namespaced alias for consumers
 add_library(WaveDB::wavedb ALIAS wavedb)
@@ -444,7 +438,6 @@ option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
 if(BUILD_DART_BINDINGS)
   # Build shared library for Dart FFI
   add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
-  target_compile_definitions(wavedb_shared PUBLIC REFCOUNTER_ATOMIC)
   target_link_libraries(wavedb_shared PUBLIC atomic xxhash cbor hashmap)
   if(NOT WIN32)
     target_link_libraries(wavedb_shared PUBLIC Threads::Threads)

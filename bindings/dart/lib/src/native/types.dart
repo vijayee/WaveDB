@@ -35,14 +35,14 @@ enum WalSyncMode {
 /// Buffer structure for raw data
 /// Maps to buffer_t in C
 ///
-/// C layout on 64-bit Linux with REFCOUNTER_ATOMIC:
+/// C layout on 64-bit Linux:
 /// - atomic_uint_fast16_t count (8 bytes, aligned)
 /// - atomic_uint_fast8_t yield (1 byte + 7 padding)
 /// - uint8_t* data (8 bytes)
 /// - size_t size (8 bytes)
 /// Total: 32 bytes
 base class buffer_t extends Struct {
-  // refcounter_t with REFCOUNTER_ATOMIC: 16 bytes
+  // refcounter_t: 16 bytes (atomic count + yield)
   @Array(16)
   external Array<Uint8> _refcounter;
 
@@ -56,19 +56,13 @@ base class buffer_t extends Struct {
 
 /// Reference counter structure (first field of refcounted structs)
 /// Maps to refcounter_t in C
-/// Note: Only the count field is defined here for reference counting access.
-/// The full struct has additional fields (yield, lock) that are platform-specific
-/// and not needed for FFI bindings.
+/// Note: Uses C11 _Atomic for lock-free reference counting.
 base class refcounter_t extends Struct {
   @Uint16()
   external int count;
 
   @Uint8()
   external int yield;
-
-  // Note: PLATFORMLOCKTYPE(lock) is platform-specific and varies in size.
-  // For FFI purposes, refcounter_t structs are typically accessed through
-  // opaque handles, so the full layout is not required.
 }
 
 /// Opaque handle to a GraphQL layer

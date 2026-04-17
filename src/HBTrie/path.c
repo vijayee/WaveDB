@@ -44,7 +44,6 @@ void path_destroy(path_t* path) {
     }
     vec_deinit(&path->identifiers);
 
-    refcounter_destroy_lock((refcounter_t*)path);
     memory_pool_free(path, sizeof(path_t));
   }
 }

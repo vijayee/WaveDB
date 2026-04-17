@@ -63,7 +63,6 @@ void batch_destroy(batch_t* batch) {
 
         // Destroy lock and free batch
         platform_lock_destroy(&batch->lock);
-        refcounter_destroy_lock((refcounter_t*)batch);
         free(batch);
     }
 }

@@ -188,8 +188,7 @@ void database_scan_end(database_iterator_t* iter) {
         // Free stack
         if (iter->stack) free(iter->stack);
 
-        // Destroy refcounter lock and free
-        refcounter_destroy_lock((refcounter_t*)iter);
+        // Free iterator
         free(iter);
     }
 }

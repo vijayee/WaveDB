@@ -403,7 +403,6 @@ void hbtrie_destroy(hbtrie_t* trie) {
     if (root != NULL) {
       hbtrie_node_destroy(root);
     }
-    refcounter_destroy_lock((refcounter_t*)trie);
     free(trie);
   }
 }
@@ -486,7 +485,6 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
         bnode_destroy_tree(current->btree);
       }
       platform_lock_destroy(&current->write_lock);
-      refcounter_destroy_lock((refcounter_t*)current);
       memory_pool_free(current, sizeof(hbtrie_node_t));
     }
 
@@ -571,7 +569,6 @@ hbtrie_node_t* hbtrie_node_copy(hbtrie_node_t* node) {
   copy->btree = bnode_tree_copy(node->btree);
   if (copy->btree == NULL) {
     platform_lock_destroy(&copy->write_lock);
-    refcounter_destroy_lock((refcounter_t*)copy);
     free(copy);
     return NULL;
   }

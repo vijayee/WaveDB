@@ -22,7 +22,6 @@
       "<!@(node -p \"require('node-addon-api').gyp\")"
     ],
     "defines": [
-      "REFCOUNTER_ATOMIC"
     ],
     "cflags!": ["-fno-exceptions"],
     "cflags": ["-O3"],
@@ -71,7 +70,6 @@
       "<!@(node -p \"require('node-addon-api').gyp\")"
     ],
     "defines": [
-      "REFCOUNTER_ATOMIC"
     ],
     "cflags!": ["-fno-exceptions"],
     "cflags": ["-O3"],

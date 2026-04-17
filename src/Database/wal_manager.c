@@ -742,7 +742,6 @@ void wal_manager_destroy(wal_manager_t* manager) {
         // Destroy locks
         platform_lock_destroy(&manager->manifest_lock);
         platform_lock_destroy(&manager->threads_lock);
-        refcounter_destroy_lock((refcounter_t*)manager);
 
         free(manager);
     }

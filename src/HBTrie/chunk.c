@@ -56,7 +56,6 @@ void chunk_destroy(chunk_t* chunk) {
 
   refcounter_dereference((refcounter_t*)chunk);
   if (refcounter_count((refcounter_t*)chunk) == 0) {
-    refcounter_destroy_lock((refcounter_t*)chunk);
     free(chunk);
   }
 }

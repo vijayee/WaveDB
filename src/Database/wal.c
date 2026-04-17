@@ -279,7 +279,6 @@ void wal_destroy(wal_t* wal) {
         free(wal->location);
         free(wal->current_file);
         platform_lock_destroy(&wal->lock);
-        refcounter_destroy_lock((refcounter_t*)wal);
         free(wal);
     }
 }

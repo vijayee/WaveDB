@@ -27,7 +27,6 @@ void debouncer_destroy(debouncer_t* bouncer) {
         bouncer->cb(bouncer->ctx);
       }
     }
-    refcounter_destroy_lock((refcounter_t*) bouncer);
     free(bouncer);
   }
 }
