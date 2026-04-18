@@ -349,6 +349,10 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_database_sync tests/benchmark/benchmark_database_sync.cpp)
     target_link_libraries(benchmark_database_sync benchmark_base wavedb Threads::Threads)
 
+    # Raw Sync Database Benchmark
+    add_executable(benchmark_database_sync_raw tests/benchmark/benchmark_database_sync_raw.cpp)
+    target_link_libraries(benchmark_database_sync_raw benchmark_base wavedb gtest gtest_main Threads::Threads)
+
     # Thread-local WAL benchmark
     add_executable(benchmark_thread_wal tests/benchmark/benchmark_thread_wal.cpp)
     target_link_libraries(benchmark_thread_wal benchmark_base wavedb Threads::Threads)
