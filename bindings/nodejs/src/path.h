@@ -21,8 +21,8 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter);
 // Create path from vector of string parts
 path_t* PathFromParts(const std::vector<std::string>& parts);
 
-// Extract JS string key into caller-provided buffer.
+// Extract JS key (string or array) into caller-provided buffer, joining array with delimiter.
 // Returns false on type error (throws JS exception).
-bool KeyFromJS(Napi::Env env, Napi::Value key, char* buf, size_t buf_size, size_t* out_len);
+bool KeyFromJS(Napi::Env env, Napi::Value key, char delimiter, char* buf, size_t buf_size, size_t* out_len);
 
 #endif // WAVEDB_BINDINGS_PATH_H

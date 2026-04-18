@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <napi.h>
+#include <cctype>
 #include <string>
 #include <unistd.h>
 #include "../../../src/Database/database.h"
@@ -717,20 +718,18 @@ Napi::Value WaveDB::PutSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Undefined();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
 
-  identifier_t* value = ValueFromJS(env, info[1]);
-  if (!value) {
-    path_destroy(path);
-    return env.Undefined();
-  }
+  const uint8_t* val_buf;
+  size_t val_len;
+  char val_str_buf[4096];
+  if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Undefined();
 
-  int rc = database_put_sync(db_, path, value);
-
+  int rc = database_put_sync_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len);
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Failed to put value").ThrowAsJavaScriptException();
-    return env.Undefined();
   }
 
   return env.Undefined();
@@ -749,16 +748,31 @@ Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
-  identifier_t* result = NULL;
-  int rc = database_get_sync(db_, path, &result);
+  uint8_t* value = NULL;
+  size_t value_len = 0;
+  int rc = database_get_sync_raw(db_, key_buf, key_len, delimiter_, &value, &value_len);
 
-  if (rc == 0 && result != NULL) {
-    Napi::Value value = ValueToJS(env, result);
-    identifier_destroy(result);
-    return value;
+  if (rc == 0 && value != NULL) {
+    // Check if printable ASCII to decide string vs Buffer return
+    bool printable = true;
+    for (size_t i = 0; i < value_len; i++) {
+      if (!isprint(value[i]) && value[i] != '\t' && value[i] != '\n' && value[i] != '\r') {
+        printable = false;
+        break;
+      }
+    }
+    Napi::Value result;
+    if (printable) {
+      result = Napi::String::New(env, std::string(reinterpret_cast<const char*>(value), value_len));
+    } else {
+      result = Napi::Buffer<uint8_t>::Copy(env, value, value_len);
+    }
+    database_raw_value_free(value);
+    return result;
   } else if (rc == -2) {
     return env.Null();
   } else {
@@ -780,14 +794,13 @@ Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Undefined();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
 
-  int rc = database_delete_sync(db_, path);
-
+  int rc = database_delete_sync_raw(db_, key_buf, key_len, delimiter_);
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Failed to delete value").ThrowAsJavaScriptException();
-    return env.Undefined();
   }
 
   return env.Undefined();
