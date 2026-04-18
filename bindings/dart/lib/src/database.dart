@@ -257,32 +257,69 @@ class WaveDB {
     if (value == null) {
       throw ArgumentError('Value is required for put operation');
     }
-    final path = PathConverter.toNative(key, _delimiter);
-    final id = IdentifierConverter.toNative(value);
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
+    final valueBytes = IdentifierConverter.toBytes(value);
+    final valuePtr = calloc<Uint8>(valueBytes.length);
+    valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
 
-    return _dispatchAsync<void>(_AsyncOpType.put, (promise) {
-      WaveDBNative.databasePutAsync(_db!, path, id, promise);
-    });
+    try {
+      return _dispatchAsync<void>(_AsyncOpType.put, (promise) {
+        final rc = WaveDBNative.databasePutRaw(
+          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+          valuePtr, valueBytes.length, promise,
+        );
+        if (rc != 0) {
+          throw WaveDBException.ioError('put_raw', 'return code: $rc');
+        }
+      });
+    } finally {
+      // database_put_raw copies data internally before dispatching
+      calloc.free(keyPtr);
+      calloc.free(valuePtr);
+    }
   }
 
   /// Retrieve a value asynchronously via the C worker pool
   Future<dynamic> get(dynamic key) async {
     _checkClosed();
-    final path = PathConverter.toNative(key, _delimiter);
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
 
-    return _dispatchAsync<dynamic>(_AsyncOpType.get, (promise) {
-      WaveDBNative.databaseGetAsync(_db!, path, promise);
-    });
+    try {
+      return _dispatchAsync<dynamic>(_AsyncOpType.get, (promise) {
+        final rc = WaveDBNative.databaseGetRaw(
+          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit, promise,
+        );
+        if (rc != 0) {
+          throw WaveDBException.ioError('get_raw', 'return code: $rc');
+        }
+      });
+    } finally {
+      // database_get_raw copies key internally before dispatching
+      calloc.free(keyPtr);
+    }
   }
 
   /// Delete a value asynchronously via the C worker pool
   Future<void> del(dynamic key) async {
     _checkClosed();
-    final path = PathConverter.toNative(key, _delimiter);
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
 
-    return _dispatchAsync<void>(_AsyncOpType.delete, (promise) {
-      WaveDBNative.databaseDeleteAsync(_db!, path, promise);
-    });
+    try {
+      return _dispatchAsync<void>(_AsyncOpType.delete, (promise) {
+        final rc = WaveDBNative.databaseDeleteRaw(
+          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit, promise,
+        );
+        if (rc != 0) {
+          throw WaveDBException.ioError('delete_raw', 'return code: $rc');
+        }
+      });
+    } finally {
+      // database_delete_raw copies key internally before dispatching
+      calloc.free(keyPtr);
+    }
   }
 
   /// Execute multiple operations atomically via the C worker pool
