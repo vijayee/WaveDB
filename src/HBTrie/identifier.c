@@ -56,6 +56,86 @@ identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
   return id;
 }
 
+identifier_t* identifier_create_from_raw(const uint8_t* data, size_t len, size_t chunk_size) {
+  if (chunk_size == 0) {
+    chunk_size = DEFAULT_CHUNK_SIZE;
+  }
+
+  // Use memory pool for identifier_t
+  identifier_t* id = (identifier_t*)memory_pool_alloc(sizeof(identifier_t));
+  if (id == NULL) {
+    id = get_clear_memory(sizeof(identifier_t));
+  }
+  if (id == NULL) return NULL;
+
+  id->length = len;
+  id->chunk_size = chunk_size;
+
+  // Initialize chunk vector
+  vec_init(&id->chunks);
+
+  // Handle empty data
+  if (len == 0 || data == NULL) {
+    refcounter_init((refcounter_t*)id);
+    return id;
+  }
+
+  // Calculate number of chunks needed
+  size_t nchunk = identifier_calc_nchunk(len, chunk_size);
+  vec_reserve(&id->chunks, (int)nchunk);
+
+  // Create chunks from raw data
+  for (size_t i = 0; i < nchunk; i++) {
+    size_t chunk_len = chunk_size;
+    if (i == nchunk - 1) {
+      // Last chunk may be smaller
+      chunk_len = identifier_calc_last_chunk_size(len, chunk_size);
+    }
+
+    chunk_t* chunk = chunk_create_empty(chunk_size);
+    if (chunk == NULL) {
+      // Clean up on failure
+      chunk_t* c;
+      int j;
+      vec_foreach(&id->chunks, c, j) {
+        chunk_destroy(c);
+      }
+      vec_deinit(&id->chunks);
+      memory_pool_free(id, sizeof(identifier_t));
+      return NULL;
+    }
+    memcpy(chunk->data, data + (i * chunk_size), chunk_len);
+    vec_push(&id->chunks, chunk);
+  }
+
+  refcounter_init((refcounter_t*)id);
+  return id;
+}
+
+uint8_t* identifier_get_data_copy(const identifier_t* id, size_t* out_len) {
+  if (id == NULL || out_len == NULL) return NULL;
+
+  *out_len = id->length;
+  if (id->length == 0) return NULL;
+
+  uint8_t* data = malloc(id->length);
+  if (data == NULL) return NULL;
+
+  size_t offset = 0;
+  for (size_t i = 0; i < (size_t)id->chunks.length; i++) {
+    chunk_t* chunk = id->chunks.data[i];
+    size_t copy_len = id->chunk_size;
+    if (i == (size_t)id->chunks.length - 1) {
+      // Last chunk: only copy up to remaining length
+      copy_len = id->length - offset;
+    }
+    memcpy(data + offset, chunk->data, copy_len);
+    offset += copy_len;
+  }
+
+  return data;
+}
+
 identifier_t* identifier_create_empty(size_t chunk_size) {
   return identifier_create(NULL, chunk_size);
 }

@@ -68,6 +68,31 @@ static inline size_t identifier_calc_last_chunk_size(size_t length, size_t chunk
 identifier_t* identifier_create(buffer_t* buf, size_t chunk_size);
 
 /**
+ * Create an identifier directly from raw bytes, skipping the buffer_t intermediate.
+ *
+ * Saves 2 allocations + 2 frees + 1 memcpy compared to creating a buffer_t
+ * first and then calling identifier_create().
+ *
+ * @param data        Raw byte data (may be NULL if len is 0)
+ * @param len         Length of data in bytes
+ * @param chunk_size  Size of each chunk (use DEFAULT_CHUNK_SIZE if 0)
+ * @return New identifier_t or NULL on failure
+ */
+identifier_t* identifier_create_from_raw(const uint8_t* data, size_t len, size_t chunk_size);
+
+/**
+ * Get a contiguous copy of the identifier's data.
+ *
+ * Allocates and returns a malloc'd buffer containing the original byte data
+ * reconstructed from all chunks. Caller must free() the returned pointer.
+ *
+ * @param id       Identifier to get data from
+ * @param out_len  Output: length of data in bytes
+ * @return Pointer to malloc'd data buffer, or NULL on failure. Caller must free().
+ */
+uint8_t* identifier_get_data_copy(const identifier_t* id, size_t* out_len);
+
+/**
  * Create an empty identifier.
  *
  * @param chunk_size Size of each chunk (use DEFAULT_CHUNK_SIZE if 0)
