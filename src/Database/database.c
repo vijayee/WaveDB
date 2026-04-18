@@ -668,6 +668,7 @@ static void database_eviction_task_execute(void* ctx) {
                                     database_eviction_task_abort,
                                     db);
         if (task != NULL) {
+            refcounter_yield((refcounter_t*) task);
             if (work_pool_enqueue(db->pool, task) != 0) {
                 work_destroy(task);  // Pool stopped, don't reschedule
             }
@@ -721,6 +722,9 @@ database_t* database_create_with_config(const char* location,
         if (owns_config) database_config_destroy(effective_config);
         return NULL;
     }
+
+    // Initialize memory pool (call once per process)
+    memory_pool_init();
 
     // Initialize transaction ID generator (call once per process)
     transaction_id_init();
@@ -914,6 +918,7 @@ database_t* database_create_with_config(const char* location,
                                                 database_eviction_task_abort,
                                                 db);
                     if (task != NULL) {
+                        refcounter_yield((refcounter_t*) task);
                         work_pool_enqueue(db->pool, task);
                     }
                 }
@@ -1164,6 +1169,9 @@ void database_destroy(database_t* db) {
 
         free(db->location);
         free(db);
+
+        // Drain TLS cache back to global pool
+        memory_pool_tls_drain();
     }
     // If count > 0, other references exist and will handle cleanup when they dereference
 }

@@ -158,11 +158,38 @@ void memory_pool_init(void) {
              (double)MEMORY_POOL_TOTAL_SIZE / (1024 * 1024));
 }
 
+// Drain the calling thread's TLS caches back to the global pool
+void memory_pool_tls_drain(void) {
+    if (!g_pool.initialized) {
+        return;
+    }
+
+    // Return all cached blocks in each TLS cache to their global pool
+    while (tls_small.count > 0) {
+        void* ptr = tls_small.cache[--tls_small.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_SMALL], ptr);
+    }
+
+    while (tls_medium.count > 0) {
+        void* ptr = tls_medium.cache[--tls_medium.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_MEDIUM], ptr);
+    }
+
+    while (tls_large.count > 0) {
+        void* ptr = tls_large.cache[--tls_large.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_LARGE], ptr);
+    }
+}
+
 // Destroy global memory pool
+// Must drain TLS caches on ALL threads that used the pool before calling this
 void memory_pool_destroy(void) {
     if (!g_pool.initialized) {
         return;
     }
+
+    // Drain the calling thread's TLS cache first
+    memory_pool_tls_drain();
 
     // Destroy each size class
     for (int i = 0; i < 3; i++) {

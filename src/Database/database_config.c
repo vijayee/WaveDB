@@ -87,7 +87,7 @@ int database_config_save(const char* location, const database_config_t* config) 
     snprintf(config_path, path_len, "%s/.config", location);
 
     // Create CBOR map
-    cbor_item_t* root = cbor_new_definite_map(10);
+    cbor_item_t* root = cbor_new_definite_map(11);
     if (root == NULL) {
         free(config_path);
         return -1;

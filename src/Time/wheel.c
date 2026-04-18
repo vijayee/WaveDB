@@ -451,12 +451,21 @@ hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count,
 void hierarchical_timing_wheel_destroy(hierarchical_timing_wheel_t* wheel) {
   refcounter_dereference((refcounter_t*) wheel);
   if (refcounter_count((refcounter_t*) wheel) == 0) {
+    // Release timer references from the hashmap before cleanup
+    timer_st* timer;
+    void* pos;
+    hashmap_foreach_data_safe(timer, &wheel->timers, pos) {
+      timer_unref(timer);
+    }
+
     timing_wheel_destroy(wheel->days);
     timing_wheel_destroy(wheel->hours);
     timing_wheel_destroy(wheel->minutes);
     timing_wheel_destroy(wheel->seconds);
     timing_wheel_destroy(wheel->milliseconds);
     hashmap_cleanup(&wheel->timers);
+    platform_lock_destroy(&wheel->lock);
+    platform_condition_destroy(&wheel->idle);
     free(wheel);
   }
 }

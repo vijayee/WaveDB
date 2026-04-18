@@ -3,6 +3,7 @@
 //
 #include "pool.h"
 #include "../Util/allocator.h"
+#include "../Util/memory_pool.h"
 #include "../Util/log.h"
 
 #if _WIN32
@@ -146,6 +147,8 @@ void* workerFunction(void* args) {
       work_destroy(work);
     }
   }
+  // Drain TLS cache before thread exits so blocks return to global pool
+  memory_pool_tls_drain();
 #if _WIN32
   return 0;
 #else

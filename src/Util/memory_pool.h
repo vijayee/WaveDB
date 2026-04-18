@@ -95,8 +95,12 @@ typedef struct {
 // Must be called once before any allocations
 void memory_pool_init(void);
 
+// Drain the calling thread's TLS caches back to the global pool
+// Must be called on every thread that used the pool before pool destroy
+void memory_pool_tls_drain(void);
+
 // Destroy global memory pool
-// Must be called after all allocations are freed
+// Must drain TLS caches on ALL threads that used the pool before calling this
 void memory_pool_destroy(void);
 
 // Allocate memory from pool
