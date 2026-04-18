@@ -45,6 +45,18 @@ path_t* path_create(void);
 path_t* path_create_from_identifier(identifier_t* id);
 
 /**
+ * Create path by parsing a raw key string with delimiter.
+ * Uses identifier_create_from_raw internally (no buffer_t overhead).
+ *
+ * @param key        Key string (e.g. "users/alice/name")
+ * @param key_len    Length of key string
+ * @param delimiter  Path segment delimiter
+ * @param chunk_size Chunk size for identifiers (0 = DEFAULT_CHUNK_SIZE)
+ * @return New path, or NULL on error
+ */
+path_t* path_create_from_raw(const char* key, size_t key_len, char delimiter, size_t chunk_size);
+
+/**
  * Destroy a path.
  *
  * @param path  Path to destroy

@@ -31,6 +31,39 @@ path_t* path_create_from_identifier(identifier_t* id) {
   return path;
 }
 
+path_t* path_create_from_raw(const char* key, size_t key_len, char delimiter, size_t chunk_size) {
+  path_t* path = path_create();
+  if (!path) return NULL;
+
+  if (chunk_size == 0) chunk_size = DEFAULT_CHUNK_SIZE;
+
+  if (!key || key_len == 0) return path;
+
+  size_t start = 0;
+  for (size_t i = 0; i <= key_len; i++) {
+    if (i == key_len || key[i] == delimiter) {
+      size_t seg_len = i - start;
+      if (seg_len == 0) {
+        start = i + 1;
+        continue;
+      }
+
+      identifier_t* id = identifier_create_from_raw(
+          (const uint8_t*)(key + start), seg_len, chunk_size);
+      if (!id) {
+        path_destroy(path);
+        return NULL;
+      }
+
+      path_append(path, id);
+      identifier_destroy(id);
+      start = i + 1;
+    }
+  }
+
+  return path;
+}
+
 void path_destroy(path_t* path) {
   if (path == NULL) return;
 
