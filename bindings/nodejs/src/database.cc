@@ -8,20 +8,10 @@
 #include <unistd.h>
 #include "../../../src/Database/database.h"
 #include "../../../src/Database/database_iterator.h"
-#include "../../../src/Database/batch.h"
 #include "path.h"
 #include "identifier.h"
 #include "async_bridge.h"
 #include "iterator.h"
-
-// BatchOp struct for PutObject/FlattenObject (local use, not the C batch_t)
-enum class BatchOpType { PUT, DEL };
-
-struct BatchOp {
-  BatchOpType type;
-  path_t* path;
-  identifier_t* value;  // nullptr for DEL
-};
 
 class WaveDB : public Napi::ObjectWrap<WaveDB> {
 public:
@@ -54,15 +44,6 @@ private:
   Napi::Value BatchSync(const Napi::CallbackInfo& info);
 
   // Object operations helpers
-  static void FlattenObject(Napi::Env env,
-                           Napi::Object obj,
-                           std::vector<std::string>& path_parts,
-                           std::vector<BatchOp>& ops,
-                           char delimiter);
-
-  static Napi::Object ReconstructObject(Napi::Env env,
-                                        const std::vector<std::pair<std::vector<std::string>, Napi::Value>>& entries);
-
   static Napi::Value ConvertArrays(Napi::Env env, Napi::Value value);
 
   // Object operations
@@ -416,73 +397,107 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Array ops = info[0].As<Napi::Array>();
-
-  // Build a C batch_t from the JS array
-  batch_t* batch = batch_create(ops.Length());
-  if (!batch) {
-    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
-    return env.Null();
+  Napi::Array js_ops = info[0].As<Napi::Array>();
+  uint32_t count = js_ops.Length();
+  if (count == 0) {
+    // Empty batch — resolve immediately
+    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
   }
 
-  for (uint32_t i = 0; i < ops.Length(); i++) {
-    Napi::Object op = ops.Get(i).As<Napi::Object>();
+  // Build raw_op_t array with stable string storage
+  // These vectors must stay alive until database_batch_raw copies data internally
+  auto* key_strings = new std::vector<std::string>(count);
+  auto* val_strings = new std::vector<std::string>();
+  val_strings->reserve(count);
+  auto* raw_ops = new std::vector<raw_op_t>(count);
+
+  for (uint32_t i = 0; i < count; i++) {
+    Napi::Object op = js_ops.Get(i).As<Napi::Object>();
 
     if (!op.Has("type") || !op.Has("key")) {
-      batch_destroy(batch);
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
       return env.Null();
     }
 
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
-    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
-    if (!path) {
-      batch_destroy(batch);
+
+    // Key
+    size_t key_len;
+    char key_buf[4096];
+    if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) {
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       return env.Null();
     }
+    (*key_strings)[i] = std::string(key_buf, key_len);
+    (*raw_ops)[i].key = (*key_strings)[i].c_str();
+    (*raw_ops)[i].key_len = (*key_strings)[i].size();
 
-    int rc;
     if (type == "put") {
       if (!op.Has("value")) {
-        path_destroy(path);
-        batch_destroy(batch);
+        delete key_strings;
+        delete val_strings;
+        delete raw_ops;
         Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
         return env.Null();
       }
+      (*raw_ops)[i].type = 0;
 
-      identifier_t* value = ValueFromJS(env, op.Get("value"));
-      if (!value) {
-        path_destroy(path);
-        batch_destroy(batch);
-        return env.Null();
+      const uint8_t* val_buf;
+      size_t val_len;
+      char val_str_buf[4096];
+      char* val_heap_buf = nullptr;
+
+      Napi::Value valArg = op.Get("value");
+      if (valArg.IsString()) {
+        size_t required;
+        napi_get_value_string_utf8(env, valArg, nullptr, 0, &required);
+        if (required >= sizeof(val_str_buf)) {
+          val_heap_buf = new char[required + 1];
+          napi_get_value_string_utf8(env, valArg, val_heap_buf, required + 1, &val_len);
+          val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
+        } else {
+          if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
+            delete key_strings;
+            delete val_strings;
+            delete raw_ops;
+            delete[] val_heap_buf;
+            return env.Null();
+          }
+        }
+      } else {
+        if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
+          delete key_strings;
+          delete val_strings;
+          delete raw_ops;
+          return env.Null();
+        }
       }
 
-      rc = batch_add_put(batch, path, value);
-      if (rc != 0) {
-        // batch_add_put failed — ownership remains with caller
-        path_destroy(path);
-        identifier_destroy(value);
-        batch_destroy(batch);
-        Napi::Error::New(env, "Failed to add put to batch").ThrowAsJavaScriptException();
-        return env.Null();
-      }
+      val_strings->push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      (*raw_ops)[i].value = reinterpret_cast<const uint8_t*>(val_strings->back().c_str());
+      (*raw_ops)[i].value_len = val_strings->back().size();
+
+      delete[] val_heap_buf;
     } else if (type == "del") {
-      rc = batch_add_delete(batch, path);
-      if (rc != 0) {
-        path_destroy(path);
-        batch_destroy(batch);
-        Napi::Error::New(env, "Failed to add delete to batch").ThrowAsJavaScriptException();
-        return env.Null();
-      }
+      (*raw_ops)[i].type = 1;
+      (*raw_ops)[i].value = nullptr;
+      (*raw_ops)[i].value_len = 0;
     } else {
-      path_destroy(path);
-      batch_destroy(batch);
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
       return env.Null();
     }
   }
 
-  // Dispatch async batch operation
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
 
   promise_t* promise_c = bridge_.CreatePromise(ctx);
@@ -492,14 +507,30 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    batch_destroy(batch);
+    delete key_strings;
+    delete val_strings;
+    delete raw_ops;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
-  ctx->batch = batch;
 
-  database_write_batch(db_, batch, promise_c);
+  int rc = database_batch_raw(db_, delimiter_, raw_ops->data(), raw_ops->size(), promise_c);
+
+  // database_batch_raw copies all data internally before dispatching,
+  // so safe to free the heap-allocated vectors now
+  delete key_strings;
+  delete val_strings;
+  delete raw_ops;
+
+  if (rc != 0) {
+    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch batch").Value();
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    // Return a rejected promise
+    return Napi::Value(env, ctx->promise);
+  }
 
   return Napi::Value(env, ctx->promise);
 }
@@ -519,8 +550,9 @@ Napi::Value WaveDB::GetCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
 
@@ -531,13 +563,12 @@ Napi::Value WaveDB::GetCb(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_get(db_, path, promise_c);
+  database_get_raw(db_, key_buf, key_len, delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -555,13 +586,27 @@ Napi::Value WaveDB::PutCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
-  identifier_t* value = ValueFromJS(env, info[1]);
-  if (!value) {
-    path_destroy(path);
-    return env.Null();
+  const uint8_t* val_buf;
+  size_t val_len;
+  char val_str_buf[4096];
+  char* val_heap_buf = nullptr;
+
+  if (info[1].IsString()) {
+    size_t required;
+    napi_get_value_string_utf8(env, info[1], nullptr, 0, &required);
+    if (required >= sizeof(val_str_buf)) {
+      val_heap_buf = new char[required + 1];
+      napi_get_value_string_utf8(env, info[1], val_heap_buf, required + 1, &val_len);
+      val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
+    } else {
+      if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
+    }
+  } else {
+    if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
   }
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
@@ -573,14 +618,15 @@ Napi::Value WaveDB::PutCb(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
-    identifier_destroy(value);
+    delete[] val_heap_buf;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_put(db_, path, value, promise_c);
+  database_put_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len, promise_c);
+
+  delete[] val_heap_buf;
 
   return Napi::Value(env, ctx->promise);
 }
@@ -598,8 +644,9 @@ Napi::Value WaveDB::DeleteCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
 
@@ -610,13 +657,12 @@ Napi::Value WaveDB::DeleteCb(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_delete(db_, path, promise_c);
+  database_delete_raw(db_, key_buf, key_len, delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -634,70 +680,109 @@ Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Array ops = info[0].As<Napi::Array>();
-
-  batch_t* batch = batch_create(ops.Length());
-  if (!batch) {
-    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
-    return env.Null();
+  Napi::Array js_ops = info[0].As<Napi::Array>();
+  uint32_t count = js_ops.Length();
+  if (count == 0) {
+    // Empty batch — call callback with no error
+    Napi::Function callback = info[1].As<Napi::Function>();
+    callback.Call({ env.Null() });
+    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
   }
 
-  for (uint32_t i = 0; i < ops.Length(); i++) {
-    Napi::Object op = ops.Get(i).As<Napi::Object>();
+  // Build raw_op_t array with stable string storage
+  auto* key_strings = new std::vector<std::string>(count);
+  auto* val_strings = new std::vector<std::string>();
+  val_strings->reserve(count);
+  auto* raw_ops = new std::vector<raw_op_t>(count);
+
+  for (uint32_t i = 0; i < count; i++) {
+    Napi::Object op = js_ops.Get(i).As<Napi::Object>();
 
     if (!op.Has("type") || !op.Has("key")) {
-      batch_destroy(batch);
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
       return env.Null();
     }
 
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
-    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
-    if (!path) {
-      batch_destroy(batch);
+
+    // Key
+    size_t key_len;
+    char key_buf[4096];
+    if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) {
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       return env.Null();
     }
+    (*key_strings)[i] = std::string(key_buf, key_len);
+    (*raw_ops)[i].key = (*key_strings)[i].c_str();
+    (*raw_ops)[i].key_len = (*key_strings)[i].size();
 
-    int rc;
     if (type == "put") {
       if (!op.Has("value")) {
-        path_destroy(path);
-        batch_destroy(batch);
+        delete key_strings;
+        delete val_strings;
+        delete raw_ops;
         Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
         return env.Null();
       }
+      (*raw_ops)[i].type = 0;
 
-      identifier_t* value = ValueFromJS(env, op.Get("value"));
-      if (!value) {
-        path_destroy(path);
-        batch_destroy(batch);
-        return env.Null();
+      const uint8_t* val_buf;
+      size_t val_len;
+      char val_str_buf[4096];
+      char* val_heap_buf = nullptr;
+
+      Napi::Value valArg = op.Get("value");
+      if (valArg.IsString()) {
+        size_t required;
+        napi_get_value_string_utf8(env, valArg, nullptr, 0, &required);
+        if (required >= sizeof(val_str_buf)) {
+          val_heap_buf = new char[required + 1];
+          napi_get_value_string_utf8(env, valArg, val_heap_buf, required + 1, &val_len);
+          val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
+        } else {
+          if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
+            delete key_strings;
+            delete val_strings;
+            delete raw_ops;
+            delete[] val_heap_buf;
+            return env.Null();
+          }
+        }
+      } else {
+        if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
+          delete key_strings;
+          delete val_strings;
+          delete raw_ops;
+          return env.Null();
+        }
       }
 
-      rc = batch_add_put(batch, path, value);
-      if (rc != 0) {
-        path_destroy(path);
-        identifier_destroy(value);
-        batch_destroy(batch);
-        Napi::Error::New(env, "Failed to add put to batch").ThrowAsJavaScriptException();
-        return env.Null();
-      }
+      val_strings->push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      (*raw_ops)[i].value = reinterpret_cast<const uint8_t*>(val_strings->back().c_str());
+      (*raw_ops)[i].value_len = val_strings->back().size();
+
+      delete[] val_heap_buf;
     } else if (type == "del") {
-      rc = batch_add_delete(batch, path);
-      if (rc != 0) {
-        path_destroy(path);
-        batch_destroy(batch);
-        Napi::Error::New(env, "Failed to add delete to batch").ThrowAsJavaScriptException();
-        return env.Null();
-      }
+      (*raw_ops)[i].type = 1;
+      (*raw_ops)[i].value = nullptr;
+      (*raw_ops)[i].value_len = 0;
     } else {
-      path_destroy(path);
-      batch_destroy(batch);
+      delete key_strings;
+      delete val_strings;
+      delete raw_ops;
       Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
       return env.Null();
     }
   }
 
+  // callbackArgIndex = 1 for BatchCb
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
 
   promise_t* promise_c = bridge_.CreatePromise(ctx);
@@ -707,14 +792,28 @@ Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    batch_destroy(batch);
+    delete key_strings;
+    delete val_strings;
+    delete raw_ops;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
-  ctx->batch = batch;
 
-  database_write_batch(db_, batch, promise_c);
+  int rc = database_batch_raw(db_, delimiter_, raw_ops->data(), raw_ops->size(), promise_c);
+
+  // database_batch_raw copies all data internally before dispatching
+  delete key_strings;
+  delete val_strings;
+  delete raw_ops;
+
+  if (rc != 0) {
+    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch batch").Value();
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, ctx->promise);
+  }
 
   return Napi::Value(env, ctx->promise);
 }
@@ -835,10 +934,18 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  Napi::Array ops = info[0].As<Napi::Array>();
+  Napi::Array js_ops = info[0].As<Napi::Array>();
+  uint32_t count = js_ops.Length();
+  if (count == 0) return env.Undefined();
 
-  for (uint32_t i = 0; i < ops.Length(); i++) {
-    Napi::Object op = ops.Get(i).As<Napi::Object>();
+  // Build raw_op_t array with stable string storage
+  std::vector<raw_op_t> ops(count);
+  std::vector<std::string> key_strings(count);
+  std::vector<std::string> val_strings;
+  val_strings.reserve(count);
+
+  for (uint32_t i = 0; i < count; i++) {
+    Napi::Object op = js_ops.Get(i).As<Napi::Object>();
 
     if (!op.Has("type") || !op.Has("key")) {
       Napi::TypeError::New(env, "Operation must have 'type' and 'key'").ThrowAsJavaScriptException();
@@ -846,97 +953,58 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
     }
 
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
-    path_t* path = PathFromJS(env, op.Get("key"), delimiter_);
-    if (!path) return env.Undefined();
 
-    int rc;
     if (type == "put") {
       if (!op.Has("value")) {
         Napi::TypeError::New(env, "Put operation must have 'value'").ThrowAsJavaScriptException();
-        path_destroy(path);
         return env.Undefined();
       }
+      ops[i].type = 0;
 
-      identifier_t* value = ValueFromJS(env, op.Get("value"));
-      if (!value) {
-        path_destroy(path);
-        return env.Undefined();
-      }
+      // Key
+      size_t key_len;
+      char key_buf[4096];
+      if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
+      key_strings[i] = std::string(key_buf, key_len);
+      ops[i].key = key_strings[i].c_str();
+      ops[i].key_len = key_strings[i].size();
 
-      rc = database_put_sync(db_, path, value);
+      // Value
+      const uint8_t* val_buf;
+      size_t val_len;
+      char val_str_buf[4096];
+      if (!ValueFromJSRaw(env, op.Get("value"), val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Undefined();
+      val_strings.push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      ops[i].value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
+      ops[i].value_len = val_strings.back().size();
     } else if (type == "del") {
-      rc = database_delete_sync(db_, path);
+      ops[i].type = 1;
+      ops[i].value = nullptr;
+      ops[i].value_len = 0;
+
+      // Key
+      size_t key_len;
+      char key_buf[4096];
+      if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
+      key_strings[i] = std::string(key_buf, key_len);
+      ops[i].key = key_strings[i].c_str();
+      ops[i].key_len = key_strings[i].size();
     } else {
       Napi::TypeError::New(env, "Operation type must be 'put' or 'del'").ThrowAsJavaScriptException();
-      path_destroy(path);
       return env.Undefined();
     }
+  }
 
-    if (rc != 0) {
-      Napi::Error::New(env, "IO_ERROR: Batch operation failed").ThrowAsJavaScriptException();
-      return env.Undefined();
-    }
+  int rc = database_batch_sync_raw(db_, delimiter_, ops.data(), ops.size());
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Batch operation failed").ThrowAsJavaScriptException();
+    return env.Undefined();
   }
 
   return env.Undefined();
 }
 
 // --- Object operations ---
-
-void WaveDB::FlattenObject(Napi::Env env,
-                          Napi::Object obj,
-                          std::vector<std::string>& path_parts,
-                          std::vector<BatchOp>& ops,
-                          char delimiter) {
-  Napi::Array keys = obj.GetPropertyNames();
-
-  for (uint32_t i = 0; i < keys.Length(); i++) {
-    std::string key = keys.Get(i).As<Napi::String>().Utf8Value();
-    Napi::Value value = obj.Get(key);
-
-    path_parts.push_back(key);
-
-    if (value.IsObject() && !value.IsArray() && !value.IsBuffer()) {
-      FlattenObject(env, value.As<Napi::Object>(), path_parts, ops, delimiter);
-    } else if (value.IsArray()) {
-      Napi::Array arr = value.As<Napi::Array>();
-      for (uint32_t j = 0; j < arr.Length(); j++) {
-        path_parts.push_back(std::to_string(j));
-
-        BatchOp op;
-        op.type = BatchOpType::PUT;
-        op.path = PathFromParts(path_parts);
-        op.value = ValueFromJS(env, arr.Get(j));
-
-        if (!op.path || !op.value) {
-          if (op.path) path_destroy(op.path);
-          if (op.value) identifier_destroy(op.value);
-          path_parts.pop_back();
-          throw std::runtime_error("Failed to create path or value");
-        }
-
-        ops.push_back(op);
-        path_parts.pop_back();
-      }
-    } else {
-      BatchOp op;
-      op.type = BatchOpType::PUT;
-      op.path = PathFromParts(path_parts);
-      op.value = ValueFromJS(env, value);
-
-      if (!op.path || !op.value) {
-        if (op.path) path_destroy(op.path);
-        if (op.value) identifier_destroy(op.value);
-        path_parts.pop_back();
-        throw std::runtime_error("Failed to create path or value");
-      }
-
-      ops.push_back(op);
-    }
-
-    path_parts.pop_back();
-  }
-}
 
 static void FlattenObjectRaw(Napi::Env env,
                              Napi::Object obj,
@@ -1202,32 +1270,6 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
   database_raw_results_free(results, count);
 
   return ConvertArrays(env, result_obj);
-}
-
-Napi::Object WaveDB::ReconstructObject(Napi::Env env,
-                                       const std::vector<std::pair<std::vector<std::string>, Napi::Value>>& entries) {
-  Napi::Object result = Napi::Object::New(env);
-
-  for (const auto& entry : entries) {
-    const std::vector<std::string>& pathParts = entry.first;
-    Napi::Value value = entry.second;
-
-    if (pathParts.empty()) continue;
-
-    Napi::Object current = result;
-    for (size_t i = 0; i < pathParts.size() - 1; i++) {
-      const std::string& key = pathParts[i];
-
-      if (!current.Has(key)) {
-        current.Set(key, Napi::Object::New(env));
-      }
-      current = current.Get(key).As<Napi::Object>();
-    }
-
-    current.Set(pathParts.back(), value);
-  }
-
-  return ConvertArrays(env, result).As<Napi::Object>();
 }
 
 Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
