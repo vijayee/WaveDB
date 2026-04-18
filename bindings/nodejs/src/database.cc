@@ -938,6 +938,86 @@ void WaveDB::FlattenObject(Napi::Env env,
   }
 }
 
+static void FlattenObjectRaw(Napi::Env env,
+                             Napi::Object obj,
+                             std::vector<std::string>& path_parts,
+                             std::vector<raw_op_t>& ops,
+                             std::vector<std::string>& key_strings,
+                             std::vector<std::string>& val_strings,
+                             char delimiter) {
+  Napi::Array keys = obj.GetPropertyNames();
+
+  for (uint32_t i = 0; i < keys.Length(); i++) {
+    std::string key = keys.Get(i).As<Napi::String>().Utf8Value();
+    Napi::Value value = obj.Get(key);
+
+    path_parts.push_back(key);
+
+    if (value.IsObject() && !value.IsArray() && !value.IsBuffer()) {
+      FlattenObjectRaw(env, value.As<Napi::Object>(), path_parts, ops, key_strings, val_strings, delimiter);
+    } else if (value.IsArray()) {
+      Napi::Array arr = value.As<Napi::Array>();
+      for (uint32_t j = 0; j < arr.Length(); j++) {
+        path_parts.push_back(std::to_string(j));
+
+        raw_op_t op;
+        op.type = 0; // put
+
+        // Build key string from path_parts joined by delimiter
+        std::string key_str;
+        for (size_t k = 0; k < path_parts.size(); k++) {
+          if (k > 0) key_str += delimiter;
+          key_str += path_parts[k];
+        }
+        key_strings.push_back(key_str);
+        op.key = key_strings.back().c_str();
+        op.key_len = key_strings.back().size();
+
+        // Handle value
+        Napi::Value arrVal = arr.Get(j);
+        if (arrVal.IsBuffer()) {
+          Napi::Buffer<uint8_t> buf = arrVal.As<Napi::Buffer<uint8_t>>();
+          val_strings.push_back(std::string(reinterpret_cast<const char*>(buf.Data()), buf.Length()));
+        } else {
+          val_strings.push_back(arrVal.As<Napi::String>().Utf8Value());
+        }
+        op.value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
+        op.value_len = val_strings.back().size();
+
+        ops.push_back(op);
+        path_parts.pop_back();
+      }
+    } else {
+      raw_op_t op;
+      op.type = 0; // put
+
+      // Build key string from path_parts joined by delimiter
+      std::string key_str;
+      for (size_t k = 0; k < path_parts.size(); k++) {
+        if (k > 0) key_str += delimiter;
+        key_str += path_parts[k];
+      }
+      key_strings.push_back(key_str);
+      op.key = key_strings.back().c_str();
+      op.key_len = key_strings.back().size();
+
+      // Handle value
+      if (value.IsBuffer()) {
+        Napi::Buffer<uint8_t> buf = value.As<Napi::Buffer<uint8_t>>();
+        val_strings.push_back(std::string(reinterpret_cast<const char*>(buf.Data()), buf.Length()));
+      } else {
+        val_strings.push_back(value.As<Napi::String>().Utf8Value());
+      }
+      op.value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
+      op.value_len = val_strings.back().size();
+
+      ops.push_back(op);
+    }
+
+    path_parts.pop_back();
+  }
+}
+
 Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -952,72 +1032,27 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   }
 
   Napi::Object obj = info[0].As<Napi::Object>();
-  std::vector<BatchOp> ops;
+  std::vector<raw_op_t> ops;
+  std::vector<std::string> key_strings;
+  std::vector<std::string> val_strings;
   std::vector<std::string> path_parts;
 
   try {
-    FlattenObject(env, obj, path_parts, ops, delimiter_);
+    FlattenObjectRaw(env, obj, path_parts, ops, key_strings, val_strings, delimiter_);
   } catch (const std::exception& e) {
-    for (auto& op : ops) {
-      if (op.path) path_destroy(op.path);
-      if (op.value) identifier_destroy(op.value);
-    }
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  // Build a C batch_t from the flattened operations
-  batch_t* batch = batch_create(ops.size());
-  if (!batch) {
-    for (auto& op : ops) {
-      if (op.path) path_destroy(op.path);
-      if (op.value) identifier_destroy(op.value);
-    }
-    Napi::Error::New(env, "Failed to create batch").ThrowAsJavaScriptException();
+  if (ops.empty()) return env.Null();
+
+  int rc = database_batch_sync_raw(db_, delimiter_, ops.data(), ops.size());
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Batch put failed").ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  for (auto& op : ops) {
-    int rc;
-    if (op.type == BatchOpType::PUT) {
-      rc = batch_add_put(batch, op.path, op.value);
-      if (rc != 0) {
-        path_destroy(op.path);
-        identifier_destroy(op.value);
-      }
-    } else {
-      rc = batch_add_delete(batch, op.path);
-      if (rc != 0) {
-        path_destroy(op.path);
-      }
-    }
-    if (rc != 0) {
-      batch_destroy(batch);
-      Napi::Error::New(env, "Failed to add operation to batch").ThrowAsJavaScriptException();
-      return env.Null();
-    }
-  }
-
-  // Dispatch async batch
-  AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Batch, info, 1);
-
-  promise_t* promise_c = bridge_.CreatePromise(ctx);
-  if (!promise_c) {
-    napi_value error_val = Napi::Error::New(env, "Failed to create async promise").Value();
-    napi_value promise_val = ctx->promise;
-    napi_reject_deferred(env, ctx->deferred, error_val);
-    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
-    delete ctx;
-    batch_destroy(batch);
-    return Napi::Value(env, promise_val);
-  }
-
-  ctx->promise_c = promise_c;
-  ctx->batch = batch;
-
-  database_write_batch(db_, batch, promise_c);
-
-  return Napi::Value(env, ctx->promise);
+  return env.Null();
 }
 
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
@@ -1033,113 +1068,69 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
-  } else {
-    callback = Napi::Function::New(env, [](const Napi::CallbackInfo& info) {
-      return info.Env().Undefined();
-    });
-  }
+  size_t prefix_len;
+  char prefix_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, prefix_buf, sizeof(prefix_buf), &prefix_len)) return env.Null();
 
-  path_t* basePath = PathFromJS(env, info[0], delimiter_);
-  if (!basePath) return env.Null();
+  raw_result_t* results = NULL;
+  size_t count = 0;
+  int rc = database_scan_sync_raw(db_, prefix_buf, prefix_len, delimiter_, &results, &count);
 
-  path_t* startPath = nullptr;
-  path_t* endPath = nullptr;
-
-  startPath = path_create();
-  if (!startPath) {
-    path_destroy(basePath);
-    Napi::Error::New(env, "Failed to create start path").ThrowAsJavaScriptException();
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
-    identifier_t* id = basePath->identifiers.data[i];
-    REFERENCE(id, identifier_t);
-    path_append(startPath, id);
-  }
-
-  std::vector<std::string> basePathParts;
-  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
-    identifier_t* id = basePath->identifiers.data[i];
-    std::string part;
-    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-      chunk_t* chunk = id->chunks.data[j];
-      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->size;
-      part += std::string(reinterpret_cast<const char*>(data), size);
-    }
-    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
-      part.pop_back();
-    }
-    basePathParts.push_back(part);
-  }
-
-  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
-  path_destroy(startPath);
-  path_destroy(basePath);
-
-  if (!iter) {
-    Napi::Object result = Napi::Object::New(env);
-    callback.Call({ env.Null(), result });
-    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
-    deferred.Resolve(result);
-    return deferred.Promise();
-  }
-
-  std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
-
-  while (true) {
-    path_t* outPath = nullptr;
-    identifier_t* outValue = nullptr;
-
-    int rc = database_scan_next(iter, &outPath, &outValue);
-    if (rc != 0) break;
-
-    std::vector<std::string> pathParts;
-    for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
-      identifier_t* id = outPath->identifiers.data[i];
-      std::string part;
-      for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-        chunk_t* chunk = id->chunks.data[j];
-        const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-        size_t size = chunk->size;
-        part += std::string(reinterpret_cast<const char*>(data), size);
+  // Reconstruct JS object from flat results
+  Napi::Object result_obj = Napi::Object::New(env);
+  for (size_t i = 0; i < count; i++) {
+    bool printable = true;
+    for (size_t j = 0; j < results[i].value_len; j++) {
+      if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
+          results[i].value[j] != '\n' && results[i].value[j] != '\r') {
+        printable = false;
+        break;
       }
-      while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
-        part.pop_back();
-      }
-      pathParts.push_back(part);
+    }
+    Napi::Value val;
+    if (printable) {
+      val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), results[i].value_len));
+    } else {
+      val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, results[i].value_len);
     }
 
-    Napi::Value jsValue = ValueToJS(env, outValue);
-
-    if (pathParts.size() >= basePathParts.size()) {
-      bool matches = true;
-      for (size_t i = 0; i < basePathParts.size() && matches; i++) {
-        if (pathParts[i] != basePathParts[i]) {
-          matches = false;
+    std::string key(results[i].key, results[i].key_len);
+    Napi::Object current = result_obj;
+    size_t start = 0;
+    for (size_t j = 0; j <= key.size(); j++) {
+      if (j == key.size() || key[j] == delimiter_) {
+        std::string segment = key.substr(start, j - start);
+        if (j == key.size()) {
+          current.Set(segment, val);
+        } else {
+          if (!current.Has(segment) || !current.Get(segment).IsObject()) {
+            current.Set(segment, Napi::Object::New(env));
+          }
+          current = current.Get(segment).As<Napi::Object>();
         }
-      }
-      if (matches) {
-        entries.push_back({pathParts, jsValue});
+        start = j + 1;
       }
     }
-
-    path_destroy(outPath);
-    identifier_destroy(outValue);
   }
 
-  database_scan_end(iter);
+  database_raw_results_free(results, count);
 
-  Napi::Object result = ReconstructObject(env, entries);
+  Napi::Value converted = ConvertArrays(env, result_obj);
 
-  callback.Call({ env.Null(), result });
+  // Handle callback if provided
+  Napi::Function callback;
+  if (info.Length() > 1 && info[1].IsFunction()) {
+    callback = info[1].As<Napi::Function>();
+    callback.Call({ env.Null(), converted });
+  }
 
   Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
-  deferred.Resolve(result);
+  deferred.Resolve(converted);
   return deferred.Promise();
 }
 
@@ -1156,93 +1147,61 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* basePath = PathFromJS(env, info[0], delimiter_);
-  if (!basePath) return env.Null();
+  size_t prefix_len;
+  char prefix_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, prefix_buf, sizeof(prefix_buf), &prefix_len)) return env.Null();
 
-  std::vector<std::string> basePathParts;
-  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
-    identifier_t* id = basePath->identifiers.data[i];
-    std::string part;
-    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-      chunk_t* chunk = id->chunks.data[j];
-      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->size;
-      part += std::string(reinterpret_cast<const char*>(data), size);
-    }
-    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
-      part.pop_back();
-    }
-    basePathParts.push_back(part);
-  }
+  raw_result_t* results = NULL;
+  size_t count = 0;
+  int rc = database_scan_sync_raw(db_, prefix_buf, prefix_len, delimiter_, &results, &count);
 
-  path_t* startPath = path_create();
-  if (!startPath) {
-    path_destroy(basePath);
-    Napi::Error::New(env, "Failed to create start path").ThrowAsJavaScriptException();
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  for (size_t i = 0; i < static_cast<size_t>(basePath->identifiers.length); i++) {
-    identifier_t* id = basePath->identifiers.data[i];
-    REFERENCE(id, identifier_t);
-    path_append(startPath, id);
-  }
-
-  database_iterator_t* iter = database_scan_start(db_, startPath, nullptr);
-
-  path_destroy(startPath);
-  path_destroy(basePath);
-
-  if (!iter) {
-    return Napi::Object::New(env);
-  }
-
-  std::vector<std::pair<std::vector<std::string>, Napi::Value>> entries;
-
-  while (true) {
-    path_t* outPath = nullptr;
-    identifier_t* outValue = nullptr;
-
-    int rc = database_scan_next(iter, &outPath, &outValue);
-    if (rc != 0) break;
-
-    std::vector<std::string> pathParts;
-    for (size_t i = 0; i < static_cast<size_t>(outPath->identifiers.length); i++) {
-      identifier_t* id = outPath->identifiers.data[i];
-      std::string part;
-      for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-        chunk_t* chunk = id->chunks.data[j];
-        const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-        size_t size = chunk->size;
-        part += std::string(reinterpret_cast<const char*>(data), size);
+  // Reconstruct JS object from flat results
+  Napi::Object result_obj = Napi::Object::New(env);
+  for (size_t i = 0; i < count; i++) {
+    // Check if printable ASCII to decide string vs Buffer
+    bool printable = true;
+    for (size_t j = 0; j < results[i].value_len; j++) {
+      if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
+          results[i].value[j] != '\n' && results[i].value[j] != '\r') {
+        printable = false;
+        break;
       }
-      while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
-        part.pop_back();
-      }
-      pathParts.push_back(part);
+    }
+    Napi::Value val;
+    if (printable) {
+      val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), results[i].value_len));
+    } else {
+      val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, results[i].value_len);
     }
 
-    Napi::Value jsValue = ValueToJS(env, outValue);
-
-    if (pathParts.size() >= basePathParts.size()) {
-      bool matches = true;
-      for (size_t i = 0; i < basePathParts.size() && matches; i++) {
-        if (pathParts[i] != basePathParts[i]) {
-          matches = false;
+    // Walk/create nested object path and set the value at the leaf
+    std::string key(results[i].key, results[i].key_len);
+    Napi::Object current = result_obj;
+    size_t start = 0;
+    for (size_t j = 0; j <= key.size(); j++) {
+      if (j == key.size() || key[j] == delimiter_) {
+        std::string segment = key.substr(start, j - start);
+        if (j == key.size()) {
+          current.Set(segment, val);
+        } else {
+          if (!current.Has(segment) || !current.Get(segment).IsObject()) {
+            current.Set(segment, Napi::Object::New(env));
+          }
+          current = current.Get(segment).As<Napi::Object>();
         }
-      }
-      if (matches) {
-        entries.push_back({pathParts, jsValue});
+        start = j + 1;
       }
     }
-
-    path_destroy(outPath);
-    identifier_destroy(outValue);
   }
 
-  database_scan_end(iter);
+  database_raw_results_free(results, count);
 
-  return ReconstructObject(env, entries);
+  return ConvertArrays(env, result_obj);
 }
 
 Napi::Object WaveDB::ReconstructObject(Napi::Env env,
