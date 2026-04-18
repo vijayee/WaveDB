@@ -284,13 +284,28 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
-  identifier_t* value = ValueFromJS(env, info[1]);
-  if (!value) {
-    path_destroy(path);
-    return env.Null();
+  const uint8_t* val_buf;
+  size_t val_len;
+  char val_str_buf[4096];
+  char* val_heap_buf = nullptr;
+
+  if (info[1].IsString()) {
+    // Get required length first
+    size_t required;
+    napi_get_value_string_utf8(env, info[1], nullptr, 0, &required);
+    if (required >= sizeof(val_str_buf)) {
+      val_heap_buf = new char[required + 1];
+      napi_get_value_string_utf8(env, info[1], val_heap_buf, required + 1, &val_len);
+      val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
+    } else {
+      if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
+    }
+  } else {
+    if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
   }
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
@@ -302,15 +317,16 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
-    identifier_destroy(value);
+    delete[] val_heap_buf;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  // C async API takes ownership of path and value
-  database_put(db_, path, value, promise_c);
+  database_put_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len, promise_c);
+
+  // database_put_raw copies data internally before dispatching, so safe to free now
+  delete[] val_heap_buf;
 
   return Napi::Value(env, ctx->promise);
 }
@@ -328,8 +344,9 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
 
@@ -340,13 +357,12 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_get(db_, path, promise_c);
+  database_get_raw(db_, key_buf, key_len, delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -364,8 +380,9 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  path_t* path = PathFromJS(env, info[0], delimiter_);
-  if (!path) return env.Null();
+  size_t key_len;
+  char key_buf[4096];
+  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
 
@@ -376,13 +393,12 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    path_destroy(path);
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_delete(db_, path, promise_c);
+  database_delete_raw(db_, key_buf, key_len, delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
