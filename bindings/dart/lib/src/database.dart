@@ -1,6 +1,7 @@
 // lib/src/database.dart
 import 'dart:async';
 import 'dart:ffi';
+import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'native/types.dart';
 import 'native/wavedb_bindings.dart';
@@ -231,6 +232,15 @@ class WaveDB {
   String get path => _path;
   String get delimiter => _delimiter;
 
+  int get _delimiterCodeUnit => _delimiter.codeUnitAt(0);
+
+  /// Convert a key (String or List) to a delimiter-joined string
+  String _keyToString(dynamic key) {
+    if (key is String) return key;
+    if (key is List) return key.map((e) => e.toString()).join(_delimiter);
+    return key.toString();
+  }
+
   void _checkClosed() {
     if (_isClosed || _db == null) {
       throw WaveDBException.databaseClosed();
@@ -395,51 +405,72 @@ class WaveDB {
   // ============================================================
 
   void _putSyncInternal(dynamic key, dynamic value) {
-    final path = PathConverter.toNative(key, _delimiter);
-    final id = IdentifierConverter.toNative(value);
-
-    final rc = WaveDBNative.databasePutSync(_db!, path, id);
-    if (rc != 0) {
-      throw WaveDBException.ioError('put', 'return code: $rc');
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
+    final valueBytes = IdentifierConverter.toBytes(value);
+    final valuePtr = calloc<Uint8>(valueBytes.length);
+    try {
+      valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
+      final rc = WaveDBNative.databasePutSyncRaw(
+        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        valuePtr, valueBytes.length,
+      );
+      if (rc != 0) {
+        throw WaveDBException.ioError('put', 'return code: $rc');
+      }
+    } finally {
+      calloc.free(keyPtr);
+      calloc.free(valuePtr);
     }
   }
 
   dynamic _getSyncInternal(dynamic key) {
-    final path = PathConverter.toNative(key, _delimiter);
-    final resultPtr = calloc<Pointer<identifier_t>>();
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
+    final valueOutPtr = calloc<Pointer<Uint8>>();
+    final valueLenPtr = calloc<Size>();
 
     try {
-      final rc = WaveDBNative.databaseGetSync(_db!, path, resultPtr);
+      final rc = WaveDBNative.databaseGetSyncRaw(
+        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        valueOutPtr, valueLenPtr,
+      );
 
-      if (rc == -2) {
-        return null;
-      }
+      if (rc == -2) return null;
+      if (rc != 0) throw WaveDBException.ioError('get', 'return code: $rc');
 
-      if (rc != 0) {
-        throw WaveDBException.ioError('get', 'return code: $rc');
-      }
-
-      final result = resultPtr.value;
-      if (result == nullptr) {
-        return null;
-      }
+      final valuePtr = valueOutPtr.value;
+      final valueLen = valueLenPtr.value;
+      if (valuePtr == nullptr || valueLen == 0) return null;
 
       try {
-        return IdentifierConverter.fromNative(result);
+        final bytes = Uint8List.fromList(valuePtr.asTypedList(valueLen));
+        return IdentifierConverter.isPrintableASCII(bytes)
+            ? String.fromCharCodes(bytes)
+            : bytes;
       } finally {
-        WaveDBNative.identifierDestroy(result);
+        WaveDBNative.databaseRawValueFree(valuePtr);
       }
     } finally {
-      calloc.free(resultPtr);
+      calloc.free(keyPtr);
+      calloc.free(valueOutPtr);
+      calloc.free(valueLenPtr);
     }
   }
 
   void _delSyncInternal(dynamic key) {
-    final path = PathConverter.toNative(key, _delimiter);
+    final keyStr = _keyToString(key);
+    final keyPtr = keyStr.toNativeUtf8();
 
-    final rc = WaveDBNative.databaseDeleteSync(_db!, path);
-    if (rc != 0) {
-      throw WaveDBException.ioError('delete', 'return code: $rc');
+    try {
+      final rc = WaveDBNative.databaseDeleteSyncRaw(
+        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+      );
+      if (rc != 0) {
+        throw WaveDBException.ioError('delete', 'return code: $rc');
+      }
+    } finally {
+      calloc.free(keyPtr);
     }
   }
 

@@ -118,6 +118,19 @@ class IdentifierConverter {
     return bytes.every((b) => b >= 32 && b < 127);
   }
 
+  /// Convert Dart value to Uint8List without FFI allocation
+  static Uint8List toBytes(dynamic value) {
+    if (value is String) {
+      return Uint8List.fromList(utf8.encode(value));
+    } else if (value is Uint8List) {
+      return value;
+    } else if (value is List<int>) {
+      return Uint8List.fromList(value);
+    } else {
+      throw ArgumentError('Value must be String, Uint8List, or List<int>');
+    }
+  }
+
   /// Destroy a native identifier
   static void destroy(Pointer<identifier_t> id) {
     WaveDBNative.identifierDestroy(id);
