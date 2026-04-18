@@ -4,6 +4,7 @@ extern "C" {
 #include "HBTrie/chunk.h"
 #include "HBTrie/path.h"
 #include "Buffer/buffer.h"
+#include "Database/database.h"
 }
 
 TEST(RawIdentifierTest, CreateFromRawBasic) {
@@ -133,4 +134,111 @@ TEST(RawPathTest, CreateFromRawRoundTrip) {
     free(seg2);
 
     path_destroy(path);
+}
+
+// --- Database-level raw sync API tests ---
+
+class RawSyncTest : public ::testing::Test {
+protected:
+    database_t* db;
+    char test_dir[256];
+
+    void SetUp() override {
+        snprintf(test_dir, sizeof(test_dir), "/tmp/wavedb_raw_test_%d", getpid());
+        database_config_t* config = database_config_default();
+        config->enable_persist = 0;
+        db = database_create_with_config(test_dir, config, NULL);
+        database_config_destroy(config);
+        ASSERT_NE(db, nullptr);
+    }
+
+    void TearDown() override {
+        if (db) database_destroy(db);
+        rmdir(test_dir);
+    }
+};
+
+TEST_F(RawSyncTest, PutAndGetSync) {
+    int rc = database_put_sync_raw(db, "users/alice", 11, '/', (const uint8_t*)"hello", 5);
+    EXPECT_EQ(rc, 0);
+
+    uint8_t* value = NULL;
+    size_t value_len = 0;
+    rc = database_get_sync_raw(db, "users/alice", 11, '/', &value, &value_len);
+    EXPECT_EQ(rc, 0);
+    ASSERT_NE(value, nullptr);
+    EXPECT_EQ(value_len, 5u);
+    EXPECT_EQ(memcmp(value, "hello", 5), 0);
+    database_raw_value_free(value);
+}
+
+TEST_F(RawSyncTest, GetNotFound) {
+    uint8_t* value = NULL;
+    size_t value_len = 0;
+    int rc = database_get_sync_raw(db, "nonexistent", 11, '/', &value, &value_len);
+    EXPECT_EQ(rc, -2);
+    EXPECT_EQ(value, nullptr);
+}
+
+TEST_F(RawSyncTest, DeleteSync) {
+    database_put_sync_raw(db, "users/alice", 11, '/', (const uint8_t*)"hello", 5);
+
+    int rc = database_delete_sync_raw(db, "users/alice", 11, '/');
+    EXPECT_EQ(rc, 0);
+
+    uint8_t* value = NULL;
+    size_t value_len = 0;
+    rc = database_get_sync_raw(db, "users/alice", 11, '/', &value, &value_len);
+    EXPECT_EQ(rc, -2);
+}
+
+TEST_F(RawSyncTest, PutNullKey) {
+    int rc = database_put_sync_raw(db, NULL, 0, '/', (const uint8_t*)"val", 3);
+    EXPECT_EQ(rc, -1);
+}
+
+TEST_F(RawSyncTest, PutAndGetVariousLengths) {
+    // Short key, long value
+    int rc = database_put_sync_raw(db, "k", 1, '/', (const uint8_t*)"long_value_here", 15);
+    EXPECT_EQ(rc, 0);
+
+    uint8_t* value = NULL;
+    size_t value_len = 0;
+    rc = database_get_sync_raw(db, "k", 1, '/', &value, &value_len);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(value_len, 15u);
+    EXPECT_EQ(memcmp(value, "long_value_here", 15), 0);
+    database_raw_value_free(value);
+}
+
+TEST_F(RawSyncTest, RawMatchesOriginalAPI) {
+    // Put via raw API, get via original API
+    database_put_sync_raw(db, "users/bob", 9, '/', (const uint8_t*)"raw_val", 7);
+
+    path_t* path = path_create_from_raw("users/bob", 9, '/', 0);
+    identifier_t* result = NULL;
+    int rc = database_get_sync(db, path, &result);
+    EXPECT_EQ(rc, 0);
+    ASSERT_NE(result, nullptr);
+    size_t len;
+    uint8_t* data = identifier_get_data_copy(result, &len);
+    EXPECT_EQ(len, 7u);
+    EXPECT_EQ(memcmp(data, "raw_val", 7), 0);
+    free(data);
+    identifier_destroy(result);
+
+    // Put via original API, get via raw API
+    path_t* path2 = path_create_from_raw("users/carol", 11, '/', 0);
+    buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)"orig_val", 8);
+    identifier_t* val = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    database_put_sync(db, path2, val);
+
+    uint8_t* value = NULL;
+    size_t value_len = 0;
+    rc = database_get_sync_raw(db, "users/carol", 11, '/', &value, &value_len);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(value_len, 8u);
+    EXPECT_EQ(memcmp(value, "orig_val", 8), 0);
+    database_raw_value_free(value);
 }

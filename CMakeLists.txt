@@ -173,7 +173,7 @@ if(BUILD_TESTS)
 
     # Test for raw binding API
     add_executable(test_raw_api tests/test_raw_api.cpp)
-    target_link_libraries(test_raw_api wavedb gtest gtest_main)
+    target_link_libraries(test_raw_api wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_raw_api COMMAND test_raw_api)
 
     # Test for bnode

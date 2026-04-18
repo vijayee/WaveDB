@@ -1937,6 +1937,59 @@ static void batch_execute_work(void* ctx) {
     free(work);
 }
 
+/* --- Raw API implementations --- */
+
+int database_put_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    const uint8_t* value, size_t value_len) {
+    if (!db || !key || key_len == 0 || !value) return -1;
+
+    path_t* path = path_create_from_raw(key, key_len, delimiter, db->chunk_size);
+    if (!path) return -1;
+
+    identifier_t* id = identifier_create_from_raw(value, value_len, db->chunk_size);
+    if (!id) { path_destroy(path); return -1; }
+
+    return database_put_sync(db, path, id);
+}
+
+int database_get_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    uint8_t** value_out, size_t* value_len_out) {
+    if (!db || !key || key_len == 0 || !value_out || !value_len_out) return -1;
+
+    path_t* path = path_create_from_raw(key, key_len, delimiter, db->chunk_size);
+    if (!path) return -1;
+
+    identifier_t* result = NULL;
+    int rc = database_get_sync(db, path, &result);
+
+    if (rc == 0 && result) {
+        *value_out = identifier_get_data_copy(result, value_len_out);
+        identifier_destroy(result);
+        if (!*value_out) return -1;
+        return 0;
+    }
+
+    *value_out = NULL;
+    *value_len_out = 0;
+    return rc;
+}
+
+int database_delete_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter) {
+    if (!db || !key || key_len == 0) return -1;
+
+    path_t* path = path_create_from_raw(key, key_len, delimiter, db->chunk_size);
+    if (!path) return -1;
+
+    return database_delete_sync(db, path);
+}
+
+void database_raw_value_free(uint8_t* value) {
+    free(value);
+}
+
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
     if (db == NULL || batch == NULL || promise == NULL) {
         int* error = malloc(sizeof(int));

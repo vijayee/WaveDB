@@ -271,6 +271,38 @@ int database_write_batch_sync(database_t* db, batch_t* batch);
  */
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise);
 
+/* --- Raw API types --- */
+
+typedef struct {
+    const char* key;
+    size_t key_len;
+    const uint8_t* value;
+    size_t value_len;
+    int type;   /* 0 = put, 1 = delete */
+} raw_op_t;
+
+typedef struct {
+    char* key;
+    size_t key_len;
+    uint8_t* value;
+    size_t value_len;
+} raw_result_t;
+
+/* --- Sync raw functions --- */
+
+int database_put_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    const uint8_t* value, size_t value_len);
+
+int database_get_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    uint8_t** value_out, size_t* value_len_out);
+
+int database_delete_sync_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter);
+
+void database_raw_value_free(uint8_t* value);
+
 /**
  * Flush all dirty bnodes to the page file using CoW.
  *
