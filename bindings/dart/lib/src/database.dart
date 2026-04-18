@@ -325,60 +325,63 @@ class WaveDB {
   /// Execute multiple operations atomically via the C worker pool
   Future<void> batch(List<Map<String, dynamic>> operations) async {
     _checkClosed();
-    final batchPtr = WaveDBNative.batchCreate(operations.length);
-    if (batchPtr == nullptr) {
-      throw WaveDBException.ioError('batch', 'Failed to create batch');
-    }
+    if (operations.isEmpty) return;
+
+    final opsPtr = calloc<RawOp>(operations.length);
+    final keyPtrs = <Pointer<Uint8>>[];
+    final valuePtrs = <Pointer<Uint8>>[];
 
     try {
-      for (final op in operations) {
+      for (int i = 0; i < operations.length; i++) {
+        final op = operations[i];
         final type = op['type'] as String?;
         final key = op['key'];
 
         if (type == null || key == null) {
-          WaveDBNative.batchDestroy(batchPtr);
           throw ArgumentError('Operation must have type and key');
         }
 
-        final path = PathConverter.toNative(key, _delimiter);
-        int rc;
+        final keyStr = _keyToString(key);
+        final keyPtr = keyStr.toNativeUtf8();
+        keyPtrs.add(keyPtr.cast());
+        opsPtr[i].key = keyPtr.cast();
+        opsPtr[i].keyLen = keyStr.length;
 
         if (type == 'put') {
           final value = op['value'];
           if (value == null) {
-            WaveDBNative.pathDestroy(path);
-            WaveDBNative.batchDestroy(batchPtr);
             throw ArgumentError('Put operation must have value');
           }
-          final id = IdentifierConverter.toNative(value);
-          rc = WaveDBNative.batchAddPut(batchPtr, path, id);
-          if (rc != 0) {
-            WaveDBNative.pathDestroy(path);
-            WaveDBNative.identifierDestroy(id);
-            WaveDBNative.batchDestroy(batchPtr);
-            throw WaveDBException.ioError('batch_add_put', 'return code: $rc');
-          }
+          opsPtr[i].type = 0;
+          final valueBytes = IdentifierConverter.toBytes(value);
+          final valuePtr = calloc<Uint8>(valueBytes.length);
+          valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
+          valuePtrs.add(valuePtr);
+          opsPtr[i].value = valuePtr;
+          opsPtr[i].valueLen = valueBytes.length;
         } else if (type == 'del') {
-          rc = WaveDBNative.batchAddDelete(batchPtr, path);
-          if (rc != 0) {
-            WaveDBNative.pathDestroy(path);
-            WaveDBNative.batchDestroy(batchPtr);
-            throw WaveDBException.ioError('batch_add_delete', 'return code: $rc');
-          }
+          opsPtr[i].type = 1;
+          opsPtr[i].value = nullptr;
+          opsPtr[i].valueLen = 0;
         } else {
-          WaveDBNative.pathDestroy(path);
-          WaveDBNative.batchDestroy(batchPtr);
           throw ArgumentError('Operation type must be "put" or "del"');
         }
       }
-    } catch (e) {
-      // If batchAddPut/Delete failed and threw, we already cleaned up
-      rethrow;
-    }
 
-    return _dispatchAsync<void>(_AsyncOpType.batch, (promise) {
-      WaveDBNative.databaseWriteBatchAsync(_db!, batchPtr, promise);
-    }, batchPtr);
+      return _dispatchAsync<void>(_AsyncOpType.batch, (promise) {
+        final rc = WaveDBNative.databaseBatchRaw(
+          _db!, _delimiterCodeUnit, opsPtr, operations.length, promise,
+        );
+        if (rc != 0) {
+          throw WaveDBException.ioError('batch_raw', 'return code: $rc');
+        }
+      });
+    } finally {
+      // database_batch_raw copies all data internally before dispatching
+      for (final p in keyPtrs) calloc.free(p);
+      for (final p in valuePtrs) calloc.free(p);
+      calloc.free(opsPtr);
+    }
   }
 
   /// Store a nested object as flattened paths via the C worker pool
@@ -512,25 +515,59 @@ class WaveDB {
   }
 
   void _batchSyncInternal(List<Map<String, dynamic>> operations) {
-    for (final op in operations) {
-      final type = op['type'] as String?;
-      final key = op['key'];
+    if (operations.isEmpty) return;
 
-      if (type == null || key == null) {
-        throw ArgumentError('Operation must have type and key');
-      }
+    final opsPtr = calloc<RawOp>(operations.length);
+    final keyPtrs = <Pointer<Uint8>>[];
+    final valuePtrs = <Pointer<Uint8>>[];
 
-      if (type == 'put') {
-        final value = op['value'];
-        if (value == null) {
-          throw ArgumentError('Put operation must have value');
+    try {
+      for (int i = 0; i < operations.length; i++) {
+        final op = operations[i];
+        final type = op['type'] as String?;
+        final key = op['key'];
+
+        if (type == null || key == null) {
+          throw ArgumentError('Operation must have type and key');
         }
-        _putSyncInternal(key, value);
-      } else if (type == 'del') {
-        _delSyncInternal(key);
-      } else {
-        throw ArgumentError('Operation type must be "put" or "del"');
+
+        final keyStr = _keyToString(key);
+        final keyPtr = keyStr.toNativeUtf8();
+        keyPtrs.add(keyPtr.cast());
+        opsPtr[i].key = keyPtr.cast();
+        opsPtr[i].keyLen = keyStr.length;
+
+        if (type == 'put') {
+          final value = op['value'];
+          if (value == null) {
+            throw ArgumentError('Put operation must have value');
+          }
+          opsPtr[i].type = 0;
+          final valueBytes = IdentifierConverter.toBytes(value);
+          final valuePtr = calloc<Uint8>(valueBytes.length);
+          valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
+          valuePtrs.add(valuePtr);
+          opsPtr[i].value = valuePtr;
+          opsPtr[i].valueLen = valueBytes.length;
+        } else if (type == 'del') {
+          opsPtr[i].type = 1;
+          opsPtr[i].value = nullptr;
+          opsPtr[i].valueLen = 0;
+        } else {
+          throw ArgumentError('Operation type must be "put" or "del"');
+        }
       }
+
+      final rc = WaveDBNative.databaseBatchSyncRaw(
+        _db!, _delimiterCodeUnit, opsPtr, operations.length,
+      );
+      if (rc != 0) {
+        throw WaveDBException.ioError('batch', 'return code: $rc');
+      }
+    } finally {
+      for (final p in keyPtrs) calloc.free(p);
+      for (final p in valuePtrs) calloc.free(p);
+      calloc.free(opsPtr);
     }
   }
 
@@ -540,72 +577,72 @@ class WaveDB {
   }
 
   Map<String, dynamic>? _getObjectSyncInternal(dynamic key) {
-    final startPath = key != null ? PathConverter.toNative(key, _delimiter) : nullptr;
-
-    final iter = WaveDBNative.databaseScanStart(_db!, startPath, nullptr);
-
-    if (iter == nullptr) {
-      return null;
-    }
-
-    final entries = <MapEntry<List<String>, dynamic>>[];
-    final basePath = key != null
-        ? (key is List ? key.map((e) => e.toString()).toList() : key.toString().split(_delimiter).where((s) => s.isNotEmpty).toList())
-        : <String>[];
+    final keyStr = _keyToString(key);
+    final prefixPtr = keyStr.toNativeUtf8();
+    final resultsPtr = calloc<Pointer<RawResult>>();
+    final countPtr = calloc<Size>();
 
     try {
-      while (true) {
-        final pathPtr = calloc<Pointer<path_t>>();
-        final valuePtr = calloc<Pointer<identifier_t>>();
+      final rc = WaveDBNative.databaseScanSyncRaw(
+        _db!, prefixPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        resultsPtr, countPtr,
+      );
+      if (rc != 0) throw WaveDBException.ioError('scan', 'return code: $rc');
 
-        try {
-          final rc = WaveDBNative.databaseScanNext(iter, pathPtr, valuePtr);
-          if (rc != 0) break;
+      final results = resultsPtr.value;
+      final count = countPtr.value;
 
-          final path = pathPtr.value;
-          final value = valuePtr.value;
+      if (count == 0 || results == nullptr) return {};
 
-          if (path == nullptr || value == nullptr) {
-            calloc.free(pathPtr);
-            calloc.free(valuePtr);
-            break;
-          }
+      final basePath = key is List
+          ? key.map((e) => e.toString()).toList()
+          : keyStr.split(_delimiter).where((s) => s.isNotEmpty).toList();
 
-          try {
-            final pathParts = PathConverter.fromNative(path, _delimiter, asArray: true) as List<String>;
-            final valueResult = IdentifierConverter.fromNative(value);
+      final entries = <MapEntry<List<String>, dynamic>>[];
 
-            final strippedPathParts = pathParts.map((p) {
-              var result = p.trimRight();
-              result = result.replaceAll('\x00', '');
-              return result;
-            }).toList();
+      try {
+        for (int i = 0; i < count; i++) {
+          final rawKey = results[i].key;
+          final keyLen = results[i].keyLen;
+          final rawVal = results[i].value;
+          final valLen = results[i].valueLen;
 
-            if (strippedPathParts.length >= basePath.length) {
-              bool matches = true;
-              for (int i = 0; i < basePath.length && matches; i++) {
-                if (strippedPathParts[i] != basePath[i]) {
-                  matches = false;
-                }
-              }
-              if (matches) {
-                entries.add(MapEntry(strippedPathParts, valueResult));
-              }
+          if (rawKey == nullptr) continue;
+          final keyData = rawKey.asTypedList(keyLen);
+          final keyStrResult = String.fromCharCodes(keyData)
+              .replaceAll('\x00', '')
+              .trimRight();
+          final pathParts = keyStrResult.split(_delimiter)
+              .where((s) => s.isNotEmpty)
+              .toList();
+
+          dynamic valueResult;
+          if (rawVal != nullptr && valLen > 0) {
+            var valBytes = rawVal.asTypedList(valLen).toList();
+            // Strip trailing null bytes from chunk padding
+            while (valBytes.isNotEmpty && valBytes.last == 0) {
+              valBytes.removeLast();
             }
-          } finally {
-            WaveDBNative.pathDestroy(path);
-            WaveDBNative.identifierDestroy(value);
+            final valUint8 = Uint8List.fromList(valBytes);
+            valueResult = IdentifierConverter.isPrintableASCII(valUint8)
+                ? String.fromCharCodes(valUint8)
+                : valUint8;
+          } else {
+            valueResult = '';
           }
-        } finally {
-          calloc.free(pathPtr);
-          calloc.free(valuePtr);
-        }
-      }
-    } finally {
-      WaveDBNative.databaseScanEnd(iter);
-    }
 
-    return ObjectOps.reconstructObject(entries, basePath);
+          entries.add(MapEntry(pathParts, valueResult));
+        }
+      } finally {
+        WaveDBNative.databaseRawResultsFree(results, count);
+      }
+
+      return ObjectOps.reconstructObject(entries, basePath);
+    } finally {
+      calloc.free(prefixPtr);
+      calloc.free(resultsPtr);
+      calloc.free(countPtr);
+    }
   }
 
   // ============================================================
