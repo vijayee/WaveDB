@@ -92,3 +92,27 @@ base class async_error_t extends Opaque {}
 /// Opaque handle to a write batch
 /// Maps to batch_t in C
 base class batch_t extends Opaque {}
+
+/// Raw batch operation (input)
+/// Maps to raw_op_t in C
+base class RawOp extends Struct {
+  external Pointer<Uint8> key;
+  @Size()
+  external int keyLen;
+  external Pointer<Uint8> value;
+  @Size()
+  external int valueLen;
+  @Int32()
+  external int type; // 0 = put, 1 = delete
+}
+
+/// Raw scan result (output)
+/// Maps to raw_result_t in C
+base class RawResult extends Struct {
+  external Pointer<Uint8> key;
+  @Size()
+  external int keyLen;
+  external Pointer<Uint8> value;
+  @Size()
+  external int valueLen;
+}
