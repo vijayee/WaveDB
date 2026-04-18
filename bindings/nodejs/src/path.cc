@@ -6,6 +6,22 @@
 #include "../../../src/HBTrie/identifier.h"
 #include "../../../src/Buffer/buffer.h"
 #include <cctype>
+#include <node_api.h>
+
+// Extract JS string key into caller-provided buffer.
+// Returns false on type error (throws JS exception).
+bool KeyFromJS(Napi::Env env, Napi::Value key, char* buf, size_t buf_size, size_t* out_len) {
+    if (!key.IsString()) {
+        Napi::TypeError::New(env, "Key must be a string").ThrowAsJavaScriptException();
+        return false;
+    }
+    napi_status status = napi_get_value_string_utf8(env, key, buf, buf_size, out_len);
+    if (status != napi_ok) {
+        Napi::Error::New(env, "Failed to extract key string").ThrowAsJavaScriptException();
+        return false;
+    }
+    return true;
+}
 
 // Split string by delimiter
 std::vector<std::string> SplitString(const std::string& str, char delimiter) {

@@ -6,6 +6,34 @@
 #include "../../../src/HBTrie/chunk.h"
 #include "../../../src/Buffer/buffer.h"
 #include <cctype>
+#include <node_api.h>
+
+// Extract JS value (string or Buffer) into caller-provided buffers.
+// For strings: writes into str_buf, sets val_buf/val_len.
+// For Buffers: sets val_buf to the Buffer's data pointer (zero-copy, valid during call).
+// Returns false on type error.
+bool ValueFromJSRaw(Napi::Env env, Napi::Value value, char* str_buf, size_t str_buf_size,
+                    const uint8_t** val_buf, size_t* val_len) {
+    if (value.IsString()) {
+        size_t len;
+        napi_status status = napi_get_value_string_utf8(env, value, str_buf, str_buf_size, &len);
+        if (status != napi_ok) {
+            Napi::Error::New(env, "Failed to extract value string").ThrowAsJavaScriptException();
+            return false;
+        }
+        *val_buf = reinterpret_cast<const uint8_t*>(str_buf);
+        *val_len = len;
+        return true;
+    } else if (value.IsBuffer()) {
+        Napi::Buffer<uint8_t> buffer = value.As<Napi::Buffer<uint8_t>>();
+        *val_buf = buffer.Data();
+        *val_len = buffer.Length();
+        return true;
+    } else {
+        Napi::TypeError::New(env, "Value must be string or Buffer").ThrowAsJavaScriptException();
+        return false;
+    }
+}
 
 // Check if bytes are printable ASCII
 static bool IsPrintableASCII(const uint8_t* data, size_t size) {
