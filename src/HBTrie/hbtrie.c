@@ -2939,9 +2939,8 @@ size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
             bnode_t* bn = bnodes[--bnode_depth];
             if (bn == NULL) continue;
 
-            for (size_t i = 0; i < (size_t)bn->entries.length; i++) {
+            for (size_t i = 0; i < bn->entries.length; i++) {
                 bnode_entry_t* entry = &bn->entries.data[i];
-                if (entry == NULL) continue;
 
                 // Check child (hbtrie child)
                 if (!entry->has_value && !entry->is_bnode_child &&
