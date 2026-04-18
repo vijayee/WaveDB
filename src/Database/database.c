@@ -6,6 +6,8 @@
 #include "database_config.h"
 #include "wal_manager.h"
 #include "batch.h"
+#include "eviction_queue.h"
+#include "../Workers/work.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -635,6 +637,46 @@ int database_flush_dirty_bnodes(database_t* db) {
     return 0;
 }
 
+// ============================================================================
+// Eviction pipeline: callback + background task
+// ============================================================================
+
+static void database_eviction_task_abort(void* ctx);
+
+static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
+    database_t* db = (database_t*)user_data;
+    eviction_queue_push(&db->eviction_queue, disk_offset);
+}
+
+static void database_eviction_task_execute(void* ctx) {
+    database_t* db = (database_t*)ctx;
+    if (db == NULL || db->trie == NULL || db->bnode_cache == NULL) return;
+
+    uint64_t offsets[64];
+    size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
+
+    for (size_t i = 0; i < n; i++) {
+        hbtrie_null_entries_by_offset(db->trie, offsets[i]);
+        bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
+    }
+
+    // Reschedule — work_pool_enqueue returns 1 if pool is stopped
+    if (db->pool != NULL) {
+        work_t* task = work_create(database_eviction_task_execute,
+                                    database_eviction_task_abort,
+                                    db);
+        if (task != NULL) {
+            if (work_pool_enqueue(db->pool, task) != 0) {
+                work_destroy(task);  // Pool stopped, don't reschedule
+            }
+        }
+    }
+}
+
+static void database_eviction_task_abort(void* ctx) {
+    (void)ctx;
+}
+
 database_t* database_create_with_config(const char* location,
                                         database_config_t* config,
                                         int* error_code) {
@@ -846,8 +888,8 @@ database_t* database_create_with_config(const char* location,
 
                 // Create bnode cache
                 bnode_cache_mgr_t* cache_mgr = bnode_cache_mgr_create(
-                    128 * 1024 * 1024,  // 128 MB
-                    4);                   // 4 shards
+                    (size_t)effective_config->bnode_cache_memory_mb * 1024 * 1024,
+                    effective_config->bnode_cache_shards);
                 if (cache_mgr != NULL) {
                     db->bnode_cache = bnode_cache_create_file_cache(
                         cache_mgr, db->page_file, page_path);
@@ -856,6 +898,21 @@ database_t* database_create_with_config(const char* location,
                     } else if (db->trie != NULL) {
                         // Wire bnode cache for lazy loading
                         db->trie->fcache = db->bnode_cache;
+                    }
+                }
+
+                // Wire eviction callback for deferred free
+                eviction_queue_init(&db->eviction_queue);
+                if (db->bnode_cache != NULL) {
+                    db->bnode_cache->on_evict = database_on_bnode_evict;
+                    db->bnode_cache->on_evict_data = db;
+
+                    // Start background eviction task
+                    work_t* task = work_create(database_eviction_task_execute,
+                                                database_eviction_task_abort,
+                                                db);
+                    if (task != NULL) {
+                        work_pool_enqueue(db->pool, task);
                     }
                 }
             } else {
@@ -1048,6 +1105,26 @@ void database_destroy(database_t* db) {
         // Reversing the order causes use-after-free since trie frees identifiers
         // that the LRU still references.
         if (db->lru) database_lru_cache_destroy(db->lru);
+
+        // Process any remaining eviction callbacks before destroying trie/bnode cache.
+        // The pool is already shut down, so no new eviction callbacks will arrive.
+        if (db->bnode_cache != NULL) {
+            uint64_t offsets[64];
+            size_t n;
+            do {
+                n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
+                for (size_t i = 0; i < n; i++) {
+                    if (db->trie != NULL) {
+                        hbtrie_null_entries_by_offset(db->trie, offsets[i]);
+                    }
+                    bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
+                }
+            } while (n > 0);
+
+            // Unregister callback before destroying
+            db->bnode_cache->on_evict = NULL;
+            db->bnode_cache->on_evict_data = NULL;
+        }
 
         // Destroy trie (frees all identifiers and bnode entries)
         if (db->trie) hbtrie_destroy(db->trie);

@@ -253,10 +253,10 @@ Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 4 worker threads.
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.71M ops/sec | 565 ns | 919 ns |
-| Put | 352K ops/sec | 2.35 µs | 6.34 µs |
-| Delete | 278K ops/sec | 3.49 µs | 5.78 µs |
-| Mixed (70% read) | 1.71M ops/sec | 582 ns | 709 ns |
+| Get | 2.11M ops/sec | 474 ns | 490 ns |
+| Put | 446K ops/sec | 2.02 µs | 4.80 µs |
+| Delete | 268K ops/sec | 3.52 µs | 7.33 µs |
+| Mixed (70% read) | 2.17M ops/sec | 459 ns | 490 ns |
 
 ### Dart FFI (DEBOUNCED WAL, 4 worker threads)
 

@@ -1980,7 +1980,6 @@ int wal_manager_flush(wal_manager_t* manager) {
                 hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
                 twal->timer_active = 0;
             }
-            }
 
             platform_unlock(&twal->lock);
         }

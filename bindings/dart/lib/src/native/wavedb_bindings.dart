@@ -849,6 +849,8 @@ class WaveDBNative {
   ///   - enablePersist: Enable persistence (default: true)
   ///   - lruMemoryMb: LRU cache size in MB (default: 50)
   ///   - lruShards: LRU cache shard count, 0 for auto (default: 64)
+  ///   - bnodeCacheMemoryMb: Bnode cache size in MB (default: 128)
+  ///   - bnodeCacheShards: Bnode cache shard count (default: 4)
   ///   - storageCacheSize: Section cache size (default: 1024)
   ///   - workerThreads: Number of worker threads (default: 4)
   ///   - walSyncMode: WAL sync mode: 'immediate', 'debounced', 'async' (default: 'debounced')
@@ -864,6 +866,8 @@ class WaveDBNative {
     bool? enablePersist,
     int? lruMemoryMb,
     int? lruShards,
+    int? bnodeCacheMemoryMb,
+    int? bnodeCacheShards,
     int? storageCacheSize,
     int? workerThreads,
     String? walSyncMode,

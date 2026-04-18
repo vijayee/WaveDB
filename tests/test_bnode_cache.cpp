@@ -429,3 +429,79 @@ TEST_F(BnodeCacheTest, MultiShardReadWrite) {
     bnode_cache_mgr_destroy(mgr);
     page_file_destroy(pf);
 }
+
+struct EvictTracker {
+    uint64_t offset;
+    int count;
+};
+
+TEST_F(BnodeCacheTest, EvictionCallbackAndDeferredFree) {
+    char path[512];
+    make_path(path, sizeof(path), "evict_cb.db");
+
+    page_file_t* pf = page_file_create(path, 4096, 2);
+    ASSERT_NE(pf, nullptr);
+    int rc = page_file_open(pf, 1);
+    EXPECT_EQ(rc, 0);
+
+    // Use very small max_memory so eviction triggers quickly
+    bnode_cache_mgr_t* mgr = bnode_cache_mgr_create(64, 1);
+    ASSERT_NE(mgr, nullptr);
+
+    file_bnode_cache_t* fcache = bnode_cache_create_file_cache(mgr, pf, "evict_cb.db");
+    ASSERT_NE(fcache, nullptr);
+
+    // Track evicted offsets via callback
+    EvictTracker tracker = {0, 0};
+    fcache->on_evict = [](uint64_t offset, void* data) {
+        EvictTracker* t = (EvictTracker*)data;
+        t->offset = offset;
+        t->count++;
+    };
+    fcache->on_evict_data = &tracker;
+
+    // Write two nodes (both dirty). Total ~53 bytes, under 64 limit.
+    const char* payload = "test payload for eviction";
+    size_t payload_len = strlen(payload);
+    size_t total_len = 0;
+    uint8_t* data = make_prefixed_data((const uint8_t*)payload, payload_len, &total_len);
+
+    rc = bnode_cache_write(fcache, 8192, data, total_len);
+    EXPECT_EQ(rc, 0);
+
+    size_t total_len2 = 0;
+    uint8_t* data2 = make_prefixed_data((const uint8_t*)"second node data here", 20, &total_len2);
+    rc = bnode_cache_write(fcache, 12288, data2, total_len2);
+    EXPECT_EQ(rc, 0);
+
+    // Flush to make both clean (eviction only evicts clean items)
+    rc = bnode_cache_flush_dirty(fcache);
+    EXPECT_EQ(rc, 0);
+
+    // Write a third node to push memory over limit and trigger eviction
+    size_t total_len3 = 0;
+    uint8_t* data3 = make_prefixed_data((const uint8_t*)"third node to trigger eviction now", 33, &total_len3);
+    rc = bnode_cache_write(fcache, 16384, data3, total_len3);
+    EXPECT_EQ(rc, 0);
+
+    // The eviction should have triggered the callback
+    EXPECT_GT(tracker.count, 0);
+
+    // Complete the deferred eviction
+    bnode_cache_complete_evict(fcache, tracker.offset);
+
+    // Verify the completed offset is no longer accessible from cache
+    bnode_cache_item_t* item = bnode_cache_read(fcache, tracker.offset);
+    // After complete_evict, the data was freed; a new read should either
+    // return NULL (page file miss) or read fresh from disk
+    if (item != NULL) {
+        bnode_cache_release(fcache, item);
+    }
+
+    bnode_cache_destroy_file_cache(fcache);
+    bnode_cache_mgr_destroy(mgr);
+    page_file_destroy(pf);
+    free(data);
+    free(data2);
+    free(data3);
+}

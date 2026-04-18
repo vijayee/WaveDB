@@ -98,6 +98,7 @@ set(WAVEDB_SOURCES
     src/Database/database.c
     src/Database/database_iterator.c
     src/Database/batch.c
+    src/Database/eviction_queue.c
 
     # Layers - GraphQL
     src/Layers/graphql/graphql_types.c
@@ -219,6 +220,11 @@ if(BUILD_TESTS)
     add_executable(test_batch tests/test_batch.cpp)
     target_link_libraries(test_batch wavedb gtest gtest_main)
     add_test(NAME test_batch COMMAND test_batch)
+
+    # Test for eviction queue
+    add_executable(test_eviction_queue tests/test_eviction_queue.cpp)
+    target_link_libraries(test_eviction_queue wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_eviction_queue COMMAND test_eviction_queue)
 
     # Test for database_config
     add_executable(test_database_config tests/test_database_config.cpp)

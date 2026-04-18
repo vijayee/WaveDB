@@ -22,6 +22,7 @@
 #include "database_config.h"
 #include "../Storage/page_file.h"
 #include "../Storage/bnode_cache.h"
+#include "eviction_queue.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,6 +63,7 @@ typedef struct {
     // Page-based persistence (Phase 2: replaces CBOR index files)
     page_file_t* page_file;
     file_bnode_cache_t* bnode_cache;
+    eviction_queue_t eviction_queue;     // Lock-free ring buffer for eviction offsets
     uint64_t next_index_id;              // Incrementing ID for index files
 
     // Pending MVCC transaction ID from page file superblock

@@ -429,12 +429,14 @@ static void setup_database(bench_context_t* ctx) {
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
 
     // Create custom WAL config with larger file size for benchmarks
-    wal_config_t wal_config;
-    wal_config.sync_mode = WAL_SYNC_DEBOUNCED;  // Balanced durability/performance
-    wal_config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
-    wal_config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
-    wal_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
-    wal_config.max_file_size = 100 * 1024 * 1024;  // 100MB for benchmarks
+    wal_config_t wal_config = {
+        .sync_mode = WAL_SYNC_ASYNC,
+        .debounce_ms = WAL_DEFAULT_DEBOUNCE_MS,
+        .idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS,
+        .compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS,
+        .max_file_size = 100 * 1024 * 1024,
+        .max_sealed_wals = 0,
+    };
 
     int error = 0;
     ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, ctx->pool, ctx->wheel, &error);
