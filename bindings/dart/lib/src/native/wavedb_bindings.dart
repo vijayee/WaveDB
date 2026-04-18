@@ -287,6 +287,205 @@ typedef DatabaseWriteBatchAsync = void Function(
 // C TYPEDEFS - Path Operations
 // ============================================================
 
+// ============================================================
+// C TYPEDEFS - Raw Sync Operations
+// ============================================================
+
+/// C signature: int32_t database_put_sync_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter,
+///   const uint8_t* value, size_t value_len
+/// )
+typedef DatabasePutSyncRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Uint8> value,
+  Size valueLen,
+);
+typedef DatabasePutSyncRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Uint8> value,
+  int valueLen,
+);
+
+/// C signature: int32_t database_get_sync_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter,
+///   uint8_t** value_out, size_t* value_len_out
+/// )
+typedef DatabaseGetSyncRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Pointer<Uint8>> valueOut,
+  Pointer<Size> valueLenOut,
+);
+typedef DatabaseGetSyncRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Pointer<Uint8>> valueOut,
+  Pointer<Size> valueLenOut,
+);
+
+/// C signature: int32_t database_delete_sync_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter
+/// )
+typedef DatabaseDeleteSyncRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+);
+typedef DatabaseDeleteSyncRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+);
+
+/// C signature: void database_raw_value_free(uint8_t* value)
+typedef DatabaseRawValueFreeC = Void Function(Pointer<Uint8> value);
+typedef DatabaseRawValueFreeDart = void Function(Pointer<Uint8> value);
+
+// ============================================================
+// C TYPEDEFS - Raw Async Operations
+// ============================================================
+
+/// C signature: int32_t database_put_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter,
+///   const uint8_t* value, size_t value_len, promise_t* promise
+/// )
+typedef DatabasePutRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Uint8> value,
+  Size valueLen,
+  Pointer<promise_t> promise,
+);
+typedef DatabasePutRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Uint8> value,
+  int valueLen,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: int32_t database_get_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter,
+///   promise_t* promise
+/// )
+typedef DatabaseGetRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseGetRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: int32_t database_delete_raw(
+///   database_t* db, const char* key, size_t key_len, char delimiter,
+///   promise_t* promise
+/// )
+typedef DatabaseDeleteRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseDeleteRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<promise_t> promise,
+);
+
+// ============================================================
+// C TYPEDEFS - Raw Batch Operations
+// ============================================================
+
+/// C signature: int32_t database_batch_sync_raw(
+///   database_t* db, char delimiter, const raw_op_t* ops, size_t count
+/// )
+typedef DatabaseBatchSyncRawC = Int32 Function(
+  Pointer<database_t> db,
+  Int8 delimiter,
+  Pointer<RawOp> ops,
+  Size count,
+);
+typedef DatabaseBatchSyncRawDart = int Function(
+  Pointer<database_t> db,
+  int delimiter,
+  Pointer<RawOp> ops,
+  int count,
+);
+
+/// C signature: int32_t database_batch_raw(
+///   database_t* db, char delimiter, const raw_op_t* ops, size_t count,
+///   promise_t* promise
+/// )
+typedef DatabaseBatchRawC = Int32 Function(
+  Pointer<database_t> db,
+  Int8 delimiter,
+  Pointer<RawOp> ops,
+  Size count,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseBatchRawDart = int Function(
+  Pointer<database_t> db,
+  int delimiter,
+  Pointer<RawOp> ops,
+  int count,
+  Pointer<promise_t> promise,
+);
+
+// ============================================================
+// C TYPEDEFS - Raw Scan Operations
+// ============================================================
+
+/// C signature: int32_t database_scan_sync_raw(
+///   database_t* db, const char* prefix, size_t prefix_len, char delimiter,
+///   raw_result_t** results, size_t* count
+/// )
+typedef DatabaseScanSyncRawC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> prefix,
+  Size prefixLen,
+  Int8 delimiter,
+  Pointer<Pointer<RawResult>> results,
+  Pointer<Size> count,
+);
+typedef DatabaseScanSyncRawDart = int Function(
+  Pointer<database_t> db,
+  Pointer<Uint8> prefix,
+  int prefixLen,
+  int delimiter,
+  Pointer<Pointer<RawResult>> results,
+  Pointer<Size> count,
+);
+
+/// C signature: void database_raw_results_free(raw_result_t* results, size_t count)
+typedef DatabaseRawResultsFreeC = Void Function(Pointer<RawResult> results, Size count);
+typedef DatabaseRawResultsFreeDart = void Function(Pointer<RawResult> results, int count);
+
 /// C signature: path_t* path_create()
 typedef PathCreateC = Pointer<path_t> Function();
 
@@ -689,6 +888,43 @@ class WaveDBNative {
   static late final DatabaseWriteBatchAsync _databaseWriteBatchAsync = WaveDBLibrary.load()
       .lookupFunction<DatabaseWriteBatchAsyncC, DatabaseWriteBatchAsync>('database_write_batch');
 
+  // Raw sync operations
+  static late final DatabasePutSyncRawDart _databasePutSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabasePutSyncRawC, DatabasePutSyncRawDart>('database_put_sync_raw');
+
+  static late final DatabaseGetSyncRawDart _databaseGetSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseGetSyncRawC, DatabaseGetSyncRawDart>('database_get_sync_raw');
+
+  static late final DatabaseDeleteSyncRawDart _databaseDeleteSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseDeleteSyncRawC, DatabaseDeleteSyncRawDart>('database_delete_sync_raw');
+
+  static late final DatabaseRawValueFreeDart _databaseRawValueFree = WaveDBLibrary.load()
+      .lookupFunction<DatabaseRawValueFreeC, DatabaseRawValueFreeDart>('database_raw_value_free');
+
+  // Raw async operations
+  static late final DatabasePutRawDart _databasePutRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabasePutRawC, DatabasePutRawDart>('database_put_raw');
+
+  static late final DatabaseGetRawDart _databaseGetRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseGetRawC, DatabaseGetRawDart>('database_get_raw');
+
+  static late final DatabaseDeleteRawDart _databaseDeleteRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseDeleteRawC, DatabaseDeleteRawDart>('database_delete_raw');
+
+  // Raw batch operations
+  static late final DatabaseBatchSyncRawDart _databaseBatchSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseBatchSyncRawC, DatabaseBatchSyncRawDart>('database_batch_sync_raw');
+
+  static late final DatabaseBatchRawDart _databaseBatchRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseBatchRawC, DatabaseBatchRawDart>('database_batch_raw');
+
+  // Raw scan operations
+  static late final DatabaseScanSyncRawDart _databaseScanSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseScanSyncRawC, DatabaseScanSyncRawDart>('database_scan_sync_raw');
+
+  static late final DatabaseRawResultsFreeDart _databaseRawResultsFree = WaveDBLibrary.load()
+      .lookupFunction<DatabaseRawResultsFreeC, DatabaseRawResultsFreeDart>('database_raw_results_free');
+
   // Path operations
   static late final PathCreate _pathCreate = WaveDBLibrary.load()
       .lookupFunction<PathCreateC, PathCreate>('path_create');
@@ -1036,6 +1272,134 @@ class WaveDBNative {
     Pointer<promise_t> promise,
   ) {
     _databaseWriteBatchAsync(db, batch, promise);
+  }
+
+  // ============================================================
+  // PUBLIC API - Raw Sync Operations
+  // ============================================================
+
+  /// Synchronously put a value using raw key/value pointers
+  static int databasePutSyncRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Uint8> value,
+    int valueLen,
+  ) {
+    return _databasePutSyncRaw(db, key, keyLen, delimiter, value, valueLen);
+  }
+
+  /// Synchronously get a value using raw key pointer
+  static int databaseGetSyncRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Pointer<Uint8>> valueOut,
+    Pointer<Size> valueLenOut,
+  ) {
+    return _databaseGetSyncRaw(db, key, keyLen, delimiter, valueOut, valueLenOut);
+  }
+
+  /// Synchronously delete a value using raw key pointer
+  static int databaseDeleteSyncRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+  ) {
+    return _databaseDeleteSyncRaw(db, key, keyLen, delimiter);
+  }
+
+  /// Free a value pointer returned by databaseGetSyncRaw
+  static void databaseRawValueFree(Pointer<Uint8> value) {
+    _databaseRawValueFree(value);
+  }
+
+  // ============================================================
+  // PUBLIC API - Raw Async Operations
+  // ============================================================
+
+  /// Asynchronously put a value using raw key/value pointers
+  static int databasePutRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Uint8> value,
+    int valueLen,
+    Pointer<promise_t> promise,
+  ) {
+    return _databasePutRaw(db, key, keyLen, delimiter, value, valueLen, promise);
+  }
+
+  /// Asynchronously get a value using raw key pointer
+  static int databaseGetRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseGetRaw(db, key, keyLen, delimiter, promise);
+  }
+
+  /// Asynchronously delete a value using raw key pointer
+  static int databaseDeleteRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseDeleteRaw(db, key, keyLen, delimiter, promise);
+  }
+
+  // ============================================================
+  // PUBLIC API - Raw Batch Operations
+  // ============================================================
+
+  /// Synchronously execute a batch of raw operations
+  static int databaseBatchSyncRaw(
+    Pointer<database_t> db,
+    int delimiter,
+    Pointer<RawOp> ops,
+    int count,
+  ) {
+    return _databaseBatchSyncRaw(db, delimiter, ops, count);
+  }
+
+  /// Asynchronously execute a batch of raw operations
+  static int databaseBatchRaw(
+    Pointer<database_t> db,
+    int delimiter,
+    Pointer<RawOp> ops,
+    int count,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseBatchRaw(db, delimiter, ops, count, promise);
+  }
+
+  // ============================================================
+  // PUBLIC API - Raw Scan Operations
+  // ============================================================
+
+  /// Synchronously scan entries under a prefix, returning raw results
+  static int databaseScanSyncRaw(
+    Pointer<database_t> db,
+    Pointer<Uint8> prefix,
+    int prefixLen,
+    int delimiter,
+    Pointer<Pointer<RawResult>> results,
+    Pointer<Size> count,
+  ) {
+    return _databaseScanSyncRaw(db, prefix, prefixLen, delimiter, results, count);
+  }
+
+  /// Free raw scan results
+  static void databaseRawResultsFree(Pointer<RawResult> results, int count) {
+    _databaseRawResultsFree(results, count);
   }
 
   // ============================================================
