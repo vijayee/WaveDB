@@ -2261,7 +2261,9 @@ int database_batch_sync_raw(database_t* db, char delimiter,
         }
     }
 
-    return database_write_batch_sync(db, batch);
+    int rc = database_write_batch_sync(db, batch);
+    batch_destroy(batch);
+    return rc;
 }
 
 int database_batch_raw(database_t* db, char delimiter,
