@@ -641,6 +641,7 @@ void hbtrie_node_destroy(hbtrie_node_t* node) {
     // Collect all child nodes iteratively
     for (int i = 0; i < nodes.length; i++) {
       hbtrie_node_t* current = nodes.data[i];
+      if (!current->is_loaded) continue;  // Evicted — btree already freed
       if (current->btree != NULL) {
         // Walk the entire bnode tree to find all child hbtrie_node pointers
         vec_t(bnode_t*) bnode_stack;
@@ -2945,7 +2946,14 @@ size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
                 // Check child (hbtrie child)
                 if (!entry->has_value && !entry->is_bnode_child &&
                     entry->child_disk_offset == offset && entry->child != NULL) {
-                    entry->child->is_loaded = 0;
+                    hbtrie_node_t* evicted = entry->child;
+                    evicted->is_loaded = 0;
+                    if (evicted->btree != NULL) {
+                        bnode_destroy_tree(evicted->btree);
+                        evicted->btree = NULL;
+                    }
+                    spinlock_destroy(&evicted->write_lock);
+                    free(evicted);
                     entry->child = NULL;
                     nulled++;
                 }
@@ -2953,7 +2961,14 @@ size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
                 // Check trie_child (prefix sharing)
                 if (entry->has_value && entry->trie_child != NULL &&
                     entry->child_disk_offset == offset) {
-                    entry->trie_child->is_loaded = 0;
+                    hbtrie_node_t* evicted = entry->trie_child;
+                    evicted->is_loaded = 0;
+                    if (evicted->btree != NULL) {
+                        bnode_destroy_tree(evicted->btree);
+                        evicted->btree = NULL;
+                    }
+                    spinlock_destroy(&evicted->write_lock);
+                    free(evicted);
                     entry->trie_child = NULL;
                     nulled++;
                 }

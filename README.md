@@ -264,25 +264,27 @@ See [bindings/dart/README.md](bindings/dart/README.md) for full API reference.
 
 ## Performance
 
-Benchmarks on Linux x86_64, 8-core CPU, 50MB LRU cache.
+Benchmarks on Linux x86_64, 8-core CPU, 50MB LRU cache, ASYNC WAL mode.
 
-### Sync Operations (ASYNC WAL mode, single-threaded)
+### Sync Operations (single-threaded)
 
 | Operation | Throughput | P50 Latency | P99 Latency |
 |-----------|------------|-------------|-------------|
-| Get | 1.71M ops/sec | 565 ns | 919 ns |
-| Put | 352K ops/sec | 2.35 µs | 6.34 µs |
-| Delete | 278K ops/sec | 3.49 µs | 5.78 µs |
-| Mixed (70% read) | 1.71M ops/sec | 582 ns | 709 ns |
+| Get | 2.11M ops/sec | 474 ns | 490 ns |
+| Put | 446K ops/sec | 2.02 µs | 4.80 µs |
+| Delete | 268K ops/sec | 3.52 µs | 7.33 µs |
+| Mixed (70% read) | 2.17M ops/sec | 459 ns | 490 ns |
 
-### Concurrent Throughput (DEBOUNCED WAL mode, 250ms)
+### Concurrent Throughput (sync API, 4 worker threads)
 
 | Threads | Write | Read | Mixed (70R/20W/10D) |
 |---------|-------|------|---------------------|
-| 1 | 201K ops/sec | 838K ops/sec | 298K ops/sec |
-| 4 | 413K ops/sec | 2.38M ops/sec | 613K ops/sec |
-| 16 | 693K ops/sec | 7.25M ops/sec | 905K ops/sec |
-| 32 | 938K ops/sec | 9.06M ops/sec | 1.02M ops/sec |
+| 1 | 115K ops/sec | 994K ops/sec | 98K ops/sec |
+| 2 | 224K ops/sec | 1.87M ops/sec | 309K ops/sec |
+| 4 | 401K ops/sec | 2.83M ops/sec | 434K ops/sec |
+| 8 | 659K ops/sec | 7.23M ops/sec | 810K ops/sec |
+| 16 | 926K ops/sec | 9.26M ops/sec | 901K ops/sec |
+| 32 | 893K ops/sec | 9.15M ops/sec | 957K ops/sec |
 
 ## Building
 

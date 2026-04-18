@@ -32,12 +32,14 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/thread_wal_bench_%s_%d", test_name, getpid());
     mkdir(ctx->test_dir, 0755);
 
-    wal_config_t config;
-    config.sync_mode = sync_mode;
-    config.debounce_ms = WAL_DEFAULT_DEBOUNCE_MS;
-    config.idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS;
-    config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
-    config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
+    wal_config_t config = {
+        .sync_mode = sync_mode,
+        .debounce_ms = WAL_DEFAULT_DEBOUNCE_MS,
+        .idle_threshold_ms = WAL_DEFAULT_IDLE_THRESHOLD_MS,
+        .compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS,
+        .max_file_size = WAL_DEFAULT_MAX_FILE_SIZE,
+        .max_sealed_wals = 0,
+    };
 
     int error_code = 0;
     // Pass NULL for timing wheel (only works for IMMEDIATE and ASYNC modes)

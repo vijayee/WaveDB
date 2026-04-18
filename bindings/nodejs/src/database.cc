@@ -178,6 +178,16 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       config->lru_shards = static_cast<uint16_t>(val.Uint32Value());
     }
 
+    if (options.Has("bnodeCacheMemoryMb")) {
+      Napi::Number val = options.Get("bnodeCacheMemoryMb").As<Napi::Number>();
+      config->bnode_cache_memory_mb = static_cast<size_t>(val.Uint32Value());
+    }
+
+    if (options.Has("bnodeCacheShards")) {
+      Napi::Number val = options.Get("bnodeCacheShards").As<Napi::Number>();
+      config->bnode_cache_shards = static_cast<uint16_t>(val.Uint32Value());
+    }
+
     if (options.Has("wal")) {
       Napi::Object walOpts = options.Get("wal").As<Napi::Object>();
 

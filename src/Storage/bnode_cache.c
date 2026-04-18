@@ -377,13 +377,9 @@ int bnode_cache_write(file_bnode_cache_t* fcache, uint64_t offset, const uint8_t
 
     platform_lock(&shard->lock);
 
-    /* Check if offset already exists */
     bnode_cache_item_t* item = shard_find(shard, offset);
     if (item != NULL) {
-        /* Replace data */
         size_t old_len = item->data_len;
-
-        /* Update dirty tracking */
         if (!item->is_dirty) {
             shard->dirty_count++;
             shard->dirty_bytes += data_len;
@@ -391,35 +387,26 @@ int bnode_cache_write(file_bnode_cache_t* fcache, uint64_t offset, const uint8_t
         } else {
             shard->dirty_bytes = shard->dirty_bytes - old_len + data_len;
         }
-
-        /* Update memory tracking */
         fcache->current_memory = fcache->current_memory - old_len + data_len;
         if (fcache->mgr != NULL) {
             fcache->mgr->current_total_memory = fcache->mgr->current_total_memory - old_len + data_len;
         }
-
         free(item->data);
         item->data = get_clear_memory(data_len);
         memcpy(item->data, data, data_len);
         item->data_len = data_len;
-
         lru_move_to_front(shard, item);
     } else {
-        /* Create new item */
         item = get_clear_memory(sizeof(bnode_cache_item_t));
         item->offset = offset;
         item->data = get_clear_memory(data_len);
         memcpy(item->data, data, data_len);
         item->data_len = data_len;
         item->is_dirty = 1;
-        item->ref_count = 0;
-
         shard_insert(shard, item);
         lru_push_front(shard, item);
-
         shard->dirty_count++;
         shard->dirty_bytes += data_len;
-
         fcache->current_memory += data_len;
         if (fcache->mgr != NULL) {
             fcache->mgr->current_total_memory += data_len;
@@ -427,7 +414,6 @@ int bnode_cache_write(file_bnode_cache_t* fcache, uint64_t offset, const uint8_t
     }
 
     evict_if_needed(fcache, shard);
-
     platform_unlock(&shard->lock);
     return 0;
 }

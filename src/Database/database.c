@@ -641,6 +641,8 @@ int database_flush_dirty_bnodes(database_t* db) {
 // Eviction pipeline: callback + background task
 // ============================================================================
 
+static void database_eviction_task_abort(void* ctx);
+
 static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
     database_t* db = (database_t*)user_data;
     eviction_queue_push(&db->eviction_queue, disk_offset);
@@ -749,16 +751,6 @@ database_t* database_create_with_config(const char* location,
             return NULL;
         }
         work_pool_launch(db->pool);
-
-        // Start background eviction task
-        if (db->bnode_cache != NULL) {
-            work_t* task = work_create(database_eviction_task_execute,
-                                        database_eviction_task_abort,
-                                        db);
-            if (task != NULL) {
-                work_pool_enqueue(db->pool, task);
-            }
-        }
     } else {
         // No pool available
         if (error_code) *error_code = EINVAL;
@@ -896,8 +888,8 @@ database_t* database_create_with_config(const char* location,
 
                 // Create bnode cache
                 bnode_cache_mgr_t* cache_mgr = bnode_cache_mgr_create(
-                    128 * 1024 * 1024,  // 128 MB
-                    4);                   // 4 shards
+                    (size_t)effective_config->bnode_cache_memory_mb * 1024 * 1024,
+                    effective_config->bnode_cache_shards);
                 if (cache_mgr != NULL) {
                     db->bnode_cache = bnode_cache_create_file_cache(
                         cache_mgr, db->page_file, page_path);
@@ -914,6 +906,14 @@ database_t* database_create_with_config(const char* location,
                 if (db->bnode_cache != NULL) {
                     db->bnode_cache->on_evict = database_on_bnode_evict;
                     db->bnode_cache->on_evict_data = db;
+
+                    // Start background eviction task
+                    work_t* task = work_create(database_eviction_task_execute,
+                                                database_eviction_task_abort,
+                                                db);
+                    if (task != NULL) {
+                        work_pool_enqueue(db->pool, task);
+                    }
                 }
             } else {
                 // Failed to open page file — log warning but continue

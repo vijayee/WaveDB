@@ -27,6 +27,12 @@ class WaveDBConfig {
   /// LRU cache shard count, 0 for auto-scale (default: 64)
   final int? lruShards;
 
+  /// Bnode cache size in megabytes (default: 128)
+  final int? bnodeCacheMemoryMb;
+
+  /// Bnode cache shard count (default: 4)
+  final int? bnodeCacheShards;
+
   /// Section cache size (default: 1024)
   final int? storageCacheSize;
 
@@ -48,6 +54,8 @@ class WaveDBConfig {
     this.enablePersist,
     this.lruMemoryMb,
     this.lruShards,
+    this.bnodeCacheMemoryMb,
+    this.bnodeCacheShards,
     this.storageCacheSize,
     this.workerThreads,
     this.walSyncMode,
@@ -92,6 +100,8 @@ class WaveDB {
         enablePersist: config.enablePersist,
         lruMemoryMb: config.lruMemoryMb,
         lruShards: config.lruShards,
+        bnodeCacheMemoryMb: config.bnodeCacheMemoryMb,
+        bnodeCacheShards: config.bnodeCacheShards,
         storageCacheSize: config.storageCacheSize,
         workerThreads: config.workerThreads,
         walSyncMode: config.walSyncMode,
