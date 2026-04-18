@@ -327,6 +327,14 @@ int database_batch_raw(database_t* db, char delimiter,
     const raw_op_t* ops, size_t count,
     promise_t* promise);
 
+/* --- Scan raw functions --- */
+
+int database_scan_sync_raw(database_t* db,
+    const char* prefix, size_t prefix_len, char delimiter,
+    raw_result_t** results, size_t* count);
+
+void database_raw_results_free(raw_result_t* results, size_t count);
+
 /**
  * Flush all dirty bnodes to the page file using CoW.
  *

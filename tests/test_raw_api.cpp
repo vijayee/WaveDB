@@ -387,3 +387,45 @@ TEST_F(RawSyncTest, BatchSyncRawWithDelete) {
     rc = database_get_sync_raw(db, "users/alice", 11, '/', &val, &vlen);
     EXPECT_EQ(rc, -2);
 }
+
+// --- Scan raw API tests ---
+
+TEST_F(RawSyncTest, ScanSyncRaw) {
+    // Insert several entries under "users/"
+    database_put_sync_raw(db, "users/alice", 11, '/', (const uint8_t*)"alice_val", 9);
+    database_put_sync_raw(db, "users/bob", 9, '/', (const uint8_t*)"bob_val", 7);
+    database_put_sync_raw(db, "users/carol", 11, '/', (const uint8_t*)"carol_val", 9);
+
+    raw_result_t* results = NULL;
+    size_t count = 0;
+    int rc = database_scan_sync_raw(db, "users", 5, '/', &results, &count);
+    EXPECT_EQ(rc, 0);
+    EXPECT_GE(count, 3u);
+
+    // Verify we can find our entries in the results
+    bool found_alice = false, found_bob = false, found_carol = false;
+    for (size_t i = 0; i < count; i++) {
+        if (results[i].value_len == 9 && memcmp(results[i].value, "alice_val", 9) == 0) found_alice = true;
+        if (results[i].value_len == 7 && memcmp(results[i].value, "bob_val", 7) == 0) found_bob = true;
+        if (results[i].value_len == 9 && memcmp(results[i].value, "carol_val", 9) == 0) found_carol = true;
+    }
+    EXPECT_TRUE(found_alice);
+    EXPECT_TRUE(found_bob);
+    EXPECT_TRUE(found_carol);
+
+    database_raw_results_free(results, count);
+}
+
+TEST_F(RawSyncTest, ScanSyncRawEmpty) {
+    // Scan a prefix that doesn't match any entries
+    raw_result_t* results = NULL;
+    size_t count = 0;
+    int rc = database_scan_sync_raw(db, "nonexistent", 11, '/', &results, &count);
+    EXPECT_EQ(rc, 0);
+    // No entries should match the "nonexistent" prefix
+    for (size_t i = 0; i < count; i++) {
+        // All returned keys should not start with "nonexistent"
+        EXPECT_NE(strncmp(results[i].key, "nonexistent", 11), 0);
+    }
+    database_raw_results_free(results, count);
+}

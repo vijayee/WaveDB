@@ -4,6 +4,7 @@
 
 #include "database.h"
 #include "database_config.h"
+#include "database_iterator.h"
 #include "wal_manager.h"
 #include "batch.h"
 #include "eviction_queue.h"
@@ -2341,4 +2342,113 @@ void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
     work_t* task = work_create(batch_execute_work, NULL, work);
     refcounter_yield((refcounter_t*) task);
     work_pool_enqueue(db->pool, task);
+}
+
+/* --- Scan raw implementations --- */
+
+int database_scan_sync_raw(database_t* db,
+    const char* prefix, size_t prefix_len, char delimiter,
+    raw_result_t** results, size_t* count) {
+    if (!db || !results || !count) return -1;
+
+    *results = NULL;
+    *count = 0;
+
+    path_t* start_path = NULL;
+    if (prefix && prefix_len > 0) {
+        start_path = path_create_from_raw(prefix, prefix_len, delimiter,
+                                           db->chunk_size);
+        if (!start_path) return -1;
+    }
+
+    database_iterator_t* iter = database_scan_start(db, start_path, NULL);
+    if (start_path) path_destroy(start_path);
+    if (!iter) return 0;
+
+    size_t capacity = 64;
+    size_t n = 0;
+    raw_result_t* out = malloc(capacity * sizeof(raw_result_t));
+    if (!out) { database_scan_end(iter); return -1; }
+
+    while (true) {
+        path_t* out_path = NULL;
+        identifier_t* out_value = NULL;
+        int rc = database_scan_next(iter, &out_path, &out_value);
+        if (rc != 0) break;
+
+        if (n >= capacity) {
+            capacity *= 2;
+            raw_result_t* new_out = realloc(out, capacity * sizeof(raw_result_t));
+            if (!new_out) {
+                for (size_t j = 0; j < n; j++) {
+                    free(out[j].key);
+                    free(out[j].value);
+                }
+                free(out);
+                path_destroy(out_path);
+                identifier_destroy(out_value);
+                database_scan_end(iter);
+                return -1;
+            }
+            out = new_out;
+        }
+
+        // Assemble key string from path identifiers
+        size_t key_total = 0;
+        size_t path_len = path_length(out_path);
+        for (size_t i = 0; i < path_len; i++) {
+            identifier_t* id = path_get(out_path, i);
+            key_total += id->length;
+            if (i > 0) key_total++;  // delimiter
+        }
+
+        out[n].key = malloc(key_total + 1);
+        if (!out[n].key) {
+            for (size_t j = 0; j < n; j++) {
+                free(out[j].key);
+                free(out[j].value);
+            }
+            free(out);
+            path_destroy(out_path);
+            identifier_destroy(out_value);
+            database_scan_end(iter);
+            return -1;
+        }
+
+        size_t pos = 0;
+        for (size_t i = 0; i < path_len; i++) {
+            identifier_t* id = path_get(out_path, i);
+            if (i > 0) out[n].key[pos++] = delimiter;
+            size_t id_len;
+            uint8_t* id_data = identifier_get_data_copy(id, &id_len);
+            if (id_data) {
+                memcpy(out[n].key + pos, id_data, id_len);
+                pos += id_len;
+                free(id_data);
+            }
+        }
+        out[n].key[pos] = '\0';
+        out[n].key_len = pos;
+
+        // Copy value
+        out[n].value = identifier_get_data_copy(out_value, &out[n].value_len);
+
+        path_destroy(out_path);
+        identifier_destroy(out_value);
+        n++;
+    }
+
+    database_scan_end(iter);
+    *results = out;
+    *count = n;
+    return 0;
+}
+
+void database_raw_results_free(raw_result_t* results, size_t count) {
+    if (!results) return;
+    for (size_t i = 0; i < count; i++) {
+        free(results[i].key);
+        free(results[i].value);
+    }
+    free(results);
 }
