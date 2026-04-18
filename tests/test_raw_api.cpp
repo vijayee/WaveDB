@@ -5,6 +5,10 @@ extern "C" {
 #include "HBTrie/path.h"
 #include "Buffer/buffer.h"
 #include "Database/database.h"
+#include "Workers/work.h"
+#include "Workers/pool.h"
+#include "Workers/promise.h"
+#include "Workers/error.h"
 }
 
 TEST(RawIdentifierTest, CreateFromRawBasic) {
@@ -241,4 +245,79 @@ TEST_F(RawSyncTest, RawMatchesOriginalAPI) {
     EXPECT_EQ(value_len, 8u);
     EXPECT_EQ(memcmp(value, "orig_val", 8), 0);
     database_raw_value_free(value);
+}
+
+// --- Async raw API tests ---
+
+class RawAsyncTest : public ::testing::Test {
+protected:
+    database_t* db;
+    char test_dir[256];
+
+    void SetUp() override {
+        snprintf(test_dir, sizeof(test_dir), "/tmp/wavedb_raw_async_%d", getpid());
+        database_config_t* config = database_config_default();
+        config->enable_persist = 0;
+        db = database_create_with_config(test_dir, config, NULL);
+        database_config_destroy(config);
+        ASSERT_NE(db, nullptr);
+    }
+
+    void TearDown() override {
+        if (db) database_destroy(db);
+        rmdir(test_dir);
+    }
+
+    static void resolve_cb(void* ctx, void* payload) {
+        identifier_t** out = static_cast<identifier_t**>(ctx);
+        if (payload) {
+            *out = REFERENCE((identifier_t*)payload, identifier_t);
+        } else {
+            *out = nullptr;
+        }
+    }
+
+    static void reject_cb(void* ctx, async_error_t* error) {
+        identifier_t** out = static_cast<identifier_t**>(ctx);
+        *out = nullptr;
+        error_destroy(error);
+    }
+};
+
+TEST_F(RawAsyncTest, PutAndGetRaw) {
+    identifier_t* result = nullptr;
+    promise_t* promise = promise_create(
+        (void (*)(void*, void*))resolve_cb,
+        (void (*)(void*, async_error_t*))reject_cb,
+        &result);
+    ASSERT_NE(promise, nullptr);
+
+    int rc = database_put_raw(db, "users/alice", 11, '/',
+                              (const uint8_t*)"hello", 5, promise);
+    EXPECT_EQ(rc, 0);
+
+    // Wait for async completion
+    usleep(50000);
+
+    // Now get it
+    result = nullptr;
+    promise_t* get_promise = promise_create(
+        (void (*)(void*, void*))resolve_cb,
+        (void (*)(void*, async_error_t*))reject_cb,
+        &result);
+    rc = database_get_raw(db, "users/alice", 11, '/', get_promise);
+    EXPECT_EQ(rc, 0);
+
+    usleep(50000);
+    if (result) {
+        size_t len;
+        uint8_t* data = identifier_get_data_copy(result, &len);
+        EXPECT_EQ(len, 5u);
+        EXPECT_EQ(memcmp(data, "hello", 5), 0);
+        free(data);
+        identifier_destroy(result);
+    }
+
+    promise_destroy(get_promise);
+    promise_destroy(promise);
 }

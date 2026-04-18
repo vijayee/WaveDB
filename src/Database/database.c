@@ -8,6 +8,7 @@
 #include "batch.h"
 #include "eviction_queue.h"
 #include "../Workers/work.h"
+#include "../Workers/error.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
@@ -1988,6 +1989,232 @@ int database_delete_sync_raw(database_t* db,
 
 void database_raw_value_free(uint8_t* value) {
     free(value);
+}
+
+/* --- Raw async context and workers --- */
+
+typedef struct {
+    database_t* db;
+    char* key_buf;
+    size_t key_len;
+    char delimiter;
+    uint8_t* value_buf;
+    size_t value_len;
+    promise_t* promise;
+    int op_type;   /* 0=put, 1=get, 2=delete */
+} raw_async_ctx_t;
+
+static void _raw_put_worker(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    path_t* path = path_create_from_raw(ctx->key_buf, ctx->key_len,
+                                         ctx->delimiter,
+                                         ctx->db->chunk_size);
+    if (!path) {
+        async_error_t* err = ERROR("Failed to create path from raw key");
+        promise_reject(ctx->promise, err);
+        free(ctx->key_buf);
+        free(ctx->value_buf);
+        free(ctx);
+        return;
+    }
+
+    identifier_t* value = identifier_create_from_raw(
+        ctx->value_buf, ctx->value_len, ctx->db->chunk_size);
+    if (!value) {
+        path_destroy(path);
+        async_error_t* err = ERROR("Failed to create value from raw data");
+        promise_reject(ctx->promise, err);
+        free(ctx->key_buf);
+        free(ctx->value_buf);
+        free(ctx);
+        return;
+    }
+
+    free(ctx->key_buf);
+    free(ctx->value_buf);
+
+    database_put_ctx_t* put_ctx = get_clear_memory(sizeof(database_put_ctx_t));
+    put_ctx->db = ctx->db;
+    put_ctx->path = path;
+    put_ctx->value = value;
+    put_ctx->promise = ctx->promise;
+    free(ctx);
+
+    _database_put(put_ctx);
+}
+
+static void abort_raw_put(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    free(ctx->key_buf);
+    free(ctx->value_buf);
+    free(ctx);
+}
+
+static void _raw_get_worker(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    path_t* path = path_create_from_raw(ctx->key_buf, ctx->key_len,
+                                         ctx->delimiter,
+                                         ctx->db->chunk_size);
+    free(ctx->key_buf);
+
+    if (!path) {
+        async_error_t* err = ERROR("Failed to create path from raw key");
+        promise_reject(ctx->promise, err);
+        free(ctx);
+        return;
+    }
+
+    database_get_ctx_t* get_ctx = get_clear_memory(sizeof(database_get_ctx_t));
+    get_ctx->db = ctx->db;
+    get_ctx->path = path;
+    get_ctx->promise = ctx->promise;
+    free(ctx);
+
+    _database_get(get_ctx);
+}
+
+static void abort_raw_get(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    free(ctx->key_buf);
+    free(ctx);
+}
+
+static void _raw_delete_worker(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    path_t* path = path_create_from_raw(ctx->key_buf, ctx->key_len,
+                                         ctx->delimiter,
+                                         ctx->db->chunk_size);
+    free(ctx->key_buf);
+
+    if (!path) {
+        async_error_t* err = ERROR("Failed to create path from raw key");
+        promise_reject(ctx->promise, err);
+        free(ctx);
+        return;
+    }
+
+    database_delete_ctx_t* del_ctx = get_clear_memory(sizeof(database_delete_ctx_t));
+    del_ctx->db = ctx->db;
+    del_ctx->path = path;
+    del_ctx->promise = ctx->promise;
+    free(ctx);
+
+    _database_delete(del_ctx);
+}
+
+static void abort_raw_delete(void* ctx_ptr) {
+    raw_async_ctx_t* ctx = (raw_async_ctx_t*)ctx_ptr;
+    free(ctx->key_buf);
+    free(ctx);
+}
+
+int database_put_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    const uint8_t* value, size_t value_len,
+    promise_t* promise) {
+    if (!db || !key || key_len == 0 || !value || !promise) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    raw_async_ctx_t* ctx = calloc(1, sizeof(raw_async_ctx_t));
+    if (!ctx) { promise_resolve(promise, NULL); return -1; }
+
+    ctx->db = db;
+    ctx->key_len = key_len;
+    ctx->key_buf = malloc(key_len);
+    if (!ctx->key_buf) { free(ctx); promise_resolve(promise, NULL); return -1; }
+    memcpy(ctx->key_buf, key, key_len);
+
+    ctx->delimiter = delimiter;
+    ctx->value_len = value_len;
+    ctx->value_buf = malloc(value_len);
+    if (!ctx->value_buf) { free(ctx->key_buf); free(ctx); promise_resolve(promise, NULL); return -1; }
+    memcpy(ctx->value_buf, value, value_len);
+
+    ctx->promise = promise;
+    ctx->op_type = 0;
+
+    work_t* work = work_create(_raw_put_worker, abort_raw_put, ctx);
+    if (!work) {
+        free(ctx->value_buf);
+        free(ctx->key_buf);
+        free(ctx);
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    refcounter_yield((refcounter_t*)work);
+    work_pool_enqueue(db->pool, work);
+    return 0;
+}
+
+int database_get_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    promise_t* promise) {
+    if (!db || !key || key_len == 0 || !promise) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    raw_async_ctx_t* ctx = calloc(1, sizeof(raw_async_ctx_t));
+    if (!ctx) { promise_resolve(promise, NULL); return -1; }
+
+    ctx->db = db;
+    ctx->key_len = key_len;
+    ctx->key_buf = malloc(key_len);
+    if (!ctx->key_buf) { free(ctx); promise_resolve(promise, NULL); return -1; }
+    memcpy(ctx->key_buf, key, key_len);
+
+    ctx->delimiter = delimiter;
+    ctx->promise = promise;
+    ctx->op_type = 1;
+
+    work_t* work = work_create(_raw_get_worker, abort_raw_get, ctx);
+    if (!work) {
+        free(ctx->key_buf);
+        free(ctx);
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    refcounter_yield((refcounter_t*)work);
+    work_pool_enqueue(db->pool, work);
+    return 0;
+}
+
+int database_delete_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    promise_t* promise) {
+    if (!db || !key || key_len == 0 || !promise) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    raw_async_ctx_t* ctx = calloc(1, sizeof(raw_async_ctx_t));
+    if (!ctx) { promise_resolve(promise, NULL); return -1; }
+
+    ctx->db = db;
+    ctx->key_len = key_len;
+    ctx->key_buf = malloc(key_len);
+    if (!ctx->key_buf) { free(ctx); promise_resolve(promise, NULL); return -1; }
+    memcpy(ctx->key_buf, key, key_len);
+
+    ctx->delimiter = delimiter;
+    ctx->promise = promise;
+    ctx->op_type = 2;
+
+    work_t* work = work_create(_raw_delete_worker, abort_raw_delete, ctx);
+    if (!work) {
+        free(ctx->key_buf);
+        free(ctx);
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    refcounter_yield((refcounter_t*)work);
+    work_pool_enqueue(db->pool, work);
+    return 0;
 }
 
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {

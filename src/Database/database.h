@@ -303,6 +303,21 @@ int database_delete_sync_raw(database_t* db,
 
 void database_raw_value_free(uint8_t* value);
 
+/* --- Async raw functions --- */
+
+int database_put_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    const uint8_t* value, size_t value_len,
+    promise_t* promise);
+
+int database_get_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    promise_t* promise);
+
+int database_delete_raw(database_t* db,
+    const char* key, size_t key_len, char delimiter,
+    promise_t* promise);
+
 /**
  * Flush all dirty bnodes to the page file using CoW.
  *
