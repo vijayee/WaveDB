@@ -2217,6 +2217,98 @@ int database_delete_raw(database_t* db,
     return 0;
 }
 
+/* --- Batch raw implementations --- */
+
+int database_batch_sync_raw(database_t* db, char delimiter,
+    const raw_op_t* ops, size_t count) {
+    if (!db || !ops || count == 0) return -1;
+
+    batch_t* batch = batch_create(count);
+    if (!batch) return -1;
+
+    for (size_t i = 0; i < count; i++) {
+        path_t* path = path_create_from_raw(ops[i].key, ops[i].key_len,
+                                             delimiter,
+                                             db->chunk_size);
+        if (!path) { batch_destroy(batch); return -1; }
+
+        if (ops[i].type == 0) {
+            if (!ops[i].value) {
+                path_destroy(path);
+                batch_destroy(batch);
+                return -1;
+            }
+            identifier_t* value = identifier_create_from_raw(
+                ops[i].value, ops[i].value_len,
+                db->chunk_size);
+            if (!value) { path_destroy(path); batch_destroy(batch); return -1; }
+
+            int rc = batch_add_put(batch, path, value);
+            if (rc != 0) {
+                path_destroy(path);
+                identifier_destroy(value);
+                batch_destroy(batch);
+                return -1;
+            }
+        } else {
+            int rc = batch_add_delete(batch, path);
+            if (rc != 0) {
+                path_destroy(path);
+                batch_destroy(batch);
+                return -1;
+            }
+        }
+    }
+
+    return database_write_batch_sync(db, batch);
+}
+
+int database_batch_raw(database_t* db, char delimiter,
+    const raw_op_t* ops, size_t count,
+    promise_t* promise) {
+    if (!db || !ops || count == 0 || !promise) return -1;
+
+    batch_t* batch = batch_create(count);
+    if (!batch) return -1;
+
+    for (size_t i = 0; i < count; i++) {
+        path_t* path = path_create_from_raw(ops[i].key, ops[i].key_len,
+                                             delimiter,
+                                             db->chunk_size);
+        if (!path) { batch_destroy(batch); return -1; }
+
+        if (ops[i].type == 0) {
+            if (!ops[i].value) {
+                path_destroy(path);
+                batch_destroy(batch);
+                return -1;
+            }
+            identifier_t* value = identifier_create_from_raw(
+                ops[i].value, ops[i].value_len,
+                db->chunk_size);
+            if (!value) { path_destroy(path); batch_destroy(batch); return -1; }
+
+            int rc = batch_add_put(batch, path, value);
+            if (rc != 0) {
+                path_destroy(path);
+                identifier_destroy(value);
+                batch_destroy(batch);
+                return -1;
+            }
+        } else {
+            int rc = batch_add_delete(batch, path);
+            if (rc != 0) {
+                path_destroy(path);
+                batch_destroy(batch);
+                return -1;
+            }
+        }
+    }
+
+    database_write_batch(db, batch, promise);
+    return 0;
+}
+
 void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
     if (db == NULL || batch == NULL || promise == NULL) {
         int* error = malloc(sizeof(int));

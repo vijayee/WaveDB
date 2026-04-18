@@ -321,3 +321,69 @@ TEST_F(RawAsyncTest, PutAndGetRaw) {
     promise_destroy(get_promise);
     promise_destroy(promise);
 }
+
+// --- Batch raw API tests ---
+
+TEST_F(RawSyncTest, BatchSyncRaw) {
+    raw_op_t ops[3];
+    ops[0].key = "users/alice";
+    ops[0].key_len = 11;
+    ops[0].value = (const uint8_t*)"alice_val";
+    ops[0].value_len = 9;
+    ops[0].type = 0;
+
+    ops[1].key = "users/bob";
+    ops[1].key_len = 9;
+    ops[1].value = (const uint8_t*)"bob_val";
+    ops[1].value_len = 7;
+    ops[1].type = 0;
+
+    ops[2].key = "users/carol";
+    ops[2].key_len = 11;
+    ops[2].value = (const uint8_t*)"carol_val";
+    ops[2].value_len = 9;
+    ops[2].type = 0;
+
+    int rc = database_batch_sync_raw(db, '/', ops, 3);
+    EXPECT_EQ(rc, 0);
+
+    // Verify all three entries
+    uint8_t* val = NULL;
+    size_t vlen = 0;
+
+    rc = database_get_sync_raw(db, "users/alice", 11, '/', &val, &vlen);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(vlen, 9u);
+    EXPECT_EQ(memcmp(val, "alice_val", 9), 0);
+    database_raw_value_free(val);
+
+    rc = database_get_sync_raw(db, "users/bob", 9, '/', &val, &vlen);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(vlen, 7u);
+    database_raw_value_free(val);
+
+    rc = database_get_sync_raw(db, "users/carol", 11, '/', &val, &vlen);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(vlen, 9u);
+    database_raw_value_free(val);
+}
+
+TEST_F(RawSyncTest, BatchSyncRawWithDelete) {
+    // Put, then delete via batch
+    database_put_sync_raw(db, "users/alice", 11, '/', (const uint8_t*)"val", 3);
+
+    raw_op_t ops[1];
+    ops[0].key = "users/alice";
+    ops[0].key_len = 11;
+    ops[0].value = NULL;
+    ops[0].value_len = 0;
+    ops[0].type = 1;  // delete
+
+    int rc = database_batch_sync_raw(db, '/', ops, 1);
+    EXPECT_EQ(rc, 0);
+
+    uint8_t* val = NULL;
+    size_t vlen = 0;
+    rc = database_get_sync_raw(db, "users/alice", 11, '/', &val, &vlen);
+    EXPECT_EQ(rc, -2);
+}

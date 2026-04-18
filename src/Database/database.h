@@ -318,6 +318,15 @@ int database_delete_raw(database_t* db,
     const char* key, size_t key_len, char delimiter,
     promise_t* promise);
 
+/* --- Batch raw functions --- */
+
+int database_batch_sync_raw(database_t* db, char delimiter,
+    const raw_op_t* ops, size_t count);
+
+int database_batch_raw(database_t* db, char delimiter,
+    const raw_op_t* ops, size_t count,
+    promise_t* promise);
+
 /**
  * Flush all dirty bnodes to the page file using CoW.
  *
