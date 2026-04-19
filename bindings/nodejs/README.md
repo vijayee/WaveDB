@@ -233,39 +233,27 @@ Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALI
 
 ## Performance
 
-Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache, 4 worker threads.
+Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache, 32 worker threads, async WAL.
 
-### C Library (ASYNC WAL, no work pool, single-threaded)
-
-| Operation | Throughput | P50 Latency | P99 Latency |
-|-----------|------------|-------------|-------------|
-| Get | 2.11M ops/sec | 474 ns | 490 ns |
-| Put | 446K ops/sec | 2.02 µs | 4.80 µs |
-| Delete | 268K ops/sec | 3.52 µs | 7.33 µs |
-| Mixed (70% read) | 2.17M ops/sec | 459 ns | 490 ns |
-
-### Node.js (DEBOUNCED WAL, 4 worker threads)
+### Node.js Sync (ASYNC WAL, 32 worker threads)
 
 | Operation | Throughput |
 |-----------|------------|
-| `getSync` | 203K ops/sec |
-| `putSync` | 1.2K ops/sec |
-| `get` (async) | 31K ops/sec |
-| `put` (async) | 950 ops/sec |
-| `batch` (async, 1K ops) | 54K ops/sec |
+| `putSync` | 1.3K ops/sec |
+| `getSync` | 304K ops/sec |
 
-### Node.js Concurrent Throughput (DEBOUNCED WAL)
+### Node.js Concurrent Throughput (ASYNC WAL, 32 worker threads)
 
 | Concurrency | `put` | `get` |
 |-------------|-------|-------|
-| 1 | 1.1K ops/sec | 41K ops/sec |
-| 2 | 1.7K ops/sec | 58K ops/sec |
-| 4 | 2.3K ops/sec | 67K ops/sec |
-| 8 | 2.0K ops/sec | 13K ops/sec |
-| 16 | 2.0K ops/sec | 11K ops/sec |
-| 32 | 2.0K ops/sec | 14K ops/sec |
+| 1 | 1.2K ops/sec | 45K ops/sec |
+| 2 | 1.9K ops/sec | 47K ops/sec |
+| 4 | 2.6K ops/sec | 106K ops/sec |
+| 8 | 2.6K ops/sec | 102K ops/sec |
+| 16 | 2.4K ops/sec | 80K ops/sec |
+| 32 | 2.2K ops/sec | 114K ops/sec |
 
-**Tips:** Use async operations in production. Use sync for scripts/initialization. Batch for bulk loads (10-100x faster than individual puts).
+**Tips:** Use async operations in production. Scale concurrency to 4-8 for best throughput. Sync puts are WAL-bound; sync gets are memory-speed.
 
 ## Building from Source
 

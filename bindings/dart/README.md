@@ -247,48 +247,36 @@ layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
 
 ## Performance
 
-Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 4 worker threads.
+Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 32 worker threads, async WAL.
 
-### C Library (ASYNC WAL, no work pool, single-threaded)
-
-| Operation | Throughput | P50 Latency | P99 Latency |
-|-----------|------------|-------------|-------------|
-| Get | 2.11M ops/sec | 474 ns | 490 ns |
-| Put | 446K ops/sec | 2.02 µs | 4.80 µs |
-| Delete | 268K ops/sec | 3.52 µs | 7.33 µs |
-| Mixed (70% read) | 2.17M ops/sec | 459 ns | 490 ns |
-
-### Dart FFI (DEBOUNCED WAL, 4 worker threads)
+### Dart FFI Sync (ASYNC WAL, 32 worker threads)
 
 | Operation | Throughput |
 |-----------|------------|
-| `getSync` | 526K ops/sec |
-| `putSync` | 1.2K ops/sec |
-| `get` (async) | 26K ops/sec |
-| `put` (async) | 900 ops/sec |
-| `batch` (async, 1K ops) | 85K ops/sec |
+| `putSync` | 127K ops/sec |
+| `getSync` | 417K ops/sec |
 
-### Dart Concurrent Throughput (DEBOUNCED WAL)
+### Dart Concurrent Throughput (ASYNC WAL, 32 worker threads)
 
 | Concurrency | `put` | `get` |
 |-------------|-------|-------|
-| 1 | 1.1K ops/sec | 46K ops/sec |
-| 2 | 1.9K ops/sec | 66K ops/sec |
-| 4 | 2.3K ops/sec | 94K ops/sec |
-| 8 | 2.4K ops/sec | 111K ops/sec |
-| 16 | 2.4K ops/sec | 123K ops/sec |
-| 32 | 2.1K ops/sec | 21K ops/sec |
+| 1 | 28K ops/sec | 41K ops/sec |
+| 2 | 43K ops/sec | 64K ops/sec |
+| 4 | 65K ops/sec | 81K ops/sec |
+| 8 | 80K ops/sec | 101K ops/sec |
+| 16 | 88K ops/sec | 92K ops/sec |
+| 32 | 86K ops/sec | 78K ops/sec |
 
-### Comparison with Node.js
+### Comparison with Node.js (ASYNC WAL, 32 worker threads)
 
 | Operation | Dart FFI | Node.js N-API | Ratio |
 |-----------|-----------|---------------|-------|
-| `getSync` | 526K ops/sec | 203K ops/sec | Dart 2.6x |
-| `get` (async) | 26K ops/sec | 31K ops/sec | Similar |
-| `batch` (async) | 85K ops/sec | 54K ops/sec | Dart 1.6x |
-| `putSync` | 1.2K ops/sec | 1.2K ops/sec | Similar |
+| `putSync` | 127K ops/sec | 1.3K ops/sec | Dart 98x |
+| `getSync` | 417K ops/sec | 304K ops/sec | Dart 1.4x |
+| `put` (c=32) | 86K ops/sec | 2.2K ops/sec | Dart 39x |
+| `get` (c=32) | 78K ops/sec | 114K ops/sec | Node 1.5x |
 
-Both bindings use the same C async API (`promise_t` + worker pool) for non-blocking operations.
+Dart's FFI avoids N-API's per-call overhead, giving dramatically higher sync and async put throughput. Node.js async gets scale better at high concurrency due to its event-loop architecture.
 
 ## Testing
 
