@@ -66,9 +66,15 @@ class GraphQLResult {
 ///
 /// Async methods use the C worker pool and promise infrastructure,
 /// with NativeCallable.listener bridging callbacks back to the Dart isolate.
-class GraphQLLayer {
+class GraphQLLayer implements Finalizable {
   Pointer<graphql_layer_t>? _layer;
   bool _closed = false;
+
+  // NativeFinalizer to ensure graphql_layer_destroy is called if the Dart object
+  // is GC'd without an explicit close(). This prevents native resource leaks.
+  static final NativeFinalizer _finalizer = NativeFinalizer(
+    WaveDBNative.graphQLLayerDestroyNative.cast(),
+  );
 
   // NativeCallable listeners for C promise callbacks.
   // These must persist for the lifetime of the layer since C holds pointers to them.
@@ -92,6 +98,21 @@ class GraphQLLayer {
   /// by the C API's config interface and will be silently ignored.
   void create(GraphQLLayerConfig config) {
     if (_layer != null && !_closed) {
+      // Cancel pending async ops before destroying the old layer
+      final keysToRemove = <int>[];
+      for (final entry in _pending.entries) {
+        if (entry.value.instanceId == _instanceId) {
+          if (!entry.value.completer.isCompleted) {
+            WaveDBNative.promiseDestroy(entry.value.promisePtr);
+            entry.value.completer.completeError(GraphQLLayerException('GraphQL layer is being replaced'));
+          }
+          keysToRemove.add(entry.key);
+        }
+      }
+      for (final key in keysToRemove) {
+        _pending.remove(key);
+      }
+
       WaveDBNative.graphQLLayerDestroy(_layer!);
     }
 
@@ -106,6 +127,7 @@ class GraphQLLayer {
       throw GraphQLLayerException('Failed to create GraphQL layer');
     }
 
+    _finalizer.attach(this, _layer!.cast(), detach: this);
     _ensureCallbacksRegistered();
   }
 
@@ -286,10 +308,16 @@ class GraphQLLayer {
     _pending[requestId] = _GraphQLPendingOp(_instanceId, completer, promisePtr);
 
     // Dispatch to the C worker pool
-    if (op == _OperationType.query) {
-      WaveDBNative.graphQLQueryAsync(_layer!, input, promisePtr);
-    } else {
-      WaveDBNative.graphQLMutateAsync(_layer!, input, promisePtr);
+    try {
+      if (op == _OperationType.query) {
+        WaveDBNative.graphQLQueryAsync(_layer!, input, promisePtr);
+      } else {
+        WaveDBNative.graphQLMutateAsync(_layer!, input, promisePtr);
+      }
+    } catch (e) {
+      _pending.remove(requestId);
+      WaveDBNative.promiseDestroy(promisePtr);
+      completer.completeError(e);
     }
 
     return completer.future;
@@ -298,6 +326,8 @@ class GraphQLLayer {
   /// Close the GraphQL layer and release resources
   void close() {
     if (!_closed && _layer != null) {
+      _finalizer.detach(this);
+
       // Cancel only this instance's pending async operations
       final keysToRemove = <int>[];
       for (final entry in _pending.entries) {

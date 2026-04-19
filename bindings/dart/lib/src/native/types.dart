@@ -35,12 +35,16 @@ enum WalSyncMode {
 /// Buffer structure for raw data
 /// Maps to buffer_t in C
 ///
-/// C layout on 64-bit Linux:
-/// - atomic_uint_fast16_t count (8 bytes, aligned)
-/// - atomic_uint_fast8_t yield (1 byte + 7 padding)
+/// C layout on 64-bit Linux/macOS:
+/// - _Atomic uint_fast16_t count (8 bytes, uint_fast16_t = unsigned long)
+/// - _Atomic uint_fast8_t yield (1 byte + 7 padding)
 /// - uint8_t* data (8 bytes)
 /// - size_t size (8 bytes)
 /// Total: 32 bytes
+///
+/// WARNING: On 64-bit Windows, uint_fast16_t is 2 bytes (not 8), so
+/// refcounter_t is 4 bytes and this layout is wrong. Windows support
+/// requires a platform-specific layout.
 base class buffer_t extends Struct {
   // refcounter_t: 16 bytes (atomic count + yield)
   @Array(16)

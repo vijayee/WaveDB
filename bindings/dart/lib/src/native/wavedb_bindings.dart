@@ -842,6 +842,10 @@ class WaveDBNative {
   static late final DatabaseDestroy _databaseDestroy = WaveDBLibrary.load()
       .lookupFunction<DatabaseDestroyC, DatabaseDestroy>('database_destroy');
 
+  /// Raw native function pointer for database_destroy, used by NativeFinalizer
+  static late final Pointer<NativeFunction<DatabaseDestroyC>> databaseDestroyNative =
+      WaveDBLibrary.load().lookup('database_destroy');
+
   // Configuration functions
   static late final DatabaseConfigDefault _databaseConfigDefault = WaveDBLibrary.load()
       .lookupFunction<DatabaseConfigDefaultC, DatabaseConfigDefault>('database_config_default');
@@ -1006,6 +1010,10 @@ class WaveDBNative {
 
   static late final GraphQLLayerDestroy _graphQLLayerDestroy = WaveDBLibrary.load()
       .lookupFunction<GraphQLLayerDestroyC, GraphQLLayerDestroy>('graphql_layer_destroy');
+
+  /// Raw native function pointer for graphql_layer_destroy, used by NativeFinalizer
+  static late final Pointer<NativeFunction<GraphQLLayerDestroyC>> graphQLLayerDestroyNative =
+      WaveDBLibrary.load().lookup('graphql_layer_destroy');
 
   static late final GraphQLLayerConfigDefault _graphQLLayerConfigDefault = WaveDBLibrary.load()
       .lookupFunction<GraphQLLayerConfigDefaultC, GraphQLLayerConfigDefault>('graphql_layer_config_default');

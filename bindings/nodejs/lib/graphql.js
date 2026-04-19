@@ -76,7 +76,7 @@ class GraphQLLayer {
     if (typeof query !== 'string') return Promise.reject(new TypeError('Query must be a string'));
     return new Promise((resolve, reject) => {
       this._layer.query(query, (err, result) => {
-        if (err) reject(err);
+        if (err) reject(typeof err === 'string' ? new Error(err) : err);
         else resolve(result);
       });
     });
@@ -93,7 +93,7 @@ class GraphQLLayer {
     if (typeof mutation !== 'string') return Promise.reject(new TypeError('Mutation must be a string'));
     return new Promise((resolve, reject) => {
       this._layer.mutate(mutation, (err, result) => {
-        if (err) reject(err);
+        if (err) reject(typeof err === 'string' ? new Error(err) : err);
         else resolve(result);
       });
     });

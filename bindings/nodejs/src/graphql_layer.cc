@@ -3,6 +3,7 @@
 #include <atomic>
 
 #include <napi.h>
+#include <cstdlib>
 #include <string>
 #include "../../../src/Layers/graphql/graphql.h"
 #include "async_bridge.h"
@@ -97,11 +98,13 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
 
   layer_ = graphql_layer_create(config->path, config);
   if (!layer_) {
+    if (config->path) std::free(const_cast<char*>(config->path));
     graphql_layer_config_destroy(config);
     Napi::Error::New(env, "Failed to create GraphQL layer").ThrowAsJavaScriptException();
     return;
   }
 
+  if (config->path) std::free(const_cast<char*>(config->path));
   graphql_layer_config_destroy(config);
   bridge_.Init(env);
 }

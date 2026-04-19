@@ -120,7 +120,7 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       config->bnode_cache_shards = static_cast<uint16_t>(val.Uint32Value());
     }
 
-    if (options.Has("wal")) {
+    if (options.Has("wal") && options.Get("wal").IsObject()) {
       Napi::Object walOpts = options.Get("wal").As<Napi::Object>();
 
       if (walOpts.Has("syncMode")) {
@@ -1007,14 +1007,16 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Call callback if provided
-  if (info.Length() > 2 && info[2].IsFunction()) {
+  // Create Promise first, then invoke callback
+  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+  deferred.Resolve(env.Undefined());
+
+  // Call callback if provided (after Promise creation to avoid pending exception UB)
+  if (!env.IsExceptionPending() && info.Length() > 2 && info[2].IsFunction()) {
     Napi::Function callback = info[2].As<Napi::Function>();
     callback.Call({env.Null()});
   }
 
-  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
-  deferred.Resolve(env.Undefined());
   return deferred.Promise();
 }
 
@@ -1098,15 +1100,15 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
 
   Napi::Value converted = ConvertArrays(env, result_obj);
 
-  // Handle callback if provided
-  Napi::Function callback;
-  if (info.Length() > 1 && info[1].IsFunction()) {
-    callback = info[1].As<Napi::Function>();
+  // Create Promise first, then invoke callback
+  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+  deferred.Resolve(converted);
+
+  if (!env.IsExceptionPending() && info.Length() > 1 && info[1].IsFunction()) {
+    Napi::Function callback = info[1].As<Napi::Function>();
     callback.Call({ env.Null(), converted });
   }
 
-  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
-  deferred.Resolve(converted);
   return deferred.Promise();
 }
 

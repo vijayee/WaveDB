@@ -74,11 +74,17 @@ enum _AsyncOpType { put, get, delete, batch }
 /// Async methods use the C worker pool via promise_t and
 /// NativeCallable.listener to bridge C thread callbacks back
 /// to the Dart isolate.
-class WaveDB {
+class WaveDB implements Finalizable {
   Pointer<database_t>? _db;
   final String _path;
   final String _delimiter;
   bool _isClosed = false;
+
+  // NativeFinalizer to ensure database_destroy is called if the Dart object
+  // is GC'd without an explicit close(). This prevents native resource leaks.
+  static final NativeFinalizer _finalizer = NativeFinalizer(
+    WaveDBNative.databaseDestroyNative.cast(),
+  );
 
   // NativeCallable listeners for C promise callbacks.
   // These must persist for the lifetime of the database since C holds pointers to them.
@@ -122,6 +128,7 @@ class WaveDB {
       throw WaveDBException.ioError('database_create', 'Failed to create database at $path');
     }
 
+    _finalizer.attach(this, _db!.cast(), detach: this);
     _ensureCallbacksRegistered();
   }
 
@@ -523,11 +530,8 @@ class WaveDB {
       if (valuePtr == nullptr || valueLen == 0) return null;
 
       try {
-        var bytes = valuePtr.asTypedList(valueLen).toList();
-        // Strip trailing null bytes (chunk padding from C identifier serialization)
-        while (bytes.isNotEmpty && bytes.last == 0) {
-          bytes.removeLast();
-        }
+        // databaseGetSyncRaw returns exact-length data, no chunk padding
+        final bytes = valuePtr.asTypedList(valueLen);
         final bytesUint8 = Uint8List.fromList(bytes);
         return IdentifierConverter.isPrintableASCII(bytesUint8)
             ? utf8.decode(bytesUint8, allowMalformed: true)
@@ -661,12 +665,8 @@ class WaveDB {
 
           dynamic valueResult;
           if (rawVal != nullptr && valLen > 0) {
-            var valBytes = rawVal.asTypedList(valLen).toList();
-            // Strip trailing null bytes (chunk padding)
-            while (valBytes.isNotEmpty && valBytes.last == 0) {
-              valBytes.removeLast();
-            }
-            final valUint8 = Uint8List.fromList(valBytes);
+            // databaseScanSyncRaw returns exact-length data, no chunk padding
+            final valUint8 = Uint8List.fromList(rawVal.asTypedList(valLen));
             valueResult = IdentifierConverter.isPrintableASCII(valUint8)
                 ? utf8.decode(valUint8, allowMalformed: true)
                 : valUint8;
@@ -728,6 +728,8 @@ class WaveDB {
   /// so pending async operations will complete or abort before teardown.
   void close() {
     if (_db != null && !_isClosed) {
+      _finalizer.detach(this);
+
       // Cancel only this instance's pending async operations
       final keysToRemove = <int>[];
       for (final entry in _pending.entries) {
