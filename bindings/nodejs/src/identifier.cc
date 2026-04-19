@@ -8,21 +8,28 @@
 #include <cctype>
 #include <node_api.h>
 
-// Extract JS value (string or Buffer) into caller-provided buffers.
-// For strings: writes into str_buf, sets val_buf/val_len.
-// For Buffers: sets val_buf to the Buffer's data pointer (zero-copy, valid during call).
-// Returns false on type error.
-bool ValueFromJSRaw(Napi::Env env, Napi::Value value, char* str_buf, size_t str_buf_size,
-                    const uint8_t** val_buf, size_t* val_len) {
+// Extract JS value into a std::string (copies Buffer data, no truncation for strings).
+bool ValueFromJSDynamic(Napi::Env env, Napi::Value value, std::string& out) {
     if (value.IsString()) {
-        size_t len;
-        napi_status status = napi_get_value_string_utf8(env, value, str_buf, str_buf_size, &len);
-        if (status != napi_ok) {
-            Napi::Error::New(env, "Failed to extract value string").ThrowAsJavaScriptException();
-            return false;
-        }
-        *val_buf = reinterpret_cast<const uint8_t*>(str_buf);
-        *val_len = len;
+        out = value.As<Napi::String>().Utf8Value();
+        return true;
+    } else if (value.IsBuffer()) {
+        Napi::Buffer<uint8_t> buffer = value.As<Napi::Buffer<uint8_t>>();
+        out = std::string(reinterpret_cast<const char*>(buffer.Data()), buffer.Length());
+        return true;
+    } else {
+        Napi::TypeError::New(env, "Value must be string or Buffer").ThrowAsJavaScriptException();
+        return false;
+    }
+}
+
+// Extract JS value with zero-copy for Buffers.
+bool ValueFromJSZeroCopy(Napi::Env env, Napi::Value value, std::string& out_str,
+                         const uint8_t** val_buf, size_t* val_len) {
+    if (value.IsString()) {
+        out_str = value.As<Napi::String>().Utf8Value();
+        *val_buf = reinterpret_cast<const uint8_t*>(out_str.c_str());
+        *val_len = out_str.size();
         return true;
     } else if (value.IsBuffer()) {
         Napi::Buffer<uint8_t> buffer = value.As<Napi::Buffer<uint8_t>>();
@@ -35,73 +42,36 @@ bool ValueFromJSRaw(Napi::Env env, Napi::Value value, char* str_buf, size_t str_
     }
 }
 
-// Check if bytes are printable ASCII
-static bool IsPrintableASCII(const uint8_t* data, size_t size) {
-  for (size_t i = 0; i < size; i++) {
-    if (!isprint(data[i]) && data[i] != '\t' && data[i] != '\n' && data[i] != '\r') {
-      return false;
-    }
-  }
-  return true;
-}
-
-// Convert JavaScript value (string or Buffer) to identifier_t*
-identifier_t* ValueFromJS(Napi::Env env, Napi::Value value) {
-  if (value.IsNull() || value.IsUndefined()) {
-    return nullptr;
-  }
-
-  buffer_t* buf = nullptr;
-
-  if (value.IsString()) {
-    std::string str = value.As<Napi::String>().Utf8Value();
-    buf = buffer_create_from_pointer_copy(
-      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(str.c_str())),
-      str.size()
-    );
-  } else if (value.IsBuffer()) {
-    Napi::Buffer<uint8_t> buffer = value.As<Napi::Buffer<uint8_t>>();
-    buf = buffer_create_from_pointer_copy(buffer.Data(), buffer.Length());
-  } else {
-    Napi::TypeError::New(env, "Value must be string or Buffer").ThrowAsJavaScriptException();
-    return nullptr;
-  }
-
-  if (!buf) {
-    Napi::Error::New(env, "Failed to create buffer").ThrowAsJavaScriptException();
-    return nullptr;
-  }
-
-  identifier_t* id = identifier_create(buf, 0);
-  buffer_destroy(buf);
-
-  if (!id) {
-    Napi::Error::New(env, "Failed to create identifier").ThrowAsJavaScriptException();
-    return nullptr;
-  }
-
-  return id;
-}
-
 // Convert identifier_t* to JavaScript value (string or Buffer)
 Napi::Value ValueToJS(Napi::Env env, identifier_t* id) {
   if (!id) {
     return env.Null();
   }
 
-  // Use identifier_to_buffer to reconstruct original data (removes padding)
   buffer_t* buf = identifier_to_buffer(id);
   if (!buf) {
     return env.Null();
   }
 
-  // Get data pointer and size
   const uint8_t* data = buf->data;
   size_t size = buf->size;
 
-  // Return as string if printable ASCII, otherwise Buffer
+  // identifier_to_buffer may include trailing null padding from chunk alignment;
+  // strip it to get the original data length.
+  while (size > 0 && (data[size - 1] == '\0' || data[size - 1] == ' ')) {
+    size--;
+  }
+
+  bool printable = true;
+  for (size_t i = 0; i < size; i++) {
+    if (!isprint(data[i]) && data[i] != '\t' && data[i] != '\n' && data[i] != '\r') {
+      printable = false;
+      break;
+    }
+  }
+
   Napi::Value result;
-  if (IsPrintableASCII(data, size)) {
+  if (printable) {
     result = Napi::String::New(env, std::string(reinterpret_cast<const char*>(data), size));
   } else {
     result = Napi::Buffer<uint8_t>::Copy(env, data, size);

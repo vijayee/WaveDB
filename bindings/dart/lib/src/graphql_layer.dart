@@ -77,17 +77,30 @@ class GraphQLLayer {
 
   // Active completers keyed by request id
   static int _nextRequestId = 1;
-  static final Map<int, Completer<GraphQLResult>> _pending = {};
+  static final Map<int, _GraphQLPendingOp> _pending = {};
 
-  GraphQLLayer();
+  // Unique instance id to scope pending ops
+  final int _instanceId;
+  static int _nextInstanceId = 1;
+
+  GraphQLLayer() : _instanceId = _nextInstanceId++;
 
   /// Create a new GraphQL layer with the given configuration
+  ///
+  /// Note: only [GraphQLLayerConfig.path] is currently used. Other config
+  /// fields (enablePersist, chunkSize, workerThreads) are not yet supported
+  /// by the C API's config interface and will be silently ignored.
   void create(GraphQLLayerConfig config) {
     if (_layer != null && !_closed) {
       WaveDBNative.graphQLLayerDestroy(_layer!);
     }
 
-    _layer = WaveDBNative.graphQLLayerCreate(config.path, config: null);
+    final configPtr = WaveDBNative.graphQLLayerConfigDefault();
+    try {
+      _layer = WaveDBNative.graphQLLayerCreate(config.path, config: configPtr);
+    } finally {
+      WaveDBNative.graphQLLayerConfigDestroy(configPtr);
+    }
 
     if (_layer == nullptr) {
       throw GraphQLLayerException('Failed to create GraphQL layer');
@@ -99,44 +112,67 @@ class GraphQLLayer {
   /// Ensure the NativeCallable.listener callbacks are registered.
   /// These are created once and reused across all async operations.
   static void _ensureCallbacksRegistered() {
-    if (_resolveCallable != null) return;
+    if (_resolveCallable != null && _rejectCallable != null) return;
 
-    _resolveCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>.listener(
-      _cResolveCallback,
-    );
-    _rejectCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>.listener(
-      _cRejectCallback,
-    );
+    if (_resolveCallable == null) {
+      _resolveCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>.listener(
+        _cResolveCallback,
+      );
+    }
+    if (_rejectCallable == null) {
+      _rejectCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>.listener(
+        _cRejectCallback,
+      );
+    }
   }
 
   /// C resolve callback — called from the C worker pool thread.
   /// NativeCallable.listener marshals this to the Dart isolate's event loop.
   static void _cResolveCallback(Pointer<Void> ctx, Pointer<Void> payload) {
     final requestId = ctx.address;
-    final completer = _pending.remove(requestId);
-    if (completer == null || completer.isCompleted) return;
+    final pending = _pending.remove(requestId);
 
-    final resultPtr = payload.cast<graphql_result_t>();
-    final result = _convertResultFromPointer(resultPtr);
-    completer.complete(result);
+    if (pending == null) return;
+
+    try {
+      if (pending.completer.isCompleted) return;
+
+      final resultPtr = payload.cast<graphql_result_t>();
+      final result = _convertResultFromPointer(resultPtr);
+      pending.completer.complete(result);
+    } catch (e) {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(e);
+      }
+    } finally {
+      WaveDBNative.promiseDestroy(pending.promisePtr);
+    }
   }
 
   /// C reject callback — called from the C worker pool thread.
   static void _cRejectCallback(Pointer<Void> ctx, Pointer<async_error_t> error) {
     final requestId = ctx.address;
-    final completer = _pending.remove(requestId);
-    if (completer == null || completer.isCompleted) return;
+    final pending = _pending.remove(requestId);
 
-    // Read the error message before destroying
+    // Always destroy the C error object
     String errorMsg = 'Operation failed';
     if (error != nullptr) {
       final msgPtr = WaveDBNative.errorGetMessage(error);
       if (msgPtr != nullptr) {
         errorMsg = msgPtr.toDartString();
       }
+      WaveDBNative.errorDestroy(error);
     }
-    WaveDBNative.errorDestroy(error);
-    completer.completeError(GraphQLLayerException(errorMsg));
+
+    if (pending == null) return;
+
+    try {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(GraphQLLayerException(errorMsg));
+      }
+    } finally {
+      WaveDBNative.promiseDestroy(pending.promisePtr);
+    }
   }
 
   /// Convert a C graphql_result_t pointer to a Dart GraphQLResult
@@ -232,7 +268,6 @@ class GraphQLLayer {
   Future<GraphQLResult> _dispatchAsync(String input, _OperationType op) {
     final completer = Completer<GraphQLResult>();
     final requestId = _nextRequestId++;
-    _pending[requestId] = completer;
 
     // Create a C promise_t with our NativeCallable listener callbacks
     // The ctx pointer encodes the request ID so we can look up the completer
@@ -244,10 +279,11 @@ class GraphQLLayer {
     );
 
     if (promisePtr == nullptr) {
-      _pending.remove(requestId);
       completer.completeError(GraphQLLayerException('Failed to create promise'));
       return completer.future;
     }
+
+    _pending[requestId] = _GraphQLPendingOp(_instanceId, completer, promisePtr);
 
     // Dispatch to the C worker pool
     if (op == _OperationType.query) {
@@ -256,14 +292,27 @@ class GraphQLLayer {
       WaveDBNative.graphQLMutateAsync(_layer!, input, promisePtr);
     }
 
-    // The promise is now owned by the C async system; it will be destroyed
-    // by the worker callbacks. We just wait for the completer.
     return completer.future;
   }
 
   /// Close the GraphQL layer and release resources
   void close() {
     if (!_closed && _layer != null) {
+      // Cancel only this instance's pending async operations
+      final keysToRemove = <int>[];
+      for (final entry in _pending.entries) {
+        if (entry.value.instanceId == _instanceId) {
+          if (!entry.value.completer.isCompleted) {
+            WaveDBNative.promiseDestroy(entry.value.promisePtr);
+            entry.value.completer.completeError(GraphQLLayerException('GraphQL layer is closed'));
+          }
+          keysToRemove.add(entry.key);
+        }
+      }
+      for (final key in keysToRemove) {
+        _pending.remove(key);
+      }
+
       WaveDBNative.graphQLLayerDestroy(_layer!);
       _layer = null;
       _closed = true;
@@ -309,6 +358,14 @@ class GraphQLLayer {
 
 /// Operation type for async dispatch
 enum _OperationType { query, mutate }
+
+/// Pending async GraphQL operation holding completer and C promise pointer
+class _GraphQLPendingOp {
+  final int instanceId;
+  final Completer<GraphQLResult> completer;
+  final Pointer<promise_t> promisePtr;
+  _GraphQLPendingOp(this.instanceId, this.completer, this.promisePtr);
+}
 
 /// Exception thrown by GraphQL layer operations
 class GraphQLLayerException implements Exception {

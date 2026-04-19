@@ -102,8 +102,14 @@ class IdentifierConverter {
         return [];
       }
 
-      // Copy data to Dart list
-      return dataPtr.asTypedList(size).toList();
+      // Read raw bytes; identifier_to_buffer may include trailing null padding
+      // from chunk alignment, so strip trailing nulls.
+      final raw = dataPtr.asTypedList(size).toList();
+      while (raw.isNotEmpty && raw.last == 0) {
+        raw.removeLast();
+      }
+
+      return raw;
     } finally {
       WaveDBNative.bufferDestroy(buffer);
     }
@@ -111,11 +117,12 @@ class IdentifierConverter {
 
   /// Check if bytes are printable ASCII
   ///
-  /// Printable ASCII is defined as bytes in range 32-126 (space through tilde)
+  /// Printable ASCII is defined as bytes in range 32-126 (space through tilde),
+  /// plus tab (9), newline (10), and carriage return (13).
   static bool isPrintableASCII(List<int> bytes) {
     if (bytes.isEmpty) return true;
 
-    return bytes.every((b) => b >= 32 && b < 127);
+    return bytes.every((b) => (b >= 32 && b < 127) || b == 9 || b == 10 || b == 13);
   }
 
   /// Convert Dart value to Uint8List without FFI allocation

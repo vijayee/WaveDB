@@ -18,7 +18,6 @@ import '../exceptions.dart';
 ///   uint8_t chunk_size,
 ///   uint32_t btree_node_size,
 ///   uint8_t enable_persist,
-///   size_t storage_cache_size,
 ///   work_pool_t* pool,
 ///   hierarchical_timing_wheel_t* wheel,
 ///   int* error_code
@@ -30,7 +29,6 @@ typedef DatabaseCreateC = Pointer<database_t> Function(
   Uint8 chunk_size,
   Uint32 btree_node_size,
   Uint8 enable_persist,
-  UintPtr storage_cache_size,
   Pointer<Void> pool,
   Pointer<Void> wheel,
   Pointer<Int32> error_code,
@@ -44,7 +42,6 @@ typedef DatabaseCreate = Pointer<database_t> Function(
   int chunk_size,
   int btree_node_size,
   int enable_persist,
-  int storage_cache_size,
   Pointer<Void> pool,
   Pointer<Void> wheel,
   Pointer<Int32> error_code,
@@ -81,6 +78,18 @@ typedef DatabaseConfigDestroyC = Void Function(Pointer<database_config_t> config
 
 /// Dart signature for database_config_destroy
 typedef DatabaseConfigDestroy = void Function(Pointer<database_config_t> config);
+
+// Config setter typedefs
+typedef _ConfigSetU8C = Void Function(Pointer<database_config_t>, Uint8);
+typedef _ConfigSetU8 = void Function(Pointer<database_config_t>, int);
+typedef _ConfigSetU16C = Void Function(Pointer<database_config_t>, Uint16);
+typedef _ConfigSetU16 = void Function(Pointer<database_config_t>, int);
+typedef _ConfigSetU32C = Void Function(Pointer<database_config_t>, Uint32);
+typedef _ConfigSetU32 = void Function(Pointer<database_config_t>, int);
+typedef _ConfigSetU64C = Void Function(Pointer<database_config_t>, Uint64);
+typedef _ConfigSetU64 = void Function(Pointer<database_config_t>, int);
+typedef _ConfigSetSizeC = Void Function(Pointer<database_config_t>, UintPtr);
+typedef _ConfigSetSize = void Function(Pointer<database_config_t>, int);
 
 /// C signature: database_t* database_create_with_config(
 ///   const char* location,
@@ -535,12 +544,6 @@ typedef PathGet = Pointer<identifier_t> Function(
 // C TYPEDEFS - Buffer Operations (must come before Identifier)
 // ============================================================
 
-/// C signature: buffer_t* buffer_create(size_t size)
-typedef BufferCreateC = Pointer<buffer_t> Function(UintPtr size);
-
-/// Dart signature for buffer_create
-typedef BufferCreate = Pointer<buffer_t> Function(int size);
-
 /// C signature: buffer_t* buffer_create_from_pointer_copy(uint8_t* data, size_t size)
 typedef BufferCreateFromPointerCopyC = Pointer<buffer_t> Function(
   Pointer<Uint8> data,
@@ -849,6 +852,30 @@ class WaveDBNative {
   static late final DatabaseConfigDestroy _databaseConfigDestroy = WaveDBLibrary.load()
       .lookupFunction<DatabaseConfigDestroyC, DatabaseConfigDestroy>('database_config_destroy');
 
+  // Config setters
+  static late final _ConfigSetU8 _configSetChunkSize = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_chunk_size');
+  static late final _ConfigSetU32 _configSetBtreeNodeSize = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_btree_node_size');
+  static late final _ConfigSetU8 _configSetEnablePersist = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_enable_persist');
+  static late final _ConfigSetSize _configSetLruMemoryMb = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetSizeC, _ConfigSetSize>('database_config_set_lru_memory_mb');
+  static late final _ConfigSetU16 _configSetLruShards = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU16C, _ConfigSetU16>('database_config_set_lru_shards');
+  static late final _ConfigSetSize _configSetBnodeCacheMemoryMb = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetSizeC, _ConfigSetSize>('database_config_set_bnode_cache_memory_mb');
+  static late final _ConfigSetU16 _configSetBnodeCacheShards = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU16C, _ConfigSetU16>('database_config_set_bnode_cache_shards');
+  static late final _ConfigSetU8 _configSetWorkerThreads = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_worker_threads');
+  static late final _ConfigSetU8 _configSetWalSyncMode = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_wal_sync_mode');
+  static late final _ConfigSetU64 _configSetWalDebounceMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU64C, _ConfigSetU64>('database_config_set_wal_debounce_ms');
+  static late final _ConfigSetSize _configSetWalMaxFileSize = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetSizeC, _ConfigSetSize>('database_config_set_wal_max_file_size');
+
   static late final DatabaseCreateWithConfig _databaseCreateWithConfig = WaveDBLibrary.load()
       .lookupFunction<DatabaseCreateWithConfigC, DatabaseCreateWithConfig>('database_create_with_config');
 
@@ -1032,7 +1059,6 @@ class WaveDBNative {
   /// [chunkSize] - HBTrie chunk size (0 = default)
   /// [btreeNodeSize] - B-tree node size (0 = default)
   /// [enablePersist] - Enable persistent storage (0 = in-memory only, 1 = persistent)
-  /// [storageCacheSize] - Section LRU cache size (0 = default)
   ///
   /// Returns a pointer to the database handle.
   /// Throws [WaveDBException] if creation fails.
@@ -1042,7 +1068,6 @@ class WaveDBNative {
     int chunkSize = 0,
     int btreeNodeSize = 0,
     int enablePersist = 1,
-    int storageCacheSize = 0,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -1055,7 +1080,6 @@ class WaveDBNative {
         chunkSize,
         btreeNodeSize,
         enablePersist,
-        storageCacheSize,
         nullptr, // pool
         nullptr, // wheel
         errorPtr,
@@ -1087,7 +1111,6 @@ class WaveDBNative {
   ///   - lruShards: LRU cache shard count, 0 for auto (default: 64)
   ///   - bnodeCacheMemoryMb: Bnode cache size in MB (default: 128)
   ///   - bnodeCacheShards: Bnode cache shard count (default: 4)
-  ///   - storageCacheSize: Section cache size (default: 1024)
   ///   - workerThreads: Number of worker threads (default: 4)
   ///   - walSyncMode: WAL sync mode: 'immediate', 'debounced', 'async' (default: 'debounced')
   ///   - walDebounceMs: Debounce window for fsync (default: 250)
@@ -1104,7 +1127,6 @@ class WaveDBNative {
     int? lruShards,
     int? bnodeCacheMemoryMb,
     int? bnodeCacheShards,
-    int? storageCacheSize,
     int? workerThreads,
     String? walSyncMode,
     int? walDebounceMs,
@@ -1120,9 +1142,21 @@ class WaveDBNative {
         throw WaveDBException.ioError('database_config_default', 'Failed to create default config');
       }
 
-      // Apply overrides (note: we can't directly modify the struct from Dart,
-      // so we use the legacy database_create for now)
-      // TODO: Add native config setters or use struct layout
+      // Apply overrides via C setter functions
+      if (chunkSize != null) _configSetChunkSize(configPtr, chunkSize);
+      if (btreeNodeSize != null) _configSetBtreeNodeSize(configPtr, btreeNodeSize);
+      if (enablePersist != null) _configSetEnablePersist(configPtr, enablePersist ? 1 : 0);
+      if (lruMemoryMb != null) _configSetLruMemoryMb(configPtr, lruMemoryMb);
+      if (lruShards != null) _configSetLruShards(configPtr, lruShards);
+      if (bnodeCacheMemoryMb != null) _configSetBnodeCacheMemoryMb(configPtr, bnodeCacheMemoryMb);
+      if (bnodeCacheShards != null) _configSetBnodeCacheShards(configPtr, bnodeCacheShards);
+      if (workerThreads != null) _configSetWorkerThreads(configPtr, workerThreads);
+      if (walSyncMode != null) {
+        final modeValue = {'immediate': 0, 'debounced': 1, 'async': 2}[walSyncMode] ?? 1;
+        _configSetWalSyncMode(configPtr, modeValue);
+      }
+      if (walDebounceMs != null) _configSetWalDebounceMs(configPtr, walDebounceMs);
+      if (walMaxFileSize != null) _configSetWalMaxFileSize(configPtr, walMaxFileSize);
 
       final db = _databaseCreateWithConfig(
         pathPtr.cast(),

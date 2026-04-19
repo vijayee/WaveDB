@@ -12,57 +12,7 @@
 #include "identifier.h"
 #include "async_bridge.h"
 #include "iterator.h"
-
-class WaveDB : public Napi::ObjectWrap<WaveDB> {
-public:
-  static Napi::Object Init(Napi::Env env, Napi::Object exports);
-
-  WaveDB(const Napi::CallbackInfo& info);
-  ~WaveDB();
-
-private:
-  database_t* db_;
-  char delimiter_;
-  AsyncBridge bridge_;
-
-  // Async operations
-  Napi::Value Put(const Napi::CallbackInfo& info);
-  Napi::Value Get(const Napi::CallbackInfo& info);
-  Napi::Value Delete(const Napi::CallbackInfo& info);
-  Napi::Value Batch(const Napi::CallbackInfo& info);
-
-  // Callback-style async operations (use C async API with error-first callback)
-  Napi::Value PutCb(const Napi::CallbackInfo& info);
-  Napi::Value GetCb(const Napi::CallbackInfo& info);
-  Napi::Value DeleteCb(const Napi::CallbackInfo& info);
-  Napi::Value BatchCb(const Napi::CallbackInfo& info);
-
-  // Sync operations
-  Napi::Value PutSync(const Napi::CallbackInfo& info);
-  Napi::Value GetSync(const Napi::CallbackInfo& info);
-  Napi::Value DeleteSync(const Napi::CallbackInfo& info);
-  Napi::Value BatchSync(const Napi::CallbackInfo& info);
-
-  // Object operations helpers
-  static Napi::Value ConvertArrays(Napi::Env env, Napi::Value value);
-
-  // Object operations
-  Napi::Value PutObject(const Napi::CallbackInfo& info);
-  Napi::Value GetObject(const Napi::CallbackInfo& info);
-  Napi::Value GetObjectSync(const Napi::CallbackInfo& info);
-
-  // Streaming
-  Napi::Value CreateReadStream(const Napi::CallbackInfo& info);
-
-  // Lifecycle
-  Napi::Value Close(const Napi::CallbackInfo& info);
-
-  // Helper: create an AsyncOpContext with a JS Promise and optional callback
-  AsyncOpContext* CreateOpContext(Napi::Env env, AsyncOpType type, const Napi::CallbackInfo& info, int callbackArgIndex);
-
-  static Napi::FunctionReference constructor_;
-  static void Cleanup(void* arg);
-};
+#include "database.h"
 
 Napi::FunctionReference WaveDB::constructor_;
 
@@ -265,28 +215,13 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
-  const uint8_t* val_buf;
-  size_t val_len;
-  char val_str_buf[4096];
-  char* val_heap_buf = nullptr;
+  std::string val_str;
 
-  if (info[1].IsString()) {
-    // Get required length first
-    size_t required;
-    napi_get_value_string_utf8(env, info[1], nullptr, 0, &required);
-    if (required >= sizeof(val_str_buf)) {
-      val_heap_buf = new char[required + 1];
-      napi_get_value_string_utf8(env, info[1], val_heap_buf, required + 1, &val_len);
-      val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
-    } else {
-      if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
-    }
-  } else {
-    if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
+  if (!ValueFromJSDynamic(env, info[1], val_str)) {
+    return env.Null();
   }
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
@@ -298,16 +233,13 @@ Napi::Value WaveDB::Put(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    delete[] val_heap_buf;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_put_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len, promise_c);
-
-  // database_put_raw copies data internally before dispatching, so safe to free now
-  delete[] val_heap_buf;
+  database_put_raw(db_, key_str.c_str(), key_str.size(), delimiter_,
+                   reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(), promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -325,9 +257,8 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
 
@@ -343,7 +274,7 @@ Napi::Value WaveDB::Get(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_get_raw(db_, key_buf, key_len, delimiter_, promise_c);
+  database_get_raw(db_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -361,9 +292,8 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
 
@@ -379,7 +309,7 @@ Napi::Value WaveDB::Delete(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_delete_raw(db_, key_buf, key_len, delimiter_, promise_c);
+  database_delete_raw(db_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -427,15 +357,14 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
 
     // Key
-    size_t key_len;
-    char key_buf[4096];
-    if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) {
+    std::string key_str = KeyFromJSDynamic(env, op.Get("key"), delimiter_);
+    if (env.IsExceptionPending()) {
       delete key_strings;
       delete val_strings;
       delete raw_ops;
       return env.Null();
     }
-    (*key_strings)[i] = std::string(key_buf, key_len);
+    (*key_strings)[i] = key_str;
     (*raw_ops)[i].key = (*key_strings)[i].c_str();
     (*raw_ops)[i].key_len = (*key_strings)[i].size();
 
@@ -449,42 +378,18 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
       }
       (*raw_ops)[i].type = 0;
 
-      const uint8_t* val_buf;
-      size_t val_len;
-      char val_str_buf[4096];
-      char* val_heap_buf = nullptr;
-
+      std::string val_str;
       Napi::Value valArg = op.Get("value");
-      if (valArg.IsString()) {
-        size_t required;
-        napi_get_value_string_utf8(env, valArg, nullptr, 0, &required);
-        if (required >= sizeof(val_str_buf)) {
-          val_heap_buf = new char[required + 1];
-          napi_get_value_string_utf8(env, valArg, val_heap_buf, required + 1, &val_len);
-          val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
-        } else {
-          if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
-            delete key_strings;
-            delete val_strings;
-            delete raw_ops;
-            delete[] val_heap_buf;
-            return env.Null();
-          }
-        }
-      } else {
-        if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
-          delete key_strings;
-          delete val_strings;
-          delete raw_ops;
-          return env.Null();
-        }
+      if (!ValueFromJSDynamic(env, valArg, val_str)) {
+        delete key_strings;
+        delete val_strings;
+        delete raw_ops;
+        return env.Null();
       }
 
-      val_strings->push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      val_strings->push_back(val_str);
       (*raw_ops)[i].value = reinterpret_cast<const uint8_t*>(val_strings->back().c_str());
       (*raw_ops)[i].value_len = val_strings->back().size();
-
-      delete[] val_heap_buf;
     } else if (type == "del") {
       (*raw_ops)[i].type = 1;
       (*raw_ops)[i].value = nullptr;
@@ -525,11 +430,11 @@ Napi::Value WaveDB::Batch(const Napi::CallbackInfo& info) {
 
   if (rc != 0) {
     napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch batch").Value();
+    napi_value promise_val = ctx->promise;
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    // Return a rejected promise
-    return Napi::Value(env, ctx->promise);
+    return Napi::Value(env, promise_val);
   }
 
   return Napi::Value(env, ctx->promise);
@@ -550,9 +455,8 @@ Napi::Value WaveDB::GetCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Get, info, 1);
 
@@ -568,7 +472,7 @@ Napi::Value WaveDB::GetCb(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_get_raw(db_, key_buf, key_len, delimiter_, promise_c);
+  database_get_raw(db_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -586,27 +490,13 @@ Napi::Value WaveDB::PutCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
-  const uint8_t* val_buf;
-  size_t val_len;
-  char val_str_buf[4096];
-  char* val_heap_buf = nullptr;
+  std::string val_str;
 
-  if (info[1].IsString()) {
-    size_t required;
-    napi_get_value_string_utf8(env, info[1], nullptr, 0, &required);
-    if (required >= sizeof(val_str_buf)) {
-      val_heap_buf = new char[required + 1];
-      napi_get_value_string_utf8(env, info[1], val_heap_buf, required + 1, &val_len);
-      val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
-    } else {
-      if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
-    }
-  } else {
-    if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Null();
+  if (!ValueFromJSDynamic(env, info[1], val_str)) {
+    return env.Null();
   }
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Put, info, 2);
@@ -618,15 +508,13 @@ Napi::Value WaveDB::PutCb(const Napi::CallbackInfo& info) {
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    delete[] val_heap_buf;
     return Napi::Value(env, promise_val);
   }
 
   ctx->promise_c = promise_c;
 
-  database_put_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len, promise_c);
-
-  delete[] val_heap_buf;
+  database_put_raw(db_, key_str.c_str(), key_str.size(), delimiter_,
+                   reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(), promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -644,9 +532,8 @@ Napi::Value WaveDB::DeleteCb(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
   AsyncOpContext* ctx = CreateOpContext(env, AsyncOpType::Delete, info, 1);
 
@@ -662,7 +549,7 @@ Napi::Value WaveDB::DeleteCb(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_delete_raw(db_, key_buf, key_len, delimiter_, promise_c);
+  database_delete_raw(db_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -711,15 +598,14 @@ Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
     std::string type = op.Get("type").As<Napi::String>().Utf8Value();
 
     // Key
-    size_t key_len;
-    char key_buf[4096];
-    if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) {
+    std::string key_str = KeyFromJSDynamic(env, op.Get("key"), delimiter_);
+    if (env.IsExceptionPending()) {
       delete key_strings;
       delete val_strings;
       delete raw_ops;
       return env.Null();
     }
-    (*key_strings)[i] = std::string(key_buf, key_len);
+    (*key_strings)[i] = key_str;
     (*raw_ops)[i].key = (*key_strings)[i].c_str();
     (*raw_ops)[i].key_len = (*key_strings)[i].size();
 
@@ -733,42 +619,18 @@ Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
       }
       (*raw_ops)[i].type = 0;
 
-      const uint8_t* val_buf;
-      size_t val_len;
-      char val_str_buf[4096];
-      char* val_heap_buf = nullptr;
-
+      std::string val_str;
       Napi::Value valArg = op.Get("value");
-      if (valArg.IsString()) {
-        size_t required;
-        napi_get_value_string_utf8(env, valArg, nullptr, 0, &required);
-        if (required >= sizeof(val_str_buf)) {
-          val_heap_buf = new char[required + 1];
-          napi_get_value_string_utf8(env, valArg, val_heap_buf, required + 1, &val_len);
-          val_buf = reinterpret_cast<const uint8_t*>(val_heap_buf);
-        } else {
-          if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
-            delete key_strings;
-            delete val_strings;
-            delete raw_ops;
-            delete[] val_heap_buf;
-            return env.Null();
-          }
-        }
-      } else {
-        if (!ValueFromJSRaw(env, valArg, val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) {
-          delete key_strings;
-          delete val_strings;
-          delete raw_ops;
-          return env.Null();
-        }
+      if (!ValueFromJSDynamic(env, valArg, val_str)) {
+        delete key_strings;
+        delete val_strings;
+        delete raw_ops;
+        return env.Null();
       }
 
-      val_strings->push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      val_strings->push_back(val_str);
       (*raw_ops)[i].value = reinterpret_cast<const uint8_t*>(val_strings->back().c_str());
       (*raw_ops)[i].value_len = val_strings->back().size();
-
-      delete[] val_heap_buf;
     } else if (type == "del") {
       (*raw_ops)[i].type = 1;
       (*raw_ops)[i].value = nullptr;
@@ -809,10 +671,11 @@ Napi::Value WaveDB::BatchCb(const Napi::CallbackInfo& info) {
 
   if (rc != 0) {
     napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch batch").Value();
+    napi_value promise_val = ctx->promise;
     napi_reject_deferred(env, ctx->deferred, error_val);
     if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
     delete ctx;
-    return Napi::Value(env, ctx->promise);
+    return Napi::Value(env, promise_val);
   }
 
   return Napi::Value(env, ctx->promise);
@@ -833,16 +696,18 @@ Napi::Value WaveDB::PutSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Undefined();
 
+  std::string val_str;
   const uint8_t* val_buf;
   size_t val_len;
-  char val_str_buf[4096];
-  if (!ValueFromJSRaw(env, info[1], val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Undefined();
 
-  int rc = database_put_sync_raw(db_, key_buf, key_len, delimiter_, val_buf, val_len);
+  if (!ValueFromJSZeroCopy(env, info[1], val_str, &val_buf, &val_len)) {
+    return env.Undefined();
+  }
+
+  int rc = database_put_sync_raw(db_, key_str.c_str(), key_str.size(), delimiter_, val_buf, val_len);
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Failed to put value").ThrowAsJavaScriptException();
   }
@@ -863,15 +728,19 @@ Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Null();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
-  uint8_t* value = NULL;
+  uint8_t* value = nullptr;
   size_t value_len = 0;
-  int rc = database_get_sync_raw(db_, key_buf, key_len, delimiter_, &value, &value_len);
+  int rc = database_get_sync_raw(db_, key_str.c_str(), key_str.size(), delimiter_, &value, &value_len);
 
-  if (rc == 0 && value != NULL) {
+  if (rc == 0 && value != nullptr) {
+    // Strip trailing null bytes (chunk padding from identifier serialization)
+    while (value_len > 0 && (value[value_len - 1] == '\0' || value[value_len - 1] == ' ')) {
+      value_len--;
+    }
+
     // Check if printable ASCII to decide string vs Buffer return
     bool printable = true;
     for (size_t i = 0; i < value_len; i++) {
@@ -909,11 +778,10 @@ Napi::Value WaveDB::DeleteSync(const Napi::CallbackInfo& info) {
     return env.Undefined();
   }
 
-  size_t key_len;
-  char key_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
+  std::string key_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Undefined();
 
-  int rc = database_delete_sync_raw(db_, key_buf, key_len, delimiter_);
+  int rc = database_delete_sync_raw(db_, key_str.c_str(), key_str.size(), delimiter_);
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Failed to delete value").ThrowAsJavaScriptException();
   }
@@ -962,19 +830,18 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
       ops[i].type = 0;
 
       // Key
-      size_t key_len;
-      char key_buf[4096];
-      if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
-      key_strings[i] = std::string(key_buf, key_len);
+      key_strings[i] = KeyFromJSDynamic(env, op.Get("key"), delimiter_);
+      if (env.IsExceptionPending()) return env.Undefined();
       ops[i].key = key_strings[i].c_str();
       ops[i].key_len = key_strings[i].size();
 
       // Value
-      const uint8_t* val_buf;
-      size_t val_len;
-      char val_str_buf[4096];
-      if (!ValueFromJSRaw(env, op.Get("value"), val_str_buf, sizeof(val_str_buf), &val_buf, &val_len)) return env.Undefined();
-      val_strings.push_back(std::string(reinterpret_cast<const char*>(val_buf), val_len));
+      Napi::Value valArg = op.Get("value");
+      std::string val_str;
+      if (!ValueFromJSDynamic(env, valArg, val_str)) {
+        return env.Undefined();
+      }
+      val_strings.push_back(val_str);
       ops[i].value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
       ops[i].value_len = val_strings.back().size();
     } else if (type == "del") {
@@ -983,10 +850,8 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
       ops[i].value_len = 0;
 
       // Key
-      size_t key_len;
-      char key_buf[4096];
-      if (!KeyFromJS(env, op.Get("key"), delimiter_, key_buf, sizeof(key_buf), &key_len)) return env.Undefined();
-      key_strings[i] = std::string(key_buf, key_len);
+      key_strings[i] = KeyFromJSDynamic(env, op.Get("key"), delimiter_);
+      if (env.IsExceptionPending()) return env.Undefined();
       ops[i].key = key_strings[i].c_str();
       ops[i].key_len = key_strings[i].size();
     } else {
@@ -1006,10 +871,9 @@ Napi::Value WaveDB::BatchSync(const Napi::CallbackInfo& info) {
 
 // --- Object operations ---
 
-static void FlattenObjectRaw(Napi::Env env,
+static bool FlattenObjectRaw(Napi::Env env,
                              Napi::Object obj,
                              std::vector<std::string>& path_parts,
-                             std::vector<raw_op_t>& ops,
                              std::vector<std::string>& key_strings,
                              std::vector<std::string>& val_strings,
                              char delimiter) {
@@ -1022,68 +886,49 @@ static void FlattenObjectRaw(Napi::Env env,
     path_parts.push_back(key);
 
     if (value.IsObject() && !value.IsArray() && !value.IsBuffer()) {
-      FlattenObjectRaw(env, value.As<Napi::Object>(), path_parts, ops, key_strings, val_strings, delimiter);
+      if (!FlattenObjectRaw(env, value.As<Napi::Object>(), path_parts, key_strings, val_strings, delimiter)) {
+        return false;
+      }
     } else if (value.IsArray()) {
       Napi::Array arr = value.As<Napi::Array>();
       for (uint32_t j = 0; j < arr.Length(); j++) {
         path_parts.push_back(std::to_string(j));
 
-        raw_op_t op;
-        op.type = 0; // put
-
-        // Build key string from path_parts joined by delimiter
         std::string key_str;
         for (size_t k = 0; k < path_parts.size(); k++) {
           if (k > 0) key_str += delimiter;
           key_str += path_parts[k];
         }
         key_strings.push_back(key_str);
-        op.key = key_strings.back().c_str();
-        op.key_len = key_strings.back().size();
 
-        // Handle value
         Napi::Value arrVal = arr.Get(j);
-        if (arrVal.IsBuffer()) {
-          Napi::Buffer<uint8_t> buf = arrVal.As<Napi::Buffer<uint8_t>>();
-          val_strings.push_back(std::string(reinterpret_cast<const char*>(buf.Data()), buf.Length()));
-        } else {
-          val_strings.push_back(arrVal.As<Napi::String>().Utf8Value());
+        std::string arr_val_str;
+        if (!ValueFromJSDynamic(env, arrVal, arr_val_str)) {
+          return false;
         }
-        op.value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
-        op.value_len = val_strings.back().size();
+        val_strings.push_back(arr_val_str);
 
-        ops.push_back(op);
         path_parts.pop_back();
       }
     } else {
-      raw_op_t op;
-      op.type = 0; // put
-
-      // Build key string from path_parts joined by delimiter
       std::string key_str;
       for (size_t k = 0; k < path_parts.size(); k++) {
         if (k > 0) key_str += delimiter;
         key_str += path_parts[k];
       }
       key_strings.push_back(key_str);
-      op.key = key_strings.back().c_str();
-      op.key_len = key_strings.back().size();
 
-      // Handle value
-      if (value.IsBuffer()) {
-        Napi::Buffer<uint8_t> buf = value.As<Napi::Buffer<uint8_t>>();
-        val_strings.push_back(std::string(reinterpret_cast<const char*>(buf.Data()), buf.Length()));
-      } else {
-        val_strings.push_back(value.As<Napi::String>().Utf8Value());
+      std::string leaf_val_str;
+      if (!ValueFromJSDynamic(env, value, leaf_val_str)) {
+        return false;
       }
-      op.value = reinterpret_cast<const uint8_t*>(val_strings.back().c_str());
-      op.value_len = val_strings.back().size();
-
-      ops.push_back(op);
+      val_strings.push_back(leaf_val_str);
     }
 
     path_parts.pop_back();
   }
+
+  return true;
 }
 
 Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
@@ -1094,25 +939,67 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  if (info.Length() < 1 || !info[0].IsObject()) {
-    Napi::TypeError::New(env, "Object required").ThrowAsJavaScriptException();
+  if (info.Length() < 2) {
+    Napi::TypeError::New(env, "Key prefix and object required").ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  Napi::Object obj = info[0].As<Napi::Object>();
-  std::vector<raw_op_t> ops;
+  std::string key_prefix = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
+
+  if (!info[1].IsObject()) {
+    Napi::TypeError::New(env, "Object required as second argument").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Object obj = info[1].As<Napi::Object>();
   std::vector<std::string> key_strings;
   std::vector<std::string> val_strings;
   std::vector<std::string> path_parts;
 
+  // Seed path_parts with key prefix segments
+  if (!key_prefix.empty()) {
+    size_t start = 0;
+    size_t pos;
+    while ((pos = key_prefix.find(delimiter_, start)) != std::string::npos) {
+      std::string segment = key_prefix.substr(start, pos - start);
+      if (!segment.empty()) path_parts.push_back(segment);
+      start = pos + 1;
+    }
+    std::string last = key_prefix.substr(start);
+    if (!last.empty()) path_parts.push_back(last);
+  }
+
+  bool ok;
   try {
-    FlattenObjectRaw(env, obj, path_parts, ops, key_strings, val_strings, delimiter_);
+    ok = FlattenObjectRaw(env, obj, path_parts, key_strings, val_strings, delimiter_);
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 
-  if (ops.empty()) return env.Null();
+  if (!ok || env.IsExceptionPending()) return env.Null();
+
+  if (key_strings.empty()) {
+    if (info.Length() > 2 && info[2].IsFunction()) {
+      Napi::Function callback = info[2].As<Napi::Function>();
+      callback.Call({env.Null()});
+    }
+    Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+    deferred.Resolve(env.Undefined());
+    return deferred.Promise();
+  }
+
+  // Build raw_op_t array from finalized string vectors (no more push_backs,
+  // so c_str() pointers are stable)
+  std::vector<raw_op_t> ops(key_strings.size());
+  for (size_t i = 0; i < key_strings.size(); i++) {
+    ops[i].type = 0;
+    ops[i].key = key_strings[i].c_str();
+    ops[i].key_len = key_strings[i].size();
+    ops[i].value = reinterpret_cast<const uint8_t*>(val_strings[i].c_str());
+    ops[i].value_len = val_strings[i].size();
+  }
 
   int rc = database_batch_sync_raw(db_, delimiter_, ops.data(), ops.size());
   if (rc != 0) {
@@ -1120,7 +1007,15 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  return env.Null();
+  // Call callback if provided
+  if (info.Length() > 2 && info[2].IsFunction()) {
+    Napi::Function callback = info[2].As<Napi::Function>();
+    callback.Call({env.Null()});
+  }
+
+  Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+  deferred.Resolve(env.Undefined());
+  return deferred.Promise();
 }
 
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
@@ -1136,13 +1031,12 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t prefix_len;
-  char prefix_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, prefix_buf, sizeof(prefix_buf), &prefix_len)) return env.Null();
+  std::string prefix_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
-  raw_result_t* results = NULL;
+  raw_result_t* results = nullptr;
   size_t count = 0;
-  int rc = database_scan_sync_raw(db_, prefix_buf, prefix_len, delimiter_, &results, &count);
+  int rc = database_scan_sync_raw(db_, prefix_str.c_str(), prefix_str.size(), delimiter_, &results, &count);
 
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
@@ -1152,22 +1046,36 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   // Reconstruct JS object from flat results
   Napi::Object result_obj = Napi::Object::New(env);
   for (size_t i = 0; i < count; i++) {
-    bool printable = true;
-    for (size_t j = 0; j < results[i].value_len; j++) {
-      if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
-          results[i].value[j] != '\n' && results[i].value[j] != '\r') {
-        printable = false;
-        break;
-      }
-    }
     Napi::Value val;
-    if (printable) {
-      val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), results[i].value_len));
+    if (results[i].value == nullptr || results[i].value_len == 0) {
+      val = Napi::String::New(env, "");
     } else {
-      val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, results[i].value_len);
+      // Strip trailing null bytes (chunk padding from identifier serialization)
+      size_t val_len = results[i].value_len;
+      while (val_len > 0 && (results[i].value[val_len - 1] == '\0' || results[i].value[val_len - 1] == ' ')) {
+        val_len--;
+      }
+
+      bool printable = true;
+      for (size_t j = 0; j < val_len; j++) {
+        if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
+            results[i].value[j] != '\n' && results[i].value[j] != '\r') {
+          printable = false;
+          break;
+        }
+      }
+      if (printable) {
+        val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), val_len));
+      } else {
+        val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, val_len);
+      }
     }
 
     std::string key(results[i].key, results[i].key_len);
+    // Strip trailing null bytes from key (chunk padding)
+    while (!key.empty() && (key.back() == '\0' || key.back() == ' ')) {
+      key.pop_back();
+    }
     Napi::Object current = result_obj;
     size_t start = 0;
     for (size_t j = 0; j <= key.size(); j++) {
@@ -1215,13 +1123,12 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  size_t prefix_len;
-  char prefix_buf[4096];
-  if (!KeyFromJS(env, info[0], delimiter_, prefix_buf, sizeof(prefix_buf), &prefix_len)) return env.Null();
+  std::string prefix_str = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
 
-  raw_result_t* results = NULL;
+  raw_result_t* results = nullptr;
   size_t count = 0;
-  int rc = database_scan_sync_raw(db_, prefix_buf, prefix_len, delimiter_, &results, &count);
+  int rc = database_scan_sync_raw(db_, prefix_str.c_str(), prefix_str.size(), delimiter_, &results, &count);
 
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
@@ -1231,24 +1138,38 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
   // Reconstruct JS object from flat results
   Napi::Object result_obj = Napi::Object::New(env);
   for (size_t i = 0; i < count; i++) {
-    // Check if printable ASCII to decide string vs Buffer
-    bool printable = true;
-    for (size_t j = 0; j < results[i].value_len; j++) {
-      if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
-          results[i].value[j] != '\n' && results[i].value[j] != '\r') {
-        printable = false;
-        break;
-      }
-    }
     Napi::Value val;
-    if (printable) {
-      val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), results[i].value_len));
+    if (results[i].value == nullptr || results[i].value_len == 0) {
+      val = Napi::String::New(env, "");
     } else {
-      val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, results[i].value_len);
+      // Strip trailing null bytes (chunk padding from identifier serialization)
+      size_t val_len = results[i].value_len;
+      while (val_len > 0 && (results[i].value[val_len - 1] == '\0' || results[i].value[val_len - 1] == ' ')) {
+        val_len--;
+      }
+
+      // Check if printable ASCII to decide string vs Buffer
+      bool printable = true;
+      for (size_t j = 0; j < val_len; j++) {
+        if (!isprint(results[i].value[j]) && results[i].value[j] != '\t' &&
+            results[i].value[j] != '\n' && results[i].value[j] != '\r') {
+          printable = false;
+          break;
+        }
+      }
+      if (printable) {
+        val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), val_len));
+      } else {
+        val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, val_len);
+      }
     }
 
     // Walk/create nested object path and set the value at the leaf
     std::string key(results[i].key, results[i].key_len);
+    // Strip trailing null bytes from key (chunk padding)
+    while (!key.empty() && (key.back() == '\0' || key.back() == ' ')) {
+      key.pop_back();
+    }
     Napi::Object current = result_obj;
     size_t start = 0;
     for (size_t j = 0; j <= key.size(); j++) {
@@ -1333,6 +1254,11 @@ Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
 Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
   Napi::Object options = Napi::Object::New(env);
   if (info.Length() > 0 && info[0].IsObject()) {
     options = info[0].As<Napi::Object>();
@@ -1344,7 +1270,7 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
   // WaveDB wrapper, not the External — do NOT free db_ in the finalizer.
   Napi::External<database_t> dbExternal = Napi::External<database_t>::New(
     env, db_, [](Napi::Env, database_t*) { /* no-op: WaveDB owns the pointer */ });
-  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, Value() });
+  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, info.This() });
 
   return iterObj;
 }
@@ -1355,11 +1281,6 @@ Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
   if (db_) {
     // Shutdown the async bridge — waits for pending operations
     bridge_.Shutdown();
-
-    // Flush all thread-local WALs
-    if (db_->wal_manager != NULL) {
-      wal_manager_flush(db_->wal_manager);
-    }
 
     database_t* db = db_;
     db_ = nullptr;

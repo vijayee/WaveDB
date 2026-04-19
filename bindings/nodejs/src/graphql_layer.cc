@@ -107,6 +107,7 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
 }
 
 GraphQLLayer::~GraphQLLayer() {
+  bridge_.Shutdown();
   if (layer_) {
     graphql_layer_destroy(layer_);
     layer_ = nullptr;

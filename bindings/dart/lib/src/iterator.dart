@@ -19,6 +19,7 @@ class WaveDBIterator {
   final bool _reverse;
   final bool _keys;
   final bool _values;
+  final bool Function() _isClosed;
 
   Pointer<database_iterator_t>? _nativeIterator;
   bool _started = false;
@@ -32,13 +33,15 @@ class WaveDBIterator {
     bool reverse = false,
     bool keys = true,
     bool values = true,
+    required bool Function() isClosed,
   })  : _db = db,
         _delimiter = delimiter,
         _startPath = startPath,
         _endPath = endPath,
         _reverse = reverse,
         _keys = keys,
-        _values = values;
+        _values = values,
+        _isClosed = isClosed;
 
   /// Get the stream of key-value pairs
   Stream<KeyValue> get stream => _createStream();
@@ -66,6 +69,9 @@ class WaveDBIterator {
 
   void _startIterator() {
     if (_started) return;
+    if (_isClosed()) {
+      throw WaveDBException.databaseClosed();
+    }
     _started = true;
 
     Pointer<path_t>? startNative;
@@ -113,6 +119,9 @@ class WaveDBIterator {
   }
 
   KeyValue? _readNext() {
+    if (_isClosed()) {
+      throw WaveDBException.databaseClosed();
+    }
     if (_nativeIterator == null || _nativeIterator == nullptr) {
       return null;
     }
@@ -136,9 +145,6 @@ class WaveDBIterator {
       final value = valuePtr.value;
 
       try {
-        // Note: PathConverter.fromNative and IdentifierConverter.fromNative currently
-        // return empty data due to missing C accessor functions.
-        // This will be fixed when C API adds identifier_get_data and path_get_identifiers.
         final keyResult = PathConverter.fromNative(path, _delimiter);
         final valueResult = IdentifierConverter.fromNative(value);
 

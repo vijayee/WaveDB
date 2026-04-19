@@ -152,6 +152,13 @@ void main() {
       test('should return true for mixed printable', () {
         expect(IdentifierConverter.isPrintableASCII([65, 32, 66]), isTrue); // "A B"
       });
+
+      test('should return true for tab, newline, carriage return', () {
+        expect(IdentifierConverter.isPrintableASCII([9]), isTrue);  // tab
+        expect(IdentifierConverter.isPrintableASCII([10]), isTrue); // newline
+        expect(IdentifierConverter.isPrintableASCII([13]), isTrue); // carriage return
+        expect(IdentifierConverter.isPrintableASCII([9, 10, 13]), isTrue);
+      });
     });
   });
 }

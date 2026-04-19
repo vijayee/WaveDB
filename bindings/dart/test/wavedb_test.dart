@@ -221,10 +221,9 @@ void main() {
         expect(obj['bob']['age'], equals('25'));
       });
 
-      test('should return empty object for non-existent key', () {
+      test('should return null for non-existent key', () {
         final obj = fixture.db!.getObjectSync('nonexistent');
-        expect(obj, isNotNull);
-        expect(obj, isEmpty);
+        expect(obj, isNull);
       });
     });
 

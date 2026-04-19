@@ -8,43 +8,26 @@
 #include <cctype>
 #include <node_api.h>
 
-// Extract JS key (string or array) into caller-provided buffer, joining array with delimiter.
-// Returns false on type error (throws JS exception).
-bool KeyFromJS(Napi::Env env, Napi::Value key, char delimiter, char* buf, size_t buf_size, size_t* out_len) {
+// Extract JS key (string or array) into a std::string (no truncation).
+std::string KeyFromJSDynamic(Napi::Env env, Napi::Value key, char delimiter) {
     if (key.IsString()) {
-        napi_status status = napi_get_value_string_utf8(env, key, buf, buf_size, out_len);
-        if (status != napi_ok) {
-            Napi::Error::New(env, "Failed to extract key string").ThrowAsJavaScriptException();
-            return false;
-        }
-        return true;
+        return key.As<Napi::String>().Utf8Value();
     } else if (key.IsArray()) {
         Napi::Array arr = key.As<Napi::Array>();
-        size_t pos = 0;
+        std::string result;
         for (uint32_t i = 0; i < arr.Length(); i++) {
             Napi::Value part = arr.Get(i);
             if (!part.IsString()) {
                 Napi::TypeError::New(env, "Key array elements must be strings").ThrowAsJavaScriptException();
-                return false;
+                return "";
             }
-            if (i > 0) {
-                if (pos + 1 >= buf_size) break;
-                buf[pos++] = delimiter;
-            }
-            std::string partStr = part.As<Napi::String>().Utf8Value();
-            size_t copy_len = partStr.size();
-            if (pos + copy_len >= buf_size) {
-                copy_len = buf_size - pos - 1;
-            }
-            memcpy(buf + pos, partStr.c_str(), copy_len);
-            pos += copy_len;
+            if (i > 0) result += delimiter;
+            result += part.As<Napi::String>().Utf8Value();
         }
-        buf[pos] = '\0';
-        *out_len = pos;
-        return true;
+        return result;
     } else {
         Napi::TypeError::New(env, "Key must be a string or array").ThrowAsJavaScriptException();
-        return false;
+        return "";
     }
 }
 
@@ -180,7 +163,7 @@ std::string PathToJS(path_t* path, char delimiter) {
     }
   }
 
-  // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+  // Strip trailing null characters and whitespace (chunk padding)
   while (!result.empty() && (result.back() == '\0' || result.back() == ' ')) {
     result.pop_back();
   }
@@ -223,7 +206,7 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
       }
     }
 
-    // Strip trailing null characters and whitespace (padding from chunk reconstruction)
+    // Strip trailing null characters and whitespace (chunk padding)
     while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
       part.pop_back();
     }

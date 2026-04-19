@@ -57,12 +57,10 @@ base class buffer_t extends Struct {
 /// Reference counter structure (first field of refcounted structs)
 /// Maps to refcounter_t in C
 /// Note: Uses C11 _Atomic for lock-free reference counting.
+/// Layout: _Atomic uint_fast16_t count (8 bytes) + _Atomic uint_fast8_t yield (1 byte + 7 padding) = 16 bytes
 base class refcounter_t extends Struct {
-  @Uint16()
-  external int count;
-
-  @Uint8()
-  external int yield;
+  @Array(16)
+  external Array<Uint8> _refcounter;
 }
 
 /// Opaque handle to a GraphQL layer

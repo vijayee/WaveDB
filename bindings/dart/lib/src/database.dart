@@ -1,5 +1,6 @@
 // lib/src/database.dart
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
@@ -34,9 +35,6 @@ class WaveDBConfig {
   /// Bnode cache shard count (default: 4)
   final int? bnodeCacheShards;
 
-  /// Section cache size (default: 1024)
-  final int? storageCacheSize;
-
   /// Number of worker threads (default: 4)
   final int? workerThreads;
 
@@ -57,13 +55,15 @@ class WaveDBConfig {
     this.lruShards,
     this.bnodeCacheMemoryMb,
     this.bnodeCacheShards,
-    this.storageCacheSize,
     this.workerThreads,
     this.walSyncMode,
     this.walDebounceMs,
     this.walMaxFileSize,
   });
 }
+
+/// Return code from C raw sync get operations indicating "not found"
+const int _kNotFoundCode = -2;
 
 /// Operation type for async dispatch
 enum _AsyncOpType { put, get, delete, batch }
@@ -88,11 +88,18 @@ class WaveDB {
   // Active completers keyed by request id
   static int _nextRequestId = 1;
   static final Map<int, _PendingOp> _pending = {};
-  static int _pendingCount = 0;
+
+  // Unique instance id to scope pending ops
+  final int _instanceId;
+  static int _nextInstanceId = 1;
 
   WaveDB(String path, {String delimiter = '/', WaveDBConfig? config})
       : _path = path,
-        _delimiter = delimiter {
+        _delimiter = delimiter,
+        _instanceId = _nextInstanceId++ {
+    if (delimiter.length != 1) {
+      throw ArgumentError('Delimiter must be a single character, got: "$delimiter"');
+    }
     if (config != null) {
       _db = WaveDBNative.databaseCreateWithConfig(
         path,
@@ -103,7 +110,6 @@ class WaveDB {
         lruShards: config.lruShards,
         bnodeCacheMemoryMb: config.bnodeCacheMemoryMb,
         bnodeCacheShards: config.bnodeCacheShards,
-        storageCacheSize: config.storageCacheSize,
         workerThreads: config.workerThreads,
         walSyncMode: config.walSyncMode,
         walDebounceMs: config.walDebounceMs,
@@ -122,14 +128,18 @@ class WaveDB {
   /// Ensure the NativeCallable.listener callbacks are registered.
   /// These are created once and reused across all async operations.
   static void _ensureCallbacksRegistered() {
-    if (_resolveCallable != null) return;
+    if (_resolveCallable != null && _rejectCallable != null) return;
 
-    _resolveCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>.listener(
-      _cResolveCallback,
-    );
-    _rejectCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>.listener(
-      _cRejectCallback,
-    );
+    if (_resolveCallable == null) {
+      _resolveCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<Void>)>.listener(
+        _cResolveCallback,
+      );
+    }
+    if (_rejectCallable == null) {
+      _rejectCallable = NativeCallable<Void Function(Pointer<Void>, Pointer<async_error_t>)>.listener(
+        _cRejectCallback,
+      );
+    }
   }
 
   /// C resolve callback — called from the C worker pool thread.
@@ -137,11 +147,18 @@ class WaveDB {
   static void _cResolveCallback(Pointer<Void> ctx, Pointer<Void> payload) {
     final requestId = ctx.address;
     final pending = _pending.remove(requestId);
-    if (pending == null || pending.completer.isCompleted) return;
 
-    _pendingCount--;
+    if (pending == null) {
+      // Orphaned resolve — no matching request (e.g., close() cancelled the op
+      // but C callback still fired). We can't free identifier_t* payloads
+      // correctly without knowing the op type (identifierDestroy vs malloc.free),
+      // so we accept a small leak for this rare race.
+      return;
+    }
 
     try {
+      if (pending.completer.isCompleted) return;
+
       switch (pending.type) {
         case _AsyncOpType.get:
           final idPtr = payload.cast<identifier_t>();
@@ -150,11 +167,9 @@ class WaveDB {
           } else {
             try {
               pending.completer.complete(IdentifierConverter.fromNative(idPtr));
+            } catch (e) {
+              pending.completer.completeError(e);
             } finally {
-              // The value was CONSUME'd before being passed to the callback
-              // (yield=1). REFERENCE consumes the yield (protecting the value
-              // from other threads), then identifierDestroy decrements the
-              // count to release this reference.
               WaveDBNative.identifierReference(idPtr);
               WaveDBNative.identifierDestroy(idPtr);
             }
@@ -163,15 +178,17 @@ class WaveDB {
         case _AsyncOpType.put:
         case _AsyncOpType.delete:
         case _AsyncOpType.batch:
-          // Free int* result from C resolve callback (allocated by C malloc)
           if (payload != nullptr) {
             malloc.free(payload);
           }
           pending.completer.complete(null);
           break;
       }
+    } catch (e) {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(e);
+      }
     } finally {
-      // Clean up C-side allocations
       WaveDBNative.promiseDestroy(pending.promisePtr);
       if (pending.batchPtr != null) {
         WaveDBNative.batchDestroy(pending.batchPtr!);
@@ -183,29 +200,35 @@ class WaveDB {
   static void _cRejectCallback(Pointer<Void> ctx, Pointer<async_error_t> error) {
     final requestId = ctx.address;
     final pending = _pending.remove(requestId);
-    if (pending == null || pending.completer.isCompleted) return;
 
-    _pendingCount--;
-
+    // Always destroy the C error object
     String errorMsg = 'Operation failed';
-    // We can't easily read the error message from the struct without knowing layout,
-    // so we just destroy it and report a generic error.
-    WaveDBNative.errorDestroy(error);
-
-    // Clean up C-side allocations
-    WaveDBNative.promiseDestroy(pending.promisePtr);
-    if (pending.batchPtr != null) {
-      WaveDBNative.batchDestroy(pending.batchPtr!);
+    if (error != nullptr) {
+      final msgPtr = WaveDBNative.errorGetMessage(error);
+      if (msgPtr != nullptr) {
+        errorMsg = msgPtr.toDartString();
+      }
+      WaveDBNative.errorDestroy(error);
     }
 
-    pending.completer.completeError(WaveDBException.ioError('async', errorMsg));
+    if (pending == null) return;
+
+    try {
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(WaveDBException.ioError('async', errorMsg));
+      }
+    } finally {
+      WaveDBNative.promiseDestroy(pending.promisePtr);
+      if (pending.batchPtr != null) {
+        WaveDBNative.batchDestroy(pending.batchPtr!);
+      }
+    }
   }
 
   /// Dispatch an async operation via the C promise/pool infrastructure
   Future<T> _dispatchAsync<T>(_AsyncOpType type, void Function(Pointer<promise_t>) dispatch, [Pointer<batch_t>? batchPtr]) {
     final completer = Completer<T>();
     final requestId = _nextRequestId++;
-    _pendingCount++;
 
     final ctxPtr = Pointer<Void>.fromAddress(requestId);
     final promisePtr = WaveDBNative.promiseCreate(
@@ -215,15 +238,23 @@ class WaveDB {
     );
 
     if (promisePtr == nullptr) {
-      _pendingCount--;
-      completer.completeError(WaveDBException.ioError('async', 'Failed to create promise'));
+        completer.completeError(WaveDBException.ioError('async', 'Failed to create promise'));
       return completer.future;
     }
 
-    _pending[requestId] = _PendingOp(type, completer, promisePtr, batchPtr);
+    _pending[requestId] = _PendingOp(_instanceId, type, completer, promisePtr, batchPtr);
 
     // Dispatch to the C worker pool
-    dispatch(promisePtr);
+    try {
+      dispatch(promisePtr);
+    } catch (e) {
+      _pending.remove(requestId);
+      WaveDBNative.promiseDestroy(promisePtr);
+      if (batchPtr != null) {
+        WaveDBNative.batchDestroy(batchPtr);
+      }
+      completer.completeError(e);
+    }
 
     return completer.future;
   }
@@ -239,6 +270,14 @@ class WaveDB {
     if (key is String) return key;
     if (key is List) return key.map((e) => e.toString()).join(_delimiter);
     return key.toString();
+  }
+
+  /// Convert a key string to native UTF-8 and return (pointer, byte length).
+  /// Uses utf8.encode to get the correct byte length (not UTF-16 code units).
+  (Pointer<Utf8>, int) _keyToNative(String keyStr) {
+    final keyPtr = keyStr.toNativeUtf8();
+    final keyByteLen = utf8.encode(keyStr).length;
+    return (keyPtr, keyByteLen);
   }
 
   void _checkClosed() {
@@ -258,7 +297,7 @@ class WaveDB {
       throw ArgumentError('Value is required for put operation');
     }
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
     final valueBytes = IdentifierConverter.toBytes(value);
     final valuePtr = calloc<Uint8>(valueBytes.length);
     valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
@@ -266,7 +305,7 @@ class WaveDB {
     try {
       return _dispatchAsync<void>(_AsyncOpType.put, (promise) {
         final rc = WaveDBNative.databasePutRaw(
-          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+          _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit,
           valuePtr, valueBytes.length, promise,
         );
         if (rc != 0) {
@@ -284,12 +323,12 @@ class WaveDB {
   Future<dynamic> get(dynamic key) async {
     _checkClosed();
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
 
     try {
       return _dispatchAsync<dynamic>(_AsyncOpType.get, (promise) {
         final rc = WaveDBNative.databaseGetRaw(
-          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit, promise,
+          _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit, promise,
         );
         if (rc != 0) {
           throw WaveDBException.ioError('get_raw', 'return code: $rc');
@@ -305,12 +344,12 @@ class WaveDB {
   Future<void> del(dynamic key) async {
     _checkClosed();
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
 
     try {
       return _dispatchAsync<void>(_AsyncOpType.delete, (promise) {
         final rc = WaveDBNative.databaseDeleteRaw(
-          _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit, promise,
+          _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit, promise,
         );
         if (rc != 0) {
           throw WaveDBException.ioError('delete_raw', 'return code: $rc');
@@ -342,10 +381,10 @@ class WaveDB {
         }
 
         final keyStr = _keyToString(key);
-        final keyPtr = keyStr.toNativeUtf8();
+        final (keyPtr, keyByteLen) = _keyToNative(keyStr);
         keyPtrs.add(keyPtr.cast());
         opsPtr[i].key = keyPtr.cast();
-        opsPtr[i].keyLen = keyStr.length;
+        opsPtr[i].keyLen = keyByteLen;
 
         if (type == 'put') {
           final value = op['value'];
@@ -446,13 +485,13 @@ class WaveDB {
 
   void _putSyncInternal(dynamic key, dynamic value) {
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
     final valueBytes = IdentifierConverter.toBytes(value);
     final valuePtr = calloc<Uint8>(valueBytes.length);
     try {
       valuePtr.asTypedList(valueBytes.length).setAll(0, valueBytes);
       final rc = WaveDBNative.databasePutSyncRaw(
-        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit,
         valuePtr, valueBytes.length,
       );
       if (rc != 0) {
@@ -466,17 +505,17 @@ class WaveDB {
 
   dynamic _getSyncInternal(dynamic key) {
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
     final valueOutPtr = calloc<Pointer<Uint8>>();
     final valueLenPtr = calloc<Size>();
 
     try {
       final rc = WaveDBNative.databaseGetSyncRaw(
-        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit,
         valueOutPtr, valueLenPtr,
       );
 
-      if (rc == -2) return null;
+      if (rc == _kNotFoundCode) return null;
       if (rc != 0) throw WaveDBException.ioError('get', 'return code: $rc');
 
       final valuePtr = valueOutPtr.value;
@@ -484,10 +523,15 @@ class WaveDB {
       if (valuePtr == nullptr || valueLen == 0) return null;
 
       try {
-        final bytes = Uint8List.fromList(valuePtr.asTypedList(valueLen));
-        return IdentifierConverter.isPrintableASCII(bytes)
-            ? String.fromCharCodes(bytes)
-            : bytes;
+        var bytes = valuePtr.asTypedList(valueLen).toList();
+        // Strip trailing null bytes (chunk padding from C identifier serialization)
+        while (bytes.isNotEmpty && bytes.last == 0) {
+          bytes.removeLast();
+        }
+        final bytesUint8 = Uint8List.fromList(bytes);
+        return IdentifierConverter.isPrintableASCII(bytesUint8)
+            ? utf8.decode(bytesUint8, allowMalformed: true)
+            : bytesUint8;
       } finally {
         WaveDBNative.databaseRawValueFree(valuePtr);
       }
@@ -500,11 +544,11 @@ class WaveDB {
 
   void _delSyncInternal(dynamic key) {
     final keyStr = _keyToString(key);
-    final keyPtr = keyStr.toNativeUtf8();
+    final (keyPtr, keyByteLen) = _keyToNative(keyStr);
 
     try {
       final rc = WaveDBNative.databaseDeleteSyncRaw(
-        _db!, keyPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        _db!, keyPtr.cast(), keyByteLen, _delimiterCodeUnit,
       );
       if (rc != 0) {
         throw WaveDBException.ioError('delete', 'return code: $rc');
@@ -532,10 +576,10 @@ class WaveDB {
         }
 
         final keyStr = _keyToString(key);
-        final keyPtr = keyStr.toNativeUtf8();
+        final (keyPtr, keyByteLen) = _keyToNative(keyStr);
         keyPtrs.add(keyPtr.cast());
         opsPtr[i].key = keyPtr.cast();
-        opsPtr[i].keyLen = keyStr.length;
+        opsPtr[i].keyLen = keyByteLen;
 
         if (type == 'put') {
           final value = op['value'];
@@ -578,13 +622,13 @@ class WaveDB {
 
   Map<String, dynamic>? _getObjectSyncInternal(dynamic key) {
     final keyStr = _keyToString(key);
-    final prefixPtr = keyStr.toNativeUtf8();
+    final (prefixPtr, keyByteLen) = _keyToNative(keyStr);
     final resultsPtr = calloc<Pointer<RawResult>>();
     final countPtr = calloc<Size>();
 
     try {
       final rc = WaveDBNative.databaseScanSyncRaw(
-        _db!, prefixPtr.cast(), keyStr.length, _delimiterCodeUnit,
+        _db!, prefixPtr.cast(), keyByteLen, _delimiterCodeUnit,
         resultsPtr, countPtr,
       );
       if (rc != 0) throw WaveDBException.ioError('scan', 'return code: $rc');
@@ -592,7 +636,7 @@ class WaveDB {
       final results = resultsPtr.value;
       final count = countPtr.value;
 
-      if (count == 0 || results == nullptr) return {};
+      if (count == 0 || results == nullptr) return null;
 
       final basePath = key is List
           ? key.map((e) => e.toString()).toList()
@@ -609,9 +653,8 @@ class WaveDB {
 
           if (rawKey == nullptr) continue;
           final keyData = rawKey.asTypedList(keyLen);
-          final keyStrResult = String.fromCharCodes(keyData)
-              .replaceAll('\x00', '')
-              .trimRight();
+          final keyStrResult = utf8.decode(keyData, allowMalformed: true)
+              .replaceAll('\x00', '');
           final pathParts = keyStrResult.split(_delimiter)
               .where((s) => s.isNotEmpty)
               .toList();
@@ -619,13 +662,13 @@ class WaveDB {
           dynamic valueResult;
           if (rawVal != nullptr && valLen > 0) {
             var valBytes = rawVal.asTypedList(valLen).toList();
-            // Strip trailing null bytes from chunk padding
+            // Strip trailing null bytes (chunk padding)
             while (valBytes.isNotEmpty && valBytes.last == 0) {
               valBytes.removeLast();
             }
             final valUint8 = Uint8List.fromList(valBytes);
             valueResult = IdentifierConverter.isPrintableASCII(valUint8)
-                ? String.fromCharCodes(valUint8)
+                ? utf8.decode(valUint8, allowMalformed: true)
                 : valUint8;
           } else {
             valueResult = '';
@@ -658,6 +701,9 @@ class WaveDB {
     bool values = true,
   }) {
     _checkClosed();
+    if (reverse) {
+      throw UnimplementedError('Reverse scanning is not yet supported');
+    }
 
     return WaveDBIterator(
       db: _db!,
@@ -667,6 +713,7 @@ class WaveDB {
       reverse: reverse,
       keys: keys,
       values: values,
+      isClosed: () => _isClosed,
     ).stream;
   }
 
@@ -676,17 +723,27 @@ class WaveDB {
 
   /// Close the database
   ///
-  /// Waits for pending async operations to complete, then destroys the database.
+  /// Destroys the database. The C database_destroy internally stops the
+  /// timing wheel, shuts down the worker pool, and joins all worker threads,
+  /// so pending async operations will complete or abort before teardown.
   void close() {
     if (_db != null && !_isClosed) {
-      // Wait for pending async operations to drain
-      // The C database_destroy will also wait for the worker pool to finish
-      final maxWaitMs = 5000;
-      var waitedMs = 0;
-      while (_pendingCount > 0 && waitedMs < maxWaitMs) {
-        // Yield to allow callbacks to fire
-        // (In practice, NativeCallable.listener callbacks fire on the event loop)
-        waitedMs++;
+      // Cancel only this instance's pending async operations
+      final keysToRemove = <int>[];
+      for (final entry in _pending.entries) {
+        if (entry.value.instanceId == _instanceId) {
+          if (!entry.value.completer.isCompleted) {
+            WaveDBNative.promiseDestroy(entry.value.promisePtr);
+            if (entry.value.batchPtr != null) {
+              WaveDBNative.batchDestroy(entry.value.batchPtr!);
+            }
+            entry.value.completer.completeError(WaveDBException.databaseClosed());
+          }
+          keysToRemove.add(entry.key);
+        }
+      }
+      for (final key in keysToRemove) {
+        _pending.remove(key);
       }
 
       WaveDBNative.databaseDestroy(_db!);
@@ -698,10 +755,11 @@ class WaveDB {
 
 /// Pending async operation context
 class _PendingOp {
+  final int instanceId;
   final _AsyncOpType type;
   final Completer completer;
   final Pointer<promise_t> promisePtr;
   final Pointer<batch_t>? batchPtr;
 
-  _PendingOp(this.type, this.completer, this.promisePtr, [this.batchPtr]);
+  _PendingOp(this.instanceId, this.type, this.completer, this.promisePtr, [this.batchPtr]);
 }
