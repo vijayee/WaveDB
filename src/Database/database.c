@@ -653,9 +653,13 @@ static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
 
 static void database_eviction_task_execute(void* ctx) {
     database_t* db = (database_t*)ctx;
-    if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) return;
-
-    __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+    if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) {
+        // Work item lifecycle ends — decrement counter so database_destroy can proceed
+        if (db != NULL) {
+            __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+        }
+        return;
+    }
 
     uint64_t offsets[64];
     size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
@@ -665,24 +669,32 @@ static void database_eviction_task_execute(void* ctx) {
         bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
     }
 
-    __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
-
-    // Reschedule — work_pool_enqueue returns 1 if pool is stopped
+    // Reschedule — increment for new work item BEFORE decrementing for
+    // the current one, so eviction_in_flight never hits 0 while a new
+    // work item is still pending in the pool queue.
     if (!db->destroying && db->pool != NULL) {
         work_t* task = work_create(database_eviction_task_execute,
                                     database_eviction_task_abort,
                                     db);
         if (task != NULL) {
+            __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
             refcounter_yield((refcounter_t*) task);
             if (work_pool_enqueue(db->pool, task) != 0) {
-                work_destroy(task);  // Pool stopped, don't reschedule
+                work_destroy(task);  // Pool stopped, undo the increment
+                __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
             }
         }
     }
+
+    // This work item's lifecycle ends — decrement counter
+    __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
 }
 
 static void database_eviction_task_abort(void* ctx) {
-    (void)ctx;
+    database_t* db = (database_t*)ctx;
+    if (db != NULL) {
+        __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+    }
 }
 
 database_t* database_create_with_config(const char* location,
@@ -938,6 +950,7 @@ database_t* database_create_with_config(const char* location,
                                                 database_eviction_task_abort,
                                                 db);
                     if (task != NULL) {
+                        __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
                         refcounter_yield((refcounter_t*) task);
                         work_pool_enqueue(db->pool, task);
                     }
