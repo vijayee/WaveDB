@@ -20,6 +20,7 @@
 #include "wal_manager.h"
 #include "batch.h"
 #include "database_config.h"
+#include "../Storage/encryption.h"
 #include "../Storage/page_file.h"
 #include "../Storage/bnode_cache.h"
 #include "eviction_queue.h"
@@ -43,6 +44,11 @@ extern "C" {
  */
 // Number of shards for write locks (reduces contention)
 #define WRITE_LOCK_SHARDS 64
+
+// Encryption error codes
+#define DATABASE_ERR_ENCRYPTION_REQUIRED   -100
+#define DATABASE_ERR_ENCRYPTION_KEY_INVALID -101
+#define DATABASE_ERR_ENCRYPTION_UNSUPPORTED -102
 
 typedef struct {
     refcounter_t refcounter;
@@ -74,9 +80,14 @@ typedef struct {
     // Config ownership tracking
     bool owns_pool;                     // True if database created the pool
     bool owns_wheel;                   // True if database created the wheel
+    volatile bool destroying;          // Set early in database_destroy to stop eviction rescheduling
+    volatile int eviction_in_flight;   // Non-zero while eviction task is executing
 
     // Active configuration
     database_config_t* active_config;   // Current config (for runtime queries)
+
+    // Encryption context (NULL if no encryption)
+    encryption_t* encryption;
 } database_t;
 
 /**
@@ -129,6 +140,22 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
 database_t* database_create_with_config(const char* location,
                                         database_config_t* config,
                                         int* error_code);
+
+/**
+ * Create an encrypted database.
+ *
+ * Creates or opens a database with encryption enabled.
+ * On creation: initializes encryption context and stores verification check.
+ * On open: verifies the key against stored check.
+ *
+ * @param location    Directory path for database files
+ * @param config      Encrypted configuration (encryption type + key material)
+ * @param error_code  Output error code (0 on success, DATABASE_ERR_ENCRYPTION_* on failure)
+ * @return Database or NULL on failure
+ */
+database_t* database_create_encrypted(const char* location,
+                                       encrypted_database_config_t* config,
+                                       int* error_code);
 
 /**
  * Destroy a database.

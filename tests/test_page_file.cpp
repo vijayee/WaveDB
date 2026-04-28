@@ -36,7 +36,7 @@ TEST_F(PageFileTest, CreateDestroy) {
     char path[512];
     make_path(path, sizeof(path), "test1.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     EXPECT_EQ(pf->fd, -1);
     EXPECT_EQ(pf->block_size, 4096u);
@@ -50,7 +50,7 @@ TEST_F(PageFileTest, WriteReadSuperblock) {
     char path[512];
     make_path(path, sizeof(path), "test2.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -79,7 +79,7 @@ TEST_F(PageFileTest, WriteReadSmallNode) {
     char path[512];
     make_path(path, sizeof(path), "test3.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -121,7 +121,7 @@ TEST_F(PageFileTest, WriteReadLargeNode) {
     char path[512];
     make_path(path, sizeof(path), "test4.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -165,7 +165,7 @@ TEST_F(PageFileTest, WriteReadMultipleNodes) {
     char path[512];
     make_path(path, sizeof(path), "test5.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -206,7 +206,7 @@ TEST_F(PageFileTest, MarkStaleAndRatio) {
     char path[512];
     make_path(path, sizeof(path), "test6.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -242,7 +242,7 @@ TEST_F(PageFileTest, SuperblockRevisionIncrements) {
     char path[512];
     make_path(path, sizeof(path), "test7.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -272,7 +272,7 @@ TEST_F(PageFileTest, CloseReopenPersist) {
     char path[512];
     make_path(path, sizeof(path), "test8.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -284,7 +284,7 @@ TEST_F(PageFileTest, CloseReopenPersist) {
     page_file_destroy(pf);
 
     // Reopen
-    page_file_t* pf2 = page_file_create(path, 4096, 2);
+    page_file_t* pf2 = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf2, nullptr);
 
     rc = page_file_open(pf2, 1);
@@ -305,7 +305,7 @@ TEST_F(PageFileTest, ReadNonExistentOffset) {
     char path[512];
     make_path(path, sizeof(path), "test9.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);
@@ -325,7 +325,7 @@ TEST_F(PageFileTest, StaleRatioHalf) {
     char path[512];
     make_path(path, sizeof(path), "test10.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
 
     int rc = page_file_open(pf, 1);

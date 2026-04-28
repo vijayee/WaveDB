@@ -33,6 +33,8 @@
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libxxhash.a",
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libhashmap.a",
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/deps/libcbor/src/libcbor.a",
+      "-lcrypto",
+      "-lssl",
       "-lpthread",
       "-latomic"
     ],
@@ -81,6 +83,8 @@
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libxxhash.a",
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libhashmap.a",
       "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/deps/libcbor/src/libcbor.a",
+      "-lcrypto",
+      "-lssl",
       "-lpthread",
       "-latomic"
     ],

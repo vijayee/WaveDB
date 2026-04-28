@@ -80,7 +80,7 @@ static void benchmark_sequential_writes() {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/writes.db", tmpdir);
 
-    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS);
+    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS, NULL);
     if (!pf) { fprintf(stderr, "page_file_create failed\n"); remove_dir(tmpdir); return; }
 
     int rc = page_file_open(pf, 1);
@@ -149,7 +149,7 @@ static void benchmark_sequential_reads() {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/reads.db", tmpdir);
 
-    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS);
+    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS, NULL);
     if (!pf) { fprintf(stderr, "page_file_create failed\n"); remove_dir(tmpdir); return; }
 
     int rc = page_file_open(pf, 1);
@@ -228,7 +228,7 @@ static void benchmark_cache_hit_rate() {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/hitrate.db", tmpdir);
 
-    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS);
+    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS, NULL);
     if (!pf) { fprintf(stderr, "page_file_create failed\n"); remove_dir(tmpdir); return; }
 
     int rc = page_file_open(pf, 1);
@@ -376,7 +376,7 @@ static void benchmark_dirty_flush() {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/flush.db", tmpdir);
 
-    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS);
+    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS, NULL);
     if (!pf) { fprintf(stderr, "page_file_create failed\n"); remove_dir(tmpdir); return; }
 
     int rc = page_file_open(pf, 1);
@@ -463,7 +463,7 @@ static void benchmark_cow_pattern() {
     char filepath[512];
     snprintf(filepath, sizeof(filepath), "%s/cow.db", tmpdir);
 
-    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS);
+    page_file_t* pf = page_file_create(filepath, BLOCK_SIZE, NUM_SUPERBLOCKS, NULL);
     if (!pf) { fprintf(stderr, "page_file_create failed\n"); remove_dir(tmpdir); return; }
 
     int rc = page_file_open(pf, 1);

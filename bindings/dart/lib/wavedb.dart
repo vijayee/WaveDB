@@ -3,5 +3,5 @@ library wavedb;
 
 // Public API exports
 export 'src/exceptions.dart';
-export 'src/database.dart' show WaveDB, WaveDBConfig;
+export 'src/database.dart' show WaveDB, WaveDBConfig, WaveDBEncryption;
 export 'src/iterator.dart' show KeyValue;

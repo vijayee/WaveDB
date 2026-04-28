@@ -44,6 +44,16 @@ class IOError extends WaveDBError {
 }
 
 /**
+ * Error thrown when encryption is required or key is invalid
+ */
+class EncryptionError extends WaveDBError {
+  constructor(message = 'Encryption error') {
+    super(message);
+    this.name = 'EncryptionError';
+  }
+}
+
+/**
  * Convert native error to custom error type
  */
 function convertError(err) {
@@ -65,6 +75,10 @@ function convertError(err) {
   if (message.includes('IO_ERROR') || message.includes('I/O error') || message.includes('DATABASE_CLOSED')) {
     return new IOError(message);
   }
+  if (message.includes('Encryption required') || message.includes('Invalid encryption key') ||
+      message.includes('Encryption unsupported') || message.includes('encryption')) {
+    return new EncryptionError(message);
+  }
 
   return new WaveDBError(message);
 }
@@ -82,7 +96,23 @@ class WaveDB {
 
     this._delimiter = options.delimiter || '/';
     this._path = path;
-    this._db = new WaveDBNative(path, { delimiter: this._delimiter });
+
+    // Build native options, passing through all recognized properties
+    const nativeOptions = {
+      delimiter: this._delimiter
+    };
+    if (options.chunkSize !== undefined) nativeOptions.chunkSize = options.chunkSize;
+    if (options.btreeNodeSize !== undefined) nativeOptions.btreeNodeSize = options.btreeNodeSize;
+    if (options.enablePersist !== undefined) nativeOptions.enablePersist = options.enablePersist;
+    if (options.lruMemoryMb !== undefined) nativeOptions.lruMemoryMb = options.lruMemoryMb;
+    if (options.lruShards !== undefined) nativeOptions.lruShards = options.lruShards;
+    if (options.bnodeCacheMemoryMb !== undefined) nativeOptions.bnodeCacheMemoryMb = options.bnodeCacheMemoryMb;
+    if (options.bnodeCacheShards !== undefined) nativeOptions.bnodeCacheShards = options.bnodeCacheShards;
+    if (options.wal !== undefined) nativeOptions.wal = options.wal;
+    if (options.workerThreads !== undefined) nativeOptions.workerThreads = options.workerThreads;
+    if (options.encryption !== undefined) nativeOptions.encryption = options.encryption;
+
+    this._db = new WaveDBNative(path, nativeOptions);
     this._closed = false;
   }
 
@@ -565,5 +595,6 @@ module.exports = {
   WaveDBError,
   NotFoundError,
   InvalidPathError,
-  IOError
+  IOError,
+  EncryptionError
 };

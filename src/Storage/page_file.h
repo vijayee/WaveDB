@@ -9,6 +9,7 @@
 #include <stddef.h>
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
+#include "encryption.h"
 #include "stale_region.h"
 
 #ifdef __cplusplus
@@ -52,12 +53,13 @@ typedef struct {
     uint64_t cur_offset;                  // Current offset within cur_bid's block
     uint64_t revision;                    // Current revision number
     stale_region_mgr_t* stale_mgr;       // Stale region manager
+    encryption_t* encryption;             // Encryption context (NULL if no encryption)
     PLATFORMLOCKTYPE(lock);              // Mutex for allocation and superblock writes
     uint8_t is_writable;                  // 1 if file opened for writing
 } page_file_t;
 
 // Create/destroy
-page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t num_superblocks);
+page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t num_superblocks, encryption_t* encryption);
 void page_file_destroy(page_file_t* pf);
 
 // Open existing file for reading (and optionally writing)

@@ -7,7 +7,9 @@
 #include <string>
 #include <unistd.h>
 #include "../../../src/Database/database.h"
+#include "../../../src/Database/database_config.h"
 #include "../../../src/Database/database_iterator.h"
+#include "../../../src/Storage/encryption.h"
 #include "path.h"
 #include "identifier.h"
 #include "async_bridge.h"
@@ -153,12 +155,121 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
   }
 
   int error_code = 0;
-  db_ = database_create_with_config(path.c_str(), config, &error_code);
-  database_config_destroy(config);
 
-  if (!db_) {
-    Napi::Error::New(env, "Failed to create database").ThrowAsJavaScriptException();
-    return;
+  // Check for encryption configuration
+  bool has_encryption = false;
+  Napi::Object encryptionObj;
+  if (info.Length() > 1 && info[1].IsObject()) {
+    Napi::Object options = info[1].As<Napi::Object>();
+    if (options.Has("encryption") && options.Get("encryption").IsObject()) {
+      has_encryption = true;
+      encryptionObj = options.Get("encryption").As<Napi::Object>();
+    }
+  }
+
+  if (has_encryption) {
+    // Encrypted database path
+    encrypted_database_config_t* enc_config = encrypted_database_config_default();
+    if (!enc_config) {
+      database_config_destroy(config);
+      Napi::Error::New(env, "Failed to create encrypted configuration").ThrowAsJavaScriptException();
+      return;
+    }
+
+    // Copy base config settings into the embedded config
+    enc_config->config.chunk_size = config->chunk_size;
+    enc_config->config.btree_node_size = config->btree_node_size;
+    enc_config->config.enable_persist = config->enable_persist;
+    enc_config->config.lru_memory_mb = config->lru_memory_mb;
+    enc_config->config.lru_shards = config->lru_shards;
+    enc_config->config.bnode_cache_memory_mb = config->bnode_cache_memory_mb;
+    enc_config->config.bnode_cache_shards = config->bnode_cache_shards;
+    enc_config->config.worker_threads = config->worker_threads;
+    enc_config->config.wal_config = config->wal_config;
+    enc_config->config.timer_resolution_ms = config->timer_resolution_ms;
+
+    // Read encryption.type
+    if (!encryptionObj.Has("type") || !encryptionObj.Get("type").IsString()) {
+      encrypted_database_config_destroy(enc_config);
+      database_config_destroy(config);
+      Napi::TypeError::New(env, "encryption.type is required ('symmetric' or 'asymmetric')").ThrowAsJavaScriptException();
+      return;
+    }
+
+    std::string encType = encryptionObj.Get("type").As<Napi::String>().Utf8Value();
+    if (encType == "symmetric") {
+      encrypted_database_config_set_type(enc_config, ENCRYPTION_SYMMETRIC);
+
+      if (!encryptionObj.Has("key") || !encryptionObj.Get("key").IsBuffer()) {
+        encrypted_database_config_destroy(enc_config);
+        database_config_destroy(config);
+        Napi::TypeError::New(env, "encryption.key is required for symmetric encryption (32-byte Buffer)").ThrowAsJavaScriptException();
+        return;
+      }
+
+      Napi::Buffer<uint8_t> keyBuf = encryptionObj.Get("key").As<Napi::Buffer<uint8_t>>();
+      if (keyBuf.Length() != 32) {
+        encrypted_database_config_destroy(enc_config);
+        database_config_destroy(config);
+        Napi::RangeError::New(env, "encryption.key must be exactly 32 bytes for AES-256").ThrowAsJavaScriptException();
+        return;
+      }
+      encrypted_database_config_set_symmetric_key(enc_config, keyBuf.Data(), keyBuf.Length());
+
+    } else if (encType == "asymmetric") {
+      encrypted_database_config_set_type(enc_config, ENCRYPTION_ASYMMETRIC);
+
+      if (!encryptionObj.Has("publicKey") || !encryptionObj.Get("publicKey").IsBuffer()) {
+        encrypted_database_config_destroy(enc_config);
+        database_config_destroy(config);
+        Napi::TypeError::New(env, "encryption.publicKey is required for asymmetric encryption (DER Buffer)").ThrowAsJavaScriptException();
+        return;
+      }
+
+      Napi::Buffer<uint8_t> pubKeyBuf = encryptionObj.Get("publicKey").As<Napi::Buffer<uint8_t>>();
+      encrypted_database_config_set_asymmetric_public_key(enc_config, pubKeyBuf.Data(), pubKeyBuf.Length());
+
+      // Private key is optional (write-only mode)
+      if (encryptionObj.Has("privateKey") && encryptionObj.Get("privateKey").IsBuffer()) {
+        Napi::Buffer<uint8_t> privKeyBuf = encryptionObj.Get("privateKey").As<Napi::Buffer<uint8_t>>();
+        encrypted_database_config_set_asymmetric_private_key(enc_config, privKeyBuf.Data(), privKeyBuf.Length());
+      }
+
+    } else {
+      encrypted_database_config_destroy(enc_config);
+      database_config_destroy(config);
+      Napi::TypeError::New(env, "encryption.type must be 'symmetric' or 'asymmetric'").ThrowAsJavaScriptException();
+      return;
+    }
+
+    db_ = database_create_encrypted(path.c_str(), enc_config, &error_code);
+    encrypted_database_config_destroy(enc_config);
+    database_config_destroy(config);
+
+    if (!db_) {
+      if (error_code == DATABASE_ERR_ENCRYPTION_REQUIRED) {
+        Napi::Error::New(env, "Encryption required: this database was created with encryption").ThrowAsJavaScriptException();
+        return;
+      } else if (error_code == DATABASE_ERR_ENCRYPTION_KEY_INVALID) {
+        Napi::Error::New(env, "Invalid encryption key").ThrowAsJavaScriptException();
+        return;
+      } else if (error_code == DATABASE_ERR_ENCRYPTION_UNSUPPORTED) {
+        Napi::Error::New(env, "Encryption unsupported: OpenSSL not available").ThrowAsJavaScriptException();
+        return;
+      } else {
+        Napi::Error::New(env, "Failed to create encrypted database").ThrowAsJavaScriptException();
+        return;
+      }
+    }
+  } else {
+    // Unencrypted database path (existing behavior)
+    db_ = database_create_with_config(path.c_str(), config, &error_code);
+    database_config_destroy(config);
+
+    if (!db_) {
+      Napi::Error::New(env, "Failed to create database").ThrowAsJavaScriptException();
+      return;
+    }
   }
 
   // Initialize the async bridge for all async operations

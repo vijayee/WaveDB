@@ -43,7 +43,7 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
 
     int error_code = 0;
     // Pass NULL for timing wheel (only works for IMMEDIATE and ASYNC modes)
-    ctx->manager = wal_manager_create(ctx->test_dir, &config, NULL, &error_code);
+    ctx->manager = wal_manager_create(ctx->test_dir, &config, NULL, NULL, &error_code);
     ctx->counter = 0;
 
     if (error_code != 0 || ctx->manager == NULL) {

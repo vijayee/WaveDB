@@ -16,6 +16,7 @@
 #include "../Util/log.h"
 #include "../Storage/node_serializer.h"
 #include "../Storage/page_file.h"
+#include "../Storage/encryption.h"
 #include "../Storage/bnode_cache.h"
 #include "../Util/memory_pool.h"
 #include "../Util/endian.h"
@@ -652,7 +653,13 @@ static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
 
 static void database_eviction_task_execute(void* ctx) {
     database_t* db = (database_t*)ctx;
-    if (db == NULL || db->trie == NULL || db->bnode_cache == NULL) return;
+    if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) {
+        // Work item lifecycle ends — decrement counter so database_destroy can proceed
+        if (db != NULL) {
+            __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+        }
+        return;
+    }
 
     uint64_t offsets[64];
     size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
@@ -662,22 +669,32 @@ static void database_eviction_task_execute(void* ctx) {
         bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
     }
 
-    // Reschedule — work_pool_enqueue returns 1 if pool is stopped
-    if (db->pool != NULL) {
+    // Reschedule — increment for new work item BEFORE decrementing for
+    // the current one, so eviction_in_flight never hits 0 while a new
+    // work item is still pending in the pool queue.
+    if (!db->destroying && db->pool != NULL) {
         work_t* task = work_create(database_eviction_task_execute,
                                     database_eviction_task_abort,
                                     db);
         if (task != NULL) {
+            __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
             refcounter_yield((refcounter_t*) task);
             if (work_pool_enqueue(db->pool, task) != 0) {
-                work_destroy(task);  // Pool stopped, don't reschedule
+                work_destroy(task);  // Pool stopped, undo the increment
+                __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
             }
         }
     }
+
+    // This work item's lifecycle ends — decrement counter
+    __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
 }
 
 static void database_eviction_task_abort(void* ctx) {
-    (void)ctx;
+    database_t* db = (database_t*)ctx;
+    if (db != NULL) {
+        __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+    }
 }
 
 database_t* database_create_with_config(const char* location,
@@ -706,6 +723,21 @@ database_t* database_create_with_config(const char* location,
         // Load saved config and merge
         database_config_t* saved_config = database_config_load(location);
         if (saved_config != NULL) {
+            // If saved config has encryption enabled, the caller must provide
+            // an encryption context via database_create_encrypted.
+            // Exception: if the passed config already has encryption enabled,
+            // the caller is database_create_encrypted and has already verified
+            // the key — allow the merge to proceed.
+            if (saved_config->encryption.has_encryption &&
+                saved_config->encryption.type != ENCRYPTION_NONE &&
+                !(effective_config->encryption.has_encryption &&
+                  effective_config->encryption.type != ENCRYPTION_NONE)) {
+                database_config_destroy(saved_config);
+                if (owns_config) database_config_destroy(effective_config);
+                if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_REQUIRED;
+                return NULL;
+            }
+
             database_config_t* merged = database_config_merge(saved_config, effective_config);
             if (owns_config) {
                 database_config_destroy(effective_config);
@@ -830,7 +862,7 @@ database_t* database_create_with_config(const char* location,
         snprintf(page_path, sizeof(page_path), "%s/data.wdbp", location);
 
         db->page_file = page_file_create(page_path,
-            PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS);
+            PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS, db->encryption);
         if (db->page_file != NULL) {
             int pf_rc = page_file_open(db->page_file, 1);
             if (pf_rc == 0) {
@@ -918,6 +950,7 @@ database_t* database_create_with_config(const char* location,
                                                 database_eviction_task_abort,
                                                 db);
                     if (task != NULL) {
+                        __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
                         refcounter_yield((refcounter_t*) task);
                         work_pool_enqueue(db->pool, task);
                     }
@@ -972,7 +1005,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Create WAL manager
-    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, error_code);
+    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, db->encryption, error_code);
     if (db->wal_manager == NULL) {
         tx_manager_destroy(db->tx_manager);
         hbtrie_destroy(db->trie);
@@ -1009,6 +1042,133 @@ database_t* database_create_with_config(const char* location,
 
     if (owns_config) {
         database_config_destroy(effective_config);
+    }
+
+    return db;
+}
+
+database_t* database_create_encrypted(const char* location,
+                                       encrypted_database_config_t* config,
+                                       int* error_code) {
+    if (error_code) *error_code = 0;
+
+    if (config == NULL) {
+        if (error_code) *error_code = EINVAL;
+        return NULL;
+    }
+
+    // Validate encryption type and key material
+    if (config->type == ENCRYPTION_NONE) {
+        // If type is NONE but key material was provided, that's an error
+        if ((config->symmetric.key != NULL && config->symmetric.key_length > 0) ||
+            (config->asymmetric.public_key_der != NULL && config->asymmetric.public_key_len > 0)) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        // No encryption requested — delegate to database_create_with_config
+        return database_create_with_config(location, &config->config, error_code);
+    }
+
+    // Create the encryption context based on type
+    encryption_t* encryption = NULL;
+
+    if (config->type == ENCRYPTION_SYMMETRIC) {
+        if (config->symmetric.key == NULL || config->symmetric.key_length == 0) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        encryption = encryption_create_symmetric(config->symmetric.key,
+                                                  config->symmetric.key_length);
+    } else if (config->type == ENCRYPTION_ASYMMETRIC) {
+        if (config->asymmetric.public_key_der == NULL ||
+            config->asymmetric.public_key_len == 0) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        encryption = encryption_create_asymmetric(
+            config->asymmetric.private_key_der, config->asymmetric.private_key_len,
+            config->asymmetric.public_key_der, config->asymmetric.public_key_len);
+    } else {
+        if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_UNSUPPORTED;
+        return NULL;
+    }
+
+    if (encryption == NULL) {
+        if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+        return NULL;
+    }
+
+    // Check if database already exists
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/.config", location);
+    struct stat st;
+    bool db_exists = (stat(config_path, &st) == 0);
+
+    if (db_exists) {
+        // Load saved config to get stored salt/check for key verification
+        database_config_t* saved_config = database_config_load(location);
+        if (saved_config != NULL && saved_config->encryption.has_encryption &&
+            saved_config->encryption.type != ENCRYPTION_NONE) {
+            // Database is encrypted — verify the provided key matches
+            encryption_t* verify_enc = encryption_create_from_config(
+                config->type,
+                config->symmetric.key, config->symmetric.key_length,
+                config->asymmetric.private_key_der, config->asymmetric.private_key_len,
+                config->asymmetric.public_key_der, config->asymmetric.public_key_len,
+                saved_config->encryption.salt,
+                saved_config->encryption.check);
+
+            if (verify_enc == NULL) {
+                // Key verification failed
+                encryption_destroy(encryption);
+                database_config_destroy(saved_config);
+                if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+                return NULL;
+            }
+            // Key verified — use the verified context
+            encryption_destroy(encryption);
+            encryption = verify_enc;
+
+            database_config_destroy(saved_config);
+        } else {
+            // Database exists but is not encrypted — cannot add encryption
+            // to an existing unencrypted database
+            if (saved_config != NULL) {
+                database_config_destroy(saved_config);
+            }
+            encryption_destroy(encryption);
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_UNSUPPORTED;
+            return NULL;
+        }
+    }
+
+    // Store encryption key material in the config before saving
+    // This ensures the config saved to disk includes salt/check for re-open
+    database_config_t effective_config = config->config;
+    effective_config.encryption.type = config->type;
+    effective_config.encryption.has_encryption = 1;
+
+    // Copy salt and check from the encryption context
+    const uint8_t* salt = encryption_get_salt(encryption);
+    const uint8_t* check = encryption_get_check(encryption);
+    if (salt != NULL) {
+        memcpy(effective_config.encryption.salt, salt, 16);
+    }
+    if (check != NULL) {
+        memcpy(effective_config.encryption.check, check, 44);
+    }
+
+    // Delegate to database_create_with_config for the rest
+    database_t* db = database_create_with_config(location, &effective_config, error_code);
+
+    if (db != NULL) {
+        db->encryption = encryption;
+        if (db->wal_manager != NULL) {
+            db->wal_manager->encryption = encryption;
+        }
+    } else {
+        // database_create_with_config failed — clean up encryption context
+        encryption_destroy(encryption);
     }
 
     return db;
@@ -1067,6 +1227,15 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
+        // Signal that destruction is in progress so eviction task won't reschedule.
+        db->destroying = true;
+
+        // Unregister eviction callback so no new eviction offsets are queued.
+        if (db->bnode_cache != NULL) {
+            db->bnode_cache->on_evict = NULL;
+            db->bnode_cache->on_evict_data = NULL;
+        }
+
         // Stop the timing wheel and worker pool BEFORE destroying data structures.
         // If we destroy the trie/LRU while workers are still running, a worker
         // thread might access freed memory or hold a lock on a destroyed mutex.
@@ -1079,6 +1248,19 @@ void database_destroy(database_t* db) {
         if (db->owns_pool && db->pool != NULL) {
             work_pool_shutdown(db->pool);
             work_pool_join_all(db->pool);
+        }
+
+        // With an external pool, we can't shut it down. The eviction task
+        // is self-rescheduling — once it sees destroying=true it won't
+        // reschedule, but an in-flight instance may still be executing.
+        // Wait for it to finish before we free db.
+        if (!db->owns_pool && db->pool != NULL) {
+            uint64_t offsets[64];
+            eviction_queue_drain(&db->eviction_queue, offsets, 64);
+            while (__atomic_load_n(&db->eviction_in_flight, __ATOMIC_SEQ_CST) > 0) {
+                // Yield to the worker thread executing the eviction task
+                sched_yield();
+            }
         }
 
         // Flush all thread-local WALs to disk before destroying
@@ -1144,6 +1326,13 @@ void database_destroy(database_t* db) {
         }
         if (db->page_file != NULL) {
             page_file_destroy(db->page_file);
+        }
+
+        // Destroy encryption context after WAL and page file are done
+        // (both use encryption during seal/compact and final persist)
+        if (db->encryption) {
+            encryption_destroy(db->encryption);
+            db->encryption = NULL;
         }
 
         // Destroy transaction manager

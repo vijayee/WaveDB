@@ -8,6 +8,7 @@
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
 #include "../Time/wheel.h"
+#include "../Storage/encryption.h"
 #include "wal.h"
 
 #ifdef __cplusplus
@@ -117,6 +118,7 @@ struct wal_manager {
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
     hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timers
     size_t sealed_count;                 // Number of sealed WAL files not yet compacted
+    encryption_t* encryption;            // Encryption context (NULL if no encryption)
 };
 
 /**
@@ -139,7 +141,7 @@ typedef struct {
 /**
  * Create WAL manager
  */
-wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, hierarchical_timing_wheel_t* wheel, int* error_code);
+wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, hierarchical_timing_wheel_t* wheel, encryption_t* encryption, int* error_code);
 
 /**
  * Load or create WAL manager with recovery options

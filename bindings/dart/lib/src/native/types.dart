@@ -21,6 +21,10 @@ base class database_iterator_t extends Opaque {}
 /// Maps to database_config_t in C
 base class database_config_t extends Opaque {}
 
+/// Opaque handle to an encrypted database configuration
+/// Maps to encrypted_database_config_t in C
+base class encrypted_database_config_t extends Opaque {}
+
 /// WAL sync mode enumeration
 /// Maps to wal_sync_mode_e in C
 enum WalSyncMode {
