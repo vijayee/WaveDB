@@ -22,6 +22,18 @@ database_config_t* database_config_default(void) {
     config->btree_node_size = DATABASE_CONFIG_DEFAULT_BTREE_NODE_SIZE;
     config->enable_persist = 1;  // Default to persistent
 
+    // Encryption defaults
+    config->encryption.type = DATABASE_CONFIG_DEFAULT_ENCRYPTION_TYPE;
+    config->encryption.key = NULL;
+    config->encryption.key_length = 0;
+    config->encryption.private_key_der = NULL;
+    config->encryption.private_key_len = 0;
+    config->encryption.public_key_der = NULL;
+    config->encryption.public_key_len = 0;
+    memset(config->encryption.salt, 0, sizeof(config->encryption.salt));
+    memset(config->encryption.check, 0, sizeof(config->encryption.check));
+    config->encryption.has_encryption = 0;
+
     // Mutable settings
     config->lru_memory_mb = DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB;
     config->lru_shards = DATABASE_CONFIG_DEFAULT_LRU_SHARDS;  // 0 = auto-scale
@@ -61,6 +73,35 @@ database_config_t* database_config_copy(const database_config_t* config) {
     copy->external_pool = config->external_pool;
     copy->external_wheel = config->external_wheel;
 
+    // Deep copy encryption key material
+    if (config->encryption.key != NULL) {
+        copy->encryption.key = get_clear_memory(config->encryption.key_length);
+        if (copy->encryption.key == NULL) {
+            free(copy);
+            return NULL;
+        }
+        memcpy(copy->encryption.key, config->encryption.key, config->encryption.key_length);
+    }
+    if (config->encryption.private_key_der != NULL) {
+        copy->encryption.private_key_der = get_clear_memory(config->encryption.private_key_len);
+        if (copy->encryption.private_key_der == NULL) {
+            free(copy->encryption.key);
+            free(copy);
+            return NULL;
+        }
+        memcpy(copy->encryption.private_key_der, config->encryption.private_key_der, config->encryption.private_key_len);
+    }
+    if (config->encryption.public_key_der != NULL) {
+        copy->encryption.public_key_der = get_clear_memory(config->encryption.public_key_len);
+        if (copy->encryption.public_key_der == NULL) {
+            free(copy->encryption.key);
+            free(copy->encryption.private_key_der);
+            free(copy);
+            return NULL;
+        }
+        memcpy(copy->encryption.public_key_der, config->encryption.public_key_der, config->encryption.public_key_len);
+    }
+
     return copy;
 }
 
@@ -69,7 +110,17 @@ void database_config_destroy(database_config_t* config) {
         return;
     }
 
-    // No internal allocations to free - just the struct itself
+    // Free encryption key material
+    if (config->encryption.key != NULL) {
+        free(config->encryption.key);
+    }
+    if (config->encryption.private_key_der != NULL) {
+        free(config->encryption.private_key_der);
+    }
+    if (config->encryption.public_key_der != NULL) {
+        free(config->encryption.public_key_der);
+    }
+
     free(config);
 }
 
@@ -87,7 +138,7 @@ int database_config_save(const char* location, const database_config_t* config) 
     snprintf(config_path, path_len, "%s/.config", location);
 
     // Create CBOR map
-    cbor_item_t* root = cbor_new_definite_map(11);
+    cbor_item_t* root = cbor_new_definite_map(14);
     if (root == NULL) {
         free(config_path);
         return -1;
@@ -175,6 +226,22 @@ int database_config_save(const char* location, const database_config_t* config) 
         .value = cbor_move(cbor_build_uint16(config->timer_resolution_ms))
     });
 
+    // Add encryption settings
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("encryption_type")),
+        .value = cbor_move(cbor_build_uint8((uint8_t)config->encryption.type))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("encryption_salt")),
+        .value = cbor_move(cbor_build_bytestring(config->encryption.salt, 16))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("encryption_check")),
+        .value = cbor_move(cbor_build_bytestring(config->encryption.check, 44))
+    });
+
     // Serialize to bytes
     unsigned char* buffer = NULL;
     size_t buffer_size = 0;
@@ -227,6 +294,28 @@ static uint64_t get_map_uint(cbor_item_t* map, const char* key, uint64_t default
         return cbor_get_int(value);
     }
     return default_val;
+}
+
+// Helper to get bytestring from CBOR map
+static cbor_item_t* get_map_bytestring(cbor_item_t* map, const char* key) {
+    cbor_item_t* key_item = cbor_build_string(key);
+    cbor_item_t* value = NULL;
+
+    for (size_t i = 0; i < cbor_map_size(map); i++) {
+        struct cbor_pair pair = cbor_map_handle(map)[i];
+        if (cbor_isa_string(pair.key) &&
+            cbor_string_length(pair.key) == strlen(key) &&
+            memcmp(cbor_string_handle(pair.key), key, strlen(key)) == 0) {
+            value = pair.value;
+            break;
+        }
+    }
+    cbor_decref(&key_item);
+
+    if (value != NULL && cbor_isa_bytestring(value)) {
+        return value;
+    }
+    return NULL;
 }
 
 database_config_t* database_config_load(const char* location) {
@@ -338,6 +427,23 @@ database_config_t* database_config_load(const char* location) {
         config->wal_config.max_file_size = (size_t)get_map_uint(wal_map, "max_file_size", WAL_DEFAULT_MAX_FILE_SIZE);
     }
 
+    // Read encryption settings
+    config->encryption.type = (encryption_type_t)get_map_uint(root, "encryption_type", DATABASE_CONFIG_DEFAULT_ENCRYPTION_TYPE);
+
+    cbor_item_t* salt_item = get_map_bytestring(root, "encryption_salt");
+    if (salt_item != NULL && cbor_bytestring_length(salt_item) == 16) {
+        memcpy(config->encryption.salt, cbor_bytestring_handle(salt_item), 16);
+    }
+
+    cbor_item_t* check_item = get_map_bytestring(root, "encryption_check");
+    if (check_item != NULL && cbor_bytestring_length(check_item) == 44) {
+        memcpy(config->encryption.check, cbor_bytestring_handle(check_item), 44);
+    }
+
+    if (config->encryption.type != ENCRYPTION_NONE) {
+        config->encryption.has_encryption = 1;
+    }
+
     cbor_decref(&root);
     return config;
 }
@@ -370,6 +476,35 @@ database_config_t* database_config_merge(const database_config_t* saved,
     merged->btree_node_size = saved->btree_node_size;
     merged->enable_persist = saved->enable_persist;
 
+    // ENCRYPTION: Immutable type and persisted verification data come from saved config.
+    // Key material (not persisted) comes from passed config at open time.
+    merged->encryption.type = saved->encryption.type;
+    memcpy(merged->encryption.salt, saved->encryption.salt, sizeof(saved->encryption.salt));
+    memcpy(merged->encryption.check, saved->encryption.check, sizeof(saved->encryption.check));
+    merged->encryption.has_encryption = saved->encryption.has_encryption;
+    // Deep copy key material from passed config (not persisted, supplied at open time)
+    if (passed->encryption.key != NULL) {
+        merged->encryption.key = get_clear_memory(passed->encryption.key_length);
+        if (merged->encryption.key != NULL) {
+            memcpy(merged->encryption.key, passed->encryption.key, passed->encryption.key_length);
+        }
+        merged->encryption.key_length = passed->encryption.key_length;
+    }
+    if (passed->encryption.private_key_der != NULL) {
+        merged->encryption.private_key_der = get_clear_memory(passed->encryption.private_key_len);
+        if (merged->encryption.private_key_der != NULL) {
+            memcpy(merged->encryption.private_key_der, passed->encryption.private_key_der, passed->encryption.private_key_len);
+        }
+        merged->encryption.private_key_len = passed->encryption.private_key_len;
+    }
+    if (passed->encryption.public_key_der != NULL) {
+        merged->encryption.public_key_der = get_clear_memory(passed->encryption.public_key_len);
+        if (merged->encryption.public_key_der != NULL) {
+            memcpy(merged->encryption.public_key_der, passed->encryption.public_key_der, passed->encryption.public_key_len);
+        }
+        merged->encryption.public_key_len = passed->encryption.public_key_len;
+    }
+
     // MUTABLE: Use passed values (user can change these)
     merged->lru_memory_mb = passed->lru_memory_mb;
     merged->lru_shards = passed->lru_shards;
@@ -386,4 +521,148 @@ database_config_t* database_config_merge(const database_config_t* saved,
     merged->external_wheel = passed->external_wheel;
 
     return merged;
+}
+
+// === Configuration setters ===
+
+void database_config_set_chunk_size(database_config_t* config, uint8_t chunk_size) {
+    if (config == NULL) return;
+    config->chunk_size = chunk_size;
+}
+
+void database_config_set_btree_node_size(database_config_t* config, uint32_t node_size) {
+    if (config == NULL) return;
+    config->btree_node_size = node_size;
+}
+
+void database_config_set_enable_persist(database_config_t* config, uint8_t enable) {
+    if (config == NULL) return;
+    config->enable_persist = enable;
+}
+
+void database_config_set_lru_memory_mb(database_config_t* config, size_t mb) {
+    if (config == NULL) return;
+    config->lru_memory_mb = mb;
+}
+
+void database_config_set_lru_shards(database_config_t* config, uint16_t shards) {
+    if (config == NULL) return;
+    config->lru_shards = shards;
+}
+
+void database_config_set_bnode_cache_memory_mb(database_config_t* config, size_t mb) {
+    if (config == NULL) return;
+    config->bnode_cache_memory_mb = mb;
+}
+
+void database_config_set_bnode_cache_shards(database_config_t* config, uint16_t shards) {
+    if (config == NULL) return;
+    config->bnode_cache_shards = shards;
+}
+
+void database_config_set_worker_threads(database_config_t* config, uint8_t threads) {
+    if (config == NULL) return;
+    config->worker_threads = threads;
+}
+
+void database_config_set_wal_sync_mode(database_config_t* config, uint8_t mode) {
+    if (config == NULL) return;
+    config->wal_config.sync_mode = (wal_sync_mode_e)mode;
+}
+
+void database_config_set_wal_debounce_ms(database_config_t* config, uint64_t ms) {
+    if (config == NULL) return;
+    config->wal_config.debounce_ms = ms;
+}
+
+void database_config_set_wal_max_file_size(database_config_t* config, size_t size) {
+    if (config == NULL) return;
+    config->wal_config.max_file_size = size;
+}
+
+void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms) {
+    if (config == NULL) return;
+    config->timer_resolution_ms = ms;
+}
+
+// === Encrypted database config ===
+
+encrypted_database_config_t* encrypted_database_config_default(void) {
+    encrypted_database_config_t* config = get_clear_memory(sizeof(encrypted_database_config_t));
+    if (config == NULL) {
+        return NULL;
+    }
+
+    // Initialize the embedded database config
+    database_config_t* db_config = database_config_default();
+    if (db_config == NULL) {
+        free(config);
+        return NULL;
+    }
+    memcpy(&config->config, db_config, sizeof(database_config_t));
+    free(db_config);
+
+    // Initialize encryption fields
+    config->type = ENCRYPTION_NONE;
+    config->symmetric.key = NULL;
+    config->symmetric.key_length = 0;
+    config->asymmetric.private_key_der = NULL;
+    config->asymmetric.private_key_len = 0;
+    config->asymmetric.public_key_der = NULL;
+    config->asymmetric.public_key_len = 0;
+
+    return config;
+}
+
+void encrypted_database_config_destroy(encrypted_database_config_t* config) {
+    if (config == NULL) return;
+
+    // Free encryption key material from the embedded config
+    if (config->config.encryption.key != NULL) {
+        free(config->config.encryption.key);
+    }
+    if (config->config.encryption.private_key_der != NULL) {
+        free(config->config.encryption.private_key_der);
+    }
+    if (config->config.encryption.public_key_der != NULL) {
+        free(config->config.encryption.public_key_der);
+    }
+
+    // Free the outer struct (embedded config is part of this allocation)
+    free(config);
+}
+
+void encrypted_database_config_set_type(encrypted_database_config_t* config, encryption_type_t type) {
+    if (config == NULL) return;
+    config->type = type;
+    config->config.encryption.type = type;
+    if (type != ENCRYPTION_NONE) {
+        config->config.encryption.has_encryption = 1;
+    } else {
+        config->config.encryption.has_encryption = 0;
+    }
+}
+
+void encrypted_database_config_set_symmetric_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
+    if (config == NULL) return;
+    config->symmetric.key = key;
+    config->symmetric.key_length = key_length;
+    config->config.encryption.key = (uint8_t*)key;
+    config->config.encryption.key_length = key_length;
+}
+
+void encrypted_database_config_set_asymmetric_private_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
+    if (config == NULL) return;
+    config->asymmetric.private_key_der = key;
+    config->asymmetric.private_key_len = key_length;
+    config->config.encryption.private_key_der = (uint8_t*)key;
+    config->config.encryption.private_key_len = key_length;
+}
+
+void encrypted_database_config_set_asymmetric_public_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
+    if (config == NULL) return;
+    config->asymmetric.public_key_der = key;
+    config->asymmetric.public_key_len = key_length;
+    config->config.encryption.public_key_der = (uint8_t*)key;
+    config->config.encryption.public_key_len = key_length;
 }
