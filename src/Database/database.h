@@ -80,6 +80,7 @@ typedef struct {
     // Config ownership tracking
     bool owns_pool;                     // True if database created the pool
     bool owns_wheel;                   // True if database created the wheel
+    volatile bool destroying;          // Set early in database_destroy to stop eviction rescheduling
 
     // Active configuration
     database_config_t* active_config;   // Current config (for runtime queries)

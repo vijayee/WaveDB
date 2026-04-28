@@ -79,24 +79,9 @@ static bool generate_rsa_keypair(std::vector<uint8_t>& priv_der,
 }
 
 // Safe destroy for encrypted_database_config_t.
-// The config setters store pointers to caller-owned memory, but
-// encrypted_database_config_destroy() tries to free() those pointers.
-// We null them out before destroying to avoid double-free.
+// Setters now copy key data, so destroy can properly free the copies.
 static void safe_destroy_encrypted_config(encrypted_database_config_t* config) {
     if (config == nullptr) return;
-    // Null out key material pointers so destroy won't free caller-owned memory
-    config->symmetric.key = nullptr;
-    config->symmetric.key_length = 0;
-    config->asymmetric.private_key_der = nullptr;
-    config->asymmetric.private_key_len = 0;
-    config->asymmetric.public_key_der = nullptr;
-    config->asymmetric.public_key_len = 0;
-    config->config.encryption.key = nullptr;
-    config->config.encryption.key_length = 0;
-    config->config.encryption.private_key_der = nullptr;
-    config->config.encryption.private_key_len = 0;
-    config->config.encryption.public_key_der = nullptr;
-    config->config.encryption.public_key_len = 0;
     encrypted_database_config_destroy(config);
 }
 

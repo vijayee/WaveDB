@@ -653,7 +653,7 @@ static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
 
 static void database_eviction_task_execute(void* ctx) {
     database_t* db = (database_t*)ctx;
-    if (db == NULL || db->trie == NULL || db->bnode_cache == NULL) return;
+    if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) return;
 
     uint64_t offsets[64];
     size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
@@ -664,7 +664,7 @@ static void database_eviction_task_execute(void* ctx) {
     }
 
     // Reschedule — work_pool_enqueue returns 1 if pool is stopped
-    if (db->pool != NULL) {
+    if (!db->destroying && db->pool != NULL) {
         work_t* task = work_create(database_eviction_task_execute,
                                     database_eviction_task_abort,
                                     db);
@@ -1210,11 +1210,13 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
-        // Destroy encryption context early — before any pending I/O that
-        // might still need it during WAL flush and persistence.
-        if (db->encryption) {
-            encryption_destroy(db->encryption);
-            db->encryption = NULL;
+        // Signal that destruction is in progress so eviction task won't reschedule.
+        db->destroying = true;
+
+        // Unregister eviction callback so no new eviction offsets are queued.
+        if (db->bnode_cache != NULL) {
+            db->bnode_cache->on_evict = NULL;
+            db->bnode_cache->on_evict_data = NULL;
         }
 
         // Stop the timing wheel and worker pool BEFORE destroying data structures.
@@ -1229,6 +1231,15 @@ void database_destroy(database_t* db) {
         if (db->owns_pool && db->pool != NULL) {
             work_pool_shutdown(db->pool);
             work_pool_join_all(db->pool);
+        }
+
+        // With an external pool, eviction tasks may still be in-flight.
+        // Drain the eviction queue and sleep briefly to let any in-flight
+        // eviction task see destroying=true and exit without rescheduling.
+        if (!db->owns_pool && db->pool != NULL) {
+            uint64_t offsets[64];
+            eviction_queue_drain(&db->eviction_queue, offsets, 64);
+            usleep(10000);  // 10ms for in-flight eviction task to complete
         }
 
         // Flush all thread-local WALs to disk before destroying
@@ -1294,6 +1305,13 @@ void database_destroy(database_t* db) {
         }
         if (db->page_file != NULL) {
             page_file_destroy(db->page_file);
+        }
+
+        // Destroy encryption context after WAL and page file are done
+        // (both use encryption during seal/compact and final persist)
+        if (db->encryption) {
+            encryption_destroy(db->encryption);
+            db->encryption = NULL;
         }
 
         // Destroy transaction manager

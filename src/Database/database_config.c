@@ -645,24 +645,65 @@ void encrypted_database_config_set_type(encrypted_database_config_t* config, enc
 
 void encrypted_database_config_set_symmetric_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
     if (config == NULL) return;
-    config->symmetric.key = key;
+
+    // Free previous copy if any
+    if (config->config.encryption.key != NULL) {
+        free(config->config.encryption.key);
+        config->config.encryption.key = NULL;
+    }
+
+    uint8_t* copy = get_clear_memory(key_length);
+    if (copy == NULL) return;
+    memcpy(copy, key, key_length);
+
+    config->symmetric.key = copy;
     config->symmetric.key_length = key_length;
-    config->config.encryption.key = (uint8_t*)key;
+    config->config.encryption.key = copy;
     config->config.encryption.key_length = key_length;
 }
 
 void encrypted_database_config_set_asymmetric_private_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
     if (config == NULL) return;
-    config->asymmetric.private_key_der = key;
+
+    // Free previous copy if any
+    if (config->config.encryption.private_key_der != NULL) {
+        free(config->config.encryption.private_key_der);
+        config->config.encryption.private_key_der = NULL;
+    }
+
+    if (key == NULL || key_length == 0) {
+        config->asymmetric.private_key_der = NULL;
+        config->asymmetric.private_key_len = 0;
+        config->config.encryption.private_key_der = NULL;
+        config->config.encryption.private_key_len = 0;
+        return;
+    }
+
+    uint8_t* copy = get_clear_memory(key_length);
+    if (copy == NULL) return;
+    memcpy(copy, key, key_length);
+
+    config->asymmetric.private_key_der = copy;
     config->asymmetric.private_key_len = key_length;
-    config->config.encryption.private_key_der = (uint8_t*)key;
+    config->config.encryption.private_key_der = copy;
     config->config.encryption.private_key_len = key_length;
 }
 
 void encrypted_database_config_set_asymmetric_public_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length) {
     if (config == NULL) return;
-    config->asymmetric.public_key_der = key;
+
+    // Free previous copy if any
+    if (config->config.encryption.public_key_der != NULL) {
+        free(config->config.encryption.public_key_der);
+        config->config.encryption.public_key_der = NULL;
+    }
+
+    uint8_t* copy = get_clear_memory(key_length);
+    if (copy == NULL) return;
+    memcpy(copy, key, key_length);
+
+    config->asymmetric.public_key_der = copy;
     config->asymmetric.public_key_len = key_length;
-    config->config.encryption.public_key_der = (uint8_t*)key;
+    config->config.encryption.public_key_der = copy;
     config->config.encryption.public_key_len = key_length;
 }
