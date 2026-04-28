@@ -16,6 +16,7 @@
 #include "../Util/log.h"
 #include "../Storage/node_serializer.h"
 #include "../Storage/page_file.h"
+#include "../Storage/encryption.h"
 #include "../Storage/bnode_cache.h"
 #include "../Util/memory_pool.h"
 #include "../Util/endian.h"
@@ -706,6 +707,16 @@ database_t* database_create_with_config(const char* location,
         // Load saved config and merge
         database_config_t* saved_config = database_config_load(location);
         if (saved_config != NULL) {
+            // If saved config has encryption enabled, the caller must provide
+            // an encryption context via database_create_encrypted
+            if (saved_config->encryption.has_encryption &&
+                saved_config->encryption.type != ENCRYPTION_NONE) {
+                database_config_destroy(saved_config);
+                if (owns_config) database_config_destroy(effective_config);
+                if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_REQUIRED;
+                return NULL;
+            }
+
             database_config_t* merged = database_config_merge(saved_config, effective_config);
             if (owns_config) {
                 database_config_destroy(effective_config);
@@ -1014,6 +1025,130 @@ database_t* database_create_with_config(const char* location,
     return db;
 }
 
+database_t* database_create_encrypted(const char* location,
+                                       encrypted_database_config_t* config,
+                                       int* error_code) {
+    if (error_code) *error_code = 0;
+
+    if (config == NULL) {
+        if (error_code) *error_code = EINVAL;
+        return NULL;
+    }
+
+    // Validate encryption type and key material
+    if (config->type == ENCRYPTION_NONE) {
+        // If type is NONE but key material was provided, that's an error
+        if ((config->symmetric.key != NULL && config->symmetric.key_length > 0) ||
+            (config->asymmetric.public_key_der != NULL && config->asymmetric.public_key_len > 0)) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        // No encryption requested — delegate to database_create_with_config
+        return database_create_with_config(location, &config->config, error_code);
+    }
+
+    // Create the encryption context based on type
+    encryption_t* encryption = NULL;
+
+    if (config->type == ENCRYPTION_SYMMETRIC) {
+        if (config->symmetric.key == NULL || config->symmetric.key_length == 0) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        encryption = encryption_create_symmetric(config->symmetric.key,
+                                                  config->symmetric.key_length);
+    } else if (config->type == ENCRYPTION_ASYMMETRIC) {
+        if (config->asymmetric.public_key_der == NULL ||
+            config->asymmetric.public_key_len == 0) {
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+            return NULL;
+        }
+        encryption = encryption_create_asymmetric(
+            config->asymmetric.private_key_der, config->asymmetric.private_key_len,
+            config->asymmetric.public_key_der, config->asymmetric.public_key_len);
+    } else {
+        if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_UNSUPPORTED;
+        return NULL;
+    }
+
+    if (encryption == NULL) {
+        if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+        return NULL;
+    }
+
+    // Check if database already exists
+    char config_path[1024];
+    snprintf(config_path, sizeof(config_path), "%s/.config", location);
+    struct stat st;
+    bool db_exists = (stat(config_path, &st) == 0);
+
+    if (db_exists) {
+        // Load saved config to get stored salt/check for key verification
+        database_config_t* saved_config = database_config_load(location);
+        if (saved_config != NULL && saved_config->encryption.has_encryption &&
+            saved_config->encryption.type != ENCRYPTION_NONE) {
+            // Database is encrypted — verify the provided key matches
+            encryption_t* verify_enc = encryption_create_from_config(
+                config->type,
+                config->symmetric.key, config->symmetric.key_length,
+                config->asymmetric.private_key_der, config->asymmetric.private_key_len,
+                config->asymmetric.public_key_der, config->asymmetric.public_key_len,
+                saved_config->encryption.salt,
+                saved_config->encryption.check);
+
+            if (verify_enc == NULL) {
+                // Key verification failed
+                encryption_destroy(encryption);
+                database_config_destroy(saved_config);
+                if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_KEY_INVALID;
+                return NULL;
+            }
+            // Key verified — use the verified context
+            encryption_destroy(encryption);
+            encryption = verify_enc;
+
+            database_config_destroy(saved_config);
+        } else {
+            // Database exists but is not encrypted — cannot add encryption
+            // to an existing unencrypted database
+            if (saved_config != NULL) {
+                database_config_destroy(saved_config);
+            }
+            encryption_destroy(encryption);
+            if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_UNSUPPORTED;
+            return NULL;
+        }
+    }
+
+    // Store encryption key material in the config before saving
+    // This ensures the config saved to disk includes salt/check for re-open
+    database_config_t effective_config = config->config;
+    effective_config.encryption.type = config->type;
+    effective_config.encryption.has_encryption = 1;
+
+    // Copy salt and check from the encryption context
+    const uint8_t* salt = encryption_get_salt(encryption);
+    const uint8_t* check = encryption_get_check(encryption);
+    if (salt != NULL) {
+        memcpy(effective_config.encryption.salt, salt, 16);
+    }
+    if (check != NULL) {
+        memcpy(effective_config.encryption.check, check, 44);
+    }
+
+    // Delegate to database_create_with_config for the rest
+    database_t* db = database_create_with_config(location, &effective_config, error_code);
+
+    if (db != NULL) {
+        db->encryption = encryption;
+    } else {
+        // database_create_with_config failed — clean up encryption context
+        encryption_destroy(encryption);
+    }
+
+    return db;
+}
+
 database_t* database_create(const char* location, size_t lru_memory_mb,
                             wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
@@ -1067,6 +1202,13 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
+        // Destroy encryption context early — before any pending I/O that
+        // might still need it during WAL flush and persistence.
+        if (db->encryption) {
+            encryption_destroy(db->encryption);
+            db->encryption = NULL;
+        }
+
         // Stop the timing wheel and worker pool BEFORE destroying data structures.
         // If we destroy the trie/LRU while workers are still running, a worker
         // thread might access freed memory or hold a lock on a destroyed mutex.
