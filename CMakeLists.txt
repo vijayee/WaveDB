@@ -36,6 +36,7 @@ set(CBOR_PRETTY_PRINTER ON CACHE BOOL "Include a pretty-printing routine" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build as a shared library" FORCE)
 set(WITH_TESTS OFF CACHE BOOL "Build unit tests" FORCE)
 set(WITH_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
+set(SANITIZE OFF CACHE BOOL "Disable sanitizers in libcbor" FORCE)
 add_subdirectory(deps/libcbor)
 
 # WaveDB library sources
@@ -273,6 +274,11 @@ if(BUILD_TESTS)
     add_executable(test_encryption tests/test_encryption.cpp)
     target_link_libraries(test_encryption wavedb gtest gtest_main OpenSSL::Crypto)
     add_test(NAME test_encryption COMMAND test_encryption)
+
+    # Encrypted database integration tests
+    add_executable(test_encrypted_database tests/test_encrypted_database.cpp)
+    target_link_libraries(test_encrypted_database wavedb gtest gtest_main Threads::Threads OpenSSL::Crypto)
+    add_test(NAME test_encrypted_database COMMAND test_encrypted_database)
 
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)

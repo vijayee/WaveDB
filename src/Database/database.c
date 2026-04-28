@@ -708,9 +708,14 @@ database_t* database_create_with_config(const char* location,
         database_config_t* saved_config = database_config_load(location);
         if (saved_config != NULL) {
             // If saved config has encryption enabled, the caller must provide
-            // an encryption context via database_create_encrypted
+            // an encryption context via database_create_encrypted.
+            // Exception: if the passed config already has encryption enabled,
+            // the caller is database_create_encrypted and has already verified
+            // the key — allow the merge to proceed.
             if (saved_config->encryption.has_encryption &&
-                saved_config->encryption.type != ENCRYPTION_NONE) {
+                saved_config->encryption.type != ENCRYPTION_NONE &&
+                !(effective_config->encryption.has_encryption &&
+                  effective_config->encryption.type != ENCRYPTION_NONE)) {
                 database_config_destroy(saved_config);
                 if (owns_config) database_config_destroy(effective_config);
                 if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_REQUIRED;
