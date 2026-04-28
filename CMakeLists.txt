@@ -87,6 +87,7 @@ set(WAVEDB_SOURCES
     src/Storage/node_serializer.c
     src/Storage/stale_region.c
     src/Storage/page_file.c
+    src/Storage/encryption.c
     src/Storage/bnode_cache.c
 
     # Database
@@ -150,7 +151,9 @@ if(WIN32)
     target_compile_definitions(wavedb PRIVATE _WIN32)
 else()
     find_package(Threads REQUIRED)
-    target_link_libraries(wavedb PUBLIC Threads::Threads)
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(wavedb PUBLIC Threads::Threads OpenSSL::Crypto)
+    target_include_directories(wavedb PRIVATE ${OPENSSL_INCLUDE_DIR})
 endif()
 
 # GoogleTest
@@ -453,7 +456,7 @@ option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
 if(BUILD_DART_BINDINGS)
   # Build shared library for Dart FFI
   add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
-  target_link_libraries(wavedb_shared PUBLIC atomic xxhash cbor hashmap)
+  target_link_libraries(wavedb_shared PUBLIC atomic xxhash cbor hashmap OpenSSL::Crypto)
   if(NOT WIN32)
     target_link_libraries(wavedb_shared PUBLIC Threads::Threads)
   endif()
