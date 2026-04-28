@@ -186,6 +186,100 @@ Opening an existing unencrypted database with `database_create_encrypted` starts
 7. **Page file verification** — raw-read `.wdbp`, verify node data is not plaintext
 8. **Write-only mode** — create with public key only, put data, verify get fails (no private key)
 
+## Binding API Updates
+
+Both Node.js and Dart bindings need a separate creation API for encrypted databases, mirroring the C `database_create_encrypted` function.
+
+### C API Additions (`src/Database/database.h`)
+
+```c
+database_t* database_create_encrypted(const char* location, encrypted_database_config_t* config);
+void encrypted_database_config_destroy(encrypted_database_config_t* config);
+
+// Setter functions for encrypted config (called after encrypted_database_config_default)
+void encrypted_database_config_set_type(encrypted_database_config_t* config, encryption_type_t type);
+void encrypted_database_config_set_symmetric_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length);
+void encrypted_database_config_set_asymmetric_private_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length);
+void encrypted_database_config_set_asymmetric_public_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length);
+
+// Also needed: setters for the embedded database_config_t fields
+// (these also fill the gap in the Dart binding which currently references missing setters)
+void database_config_set_chunk_size(database_config_t* config, uint8_t chunk_size);
+void database_config_set_btree_node_size(database_config_t* config, uint32_t node_size);
+void database_config_set_enable_persist(database_config_t* config, uint8_t enable);
+void database_config_set_lru_memory_mb(database_config_t* config, size_t mb);
+void database_config_set_lru_shards(database_config_t* config, uint16_t shards);
+void database_config_set_bnode_cache_memory_mb(database_config_t* config, size_t mb);
+void database_config_set_bnode_cache_shards(database_config_t* config, uint16_t shards);
+void database_config_set_worker_threads(database_config_t* config, uint8_t threads);
+void database_config_set_wal_sync_mode(database_config_t* config, uint8_t mode);
+void database_config_set_wal_debounce_ms(database_config_t* config, uint64_t ms);
+void database_config_set_wal_max_file_size(database_config_t* config, size_t size);
+```
+
+The `database_config_set_*` functions are also exported because the Dart binding currently references them but they are not exported from `libwavedb.so`. This is a prerequisite fix regardless of encryption.
+
+### Node.js Binding (`bindings/nodejs/`)
+
+New JS API on the `WaveDB` wrapper class:
+
+```js
+const db = new WaveDB(path, {
+  encryption: {
+    type: 'symmetric',         // 'symmetric' or 'asymmetric'
+    key: Buffer.from(...),     // 32-byte AES key for symmetric
+    // OR for asymmetric:
+    // publicKey: Buffer.from(...),   // DER-encoded public key
+    // privateKey: Buffer.from(...), // DER-encoded private key (optional, for read-write)
+  },
+  // ...existing config options (chunkSize, enablePersist, etc.)
+});
+```
+
+The native addon (`database.cc`) gets a new `CreateEncrypted` static method that:
+1. Creates an `encrypted_database_config_t` via the C API
+2. Sets encryption type and key(s) from the JS options
+3. Sets the embedded `database_config_t` fields from remaining options
+4. Calls `database_create_encrypted()`
+5. Throws a JS error if creation fails (including `ENCRYPTION_REQUIRED` / `ENCRYPTION_KEY_INVALID`)
+
+Opening an existing encrypted database uses the same constructor with the same `encryption` options.
+
+### Dart Binding (`bindings/dart/`)
+
+New `WaveDBEncryption` class and `WaveDB` constructor parameter:
+
+```dart
+class WaveDBEncryption {
+  final String type;                    // 'symmetric' or 'asymmetric'
+  final Uint8List? key;                 // symmetric: 32-byte AES key
+  final Uint8List? publicKey;           // asymmetric: DER-encoded public key
+  final Uint8List? privateKey;          // asymmetric: DER-encoded private key (optional)
+
+  WaveDBEncryption.symmetric({required Uint8List key})
+      : type = 'symmetric', this.key = key;
+
+  WaveDBEncryption.asymmetric({required Uint8List publicKey, Uint8List? privateKey})
+      : type = 'asymmetric', this.publicKey = publicKey, this.privateKey = privateKey;
+}
+
+WaveDB(String path, {String delimiter = '/', WaveDBConfig? config, WaveDBEncryption? encryption})
+```
+
+When `encryption` is provided, the Dart constructor calls `databaseCreateEncrypted()` instead of `databaseCreateWithConfig()`. The FFI layer (`wavedb_bindings.dart`) adds a `databaseCreateEncrypted()` method that:
+1. Calls `encrypted_database_config_default()` to get defaults
+2. Sets encryption type and key(s) via the C setter functions
+3. Sets config fields via the existing `_configSet*` calls on the embedded config
+4. Calls `database_create_encrypted()`
+5. Throws `WaveDBException` on failure with appropriate error code
+
+### Error Handling in Bindings
+
+Both bindings map C error codes to native exceptions:
+- `DATABASE_ERR_ENCRYPTION_REQUIRED` → `EncryptionRequiredError` / `WaveDBException(code: encryptionRequired)`
+- `DATABASE_ERR_ENCRYPTION_KEY_INVALID` → `EncryptionKeyInvalidError` / `WaveDBException(code: encryptionKeyInvalid)`
+- `DATABASE_ERR_ENCRYPTION_UNSUPPORTED` → `EncryptionUnsupportedError` / `WaveDBException(code: encryptionUnsupported)`
+
 ## Performance Expectations
 
 - AES-256-GCM with AES-NI: ~1-2% overhead on I/O-bound workloads
