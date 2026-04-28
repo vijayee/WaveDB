@@ -62,6 +62,27 @@ class WaveDBConfig {
   });
 }
 
+/// Encryption configuration for WaveDB
+class WaveDBEncryption {
+  /// Encryption type: 'symmetric' or 'asymmetric'
+  final String type;
+
+  /// Symmetric key (32 bytes for AES-256), required for symmetric encryption
+  final Uint8List? key;
+
+  /// Asymmetric public key (DER-encoded), required for asymmetric encryption
+  final Uint8List? publicKey;
+
+  /// Asymmetric private key (DER-encoded), optional for write-only mode
+  final Uint8List? privateKey;
+
+  WaveDBEncryption.symmetric({required Uint8List key})
+      : type = 'symmetric', this.key = key, publicKey = null, privateKey = null;
+
+  WaveDBEncryption.asymmetric({required Uint8List publicKey, Uint8List? privateKey})
+      : type = 'asymmetric', this.publicKey = publicKey, this.privateKey = privateKey, key = null;
+}
+
 /// Return code from C raw sync get operations indicating "not found"
 const int _kNotFoundCode = -2;
 
@@ -99,14 +120,16 @@ class WaveDB implements Finalizable {
   final int _instanceId;
   static int _nextInstanceId = 1;
 
-  WaveDB(String path, {String delimiter = '/', WaveDBConfig? config})
+  WaveDB(String path, {String delimiter = '/', WaveDBConfig? config, WaveDBEncryption? encryption})
       : _path = path,
         _delimiter = delimiter,
         _instanceId = _nextInstanceId++ {
     if (delimiter.length != 1) {
       throw ArgumentError('Delimiter must be a single character, got: "$delimiter"');
     }
-    if (config != null) {
+    if (encryption != null) {
+      _db = _createEncrypted(path, encryption, config);
+    } else if (config != null) {
       _db = WaveDBNative.databaseCreateWithConfig(
         path,
         chunkSize: config.chunkSize,
@@ -130,6 +153,67 @@ class WaveDB implements Finalizable {
 
     _finalizer.attach(this, _db!.cast(), detach: this);
     _ensureCallbacksRegistered();
+  }
+
+  /// Create an encrypted database using the FFI encrypted config API
+  static Pointer<database_t> _createEncrypted(String path, WaveDBEncryption encryption, WaveDBConfig? config) {
+    // Map encryption type string to C enum value
+    final encryptionType = {'symmetric': 1, 'asymmetric': 2}[encryption.type];
+    if (encryptionType == null) {
+      throw ArgumentError('Invalid encryption type: ${encryption.type}. Must be "symmetric" or "asymmetric"');
+    }
+
+    // Allocate native key pointers as needed
+    Pointer<Uint8>? symKeyPtr;
+    Pointer<Uint8>? asymPubKeyPtr;
+    Pointer<Uint8>? asymPrivKeyPtr;
+    int? symKeyLen;
+    int? asymPubKeyLen;
+    int? asymPrivKeyLen;
+
+    try {
+      if (encryption.key != null) {
+        symKeyLen = encryption.key!.length;
+        symKeyPtr = calloc<Uint8>(symKeyLen);
+        symKeyPtr!.asTypedList(symKeyLen).setAll(0, encryption.key!);
+      }
+      if (encryption.publicKey != null) {
+        asymPubKeyLen = encryption.publicKey!.length;
+        asymPubKeyPtr = calloc<Uint8>(asymPubKeyLen);
+        asymPubKeyPtr!.asTypedList(asymPubKeyLen).setAll(0, encryption.publicKey!);
+      }
+      if (encryption.privateKey != null) {
+        asymPrivKeyLen = encryption.privateKey!.length;
+        asymPrivKeyPtr = calloc<Uint8>(asymPrivKeyLen);
+        asymPrivKeyPtr!.asTypedList(asymPrivKeyLen).setAll(0, encryption.privateKey!);
+      }
+
+      return WaveDBNative.databaseCreateEncrypted(
+        path,
+        encryptionType: encryptionType,
+        symmetricKey: symKeyPtr,
+        symmetricKeyLength: symKeyLen,
+        asymmetricPublicKey: asymPubKeyPtr,
+        asymmetricPublicKeyLength: asymPubKeyLen,
+        asymmetricPrivateKey: asymPrivKeyPtr,
+        asymmetricPrivateKeyLength: asymPrivKeyLen,
+        chunkSize: config?.chunkSize,
+        btreeNodeSize: config?.btreeNodeSize,
+        enablePersist: config?.enablePersist,
+        lruMemoryMb: config?.lruMemoryMb,
+        lruShards: config?.lruShards,
+        bnodeCacheMemoryMb: config?.bnodeCacheMemoryMb,
+        bnodeCacheShards: config?.bnodeCacheShards,
+        workerThreads: config?.workerThreads,
+        walSyncMode: config?.walSyncMode,
+        walDebounceMs: config?.walDebounceMs,
+        walMaxFileSize: config?.walMaxFileSize,
+      );
+    } finally {
+      if (symKeyPtr != null) calloc.free(symKeyPtr);
+      if (asymPubKeyPtr != null) calloc.free(asymPubKeyPtr);
+      if (asymPrivKeyPtr != null) calloc.free(asymPrivKeyPtr);
+    }
   }
 
   /// Ensure the NativeCallable.listener callbacks are registered.

@@ -91,6 +91,56 @@ typedef _ConfigSetU64 = void Function(Pointer<database_config_t>, int);
 typedef _ConfigSetSizeC = Void Function(Pointer<database_config_t>, UintPtr);
 typedef _ConfigSetSize = void Function(Pointer<database_config_t>, int);
 
+// ============================================================
+// C TYPEDEFS - Encrypted Database Configuration
+// ============================================================
+
+/// C signature: encrypted_database_config_t* encrypted_database_config_default()
+typedef EncryptedDatabaseConfigDefaultC = Pointer<encrypted_database_config_t> Function();
+
+/// Dart signature for encrypted_database_config_default
+typedef EncryptedDatabaseConfigDefault = Pointer<encrypted_database_config_t> Function();
+
+/// C signature: void encrypted_database_config_destroy(encrypted_database_config_t* config)
+typedef EncryptedDatabaseConfigDestroyC = Void Function(Pointer<encrypted_database_config_t> config);
+
+/// Dart signature for encrypted_database_config_destroy
+typedef EncryptedDatabaseConfigDestroy = void Function(Pointer<encrypted_database_config_t> config);
+
+/// C signature: void encrypted_database_config_set_type(encrypted_database_config_t* config, encryption_type_t type)
+typedef EncryptedDatabaseConfigSetTypeC = Void Function(Pointer<encrypted_database_config_t>, Uint8);
+typedef EncryptedDatabaseConfigSetType = void Function(Pointer<encrypted_database_config_t>, int);
+
+/// C signature: void encrypted_database_config_set_symmetric_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length)
+typedef EncryptedDatabaseConfigSetSymmetricKeyC = Void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, UintPtr);
+typedef EncryptedDatabaseConfigSetSymmetricKey = void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, int);
+
+/// C signature: void encrypted_database_config_set_asymmetric_private_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length)
+typedef EncryptedDatabaseConfigSetAsymmetricPrivateKeyC = Void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, UintPtr);
+typedef EncryptedDatabaseConfigSetAsymmetricPrivateKey = void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, int);
+
+/// C signature: void encrypted_database_config_set_asymmetric_public_key(encrypted_database_config_t* config, const uint8_t* key, size_t key_length)
+typedef EncryptedDatabaseConfigSetAsymmetricPublicKeyC = Void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, UintPtr);
+typedef EncryptedDatabaseConfigSetAsymmetricPublicKey = void Function(Pointer<encrypted_database_config_t>, Pointer<Uint8>, int);
+
+/// C signature: database_t* database_create_encrypted(
+///   const char* location,
+///   encrypted_database_config_t* config,
+///   int* error_code
+/// )
+typedef DatabaseCreateEncryptedC = Pointer<database_t> Function(
+  Pointer<Utf8> location,
+  Pointer<encrypted_database_config_t> config,
+  Pointer<Int32> error_code,
+);
+
+/// Dart signature for database_create_encrypted
+typedef DatabaseCreateEncrypted = Pointer<database_t> Function(
+  Pointer<Utf8> location,
+  Pointer<encrypted_database_config_t> config,
+  Pointer<Int32> error_code,
+);
+
 /// C signature: database_t* database_create_with_config(
 ///   const char* location,
 ///   database_config_t* config,
@@ -880,8 +930,33 @@ class WaveDBNative {
   static late final _ConfigSetSize _configSetWalMaxFileSize = WaveDBLibrary.load()
       .lookupFunction<_ConfigSetSizeC, _ConfigSetSize>('database_config_set_wal_max_file_size');
 
+  static late final _ConfigSetU16 _configSetTimerResolutionMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU16C, _ConfigSetU16>('database_config_set_timer_resolution_ms');
+
   static late final DatabaseCreateWithConfig _databaseCreateWithConfig = WaveDBLibrary.load()
       .lookupFunction<DatabaseCreateWithConfigC, DatabaseCreateWithConfig>('database_create_with_config');
+
+  // Encrypted database config functions
+  static late final EncryptedDatabaseConfigDefault _encryptedDatabaseConfigDefault = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigDefaultC, EncryptedDatabaseConfigDefault>('encrypted_database_config_default');
+
+  static late final EncryptedDatabaseConfigDestroy _encryptedDatabaseConfigDestroy = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigDestroyC, EncryptedDatabaseConfigDestroy>('encrypted_database_config_destroy');
+
+  static late final EncryptedDatabaseConfigSetType _encryptedDatabaseConfigSetType = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigSetTypeC, EncryptedDatabaseConfigSetType>('encrypted_database_config_set_type');
+
+  static late final EncryptedDatabaseConfigSetSymmetricKey _encryptedDatabaseConfigSetSymmetricKey = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigSetSymmetricKeyC, EncryptedDatabaseConfigSetSymmetricKey>('encrypted_database_config_set_symmetric_key');
+
+  static late final EncryptedDatabaseConfigSetAsymmetricPrivateKey _encryptedDatabaseConfigSetAsymmetricPrivateKey = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigSetAsymmetricPrivateKeyC, EncryptedDatabaseConfigSetAsymmetricPrivateKey>('encrypted_database_config_set_asymmetric_private_key');
+
+  static late final EncryptedDatabaseConfigSetAsymmetricPublicKey _encryptedDatabaseConfigSetAsymmetricPublicKey = WaveDBLibrary.load()
+      .lookupFunction<EncryptedDatabaseConfigSetAsymmetricPublicKeyC, EncryptedDatabaseConfigSetAsymmetricPublicKey>('encrypted_database_config_set_asymmetric_public_key');
+
+  static late final DatabaseCreateEncrypted _databaseCreateEncrypted = WaveDBLibrary.load()
+      .lookupFunction<DatabaseCreateEncryptedC, DatabaseCreateEncrypted>('database_create_encrypted');
 
   // Synchronous operations
   static late final DatabasePutSync _databasePutSync = WaveDBLibrary.load()
@@ -1183,6 +1258,106 @@ class WaveDBNative {
       }
 
       return db;
+    } finally {
+      calloc.free(pathPtr);
+      calloc.free(errorPtr);
+    }
+  }
+
+  /// Create an encrypted database with full configuration
+  ///
+  /// [path] - Filesystem path for the database
+  /// [encryptionType] - Encryption type: 1=symmetric, 2=asymmetric
+  /// [symmetricKey] - Symmetric key bytes (32 bytes for AES-256), required if type=symmetric
+  /// [asymmetricPublicKey] - Asymmetric public key (DER-encoded), required if type=asymmetric
+  /// [asymmetricPrivateKey] - Asymmetric private key (DER-encoded), optional for write-only mode
+  /// [config] - Base database configuration options (all optional)
+  ///
+  /// Returns a pointer to the database handle.
+  /// Throws [WaveDBException] if creation fails.
+  static Pointer<database_t> databaseCreateEncrypted(
+    String path, {
+    required int encryptionType,
+    Pointer<Uint8>? symmetricKey,
+    int? symmetricKeyLength,
+    Pointer<Uint8>? asymmetricPublicKey,
+    int? asymmetricPublicKeyLength,
+    Pointer<Uint8>? asymmetricPrivateKey,
+    int? asymmetricPrivateKeyLength,
+    int? chunkSize,
+    int? btreeNodeSize,
+    bool? enablePersist,
+    int? lruMemoryMb,
+    int? lruShards,
+    int? bnodeCacheMemoryMb,
+    int? bnodeCacheShards,
+    int? workerThreads,
+    String? walSyncMode,
+    int? walDebounceMs,
+    int? walMaxFileSize,
+  }) {
+    final pathPtr = path.toNativeUtf8();
+    final errorPtr = calloc<Int32>();
+
+    try {
+      // Get default encrypted config
+      final encConfigPtr = _encryptedDatabaseConfigDefault();
+      if (encConfigPtr == nullptr) {
+        throw WaveDBException.ioError('encrypted_database_config_default', 'Failed to create default encrypted config');
+      }
+
+      try {
+        // Set encryption type
+        _encryptedDatabaseConfigSetType(encConfigPtr, encryptionType);
+
+        // Set key material based on encryption type
+        if (symmetricKey != null && symmetricKeyLength != null) {
+          _encryptedDatabaseConfigSetSymmetricKey(encConfigPtr, symmetricKey, symmetricKeyLength);
+        }
+        if (asymmetricPublicKey != null && asymmetricPublicKeyLength != null) {
+          _encryptedDatabaseConfigSetAsymmetricPublicKey(encConfigPtr, asymmetricPublicKey, asymmetricPublicKeyLength);
+        }
+        if (asymmetricPrivateKey != null && asymmetricPrivateKeyLength != null) {
+          _encryptedDatabaseConfigSetAsymmetricPrivateKey(encConfigPtr, asymmetricPrivateKey, asymmetricPrivateKeyLength);
+        }
+
+        // Apply base config overrides via C setter functions
+        // The encrypted config embeds a database_config_t as its first field,
+        // so we can safely cast the pointer.
+        final configPtr = encConfigPtr.cast<database_config_t>();
+        if (chunkSize != null) _configSetChunkSize(configPtr, chunkSize);
+        if (btreeNodeSize != null) _configSetBtreeNodeSize(configPtr, btreeNodeSize);
+        if (enablePersist != null) _configSetEnablePersist(configPtr, enablePersist ? 1 : 0);
+        if (lruMemoryMb != null) _configSetLruMemoryMb(configPtr, lruMemoryMb);
+        if (lruShards != null) _configSetLruShards(configPtr, lruShards);
+        if (bnodeCacheMemoryMb != null) _configSetBnodeCacheMemoryMb(configPtr, bnodeCacheMemoryMb);
+        if (bnodeCacheShards != null) _configSetBnodeCacheShards(configPtr, bnodeCacheShards);
+        if (workerThreads != null) _configSetWorkerThreads(configPtr, workerThreads);
+        if (walSyncMode != null) {
+          final modeValue = {'immediate': 0, 'debounced': 1, 'async': 2}[walSyncMode] ?? 1;
+          _configSetWalSyncMode(configPtr, modeValue);
+        }
+        if (walDebounceMs != null) _configSetWalDebounceMs(configPtr, walDebounceMs);
+        if (walMaxFileSize != null) _configSetWalMaxFileSize(configPtr, walMaxFileSize);
+
+        final db = _databaseCreateEncrypted(
+          pathPtr.cast(),
+          encConfigPtr,
+          errorPtr,
+        );
+
+        if (db == nullptr) {
+          final errorCode = errorPtr.value;
+          throw WaveDBException.ioError(
+            'database_create_encrypted',
+            'Error code: $errorCode',
+          );
+        }
+
+        return db;
+      } finally {
+        _encryptedDatabaseConfigDestroy(encConfigPtr);
+      }
     } finally {
       calloc.free(pathPtr);
       calloc.free(errorPtr);
