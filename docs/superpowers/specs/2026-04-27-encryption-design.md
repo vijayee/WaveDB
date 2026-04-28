@@ -55,7 +55,9 @@ typedef struct {
     size_t wrapped_dek_len;
 } encryption_t;
 
-encryption_t* encryption_create(encryption_type_t type, /* key params */);
+encryption_t* encryption_create_symmetric(const uint8_t* key, size_t key_length);
+encryption_t* encryption_create_asymmetric(const uint8_t* private_key_der, size_t private_key_len,
+                                          const uint8_t* public_key_der, size_t public_key_len);
 int encryption_encrypt(encryption_t* enc, const uint8_t* plaintext, size_t pt_len, uint8_t** ciphertext, size_t* ct_len);
 int encryption_decrypt(encryption_t* enc, const uint8_t* ciphertext, size_t ct_len, uint8_t** plaintext, size_t* pt_len);
 void encryption_destroy(encryption_t* enc);
@@ -93,6 +95,8 @@ void encryption_destroy(encryption_t* enc);
 - CRC32 computed over the encrypted payload (integrity of what's on disk)
 - New type byte `0xE1` (`WAL_ENCRYPTED_MAGIC`) signals encrypted payload
 - Header format unchanged: `[type:1][txn_id:24][crc32:4][data_len:4][encrypted_data]`
+- `encrypted_data` is the opaque output of `encryption_encrypt` — symmetric: `[IV:12][ciphertext][tag:16]`, asymmetric: `[wrapped_dek_len:2][wrapped_dek][IV:12][ciphertext][tag:16]`
+- The WAL layer treats `encrypted_data` as an opaque blob; the encryption module handles its own framing
 
 ### Read Path (`read_wal_file`)
 
