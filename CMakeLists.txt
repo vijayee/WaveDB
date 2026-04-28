@@ -269,6 +269,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_persistence_phase2 wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_persistence_phase2 COMMAND test_persistence_phase2)
 
+    # Encryption module tests
+    add_executable(test_encryption tests/test_encryption.cpp)
+    target_link_libraries(test_encryption wavedb gtest gtest_main OpenSSL::Crypto)
+    add_test(NAME test_encryption COMMAND test_encryption)
+
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
     target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)

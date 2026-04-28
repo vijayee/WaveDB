@@ -37,7 +37,7 @@ typedef struct {
     uint8_t wrapped_dek[512]; /* Wrapped DEK (asymmetric mode) */
     size_t wrapped_dek_len;
     uint8_t salt[16];      /* Verification salt */
-    uint8_t check[28];     /* Verification ciphertext+tag */
+    uint8_t check[44];     /* Verification ciphertext+tag: IV(12) + CHECK_PT(16) + TAG(16) */
     uint8_t has_check;     /* Whether check was loaded from config */
 } encryption_t;
 

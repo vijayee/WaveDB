@@ -129,6 +129,8 @@ static size_t wrap_dek(EVP_PKEY* pubkey, const uint8_t* dek, size_t dek_len,
     return wrapped_len;
 }
 
+#define MAX_RSA_OUTPUT 512  /* Enough for 4096-bit RSA */
+
 static int unwrap_dek(EVP_PKEY* pkey, const uint8_t* wrapped, size_t wrapped_len,
                        uint8_t* dek_out, size_t* dek_len) {
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(pkey, NULL);
@@ -141,11 +143,21 @@ static int unwrap_dek(EVP_PKEY* pkey, const uint8_t* wrapped, size_t wrapped_len
         return -1;
     }
 
-    *dek_len = 32;
-    if (EVP_PKEY_decrypt(ctx, dek_out, dek_len, wrapped, wrapped_len) != 1) {
+    /* Provide a large enough buffer for OpenSSL to write into */
+    size_t out_len = MAX_RSA_OUTPUT;
+    uint8_t out_buf[MAX_RSA_OUTPUT];
+    if (EVP_PKEY_decrypt(ctx, out_buf, &out_len, wrapped, wrapped_len) != 1) {
         EVP_PKEY_CTX_free(ctx);
         return -1;
     }
+
+    /* Copy the DEK (32 bytes) from the decrypted output */
+    if (out_len > 32) {
+        EVP_PKEY_CTX_free(ctx);
+        return -1;
+    }
+    memcpy(dek_out, out_buf, out_len);
+    *dek_len = out_len;
 
     EVP_PKEY_CTX_free(ctx);
     return 0;
