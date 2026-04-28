@@ -79,6 +79,7 @@ const db = new WaveDB(path, options);
 | `wal.syncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
 | `wal.debounceMs` | `250` | fsync debounce window (ms) |
 | `wal.maxFileSize` | `131072` | Max WAL file size before sealing |
+| `encryption` | — | Encryption configuration (see below) |
 
 ### WAL Sync Modes
 
@@ -87,6 +88,83 @@ const db = new WaveDB(path, options);
 | `'immediate'` | fsync after every write | Highest | ~1K ops/sec |
 | `'debounced'` | batched fsync (default 250ms) | High | ~300K ops/sec |
 | `'async'` | buffered write, idle drain every 250ms | Process crash only | ~400K ops/sec |
+
+## Encryption
+
+WaveDB supports AES-256-GCM encryption at rest for WAL files and persisted pages. Encryption is set at database creation and cannot be changed on an existing database. Key material is never persisted — only a salt and verification check are stored.
+
+| Mode | Key | Use case |
+|------|-----|----------|
+| `'symmetric'` | 32-byte `Buffer` | Simple setups, embedded devices |
+| `'asymmetric'` | DER-encoded RSA key pair | Key rotation, write-only nodes |
+
+### Symmetric Encryption
+
+```javascript
+const { WaveDB, EncryptionError } = require('wavedb');
+
+const key = Buffer.alloc(32); // your 32-byte AES-256 key
+// ... fill key with crypto.randomBytes(32) or a derived key ...
+
+const db = new WaveDB('/path/to/db', {
+  enablePersist: true,
+  encryption: {
+    type: 'symmetric',
+    key: key            // required, exactly 32 bytes
+  }
+});
+
+// All operations work transparently — encryption is internal
+await db.put('users/alice/name', 'Alice');
+const name = await db.get('users/alice/name');
+
+// Reopen with the same key
+const db2 = new WaveDB('/path/to/db', {
+  enablePersist: true,
+  encryption: { type: 'symmetric', key }
+});
+```
+
+### Asymmetric Encryption
+
+```javascript
+const { WaveDB } = require('wavedb');
+const fs = require('fs');
+
+const publicKey = fs.readFileSync('public_key.der');
+const privateKey = fs.readFileSync('private_key.der');
+
+const db = new WaveDB('/path/to/db', {
+  enablePersist: true,
+  encryption: {
+    type: 'asymmetric',
+    publicKey: publicKey,    // required, DER-encoded
+    privateKey: privateKey   // optional — omit for write-only mode
+  }
+});
+```
+
+In asymmetric mode, a random data encryption key (DEK) is generated per session and wrapped with the RSA public key. The private key is required for decryption; a write-only node can omit `privateKey`.
+
+### Encryption Errors
+
+| Condition | Error | Message |
+|-----------|-------|---------|
+| Opening encrypted DB without a key | `EncryptionError` | "Encryption required: this database was created with encryption" |
+| Wrong key on re-open | `EncryptionError` | "Invalid encryption key" |
+| Adding encryption to unencrypted DB | `EncryptionError` | "Encryption unsupported" |
+| Symmetric key not 32 bytes | `RangeError` | "encryption.key must be exactly 32 bytes for AES-256" |
+| Missing required key material | `TypeError` | "encryption.key is required for symmetric encryption..." |
+
+```javascript
+try {
+  const db = new WaveDB('/path/to/db', { encryption: { type: 'symmetric', key } });
+} catch (err) {
+  if (err instanceof EncryptionError) {
+    console.error('Encryption failed:', err.message);
+  }
+}
+```
 
 ## API Reference
 
@@ -229,7 +307,7 @@ try {
 }
 ```
 
-Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALID_ARGUMENT`
+Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALID_ARGUMENT`, `ENCRYPTION`
 
 ## Performance
 

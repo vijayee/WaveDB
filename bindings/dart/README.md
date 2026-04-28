@@ -82,6 +82,7 @@ final db = WaveDB(
 | `walSyncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
 | `walDebounceMs` | `250` | fsync debounce window (ms) |
 | `walMaxFileSize` | `131072` | Max WAL file size before sealing |
+| `encryption` | — | Encryption configuration (see below) |
 
 ### WAL Sync Modes
 
@@ -90,6 +91,80 @@ final db = WaveDB(
 | `'immediate'` | fsync after every write | Highest | ~1K ops/sec |
 | `'debounced'` | batched fsync (default 250ms) | High | ~300K ops/sec |
 | `'async'` | buffered write, idle drain every 250ms | Process crash only | ~400K ops/sec |
+
+## Encryption
+
+WaveDB supports AES-256-GCM encryption at rest for WAL files and persisted pages. Encryption is set at database creation and cannot be changed on an existing database. Key material is never persisted — only a salt and verification check are stored.
+
+| Mode | Key | Use case |
+|------|-----|----------|
+| `'symmetric'` | 32-byte `Uint8List` | Simple setups, embedded devices |
+| `'asymmetric'` | DER-encoded RSA key pair | Key rotation, write-only nodes |
+
+### Symmetric Encryption
+
+```dart
+import 'package:wavedb/wavedb.dart';
+import 'dart:typed_data';
+
+final key = Uint8List.fromList(List.filled(32, 0)); // your 32-byte AES-256 key
+
+final db = WaveDB('/path/to/db',
+  delimiter: '/',
+  encryption: WaveDBEncryption.symmetric(key: key),
+);
+
+// All operations work transparently — encryption is internal
+db.putSync('users/alice/name', 'Alice');
+final name = db.getSync('users/alice/name');
+
+// Reopen with the same key
+final db2 = WaveDB('/path/to/db',
+  delimiter: '/',
+  encryption: WaveDBEncryption.symmetric(key: key),
+);
+```
+
+### Asymmetric Encryption
+
+```dart
+import 'dart:io';
+
+final publicKey = File('public_key.der').readAsBytesSync();
+final privateKey = File('private_key.der').readAsBytesSync();
+
+final db = WaveDB('/path/to/db',
+  delimiter: '/',
+  encryption: WaveDBEncryption.asymmetric(
+    publicKey: publicKey,    // required, DER-encoded
+    privateKey: privateKey,  // optional — omit for write-only mode
+  ),
+);
+```
+
+In asymmetric mode, a random data encryption key (DEK) is generated per session and wrapped with the RSA public key. The private key is required for decryption; a write-only node can omit `privateKey`.
+
+### Encryption Errors
+
+Encryption failures throw `WaveDBException` with code `IO_ERROR`:
+
+| Condition | Exception |
+|-----------|-----------|
+| Opening encrypted DB without a key | `WaveDBException(IO_ERROR)` |
+| Wrong key on re-open | `WaveDBException(IO_ERROR)` |
+| Adding encryption to unencrypted DB | `WaveDBException(IO_ERROR)` |
+| Invalid encryption type | `ArgumentError` |
+
+```dart
+try {
+  final db = WaveDB('/path/to/db',
+    encryption: WaveDBEncryption.symmetric(key: key));
+} on WaveDBException catch (e) {
+  if (e.code == 'IO_ERROR') {
+    print('Encryption failed: ${e.message}');
+  }
+}
+```
 
 ## API Reference
 
