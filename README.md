@@ -144,6 +144,86 @@ Config is persisted as CBOR at `<db_path>/.config` and automatically loaded on r
 | Increment | — | `database_increment_sync(db, path, delta)` |
 | Snapshot | — | `database_snapshot(db)` |
 
+## Encryption
+
+WaveDB supports AES-256-GCM encryption at rest for both WAL files and persisted pages. Two key modes are available:
+
+| Mode | Key | Use case |
+|------|-----|----------|
+| `ENCRYPTION_SYMMETRIC` | 32-byte user-supplied key | Simple setups, embedded devices |
+| `ENCRYPTION_ASYMMETRIC` | RSA key pair (DER-encoded) | Key rotation, write-only nodes |
+
+Encryption is set at database creation and cannot be changed on an existing database. Key material is never persisted — only a salt and verification check are stored, allowing key verification on re-open.
+
+### Symmetric Encryption
+
+```c
+#include "Database/database.h"
+#include "Database/database_config.h"
+#include "Storage/encryption.h"
+
+uint8_t key[32] = { /* your 32-byte AES-256 key */ };
+
+encrypted_database_config_t* config = encrypted_database_config_default();
+encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
+encrypted_database_config_set_symmetric_key(config, key, sizeof(key));
+database_config_set_enable_persist(&config->config, 1);
+
+int error = 0;
+database_t* db = database_create_encrypted("/path/to/db", config, &error);
+if (db == NULL) {
+    // error == DATABASE_ERR_ENCRYPTION_KEY_INVALID if key is wrong
+    // error == DATABASE_ERR_ENCRYPTION_REQUIRED if DB exists but is unencrypted
+    fprintf(stderr, "Error: %d\n", error);
+    return 1;
+}
+encrypted_database_config_destroy(config);
+
+// Use normally — encryption is transparent
+database_put_sync_raw(db, "users/alice/name", 16, '\037',
+                      (const uint8_t*)"Alice", 5);
+
+// Reopen with the same key
+encrypted_database_config_t* config2 = encrypted_database_config_default();
+encrypted_database_config_set_type(config2, ENCRYPTION_SYMMETRIC);
+encrypted_database_config_set_symmetric_key(config2, key, sizeof(key));
+database_config_set_enable_persist(&config2->config, 1);
+database_t* db2 = database_create_encrypted("/path/to/db", config2, &error);
+encrypted_database_config_destroy(config2);
+
+database_destroy(db);
+```
+
+### Asymmetric Encryption
+
+```c
+// Load DER-encoded keys (generated externally, e.g. OpenSSL)
+uint8_t private_key_der[1217] = { /* DER RSA private key */ };
+uint8_t public_key_der[294]  = { /* DER RSA public key */ };
+
+encrypted_database_config_t* config = encrypted_database_config_default();
+encrypted_database_config_set_type(config, ENCRYPTION_ASYMMETRIC);
+encrypted_database_config_set_asymmetric_private_key(
+    config, private_key_der, sizeof(private_key_der));
+encrypted_database_config_set_asymmetric_public_key(
+    config, public_key_der, sizeof(public_key_der));
+database_config_set_enable_persist(&config->config, 1);
+
+int error = 0;
+database_t* db = database_create_encrypted("/path/to/db", config, &error);
+encrypted_database_config_destroy(config);
+```
+
+In asymmetric mode, a random data encryption key (DEK) is generated per session and wrapped with the RSA public key. The private key is required for decryption; a write-only node can omit it.
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `DATABASE_ERR_ENCRYPTION_REQUIRED` | Database is encrypted but no key was provided |
+| `DATABASE_ERR_ENCRYPTION_KEY_INVALID` | Wrong key or key verification failed |
+| `DATABASE_ERR_ENCRYPTION_UNSUPPORTED` | Cannot add encryption to an existing unencrypted DB |
+
 ## Schema Layers
 
 ### GraphQL
@@ -331,6 +411,7 @@ Bundled — no external dependencies required:
 - **xxhash** — fast hashing
 - **hashmap** — hash map implementation
 - **libcbor** — CBOR serialization
+- **OpenSSL** — AES-256-GCM encryption (required for encrypted databases)
 
 ## Roadmap
 
