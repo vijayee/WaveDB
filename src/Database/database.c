@@ -655,6 +655,8 @@ static void database_eviction_task_execute(void* ctx) {
     database_t* db = (database_t*)ctx;
     if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) return;
 
+    __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+
     uint64_t offsets[64];
     size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
 
@@ -662,6 +664,8 @@ static void database_eviction_task_execute(void* ctx) {
         hbtrie_null_entries_by_offset(db->trie, offsets[i]);
         bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
     }
+
+    __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
 
     // Reschedule — work_pool_enqueue returns 1 if pool is stopped
     if (!db->destroying && db->pool != NULL) {
@@ -1234,12 +1238,14 @@ void database_destroy(database_t* db) {
         }
 
         // With an external pool, eviction tasks may still be in-flight.
-        // Drain the eviction queue and sleep briefly to let any in-flight
-        // eviction task see destroying=true and exit without rescheduling.
+        // Spin-wait until the in-flight counter drops to zero, meaning
+        // the eviction task has seen destroying=true and exited.
         if (!db->owns_pool && db->pool != NULL) {
             uint64_t offsets[64];
             eviction_queue_drain(&db->eviction_queue, offsets, 64);
-            usleep(10000);  // 10ms for in-flight eviction task to complete
+            while (__atomic_load_n(&db->eviction_in_flight, __ATOMIC_SEQ_CST) > 0) {
+                usleep(100);  // 100us yield between checks
+            }
         }
 
         // Flush all thread-local WALs to disk before destroying
