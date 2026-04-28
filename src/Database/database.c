@@ -1237,14 +1237,16 @@ void database_destroy(database_t* db) {
             work_pool_join_all(db->pool);
         }
 
-        // With an external pool, eviction tasks may still be in-flight.
-        // Spin-wait until the in-flight counter drops to zero, meaning
-        // the eviction task has seen destroying=true and exited.
+        // With an external pool, we can't shut it down. The eviction task
+        // is self-rescheduling — once it sees destroying=true it won't
+        // reschedule, but an in-flight instance may still be executing.
+        // Wait for it to finish before we free db.
         if (!db->owns_pool && db->pool != NULL) {
             uint64_t offsets[64];
             eviction_queue_drain(&db->eviction_queue, offsets, 64);
             while (__atomic_load_n(&db->eviction_in_flight, __ATOMIC_SEQ_CST) > 0) {
-                usleep(100);  // 100us yield between checks
+                // Yield to the worker thread executing the eviction task
+                sched_yield();
             }
         }
 
