@@ -54,14 +54,14 @@ protected:
 
 TEST_F(WalManagerTest, CreateManager) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
     EXPECT_EQ(error, 0);
 }
 
 TEST_F(WalManagerTest, GetThreadWal) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
     EXPECT_EQ(error, 0);
 
@@ -72,7 +72,7 @@ TEST_F(WalManagerTest, GetThreadWal) {
 
 TEST_F(WalManagerTest, ThreadWalFilePath) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     thread_wal_t* twal = get_thread_wal(manager);
@@ -86,7 +86,7 @@ TEST_F(WalManagerTest, ThreadWalFilePath) {
 
 TEST_F(WalManagerTest, MultipleThreadWals) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     // First call should create thread-local WAL
@@ -101,7 +101,7 @@ TEST_F(WalManagerTest, MultipleThreadWals) {
 
 TEST_F(WalManagerTest, WriteToThreadWal) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     thread_wal_t* twal = get_thread_wal(manager);
@@ -124,7 +124,7 @@ TEST_F(WalManagerTest, WriteToThreadWal) {
 
 TEST_F(WalManagerTest, ReadManifest) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     thread_wal_t* twal = get_thread_wal(manager);
@@ -156,7 +156,7 @@ TEST_F(WalManagerTest, ReadManifest) {
 
 TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     // Write entries from thread 1
@@ -236,7 +236,7 @@ TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
     manager = nullptr;
 
     // Reopen and recover
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     // Recovery should read both files
@@ -282,7 +282,7 @@ TEST_F(WalManagerTest, MigrateFromLegacyWal) {
 
 TEST_F(WalManagerTest, Compaction) {
     int error = 0;
-    manager = wal_manager_create(temp_dir, &config, NULL, &error);
+    manager = wal_manager_create(temp_dir, &config, NULL, NULL, &error);
     ASSERT_NE(manager, nullptr);
 
     // Write entries

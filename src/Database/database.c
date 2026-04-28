@@ -983,7 +983,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     // Create WAL manager
-    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, error_code);
+    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, db->encryption, error_code);
     if (db->wal_manager == NULL) {
         tx_manager_destroy(db->tx_manager);
         hbtrie_destroy(db->trie);
@@ -1141,6 +1141,9 @@ database_t* database_create_encrypted(const char* location,
 
     if (db != NULL) {
         db->encryption = encryption;
+        if (db->wal_manager != NULL) {
+            db->wal_manager->encryption = encryption;
+        }
     } else {
         // database_create_with_config failed — clean up encryption context
         encryption_destroy(encryption);

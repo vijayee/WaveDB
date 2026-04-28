@@ -8,6 +8,7 @@
 #include "../HBTrie/identifier.h"
 #include "../HBTrie/mvcc.h"
 #include "../Workers/transaction_id.h"
+#include "../Storage/encryption.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/mkdir_p.h"
@@ -32,6 +33,9 @@
 #define WAL_ERROR_MEMORY -3
 #define WAL_ERROR_CORRUPT -4
 #define WAL_ERROR_LIMIT -5
+#define WAL_ERROR_ENCRYPTION -6
+
+#define WAL_ENCRYPTED_MAGIC 0xE1
 
 // Maximum entries to prevent DoS
 #define MANIFEST_MAX_ENTRIES 10000
@@ -295,7 +299,7 @@ static int compare_recovery_entries(const void* a, const void* b) {
 }
 
 // Read entries from a single WAL file
-static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* count) {
+static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* count, encryption_t* encryption) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
         return -1;
@@ -336,11 +340,44 @@ static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* c
             break;
         }
 
-        // Verify CRC
+        // Verify CRC over the on-disk payload (encrypted or plaintext)
         uint32_t actual_crc = wal_crc32(data->data, data_len);
         if (actual_crc != expected_crc) {
             buffer_destroy(data);
             break;
+        }
+
+        // Handle encrypted payload
+        if (type == WAL_ENCRYPTED_MAGIC) {
+            if (encryption == NULL) {
+                log_error("WAL Recovery: Encrypted entry but no encryption context provided");
+                buffer_destroy(data);
+                break;
+            }
+            uint8_t* plaintext = NULL;
+            size_t pt_len = 0;
+            if (encryption_decrypt(encryption, data->data, data_len, &plaintext, &pt_len) != 0) {
+                log_error("WAL Recovery: Failed to decrypt WAL entry");
+                buffer_destroy(data);
+                break;
+            }
+            if (pt_len < 1) {
+                log_error("WAL Recovery: Decrypted payload too short");
+                free(plaintext);
+                buffer_destroy(data);
+                break;
+            }
+            // First byte of decrypted payload is the original wal_type_e
+            type = (wal_type_e)plaintext[0];
+            buffer_destroy(data);
+            data = buffer_create(pt_len - 1);
+            if (data == NULL) {
+                free(plaintext);
+                break;
+            }
+            memcpy(data->data, plaintext + 1, pt_len - 1);
+            data->size = pt_len - 1;
+            free(plaintext);
         }
 
         // Add to array
@@ -647,7 +684,7 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
 
 // Skeleton implementations (to be filled in next tasks)
 wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
-                                   hierarchical_timing_wheel_t* wheel, int* error_code) {
+                                   hierarchical_timing_wheel_t* wheel, encryption_t* encryption, int* error_code) {
     if (error_code) *error_code = 0;
 
     // Create directory if needed
@@ -678,6 +715,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->thread_capacity = 0;
     manager->sealed_count = 0;
     manager->wheel = wheel;  // Store timing wheel for one-shot timers
+    manager->encryption = encryption;
 
     // Create manifest file
     manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
@@ -715,7 +753,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
                                           wal_recovery_options_t* options,
                                           int* error_code) {
     // 1. Create manager
-    wal_manager_t* manager = wal_manager_create(location, config, NULL, error_code);
+    wal_manager_t* manager = wal_manager_create(location, config, NULL, NULL, error_code);
     if (manager == NULL) {
         return NULL;
     }
@@ -894,7 +932,7 @@ wal_manager_t* wal_manager_load_with_options(const char* location, wal_config_t*
     }
 
     // No migration needed, create or load normally
-    return wal_manager_create(location, config, NULL, error_code);
+    return wal_manager_create(location, config, NULL, NULL, error_code);
 }
 
 void wal_manager_destroy(wal_manager_t* manager) {
@@ -1139,21 +1177,50 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         return -1;
     }
 
-    // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
-    size_t entry_size = 33 + data->size;
+    encryption_t* encryption = twal->manager->encryption;
+    uint8_t* payload = data->data;
+    size_t payload_len = data->size;
+    wal_type_e header_type = type;
+    uint8_t* encrypted_buf = NULL;
 
-    // Calculate CRC32 of data (before acquiring lock)
-    uint32_t crc = wal_crc32(data->data, data->size);
+    if (encryption != NULL) {
+        // Prepend original type byte to payload before encryption
+        size_t plain_len = 1 + data->size;
+        uint8_t* plain_buf = get_memory(plain_len);
+        if (plain_buf == NULL) {
+            return -1;
+        }
+        plain_buf[0] = (uint8_t)type;
+        memcpy(plain_buf + 1, data->data, data->size);
+
+        size_t ct_len = 0;
+        if (encryption_encrypt(encryption, plain_buf, plain_len, &encrypted_buf, &ct_len) != 0) {
+            free(plain_buf);
+            log_error("WAL: Failed to encrypt entry payload");
+            return -1;
+        }
+        free(plain_buf);
+
+        payload = encrypted_buf;
+        payload_len = ct_len;
+        header_type = WAL_ENCRYPTED_MAGIC;
+    }
+
+    // Entry format: type(1) + txn_id(24) + crc32(4) + data_len(4) + data
+    size_t entry_size = 33 + payload_len;
+
+    // Calculate CRC32 of payload (encrypted or plaintext)
+    uint32_t crc = wal_crc32(payload, payload_len);
 
     // Prepare header buffer (before acquiring lock)
     uint8_t header_buf[33];
     uint8_t* ptr = header_buf;
-    *ptr++ = (uint8_t)type;
+    *ptr++ = (uint8_t)header_type;
     transaction_id_serialize(&txn_id, ptr);
     ptr += 24;
     write_be32(ptr, crc);
     ptr += 4;
-    write_be32(ptr, (uint32_t)data->size);
+    write_be32(ptr, (uint32_t)payload_len);
 
     // Acquire lock for thread safety
     platform_lock(&twal->lock);
@@ -1164,6 +1231,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         if (twal->batch_count > 0) {
             if (thread_wal_flush_buffer_locked(twal) != 0) {
                 platform_unlock(&twal->lock);
+                free(encrypted_buf);
                 return -1;
             }
         }
@@ -1178,6 +1246,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
                 log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
                          twal->manager->sealed_count, max_sealed);
                 platform_unlock(&twal->lock);
+                free(encrypted_buf);
                 return -1;
             }
         }
@@ -1186,6 +1255,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             log_error("WAL rotation failed (thread_id=%lu, current_size=%zu, max_size=%zu)",
                      (unsigned long)twal->thread_id, twal->current_size, twal->max_size);
             platform_unlock(&twal->lock);
+            free(encrypted_buf);
             return -1;
         }
     }
@@ -1195,6 +1265,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         // Buffer full — flush before adding
         if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
+            free(encrypted_buf);
             return -1;
         }
 
@@ -1203,14 +1274,15 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             struct iovec iov[2];
             iov[0].iov_base = header_buf;
             iov[0].iov_len = sizeof(header_buf);
-            iov[1].iov_base = data->data;
-            iov[1].iov_len = data->size;
+            iov[1].iov_base = payload;
+            iov[1].iov_len = payload_len;
             ssize_t bytes_written = writev(twal->fd, iov, 2);
-            if (bytes_written != (ssize_t)(sizeof(header_buf) + data->size)) {
+            if (bytes_written != (ssize_t)(sizeof(header_buf) + payload_len)) {
                 platform_unlock(&twal->lock);
+                free(encrypted_buf);
                 return -1;
             }
-            twal->current_size += sizeof(header_buf) + data->size;
+            twal->current_size += sizeof(header_buf) + payload_len;
 
             // Handle sync for direct write with error checking
             int result = 0;
@@ -1238,15 +1310,16 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
             twal->newest_txn_id = txn_id;
 
             platform_unlock(&twal->lock);
+            free(encrypted_buf);
             return result;
         }
     }
 
-    // Copy header + data to buffer
+    // Copy header + payload to buffer
     memcpy(twal->entry_buf + twal->entry_buf_used, header_buf, sizeof(header_buf));
     twal->entry_buf_used += sizeof(header_buf);
-    memcpy(twal->entry_buf + twal->entry_buf_used, data->data, data->size);
-    twal->entry_buf_used += data->size;
+    memcpy(twal->entry_buf + twal->entry_buf_used, payload, payload_len);
+    twal->entry_buf_used += payload_len;
     twal->batch_count++;
 
     // Update transaction ID tracking
@@ -1259,9 +1332,11 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     if (twal->entry_buf_used > sizeof(twal->entry_buf) / 2) {
         if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
+            free(encrypted_buf);
             return -1;
         }
         platform_unlock(&twal->lock);
+        free(encrypted_buf);
         return 0;
     }
 
@@ -1270,6 +1345,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         // Batch limit reached — flush immediately (IMMEDIATE mode)
         if (thread_wal_flush_buffer_locked(twal) != 0) {
             platform_unlock(&twal->lock);
+            free(encrypted_buf);
             return -1;
         }
     } else if (twal->batch_count == 1 && !twal->timer_active) {
@@ -1287,6 +1363,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
     }
 
     platform_unlock(&twal->lock);
+    free(encrypted_buf);
     return 0;
 }
 
@@ -1385,7 +1462,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
 
         recovery_entry_t* file_entries = NULL;
         size_t file_count = 0;
-        if (read_wal_file(manifest_entries[i].file_path, &file_entries, &file_count) == 0) {
+        if (read_wal_file(manifest_entries[i].file_path, &file_entries, &file_count, manager->encryption) == 0) {
             // Add to all_entries
             if (entry_count + file_count >= entry_capacity) {
                 entry_capacity = (entry_count + file_count) * 2;
@@ -1425,7 +1502,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
         if (!in_manifest) {
             recovery_entry_t* file_entries = NULL;
             size_t file_count = 0;
-            if (read_wal_file(wal_files[i], &file_entries, &file_count) == 0) {
+            if (read_wal_file(wal_files[i], &file_entries, &file_count, manager->encryption) == 0) {
                 if (entry_count + file_count >= entry_capacity) {
                     entry_capacity = (entry_count + file_count) * 2;
                     recovery_entry_t* new_entries = get_clear_memory(entry_capacity * sizeof(recovery_entry_t));
@@ -1808,7 +1885,7 @@ int compact_wal_files(wal_manager_t* manager) {
         if (entries[i].status == WAL_FILE_SEALED) {
             recovery_entry_t* file_entries = NULL;
             size_t file_count = 0;
-            int result = read_wal_file(entries[i].file_path, &file_entries, &file_count);
+            int result = read_wal_file(entries[i].file_path, &file_entries, &file_count, manager->encryption);
             if (result == 0 && file_count > 0) {
                 // Expand array if needed
                 if (entry_count + file_count >= entry_capacity) {
