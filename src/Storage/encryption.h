@@ -30,7 +30,6 @@ typedef enum {
  */
 typedef struct {
     encryption_type_t type;
-    void* cipher_ctx;       /* EVP_CIPHER_CTX* */
     void* pkey;            /* EVP_PKEY* — private key (NULL in write-only mode) */
     void* pubkey;          /* EVP_PKEY* — public key */
     uint8_t key[32];         /* Symmetric: AES-256 key. Asymmetric: DEK */

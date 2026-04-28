@@ -634,6 +634,32 @@ void encrypted_database_config_destroy(encrypted_database_config_t* config) {
 
 void encrypted_database_config_set_type(encrypted_database_config_t* config, encryption_type_t type) {
     if (config == NULL) return;
+
+    // Free previous key material if switching type
+    if (config->type != type) {
+        if (config->config.encryption.key != NULL) {
+            free(config->config.encryption.key);
+            config->config.encryption.key = NULL;
+            config->symmetric.key = NULL;
+            config->symmetric.key_length = 0;
+            config->config.encryption.key_length = 0;
+        }
+        if (config->config.encryption.private_key_der != NULL) {
+            free(config->config.encryption.private_key_der);
+            config->config.encryption.private_key_der = NULL;
+            config->asymmetric.private_key_der = NULL;
+            config->asymmetric.private_key_len = 0;
+            config->config.encryption.private_key_len = 0;
+        }
+        if (config->config.encryption.public_key_der != NULL) {
+            free(config->config.encryption.public_key_der);
+            config->config.encryption.public_key_der = NULL;
+            config->asymmetric.public_key_der = NULL;
+            config->asymmetric.public_key_len = 0;
+            config->config.encryption.public_key_len = 0;
+        }
+    }
+
     config->type = type;
     config->config.encryption.type = type;
     if (type != ENCRYPTION_NONE) {
