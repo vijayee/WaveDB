@@ -59,7 +59,7 @@ static int deserialize_superblock(const uint8_t* buf, page_superblock_t* out_sb)
     return 0;
 }
 
-page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t num_superblocks) {
+page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t num_superblocks, encryption_t* encryption) {
     if (path == NULL) return NULL;
 
     page_file_t* pf = get_clear_memory(sizeof(page_file_t));
@@ -71,6 +71,7 @@ page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t nu
     pf->cur_offset = 0;
     pf->revision = 0;
     pf->stale_mgr = stale_region_mgr_create();
+    pf->encryption = encryption;
     pf->is_writable = 0;
     platform_lock_init(&pf->lock);
 
@@ -226,13 +227,27 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
         return -1;
     }
 
-    // Guard: data_len must fit in uint32_t for the size prefix
-    if (data_len > UINT32_MAX) {
+    const uint8_t* write_data = data;
+    size_t write_len = data_len;
+    uint8_t* encrypted_buf = NULL;
+
+    if (pf->encryption != NULL) {
+        size_t ct_len = 0;
+        if (encryption_encrypt(pf->encryption, data, data_len, &encrypted_buf, &ct_len) != 0) {
+            return -1;
+        }
+        write_data = encrypted_buf;
+        write_len = ct_len;
+    }
+
+    // Guard: write_len must fit in uint32_t for the size prefix
+    if (write_len > UINT32_MAX) {
+        free(encrypted_buf);
         return -1;
     }
 
     // Total write = 4-byte size prefix + data
-    size_t total_len = 4 + data_len;
+    size_t total_len = 4 + write_len;
 
     platform_lock(&pf->lock);
 
@@ -243,10 +258,10 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
 
     size_t written = 0;
     size_t bids_count = 0;
-    const uint8_t* read_ptr = data;
+    const uint8_t* read_ptr = write_data;
 
     // Write the 4-byte size prefix first
-    uint32_t node_size = (uint32_t)data_len;
+    uint32_t node_size = (uint32_t)write_len;
 
     while (written < total_len) {
         // How much space is left in the current block
@@ -278,6 +293,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
             ssize_t w = pwrite(pf->fd, size_buf + written, prefix_to_write, write_pos);
             if (w != (ssize_t)prefix_to_write) {
                 platform_unlock(&pf->lock);
+                free(encrypted_buf);
                 return -1;
             }
             pf->cur_offset += prefix_to_write;
@@ -297,13 +313,14 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
             // Write actual data
             size_t data_written_so_far = written - 4;
             size_t data_to_write = usable;
-            if (data_to_write > data_len - data_written_so_far) {
-                data_to_write = data_len - data_written_so_far;
+            if (data_to_write > write_len - data_written_so_far) {
+                data_to_write = write_len - data_written_so_far;
             }
 
             ssize_t w = pwrite(pf->fd, read_ptr, data_to_write, write_pos);
             if (w != (ssize_t)data_to_write) {
                 platform_unlock(&pf->lock);
+                free(encrypted_buf);
                 return -1;
             }
             read_ptr += data_to_write;
@@ -317,6 +334,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
             // Check for overflow of bids array
             if (bids_count >= max_bids) {
                 platform_unlock(&pf->lock);
+                free(encrypted_buf);
                 return -1;
             }
             out_bids[bids_count] = pf->cur_bid;
@@ -341,6 +359,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
                 ssize_t w = pwrite(pf->fd, &meta, INDEX_BLK_META_SIZE, meta_pos);
                 if (w != INDEX_BLK_META_SIZE) {
                     platform_unlock(&pf->lock);
+                    free(encrypted_buf);
                     return -1;
                 }
 
@@ -354,6 +373,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
     *out_num_bids = bids_count;
 
     platform_unlock(&pf->lock);
+    free(encrypted_buf);
     return 0;
 }
 
@@ -390,7 +410,30 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
     if (data_start_in_block + 4 > data_area_len) {
         // Size prefix spans block boundary - fall back to multi-block read
         free(block_buf);
-        return page_file_read_node_multiblock(pf, offset, out_len);
+        uint8_t* result = page_file_read_node_multiblock(pf, offset, out_len);
+        if (result == NULL || pf->encryption == NULL) return result;
+        size_t encrypted_len = *out_len;
+        uint8_t* plaintext = NULL;
+        size_t plaintext_len = 0;
+        if (encryption_decrypt(pf->encryption, result + 4, encrypted_len, &plaintext, &plaintext_len) != 0) {
+            free(result);
+            *out_len = 0;
+            return NULL;
+        }
+        free(result);
+        size_t total = 4 + plaintext_len;
+        uint8_t* final_buf = (uint8_t*)malloc(total);
+        if (final_buf == NULL) {
+            free(plaintext);
+            *out_len = 0;
+            return NULL;
+        }
+        uint32_t plain_size = (uint32_t)plaintext_len;
+        memcpy(final_buf, &plain_size, 4);
+        memcpy(final_buf + 4, plaintext, plaintext_len);
+        free(plaintext);
+        *out_len = plaintext_len;
+        return final_buf;
     }
 
     uint32_t node_size;
@@ -415,13 +458,60 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
         memcpy(result, block_buf + data_start_in_block, total);
         free(block_buf);
         *out_len = node_size;
+
+        if (pf->encryption != NULL) {
+            uint8_t* plaintext = NULL;
+            size_t plaintext_len = 0;
+            if (encryption_decrypt(pf->encryption, result + 4, node_size, &plaintext, &plaintext_len) != 0) {
+                free(result);
+                *out_len = 0;
+                return NULL;
+            }
+            free(result);
+            size_t final_total = 4 + plaintext_len;
+            uint8_t* final_buf = (uint8_t*)malloc(final_total);
+            if (final_buf == NULL) {
+                free(plaintext);
+                *out_len = 0;
+                return NULL;
+            }
+            uint32_t plain_size = (uint32_t)plaintext_len;
+            memcpy(final_buf, &plain_size, 4);
+            memcpy(final_buf + 4, plaintext, plaintext_len);
+            free(plaintext);
+            *out_len = plaintext_len;
+            return final_buf;
+        }
         return result;
     }
 
     // Multi-block node: use block buffer for the first part, then follow
     // IndexBlkMeta links for the remainder.
     free(block_buf);
-    return page_file_read_node_multiblock(pf, offset, out_len);
+    uint8_t* result = page_file_read_node_multiblock(pf, offset, out_len);
+    if (result == NULL || pf->encryption == NULL) return result;
+    size_t encrypted_len = *out_len;
+    uint8_t* plaintext = NULL;
+    size_t plaintext_len = 0;
+    if (encryption_decrypt(pf->encryption, result + 4, encrypted_len, &plaintext, &plaintext_len) != 0) {
+        free(result);
+        *out_len = 0;
+        return NULL;
+    }
+    free(result);
+    size_t final_total = 4 + plaintext_len;
+    uint8_t* final_buf = (uint8_t*)malloc(final_total);
+    if (final_buf == NULL) {
+        free(plaintext);
+        *out_len = 0;
+        return NULL;
+    }
+    uint32_t plain_size = (uint32_t)plaintext_len;
+    memcpy(final_buf, &plain_size, 4);
+    memcpy(final_buf + 4, plaintext, plaintext_len);
+    free(plaintext);
+    *out_len = plaintext_len;
+    return final_buf;
 }
 
 // Multi-block read: follows IndexBlkMeta links across blocks.

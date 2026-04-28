@@ -58,7 +58,7 @@ TEST_F(BnodeCacheTest, WriteReadNode) {
     char path[512];
     make_path(path, sizeof(path), "test2.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -98,7 +98,7 @@ TEST_F(BnodeCacheTest, WriteReadMultipleNodes) {
     char path[512];
     make_path(path, sizeof(path), "test3.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -143,7 +143,7 @@ TEST_F(BnodeCacheTest, FlushDirty) {
     char path[512];
     make_path(path, sizeof(path), "test4.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -188,7 +188,7 @@ TEST_F(BnodeCacheTest, EvictionOnMemoryPressure) {
     char path[512];
     make_path(path, sizeof(path), "test5.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -258,7 +258,7 @@ TEST_F(BnodeCacheTest, ReferenceCounting) {
     char path[512];
     make_path(path, sizeof(path), "test6.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -307,7 +307,7 @@ TEST_F(BnodeCacheTest, InvalidateNode) {
     char path[512];
     make_path(path, sizeof(path), "test7.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -350,7 +350,7 @@ TEST_F(BnodeCacheTest, FlushNoDirty) {
     char path[512];
     make_path(path, sizeof(path), "test8.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -379,7 +379,7 @@ TEST_F(BnodeCacheTest, MultiShardReadWrite) {
     char path[512];
     make_path(path, sizeof(path), "test9.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);
@@ -439,7 +439,7 @@ TEST_F(BnodeCacheTest, EvictionCallbackAndDeferredFree) {
     char path[512];
     make_path(path, sizeof(path), "evict_cb.db");
 
-    page_file_t* pf = page_file_create(path, 4096, 2);
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     int rc = page_file_open(pf, 1);
     EXPECT_EQ(rc, 0);

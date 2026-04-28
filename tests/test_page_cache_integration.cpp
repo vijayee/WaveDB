@@ -39,7 +39,7 @@ protected:
 
     void setup_cache(size_t max_memory, size_t num_shards = 3) {
         mgr = bnode_cache_mgr_create(max_memory, num_shards);
-        pf = page_file_create(path, 4096, 2);
+        pf = page_file_create(path, 4096, 2, NULL);
         page_file_open(pf, 1);
         fcache = bnode_cache_create_file_cache(mgr, pf, path);
     }
@@ -226,7 +226,7 @@ TEST_F(PageCacheIntegrationTest, DirtyFlushCycle) {
        With block_size=4096, the first node starts at offset 8192.
        Each small node (< 4080 - 16 = 4064 bytes payload) fits in one block.
        After the IndexBlkMeta, the next block starts at cur_bid * 4096. */
-    pf = page_file_create(path, 4096, 2);
+    pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     rc = page_file_open(pf, 1);
     ASSERT_EQ(rc, 0);
@@ -470,7 +470,7 @@ TEST_F(PageCacheIntegrationTest, CrashRecoverySimulation) {
     pf = nullptr;
 
     /* Phase 3: Reopen and read the superblock */
-    pf = page_file_create(path, 4096, 2);
+    pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     rc = page_file_open(pf, 1);
     ASSERT_EQ(rc, 0);

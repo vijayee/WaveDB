@@ -841,7 +841,7 @@ database_t* database_create_with_config(const char* location,
         snprintf(page_path, sizeof(page_path), "%s/data.wdbp", location);
 
         db->page_file = page_file_create(page_path,
-            PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS);
+            PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS, db->encryption);
         if (db->page_file != NULL) {
             int pf_rc = page_file_open(db->page_file, 1);
             if (pf_rc == 0) {
