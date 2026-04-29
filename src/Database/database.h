@@ -88,6 +88,8 @@ typedef struct {
 
     // Encryption context (NULL if no encryption)
     encryption_t* encryption;
+
+    uint8_t sync_only;                  // 1 = sync-only mode (no concurrency control)
 } database_t;
 
 /**

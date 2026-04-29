@@ -629,7 +629,14 @@ int database_flush_dirty_bnodes(database_t* db) {
     root->is_dirty = 0;
 
     // 5. Write superblock with new root offset and transaction ID
-    transaction_id_t last_txn = tx_manager_get_last_committed(db->tx_manager);
+    transaction_id_t last_txn;
+    if (db->tx_manager != NULL) {
+        last_txn = tx_manager_get_last_committed(db->tx_manager);
+    } else {
+        last_txn.time = 0;
+        last_txn.nanos = 0;
+        last_txn.count = 0;
+    }
     int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0, &last_txn);
     if (sb_rc != 0) {
         vec_deinit(&dirty_list);
@@ -772,6 +779,7 @@ database_t* database_create_with_config(const char* location,
     db->lru_memory_mb = effective_config->lru_memory_mb;
     db->chunk_size = effective_config->chunk_size;
     db->btree_node_size = effective_config->btree_node_size;
+    db->sync_only = effective_config->sync_only;
     db->is_rebuilding = 0;
 
     // Handle pool ownership
@@ -789,6 +797,10 @@ database_t* database_create_with_config(const char* location,
             return NULL;
         }
         work_pool_launch(db->pool);
+    } else if (effective_config->sync_only) {
+        // Sync-only mode: no pool needed
+        db->pool = NULL;
+        db->owns_pool = false;
     } else {
         // No pool available
         if (error_code) *error_code = EINVAL;
@@ -813,6 +825,10 @@ database_t* database_create_with_config(const char* location,
             if (error_code) *error_code = ENOMEM;
             return NULL;
         }
+    } else if (effective_config->sync_only) {
+        // Sync-only mode: no wheel needed
+        db->wheel = NULL;
+        db->owns_wheel = false;
     } else {
         // No wheel available
         if (error_code) *error_code = EINVAL;
@@ -835,9 +851,11 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
 
-    // Initialize write locks
-    for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-        spinlock_init(&db->write_locks[i]);
+    // Initialize write locks (only needed for concurrent mode)
+    if (!db->sync_only) {
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            spinlock_init(&db->write_locks[i]);
+        }
     }
 
     // Create storage directories if persistent
@@ -945,14 +963,16 @@ database_t* database_create_with_config(const char* location,
                     db->bnode_cache->on_evict = database_on_bnode_evict;
                     db->bnode_cache->on_evict_data = db;
 
-                    // Start background eviction task
-                    work_t* task = work_create(database_eviction_task_execute,
-                                                database_eviction_task_abort,
-                                                db);
-                    if (task != NULL) {
-                        __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
-                        refcounter_yield((refcounter_t*) task);
-                        work_pool_enqueue(db->pool, task);
+                    // Start background eviction task (only in concurrent mode)
+                    if (!db->sync_only && db->pool != NULL) {
+                        work_t* task = work_create(database_eviction_task_execute,
+                                                    database_eviction_task_abort,
+                                                    db);
+                        if (task != NULL) {
+                            __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+                            refcounter_yield((refcounter_t*) task);
+                            work_pool_enqueue(db->pool, task);
+                        }
                     }
                 }
             } else {
@@ -968,8 +988,10 @@ database_t* database_create_with_config(const char* location,
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
-        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            spinlock_destroy(&db->write_locks[i]);
+        if (!db->sync_only) {
+            for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+                spinlock_destroy(&db->write_locks[i]);
+            }
         }
         free(db->location);
         free(db);
@@ -978,18 +1000,22 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
 
-    // Create transaction manager
-    db->tx_manager = tx_manager_create(db->trie, db->pool, db->wheel, 100);
+    // Create transaction manager (only needed for concurrent mode)
+    if (!db->sync_only) {
+        db->tx_manager = tx_manager_create(db->trie, db->pool, db->wheel, 100);
 
-    // Apply pending MVCC transaction ID from page file superblock
-    // (page file loads before tx_manager is created, so we deferred this)
-    if (db->has_pending_txn_id && db->tx_manager != NULL) {
-        transaction_id_advance_to(&db->pending_txn_id);
-        atomic_store(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
-        db->has_pending_txn_id = 0;
+        // Apply pending MVCC transaction ID from page file superblock
+        // (page file loads before tx_manager is created, so we deferred this)
+        if (db->has_pending_txn_id && db->tx_manager != NULL) {
+            transaction_id_advance_to(&db->pending_txn_id);
+            atomic_store(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
+            db->has_pending_txn_id = 0;
+        }
+    } else {
+        db->tx_manager = NULL;
     }
 
-    if (db->tx_manager == NULL) {
+    if (db->tx_manager == NULL && !db->sync_only) {
         hbtrie_destroy(db->trie);
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
@@ -1012,8 +1038,10 @@ database_t* database_create_with_config(const char* location,
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
-        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            spinlock_destroy(&db->write_locks[i]);
+        if (!db->sync_only) {
+            for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+                spinlock_destroy(&db->write_locks[i]);
+            }
         }
         free(db->location);
         free(db);
@@ -1338,9 +1366,11 @@ void database_destroy(database_t* db) {
         // Destroy transaction manager
         if (db->tx_manager) tx_manager_destroy(db->tx_manager);
 
-        // Destroy write lock shards
-        for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
-            spinlock_destroy(&db->write_locks[i]);
+        // Destroy write lock shards (only concurrent mode initialized them)
+        if (!db->sync_only) {
+            for (size_t i = 0; i < WRITE_LOCK_SHARDS; i++) {
+                spinlock_destroy(&db->write_locks[i]);
+            }
         }
 
         // Destroy active config
@@ -1672,8 +1702,10 @@ int database_snapshot(database_t* db) {
         wal_manager_flush(db->wal_manager);
     }
 
-    // MVCC: Trigger GC to clean up old versions
-    tx_manager_gc(db->tx_manager);
+    // MVCC: Trigger GC to clean up old versions (only in concurrent mode)
+    if (db->tx_manager != NULL) {
+        tx_manager_gc(db->tx_manager);
+    }
 
     // Save index to disk
     if (db->page_file != NULL) {
