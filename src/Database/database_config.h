@@ -62,6 +62,7 @@ typedef struct {
     uint32_t btree_node_size;     // B+tree node size (default: 4096)
     uint8_t enable_persist;       // 0 = in-memory, 1 = persistent
     encryption_config_t encryption; // Encryption settings (type + keys are immutable)
+    uint8_t sync_only;            // 1 = sync-only (no MVCC, no locks), 0 = concurrent
 
     // === MUTABLE SETTINGS ===
     size_t lru_memory_mb;         // LRU cache size in MB (default: 50)
@@ -153,6 +154,7 @@ void database_config_set_wal_sync_mode(database_config_t* config, uint8_t mode);
 void database_config_set_wal_debounce_ms(database_config_t* config, uint64_t ms);
 void database_config_set_wal_max_file_size(database_config_t* config, size_t size);
 void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms);
+void database_config_set_sync_only(database_config_t* config, uint8_t sync_only);
 
 /**
  * Encrypted database configuration.

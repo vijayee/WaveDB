@@ -34,6 +34,8 @@ database_config_t* database_config_default(void) {
     memset(config->encryption.check, 0, sizeof(config->encryption.check));
     config->encryption.has_encryption = 0;
 
+    config->sync_only = 0;  // Default: concurrent mode
+
     // Mutable settings
     config->lru_memory_mb = DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB;
     config->lru_shards = DATABASE_CONFIG_DEFAULT_LRU_SHARDS;  // 0 = auto-scale
@@ -138,7 +140,7 @@ int database_config_save(const char* location, const database_config_t* config) 
     snprintf(config_path, path_len, "%s/.config", location);
 
     // Create CBOR map
-    cbor_item_t* root = cbor_new_definite_map(14);
+    cbor_item_t* root = cbor_new_definite_map(15);
     if (root == NULL) {
         free(config_path);
         return -1;
@@ -164,6 +166,11 @@ int database_config_save(const char* location, const database_config_t* config) 
     cbor_map_add(root, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("enable_persist")),
         .value = cbor_move(cbor_build_uint8(config->enable_persist))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("sync_only")),
+        .value = cbor_move(cbor_build_uint8(config->sync_only))
     });
 
     // Add mutable settings
@@ -394,6 +401,7 @@ database_config_t* database_config_load(const char* location) {
     config->chunk_size = (uint8_t)get_map_uint(root, "chunk_size", DATABASE_CONFIG_DEFAULT_CHUNK_SIZE);
     config->btree_node_size = (uint32_t)get_map_uint(root, "btree_node_size", DATABASE_CONFIG_DEFAULT_BTREE_NODE_SIZE);
     config->enable_persist = (uint8_t)get_map_uint(root, "enable_persist", 1);
+    config->sync_only = (uint8_t)get_map_uint(root, "sync_only", 0);
 
     // Read mutable settings
     config->lru_memory_mb = get_map_uint(root, "lru_memory_mb", DATABASE_CONFIG_DEFAULT_LRU_MEMORY_MB);
@@ -475,6 +483,7 @@ database_config_t* database_config_merge(const database_config_t* saved,
     merged->chunk_size = saved->chunk_size;
     merged->btree_node_size = saved->btree_node_size;
     merged->enable_persist = saved->enable_persist;
+    merged->sync_only = saved->sync_only;  // Immutable: use saved value
 
     // ENCRYPTION: Immutable type and persisted verification data come from saved config.
     // Key material (not persisted) comes from passed config at open time.
@@ -583,6 +592,11 @@ void database_config_set_wal_max_file_size(database_config_t* config, size_t siz
 void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms) {
     if (config == NULL) return;
     config->timer_resolution_ms = ms;
+}
+
+void database_config_set_sync_only(database_config_t* config, uint8_t sync_only) {
+    if (config == NULL) return;
+    config->sync_only = sync_only ? 1 : 0;
 }
 
 // === Encrypted database config ===
