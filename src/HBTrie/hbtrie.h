@@ -318,6 +318,44 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
 identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_id);
 
 /**
+ * Unsafe variants for sync-only mode.
+ * Skip all per-node spinlocks and seqlock validation.
+ * Still handle has_versions for cross-mode compatibility.
+ *
+ * @param trie    HBTrie to operate on
+ * @param path    Path key (sequence of identifiers)
+ * @return Value if found, or NULL if not found
+ */
+identifier_t* hbtrie_find_unsafe(hbtrie_t* trie, path_t* path);
+
+/**
+ * Insert a value without per-node locks (sync-only mode).
+ *
+ * Uses legacy mode (has_versions=0) for new insertions for cross-mode compat.
+ * Still handles existing has_versions=1 entries from async mode.
+ *
+ * @param trie    HBTrie to insert into
+ * @param path    Path key (sequence of identifiers)
+ * @param value   Value to store (takes ownership of reference)
+ * @param txn_id  Transaction ID for this write
+ * @return 0 on success, -1 on failure
+ */
+int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, transaction_id_t txn_id);
+
+/**
+ * Delete a value without per-node locks (sync-only mode).
+ *
+ * Creates a tombstone version for the given transaction ID.
+ * Still handles version chains for cross-mode compat.
+ *
+ * @param trie    HBTrie to remove from
+ * @param path    Path key to remove
+ * @param txn_id  Transaction ID for this delete
+ * @return Removed value (last visible), or NULL if not found
+ */
+identifier_t* hbtrie_delete_unsafe(hbtrie_t* trie, path_t* path, transaction_id_t txn_id);
+
+/**
  * Garbage collect old versions in the trie.
  *
  * Removes versions older than min_active_txn_id from all entries.
