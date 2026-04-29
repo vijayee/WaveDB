@@ -26,6 +26,9 @@ benchmark_*.txt
 !CMakeLists.txt
 !bindings/nodejs/*.json
 
+# KVBench benchmark suite (nested git repo)
+KVBench/
+
 
 # Dart bindings
 bindings/dart/.dart_tool/
