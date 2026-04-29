@@ -1727,12 +1727,57 @@ size_t database_count(database_t* db) {
 // ============================================================================
 
 int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
-    // Validation (same as async)
+    // Validation (shared)
     if (db == NULL || path == NULL || value == NULL) {
         if (path) path_destroy(path);
         if (value) identifier_destroy(value);
         return -1;
     }
+
+    // Fast path: sync-only mode — skip MVCC, locks, and write_locks
+    if (db->sync_only) {
+        transaction_id_t txn_id = transaction_id_get_next();
+
+        // Write to thread-local WAL (same durability as concurrent path)
+        buffer_t* entry = encode_put_entry_binary(path, value);
+        if (entry != NULL) {
+            thread_wal_t* twal = get_thread_wal(db->wal_manager);
+            if (twal != NULL) {
+                int result = thread_wal_write(twal, txn_id, WAL_PUT, entry);
+                if (result != 0) {
+                    log_error("Failed to write to thread-local WAL (result=%d, txn_id=%lu.%09lu.%lu)",
+                             result, txn_id.time, txn_id.nanos, txn_id.count);
+                } else {
+                    log_debug("Wrote PUT to WAL (txn_id=%lu.%09lu.%lu)",
+                             txn_id.time, txn_id.nanos, txn_id.count);
+                }
+            } else {
+                log_error("get_thread_wal returned NULL - cannot write to WAL");
+            }
+            buffer_destroy(entry);
+        } else {
+            log_error("encode_put_entry_binary returned NULL - cannot write to WAL");
+        }
+
+        // Apply to trie without per-node locks or MVCC version tracking
+        hbtrie_insert_unsafe(db->trie, path, value, txn_id);
+
+        // Update LRU cache (unsafe — no mutex)
+        path_t* copied_path = path_copy(path);
+        identifier_t* value_ref = REFERENCE(value, identifier_t);
+        identifier_t* ejected = database_lru_cache_put_unsafe(db->lru, copied_path, value_ref);
+        if (ejected) {
+            identifier_destroy(ejected);
+        }
+
+        // Cleanup
+        path_destroy(path);
+        identifier_destroy(value);
+
+        return 0;
+    }
+
+    // --- Concurrent path (unchanged) ---
 
     // Begin MVCC transaction
     txn_desc_t* txn = tx_manager_begin(db->tx_manager);
@@ -1810,6 +1855,41 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
         return -1;
     }
 
+    // Fast path: sync-only mode — skip seqlocks and tx_manager
+    if (db->sync_only) {
+        // Check LRU cache first (unsafe — no mutex)
+        identifier_t* value = database_lru_cache_get_unsafe(db->lru, path);
+        if (value != NULL) {
+            path_destroy(path);
+            *result = value;
+            return 0;
+        }
+
+        // Look up in trie without seqlocks or MVCC version resolution
+        value = hbtrie_find_unsafe(db->trie, path);
+
+        // Add to LRU cache if found (unsafe — no mutex)
+        if (value != NULL) {
+            path_t* copied_path = path_copy(path);
+            identifier_t* cached = REFERENCE(value, identifier_t);
+            identifier_t* ejected = database_lru_cache_put_unsafe(db->lru, copied_path, cached);
+            if (ejected) {
+                identifier_destroy(ejected);
+            }
+        }
+
+        path_destroy(path);
+
+        if (value != NULL) {
+            *result = value;
+            return 0;
+        } else {
+            return -2;  // Not found
+        }
+    }
+
+    // --- Concurrent path (unchanged) ---
+
     // Check LRU cache first
     identifier_t* value = database_lru_cache_get(db->lru, path);
     if (value != NULL) {
@@ -1854,6 +1934,40 @@ int database_delete_sync(database_t* db, path_t* path) {
         if (path) path_destroy(path);
         return -1;
     }
+
+    // Fast path: sync-only mode — skip MVCC, locks, and write_locks
+    if (db->sync_only) {
+        transaction_id_t txn_id = transaction_id_get_next();
+
+        // Write to thread-local WAL
+        buffer_t* entry = encode_delete_entry_binary(path);
+        if (entry != NULL) {
+            thread_wal_t* twal = get_thread_wal(db->wal_manager);
+            if (twal != NULL) {
+                int result = thread_wal_write(twal, txn_id, WAL_DELETE, entry);
+                if (result != 0) {
+                    log_warn("Failed to write to thread-local WAL");
+                }
+            }
+            buffer_destroy(entry);
+        }
+
+        // Remove from trie without per-node locks or MVCC version tracking
+        identifier_t* removed = hbtrie_delete_unsafe(db->trie, path, txn_id);
+
+        // Remove from LRU cache (unsafe — no mutex)
+        database_lru_cache_delete_unsafe(db->lru, path);
+
+        path_destroy(path);
+
+        if (removed) {
+            identifier_destroy(removed);
+        }
+
+        return 0;
+    }
+
+    // --- Concurrent path (unchanged) ---
 
     // Begin transaction
     txn_desc_t* txn = tx_manager_begin(db->tx_manager);
