@@ -2690,11 +2690,6 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
     return -1;
   }
 
-  // Track path for node creation and split propagation
-  typedef struct { hbtrie_node_t* node; size_t chunk_index; } mvcc_path_item_t;
-  vec_t(mvcc_path_item_t) path_stack;
-  vec_init(&path_stack);
-
   // Track chunk counts per identifier for path metadata
   vec_t(size_t) identifier_chunk_counts;
   vec_init(&identifier_chunk_counts);
@@ -2704,7 +2699,6 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
-      vec_deinit(&path_stack);
       vec_deinit(&identifier_chunk_counts);
       return -1;
     }
@@ -2715,27 +2709,18 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
-        vec_deinit(&path_stack);
         vec_deinit(&identifier_chunk_counts);
         return -1;
       }
 
-retry_chunk_insert_unsafe:;
       size_t index;
       btree_path_t bnode_path = {0};
       bnode_t* leaf = ensure_btree_loaded(current, chunk, &bnode_path, trie);
       if (leaf == NULL) {
-        vec_deinit(&path_stack);
         vec_deinit(&identifier_chunk_counts);
         return -1;
       }
       bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
-
-      // Track node for split propagation
-      if (path_stack.length == 0 || path_stack.data[path_stack.length - 1].node != current) {
-        mvcc_path_item_t ps_item = { current, j };
-        vec_push(&path_stack, ps_item);
-      }
 
       int is_last_chunk = (j == nchunk - 1);
       int is_last_identifier = (i == path_len_ids - 1);
@@ -2753,7 +2738,6 @@ retry_chunk_insert_unsafe:;
 
           if (bnode_insert(leaf, &new_entry) != 0) {
             bnode_entry_destroy_key(&new_entry);
-            vec_deinit(&path_stack);
             vec_deinit(&identifier_chunk_counts);
             return -1;
           }
@@ -2796,7 +2780,6 @@ retry_chunk_insert_unsafe:;
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
-              vec_deinit(&path_stack);
               vec_deinit(&identifier_chunk_counts);
               return -1;
             }
@@ -2817,7 +2800,6 @@ retry_chunk_insert_unsafe:;
             );
             if (old_version == NULL) {
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
 
@@ -2833,7 +2815,6 @@ retry_chunk_insert_unsafe:;
               entry->has_versions = 0;
               entry->versions = NULL;
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
             mark_dirty(current, leaf);
@@ -2846,7 +2827,6 @@ retry_chunk_insert_unsafe:;
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
             return -1;
           }
 
@@ -2859,7 +2839,6 @@ retry_chunk_insert_unsafe:;
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
             return -1;
           }
 
@@ -2894,7 +2873,6 @@ retry_chunk_insert_unsafe:;
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
             entry->trie_child = child;
@@ -2926,7 +2904,6 @@ retry_chunk_insert_unsafe:;
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
             entry->child = child;
@@ -2940,7 +2917,6 @@ retry_chunk_insert_unsafe:;
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
             vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
             return -1;
           }
 
@@ -2953,7 +2929,6 @@ retry_chunk_insert_unsafe:;
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
             vec_deinit(&identifier_chunk_counts);
-            vec_deinit(&path_stack);
             return -1;
           }
 
@@ -2988,7 +2963,6 @@ retry_chunk_insert_unsafe:;
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
             entry->trie_child = child;
@@ -3020,7 +2994,6 @@ retry_chunk_insert_unsafe:;
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
               vec_deinit(&identifier_chunk_counts);
-              vec_deinit(&path_stack);
               return -1;
             }
             entry->child = child;
@@ -3032,10 +3005,8 @@ retry_chunk_insert_unsafe:;
     }
   }
 
-  (void)path_stack;  // Splits are now handled inline after each insert
 
   vec_deinit(&identifier_chunk_counts);
-  vec_deinit(&path_stack);
   return 0;
 }
 
@@ -3321,7 +3292,6 @@ identifier_t* hbtrie_delete_unsafe(hbtrie_t* trie, path_t* path, transaction_id_
         return NULL;
       }
 
-retry_chunk_delete_unsafe:;
       size_t index;
       bnode_t* leaf = ensure_btree_loaded(current, chunk, NULL, trie);
       if (leaf == NULL) {
