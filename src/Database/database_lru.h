@@ -103,6 +103,14 @@ identifier_t* database_lru_cache_get(database_lru_cache_t* lru, path_t* path);
 identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, identifier_t* value);
 
 /**
+ * Unsafe variants for sync-only mode.
+ * Skip all mutex locking. Not thread-safe.
+ */
+identifier_t* database_lru_cache_get_unsafe(database_lru_cache_t* lru, path_t* path);
+identifier_t* database_lru_cache_put_unsafe(database_lru_cache_t* lru, path_t* path, identifier_t* value);
+void database_lru_cache_delete_unsafe(database_lru_cache_t* lru, path_t* path);
+
+/**
  * Delete a value from the cache.
  *
  * @param lru  Cache to update

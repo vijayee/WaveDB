@@ -363,6 +363,134 @@ identifier_t* database_lru_cache_put(database_lru_cache_t* lru, path_t* path, id
     return ejected;
 }
 
+identifier_t* database_lru_cache_get_unsafe(database_lru_cache_t* lru, path_t* path) {
+    if (lru == NULL || path == NULL) {
+        return NULL;
+    }
+
+    size_t shard_idx = get_shard_index(lru, path);
+    database_lru_shard_t* shard = &lru->shards[shard_idx];
+
+    database_lru_node_t* node = hashmap_get(&shard->cache, path);
+    if (node == NULL) {
+        return NULL;
+    }
+
+    // Move to front (most recently used)
+    lru_move_to_front(shard, node);
+
+    // Return reference to value
+    identifier_t* value = (identifier_t*)refcounter_reference((refcounter_t*)node->value);
+
+    return value;
+}
+
+identifier_t* database_lru_cache_put_unsafe(database_lru_cache_t* lru, path_t* path, identifier_t* value) {
+    if (lru == NULL || path == NULL) {
+        if (path != NULL) path_destroy(path);
+        if (value != NULL) identifier_destroy(value);
+        return NULL;
+    }
+
+    size_t shard_idx = get_shard_index(lru, path);
+    database_lru_shard_t* shard = &lru->shards[shard_idx];
+
+    // Check if already exists
+    database_lru_node_t* existing = hashmap_get(&shard->cache, path);
+    identifier_t* ejected = NULL;
+
+    if (existing != NULL) {
+        // Update existing entry
+        identifier_t* old_value = existing->value;
+        existing->value = value;
+
+        // Update memory tracking
+        size_t old_memory = existing->memory_size;
+        existing->memory_size = calculate_entry_memory(path, value);
+        shard->current_memory += (existing->memory_size - old_memory);
+
+        path_destroy(path); // We don't need the new path, keep the old one
+        lru_move_to_front(shard, existing);
+        return old_value; // Caller must destroy old value
+    }
+
+    // Check if we need to evict (memory-based)
+    size_t entry_memory = calculate_entry_memory(path, value);
+    while (shard->current_memory + entry_memory > shard->max_memory && shard->last != NULL) {
+        identifier_t* evicted = lru_evict(shard);
+        if (evicted != NULL) {
+            identifier_destroy(evicted);
+        }
+    }
+
+    // Create new node
+    database_lru_node_t* node = lru_node_create(path, value);
+    if (node == NULL) {
+        return ejected;
+    }
+
+    // Add to hashmap
+    int result = hashmap_put(&shard->cache, node->path, node);
+    if (result != 0) {
+        lru_node_destroy(node);
+        return ejected;
+    }
+
+    // Add to front of list
+    node->next = shard->first;
+    if (shard->first != NULL) {
+        shard->first->previous = node;
+    }
+    shard->first = node;
+    if (shard->last == NULL) {
+        shard->last = node;
+    }
+
+    // Update memory tracking
+    shard->current_memory += node->memory_size;
+    shard->entry_count++;
+
+    return ejected;
+}
+
+void database_lru_cache_delete_unsafe(database_lru_cache_t* lru, path_t* path) {
+    if (lru == NULL || path == NULL) {
+        return;
+    }
+
+    size_t shard_idx = get_shard_index(lru, path);
+    database_lru_shard_t* shard = &lru->shards[shard_idx];
+
+    database_lru_node_t* node = hashmap_get(&shard->cache, path);
+    if (node == NULL) {
+        return;
+    }
+
+    // Remove from hashmap
+    hashmap_remove(&shard->cache, path);
+
+    // Remove from list
+    if (node->previous != NULL) {
+        node->previous->next = node->next;
+    }
+    if (node->next != NULL) {
+        node->next->previous = node->previous;
+    }
+    if (node == shard->first) {
+        shard->first = node->next;
+    }
+    if (node == shard->last) {
+        shard->last = node->previous;
+    }
+
+    // Update memory tracking
+    shard->current_memory -= node->memory_size;
+    shard->entry_count--;
+
+    // Free node
+    lru_node_destroy(node);
+}
+
 void database_lru_cache_delete(database_lru_cache_t* lru, path_t* path) {
     if (lru == NULL || path == NULL) {
         return;
