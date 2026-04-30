@@ -111,6 +111,7 @@ class WaveDB {
     if (options.wal !== undefined) nativeOptions.wal = options.wal;
     if (options.workerThreads !== undefined) nativeOptions.workerThreads = options.workerThreads;
     if (options.encryption !== undefined) nativeOptions.encryption = options.encryption;
+    if (options.syncOnly !== undefined) nativeOptions.syncOnly = options.syncOnly;
 
     this._db = new WaveDBNative(path, nativeOptions);
     this._closed = false;

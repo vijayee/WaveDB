@@ -152,6 +152,14 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       Napi::Number val = options.Get("workerThreads").As<Napi::Number>();
       config->worker_threads = static_cast<uint8_t>(val.Uint32Value());
     }
+
+    if (options.Has("syncOnly")) {
+      bool sync_only = options.Get("syncOnly").As<Napi::Boolean>().Value();
+      if (sync_only) {
+        database_config_set_sync_only(config, 1);
+        database_config_set_worker_threads(config, 0);
+      }
+    }
   }
 
   int error_code = 0;
@@ -185,6 +193,7 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
     enc_config->config.bnode_cache_memory_mb = config->bnode_cache_memory_mb;
     enc_config->config.bnode_cache_shards = config->bnode_cache_shards;
     enc_config->config.worker_threads = config->worker_threads;
+    enc_config->config.sync_only = config->sync_only;
     enc_config->config.wal_config = config->wal_config;
     enc_config->config.timer_resolution_ms = config->timer_resolution_ms;
 
