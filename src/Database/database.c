@@ -1598,6 +1598,15 @@ void database_put(database_t* db, path_t* path,
         return;
     }
 
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        int rc = database_put_sync(db, path, value);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return;
+    }
+
     database_put_ctx_t* ctx = get_clear_memory(sizeof(database_put_ctx_t));
     if (ctx == NULL) {
         path_destroy(path);
@@ -1634,6 +1643,14 @@ void database_get(database_t* db, path_t* path, promise_t* promise) {
         return;
     }
 
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        identifier_t* result = NULL;
+        database_get_sync(db, path, &result);
+        promise_resolve(promise, result);
+        return;
+    }
+
     database_get_ctx_t* ctx = get_clear_memory(sizeof(database_get_ctx_t));
     if (ctx == NULL) {
         path_destroy(path);
@@ -1664,6 +1681,15 @@ void database_delete(database_t* db, path_t* path, promise_t* promise) {
     if (db == NULL || path == NULL || promise == NULL) {
         if (path) path_destroy(path);
         promise_resolve(promise, NULL);
+        return;
+    }
+
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        int rc = database_delete_sync(db, path);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
         return;
     }
 
@@ -2018,6 +2044,70 @@ int database_delete_sync(database_t* db, path_t* path) {
 int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     if (db == NULL || path == NULL) return -1;
 
+    // Fast path: sync-only mode — skip MVCC, locks, and write_locks
+    if (db->sync_only) {
+        transaction_id_t txn_id = transaction_id_get_next();
+        identifier_t* current = hbtrie_find_unsafe(db->trie, path);
+        int64_t old_val = 0;
+        if (current != NULL) {
+            buffer_t* buf = identifier_to_buffer(current);
+            if (buf != NULL && buf->size > 0) {
+                char* tmp = malloc(buf->size + 1);
+                if (tmp != NULL) {
+                    memcpy(tmp, buf->data, buf->size);
+                    tmp[buf->size] = '\0';
+                    old_val = strtoll(tmp, NULL, 10);
+                    free(tmp);
+                }
+                buffer_destroy(buf);
+            }
+            identifier_destroy(current);
+        }
+
+        int64_t new_val = old_val + delta;
+
+        char val_str[32];
+        snprintf(val_str, sizeof(val_str), "%lld", (long long)new_val);
+
+        path_t* ins_path = path_copy(path);
+        buffer_t* val_buf = buffer_create(strlen(val_str));
+        if (val_buf == NULL || ins_path == NULL) {
+            if (val_buf) buffer_destroy(val_buf);
+            if (ins_path) path_destroy(ins_path);
+            return -1;
+        }
+        memcpy(val_buf->data, val_str, strlen(val_str));
+        val_buf->size = strlen(val_str);
+        identifier_t* new_id = identifier_create(val_buf, 0);
+        buffer_destroy(val_buf);
+        if (new_id == NULL) {
+            path_destroy(ins_path);
+            return -1;
+        }
+
+        // Write to WAL
+        buffer_t* entry = encode_put_entry_binary(ins_path, new_id);
+        if (entry != NULL) {
+            thread_wal_t* twal = get_thread_wal(db->wal_manager);
+            if (twal != NULL) {
+                thread_wal_write(twal, txn_id, WAL_PUT, entry);
+            }
+            buffer_destroy(entry);
+        }
+
+        hbtrie_insert_unsafe(db->trie, ins_path, new_id, txn_id);
+
+        path_t* cache_path = path_copy(ins_path);
+        identifier_t* cache_val = REFERENCE(new_id, identifier_t);
+        identifier_t* ejected = database_lru_cache_put_unsafe(db->lru, cache_path, cache_val);
+        if (ejected) identifier_destroy(ejected);
+
+        path_destroy(ins_path);
+        identifier_destroy(new_id);
+
+        return new_val;
+    }
+
     // Read current value (lock-free via MVCC — no shard lock needed)
     transaction_id_t read_txn_id = tx_manager_get_last_committed(db->tx_manager);
     identifier_t* current = hbtrie_find(db->trie, path, read_txn_id);
@@ -2181,6 +2271,39 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     }
 
     platform_unlock(&batch->lock);
+
+    // Fast path: sync-only mode — skip MVCC, locks, and write_locks
+    if (db->sync_only) {
+        transaction_id_t txn_id = transaction_id_get_next();
+
+        platform_lock(&batch->lock);
+        batch->submitted = 1;
+
+        // Serialize and write to WAL
+        buffer_t* data = serialize_batch(batch);
+        if (data != NULL) {
+            thread_wal_t* twal = get_thread_wal(db->wal_manager);
+            if (twal != NULL) {
+                thread_wal_write(twal, txn_id, WAL_BATCH, data);
+            }
+            buffer_destroy(data);
+        }
+
+        // Apply to trie without per-node locks
+        for (size_t i = 0; i < batch->count; i++) {
+            if (batch->ops[i].type == WAL_PUT) {
+                hbtrie_insert_unsafe(db->trie, batch->ops[i].path, batch->ops[i].value, txn_id);
+                database_lru_cache_delete_unsafe(db->lru, batch->ops[i].path);
+            } else {
+                identifier_t* removed = hbtrie_delete_unsafe(db->trie, batch->ops[i].path, txn_id);
+                if (removed) identifier_destroy(removed);
+                database_lru_cache_delete_unsafe(db->lru, batch->ops[i].path);
+            }
+        }
+
+        platform_unlock(&batch->lock);
+        return 0;
+    }
 
     // Check size against WAL max size
     size_t size = batch_estimate_size(batch);
@@ -2461,6 +2584,14 @@ int database_put_raw(database_t* db,
         return -1;
     }
 
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error);
+        return -1;
+    }
+
     raw_async_ctx_t* ctx = calloc(1, sizeof(raw_async_ctx_t));
     if (!ctx) { promise_resolve(promise, NULL); return -1; }
 
@@ -2501,6 +2632,12 @@ int database_get_raw(database_t* db,
         return -1;
     }
 
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
     raw_async_ctx_t* ctx = calloc(1, sizeof(raw_async_ctx_t));
     if (!ctx) { promise_resolve(promise, NULL); return -1; }
 
@@ -2532,6 +2669,14 @@ int database_delete_raw(database_t* db,
     promise_t* promise) {
     if (!db || !key || key_len == 0 || !promise) {
         if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    // Async operations require a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error);
         return -1;
     }
 
@@ -2664,6 +2809,14 @@ void database_write_batch(database_t* db, batch_t* batch, promise_t* promise) {
         } else {
             promise_resolve(promise, NULL);
         }
+        return;
+    }
+
+    // Async batch requires a worker pool — not available in sync_only mode
+    if (db->sync_only) {
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error);
         return;
     }
 
