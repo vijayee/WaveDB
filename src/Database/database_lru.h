@@ -152,6 +152,13 @@ size_t database_lru_cache_size(database_lru_cache_t* lru);
  */
 size_t database_lru_cache_memory(database_lru_cache_t* lru);
 
+/**
+ * Unsafe variants for sync-only mode.
+ * Skip all mutex locking. Not thread-safe.
+ */
+size_t database_lru_cache_size_unsafe(database_lru_cache_t* lru);
+size_t database_lru_cache_memory_unsafe(database_lru_cache_t* lru);
+
 #ifdef __cplusplus
 }
 #endif

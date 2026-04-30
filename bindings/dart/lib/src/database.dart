@@ -104,6 +104,7 @@ class WaveDB implements Finalizable {
   Pointer<database_t>? _db;
   final String _path;
   final String _delimiter;
+  final bool _syncOnly;
   bool _isClosed = false;
 
   // NativeFinalizer to ensure database_destroy is called if the Dart object
@@ -128,6 +129,7 @@ class WaveDB implements Finalizable {
   WaveDB(String path, {String delimiter = '/', WaveDBConfig? config, WaveDBEncryption? encryption})
       : _path = path,
         _delimiter = delimiter,
+        _syncOnly = config?.syncOnly ?? false,
         _instanceId = _nextInstanceId++ {
     if (delimiter.length != 1) {
       throw ArgumentError('Delimiter must be a single character, got: "$delimiter"');
@@ -391,6 +393,10 @@ class WaveDB implements Finalizable {
   /// Store a value asynchronously via the C worker pool
   Future<void> put(dynamic key, dynamic value) async {
     _checkClosed();
+    if (_syncOnly) {
+      putSync(key, value);
+      return;
+    }
     if (value == null) {
       throw ArgumentError('Value is required for put operation');
     }
@@ -420,6 +426,9 @@ class WaveDB implements Finalizable {
   /// Retrieve a value asynchronously via the C worker pool
   Future<dynamic> get(dynamic key) async {
     _checkClosed();
+    if (_syncOnly) {
+      return getSync(key);
+    }
     final keyStr = _keyToString(key);
     final (keyPtr, keyByteLen) = _keyToNative(keyStr);
 
@@ -441,6 +450,10 @@ class WaveDB implements Finalizable {
   /// Delete a value asynchronously via the C worker pool
   Future<void> del(dynamic key) async {
     _checkClosed();
+    if (_syncOnly) {
+      delSync(key);
+      return;
+    }
     final keyStr = _keyToString(key);
     final (keyPtr, keyByteLen) = _keyToNative(keyStr);
 
@@ -463,6 +476,10 @@ class WaveDB implements Finalizable {
   Future<void> batch(List<Map<String, dynamic>> operations) async {
     _checkClosed();
     if (operations.isEmpty) return;
+    if (_syncOnly) {
+      batchSync(operations);
+      return;
+    }
 
     final opsPtr = calloc<RawOp>(operations.length);
     final keyPtrs = <Pointer<Uint8>>[];
@@ -525,6 +542,10 @@ class WaveDB implements Finalizable {
   Future<void> putObject(dynamic key, Map<String, dynamic> obj) async {
     _checkClosed();
     final operations = ObjectOps.flattenObject(key, obj, _delimiter);
+    if (_syncOnly) {
+      batchSync(operations);
+      return;
+    }
     return batch(operations);
   }
 

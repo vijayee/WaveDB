@@ -857,7 +857,7 @@ Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
 
   if (rc == 0 && value != nullptr) {
     // Strip trailing null bytes (chunk padding from identifier serialization)
-    while (value_len > 0 && (value[value_len - 1] == '\0' || value[value_len - 1] == ' ')) {
+    while (value_len > 0 && value[value_len - 1] == '\0') {
       value_len--;
     }
 
@@ -880,6 +880,7 @@ Napi::Value WaveDB::GetSync(const Napi::CallbackInfo& info) {
   } else if (rc == -2) {
     return env.Null();
   } else {
+    if (value != nullptr) database_raw_value_free(value);
     Napi::Error::New(env, "IO_ERROR: Failed to get value").ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -1174,7 +1175,7 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
     } else {
       // Strip trailing null bytes (chunk padding from identifier serialization)
       size_t val_len = results[i].value_len;
-      while (val_len > 0 && (results[i].value[val_len - 1] == '\0' || results[i].value[val_len - 1] == ' ')) {
+      while (val_len > 0 && results[i].value[val_len - 1] == '\0') {
         val_len--;
       }
 
@@ -1266,7 +1267,7 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
     } else {
       // Strip trailing null bytes (chunk padding from identifier serialization)
       size_t val_len = results[i].value_len;
-      while (val_len > 0 && (results[i].value[val_len - 1] == '\0' || results[i].value[val_len - 1] == ' ')) {
+      while (val_len > 0 && results[i].value[val_len - 1] == '\0') {
         val_len--;
       }
 

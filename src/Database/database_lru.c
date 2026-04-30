@@ -611,3 +611,25 @@ size_t database_lru_cache_memory(database_lru_cache_t* lru) {
 
     return total_memory;
 }
+
+size_t database_lru_cache_size_unsafe(database_lru_cache_t* lru) {
+    if (lru == NULL) return 0;
+
+    size_t total_size = 0;
+    for (size_t i = 0; i < lru->num_shards; i++) {
+        total_size += lru->shards[i].entry_count;
+    }
+
+    return total_size;
+}
+
+size_t database_lru_cache_memory_unsafe(database_lru_cache_t* lru) {
+    if (lru == NULL) return 0;
+
+    size_t total_memory = 0;
+    for (size_t i = 0; i < lru->num_shards; i++) {
+        total_memory += lru->shards[i].current_memory;
+    }
+
+    return total_memory;
+}

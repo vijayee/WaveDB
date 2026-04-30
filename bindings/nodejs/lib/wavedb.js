@@ -96,6 +96,7 @@ class WaveDB {
 
     this._delimiter = options.delimiter || '/';
     this._path = path;
+    this._syncOnly = options.syncOnly || false;
 
     // Build native options, passing through all recognized properties
     const nativeOptions = {

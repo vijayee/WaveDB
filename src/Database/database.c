@@ -1745,6 +1745,9 @@ size_t database_count(database_t* db) {
 
     // Returns LRU cache entry count, which may undercount after eviction.
     // This is a fast approximation; for exact counts, walk the trie.
+    if (db->sync_only) {
+        return database_lru_cache_size_unsafe(db->lru);
+    }
     return database_lru_cache_size(db->lru);
 }
 
@@ -2306,9 +2309,11 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     }
 
     // Check size against WAL max size
-    size_t size = batch_estimate_size(batch);
-    if (size > db->wal_manager->config.max_file_size) {
-        return -5;
+    if (db->wal_manager != NULL) {
+        size_t size = batch_estimate_size(batch);
+        if (size > db->wal_manager->config.max_file_size) {
+            return -5;
+        }
     }
 
     // Begin MVCC transaction
