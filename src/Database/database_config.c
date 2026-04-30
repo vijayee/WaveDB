@@ -483,7 +483,6 @@ database_config_t* database_config_merge(const database_config_t* saved,
     merged->chunk_size = saved->chunk_size;
     merged->btree_node_size = saved->btree_node_size;
     merged->enable_persist = saved->enable_persist;
-    merged->sync_only = saved->sync_only;  // Immutable: use saved value
 
     // ENCRYPTION: Immutable type and persisted verification data come from saved config.
     // Key material (not persisted) comes from passed config at open time.
@@ -524,6 +523,7 @@ database_config_t* database_config_merge(const database_config_t* saved,
     // THREADING: Use passed values
     merged->worker_threads = passed->worker_threads;
     merged->timer_resolution_ms = passed->timer_resolution_ms;
+    merged->sync_only = passed->sync_only;  // Mutable: mode can change on reopen
 
     // EXTERNAL: Use passed values (runtime only)
     merged->external_pool = passed->external_pool;

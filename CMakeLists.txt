@@ -280,6 +280,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_encrypted_database wavedb gtest gtest_main Threads::Threads OpenSSL::Crypto)
     add_test(NAME test_encrypted_database COMMAND test_encrypted_database)
 
+    # Sync-only mode functional and cross-mode tests
+    add_executable(test_sync_only tests/test_sync_only.c)
+    target_link_libraries(test_sync_only PRIVATE wavedb Threads::Threads)
+    add_test(NAME test_sync_only COMMAND test_sync_only)
+
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
     target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)

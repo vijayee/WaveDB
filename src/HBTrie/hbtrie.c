@@ -2136,19 +2136,13 @@ identifier_t* hbtrie_find_unsafe(hbtrie_t* trie, path_t* path) {
         }
 
         if (entry->has_versions) {
-          // Find the newest non-deleted version (no txn_id filtering in sync-only mode)
-          version_entry_t* last_visible = NULL;
-          version_entry_t* ver = entry->versions;
-          while (ver != NULL) {
-            if (!ver->is_deleted && ver->value != NULL) {
-              last_visible = ver;
-            }
-            ver = ver->next;
+          // Version chain is newest-first (head = latest version).
+          // Check the head entry — if it's a tombstone, the key is deleted.
+          version_entry_t* newest = entry->versions;
+          if (newest != NULL && !newest->is_deleted && newest->value != NULL) {
+            return (identifier_t*)refcounter_reference((refcounter_t*)newest->value);
           }
-          if (last_visible != NULL) {
-            return (identifier_t*)refcounter_reference((refcounter_t*)last_visible->value);
-          }
-          return NULL;  // All versions are tombstones
+          return NULL;  // Latest version is a tombstone or deleted
         } else {
           // Legacy: single value
           if (entry->value == NULL) {
