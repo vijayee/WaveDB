@@ -933,6 +933,9 @@ class WaveDBNative {
   static late final _ConfigSetU16 _configSetTimerResolutionMs = WaveDBLibrary.load()
       .lookupFunction<_ConfigSetU16C, _ConfigSetU16>('database_config_set_timer_resolution_ms');
 
+  static late final _ConfigSetU8 _configSetSyncOnly = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_sync_only');
+
   static late final DatabaseCreateWithConfig _databaseCreateWithConfig = WaveDBLibrary.load()
       .lookupFunction<DatabaseCreateWithConfigC, DatabaseCreateWithConfig>('database_create_with_config');
 
@@ -1214,6 +1217,7 @@ class WaveDBNative {
     String? walSyncMode,
     int? walDebounceMs,
     int? walMaxFileSize,
+    bool? syncOnly,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -1240,6 +1244,10 @@ class WaveDBNative {
       }
       if (walDebounceMs != null) _configSetWalDebounceMs(configPtr, walDebounceMs);
       if (walMaxFileSize != null) _configSetWalMaxFileSize(configPtr, walMaxFileSize);
+      if (syncOnly != null && syncOnly) {
+        _configSetSyncOnly(configPtr, 1);
+        _configSetWorkerThreads(configPtr, 0);
+      }
 
       final db = _databaseCreateWithConfig(
         pathPtr.cast(),
@@ -1295,6 +1303,7 @@ class WaveDBNative {
     String? walSyncMode,
     int? walDebounceMs,
     int? walMaxFileSize,
+    bool? syncOnly,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -1339,6 +1348,10 @@ class WaveDBNative {
         }
         if (walDebounceMs != null) _configSetWalDebounceMs(configPtr, walDebounceMs);
         if (walMaxFileSize != null) _configSetWalMaxFileSize(configPtr, walMaxFileSize);
+        if (syncOnly != null && syncOnly) {
+          _configSetSyncOnly(configPtr, 1);
+          _configSetWorkerThreads(configPtr, 0);
+        }
 
         final db = _databaseCreateEncrypted(
           pathPtr.cast(),

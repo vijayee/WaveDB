@@ -47,6 +47,10 @@ class WaveDBConfig {
   /// Max WAL file size before sealing (default: 131072)
   final int? walMaxFileSize;
 
+  /// Run in sync-only mode (no concurrency control, no worker pool).
+  /// When true, worker threads are forced to 0.
+  final bool? syncOnly;
+
   const WaveDBConfig({
     this.chunkSize,
     this.btreeNodeSize,
@@ -59,6 +63,7 @@ class WaveDBConfig {
     this.walSyncMode,
     this.walDebounceMs,
     this.walMaxFileSize,
+    this.syncOnly,
   });
 }
 
@@ -143,6 +148,7 @@ class WaveDB implements Finalizable {
         walSyncMode: config.walSyncMode,
         walDebounceMs: config.walDebounceMs,
         walMaxFileSize: config.walMaxFileSize,
+        syncOnly: config.syncOnly,
       );
     } else {
       _db = WaveDBNative.databaseCreate(path);
@@ -208,6 +214,7 @@ class WaveDB implements Finalizable {
         walSyncMode: config?.walSyncMode,
         walDebounceMs: config?.walDebounceMs,
         walMaxFileSize: config?.walMaxFileSize,
+        syncOnly: config?.syncOnly,
       );
     } finally {
       if (symKeyPtr != null) calloc.free(symKeyPtr);
