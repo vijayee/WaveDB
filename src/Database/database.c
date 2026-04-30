@@ -1728,9 +1728,13 @@ int database_snapshot(database_t* db) {
         wal_manager_flush(db->wal_manager);
     }
 
-    // MVCC: Trigger GC to clean up old versions (only in concurrent mode)
+    // MVCC: Trigger GC to clean up old versions
     if (db->tx_manager != NULL) {
         tx_manager_gc(db->tx_manager);
+    } else if (db->sync_only) {
+        // Sync-only mode: no tx_manager, but version chains still accumulate.
+        // Prune all but the newest version (safe in single-threaded context).
+        hbtrie_gc_unsafe(db->trie);
     }
 
     // Save index to disk

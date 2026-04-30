@@ -11,6 +11,7 @@ public:
 private:
   database_t* db_;
   char delimiter_;
+  bool syncOnly_;
   AsyncBridge bridge_;
 
   // Async operations

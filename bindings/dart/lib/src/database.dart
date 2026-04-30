@@ -373,11 +373,11 @@ class WaveDB implements Finalizable {
   }
 
   /// Convert a key string to native UTF-8 and return (pointer, byte length).
-  /// Uses utf8.encode to get the correct byte length (not UTF-16 code units).
   (Pointer<Utf8>, int) _keyToNative(String keyStr) {
-    final keyPtr = keyStr.toNativeUtf8();
-    final keyByteLen = utf8.encode(keyStr).length;
-    return (keyPtr, keyByteLen);
+    final encoded = utf8.encode(keyStr);
+    final keyPtr = calloc<Uint8>(encoded.length);
+    keyPtr.asTypedList(encoded.length).setAll(0, encoded);
+    return (keyPtr.cast(), encoded.length);
   }
 
   void _checkClosed() {

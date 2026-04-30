@@ -367,6 +367,13 @@ identifier_t* hbtrie_delete_unsafe(hbtrie_t* trie, path_t* path, transaction_id_
 size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id);
 
 /**
+ * Garbage collect version chains in sync-only mode.
+ * No locks, no MVCC — prunes all but the newest version.
+ * Only safe in single-threaded context.
+ */
+size_t hbtrie_gc_unsafe(hbtrie_t* trie);
+
+/**
  * Load a child bnode from disk on demand (lazy loading).
  *
  * If entry->child_bnode is NULL and entry->child_disk_offset != 0,

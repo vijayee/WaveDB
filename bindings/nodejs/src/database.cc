@@ -56,7 +56,8 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
 WaveDB::WaveDB(const Napi::CallbackInfo& info)
   : Napi::ObjectWrap<WaveDB>(info),
     db_(nullptr),
-    delimiter_('/') {
+    delimiter_('/'),
+    syncOnly_(false) {
 
   Napi::Env env = info.Env();
 
@@ -155,6 +156,7 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
 
     if (options.Has("syncOnly")) {
       bool sync_only = options.Get("syncOnly").As<Napi::Boolean>().Value();
+      syncOnly_ = sync_only;
       if (sync_only) {
         database_config_set_sync_only(config, 1);
         database_config_set_worker_threads(config, 0);
@@ -281,15 +283,19 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
     }
   }
 
-  // Initialize the async bridge for all async operations
-  bridge_.Init(env);
+  // Initialize the async bridge for async operations (skip in sync_only mode)
+  if (!syncOnly_) {
+    bridge_.Init(env);
+  }
 }
 
 WaveDB::~WaveDB() {
   if (db_) {
     // Shutdown the async bridge before destroying the database
     // to ensure pending operations complete before teardown
-    bridge_.Shutdown();
+    if (!syncOnly_) {
+      bridge_.Shutdown();
+    }
     database_destroy(db_);
     db_ = nullptr;
   }

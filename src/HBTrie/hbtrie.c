@@ -3557,6 +3557,92 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
   return total_removed;
 }
 
+size_t hbtrie_gc_unsafe(hbtrie_t* trie) {
+  if (trie == NULL) {
+    return 0;
+  }
+  hbtrie_node_t* root = atomic_load(&trie->root);
+  if (root == NULL) {
+    return 0;
+  }
+
+  // In sync-only mode, there are no concurrent transactions.
+  // Use the maximum txn_id as min_active so all versions except
+  // the newest are eligible for collection.
+  transaction_id_t max_txn_id = {UINT64_MAX, UINT64_MAX, UINT64_MAX};
+
+  size_t total_removed = 0;
+  vec_t(hbtrie_node_t*) stack;
+  vec_init(&stack);
+  vec_push(&stack, root);
+
+  while (stack.length > 0) {
+    hbtrie_node_t* node = vec_pop(&stack);
+    if (node == NULL) continue;
+
+    // No lock needed in sync-only mode
+    vec_t(bnode_t*) bnode_stack;
+    vec_init(&bnode_stack);
+    vec_push(&bnode_stack, node->btree);
+
+    while (bnode_stack.length > 0) {
+      bnode_t* bn = vec_pop(&bnode_stack);
+
+      for (int i = bn->entries.length - 1; i >= 0; i--) {
+        bnode_entry_t* entry = &bn->entries.data[i];
+
+        if (entry->is_bnode_child && entry->child_bnode != NULL) {
+          vec_push(&bnode_stack, entry->child_bnode);
+        } else if (entry->has_value && entry->has_versions) {
+          size_t removed = version_entry_gc(&entry->versions, max_txn_id);
+          total_removed += removed;
+
+          // Single non-deleted version remaining — downgrade to legacy
+          if (entry->versions != NULL &&
+              entry->versions->next == NULL &&
+              !entry->versions->is_deleted) {
+            version_entry_t* sole_version = entry->versions;
+            identifier_t* sole_value = sole_version->value;
+            transaction_id_t sole_txn_id = sole_version->txn_id;
+
+            entry->value = (identifier_t*)refcounter_reference((refcounter_t*)sole_value);
+            entry->value_txn_id = sole_txn_id;
+            entry->has_versions = 0;
+
+            version_entry_destroy(sole_version);
+          } else if (entry->versions != NULL &&
+                     entry->versions->next == NULL &&
+                     entry->versions->is_deleted) {
+            // Single tombstone — remove the entry entirely
+            bnode_entry_t removed_entry = bnode_remove_at(bn, (size_t)i);
+            if (removed_entry.key != NULL) {
+              chunk_destroy(removed_entry.key);
+            }
+            if (removed_entry.has_versions && removed_entry.versions != NULL) {
+              version_entry_destroy(removed_entry.versions);
+            } else if (removed_entry.value != NULL) {
+              identifier_destroy(removed_entry.value);
+            }
+            if (removed_entry.path_chunk_counts.data != NULL) {
+              vec_deinit(&removed_entry.path_chunk_counts);
+            }
+            total_removed++;
+          }
+        } else if (!entry->has_value && entry->child != NULL) {
+          vec_push(&stack, entry->child);
+        } else if (entry->has_value && entry->trie_child != NULL) {
+          vec_push(&stack, entry->trie_child);
+        }
+      }
+    }
+
+    vec_deinit(&bnode_stack);
+  }
+
+  vec_deinit(&stack);
+  return total_removed;
+}
+
 size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
     if (trie == NULL || offset == 0) return 0;
 
