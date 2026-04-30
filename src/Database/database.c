@@ -814,6 +814,10 @@ database_t* database_create_with_config(const char* location,
     if (effective_config->external_wheel != NULL) {
         db->wheel = effective_config->external_wheel;
         db->owns_wheel = false;
+    } else if (effective_config->sync_only) {
+        // Sync-only mode: no wheel needed
+        db->wheel = NULL;
+        db->owns_wheel = false;
     } else if (effective_config->timer_resolution_ms > 0) {
         db->wheel = hierarchical_timing_wheel_create(effective_config->timer_resolution_ms, db->pool);
         db->owns_wheel = (db->wheel != NULL);
@@ -825,10 +829,6 @@ database_t* database_create_with_config(const char* location,
             if (error_code) *error_code = ENOMEM;
             return NULL;
         }
-    } else if (effective_config->sync_only) {
-        // Sync-only mode: no wheel needed
-        db->wheel = NULL;
-        db->owns_wheel = false;
     } else {
         // No wheel available
         if (error_code) *error_code = EINVAL;
