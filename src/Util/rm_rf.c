@@ -1,11 +1,17 @@
 //
 // Created by victor on 7/30/25.
 //
-#include <dirent.h>
+#include "Util/dirent_compat.h"
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define unlink _unlink
+#define rmdir _rmdir
+#else
 #include <unistd.h>
+#endif
 #include "allocator.h"
 #include "log.h"
 #include "rm_rf.h"

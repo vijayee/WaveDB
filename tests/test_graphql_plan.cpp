@@ -7,13 +7,35 @@
 #include <cstring>
 #include "Layers/graphql/graphql.h"
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
 class GraphQLPlanTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_plan";
+#if _WIN32
+    char test_dir[256];
+#else
+    char test_dir[256];
+#endif
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
+#if _WIN32
+        const char* tmpdir = getenv("TEMP");
+        snprintf(test_dir, sizeof(test_dir), "%s/wavedb_test_graphql_plan", tmpdir ? tmpdir : ".");
+#else
+        strcpy(test_dir, "/tmp/wavedb_test_graphql_plan");
+#endif
         rmrf(test_dir);
         mkdir(test_dir, 0755);
 
@@ -38,7 +60,11 @@ protected:
 
     void rmrf(const char* path) {
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s 2>nul", path);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
+#endif
         (void)system(cmd);
     }
 };

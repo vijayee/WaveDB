@@ -29,7 +29,16 @@
 #include "benchmark_base.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>  // for getpid()
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 extern "C" {
 #include "Database/database.h"
 #include "Time/wheel.h"
@@ -426,7 +435,11 @@ static void setup_database(bench_context_t* ctx) {
     hierarchical_timing_wheel_run(ctx->wheel);
 
     // Create temporary test directory
+#if _WIN32
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir), "%s\\wavedb_bench_%d", getenv("TEMP"), getpid());
+#else
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wavedb_bench_%d", getpid());
+#endif
 
     // Create custom WAL config with larger file size for benchmarks
     wal_config_t wal_config = {
@@ -473,7 +486,11 @@ static void teardown_database(bench_context_t* ctx) {
 
     // Cleanup test directory
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", ctx->test_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", ctx->test_dir);
+#endif
     system(cmd);
 }
 
@@ -881,7 +898,11 @@ int main(int argc, char** argv) {
     transaction_id_init();
 
     // Create benchmark directory if it doesn't exist
+#if _WIN32
+    system("mkdir .benchmarks 2>nul");
+#else
     system("mkdir -p .benchmarks");
+#endif
 
     run_database_benchmarks();
 

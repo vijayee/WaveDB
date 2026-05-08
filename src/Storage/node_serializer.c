@@ -6,8 +6,12 @@
 #include "../HBTrie/identifier.h"
 #include "../Util/allocator.h"
 #include <string.h>
-#include <stdatomic.h>
-#include <arpa/inet.h>  // For htonl/ntohl
+#include "Util/atomic_compat.h"
+#if _WIN32
+#include "Util/windows_compat.h"
+#else
+#include <arpa/inet.h>
+#endif
 
 // Helper: write uint16_t in network byte order
 static void write_uint16(uint8_t** buf, uint16_t val) {

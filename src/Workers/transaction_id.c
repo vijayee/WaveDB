@@ -5,8 +5,12 @@
 #include "transaction_id.h"
 #include <time.h>
 #include <string.h>
-#include <stdatomic.h>
+#include "Util/atomic_compat.h"
+#if _WIN32
+#include "Util/windows_compat.h"
+#else
 #include <arpa/inet.h>
+#endif
 #include "../Util/threadding.h"
 
 // Thread-local pool size (number of IDs per batch)
@@ -15,7 +19,7 @@
 // Global state for transaction ID generation
 static transaction_id_t g_current_txn_id = {0, 0, 0};
 static PLATFORMLOCKTYPE(g_txn_id_lock);
-static atomic_uint_fast64_t g_global_count = ATOMIC_VAR_INIT(0);
+static atomic_uint_fast64_t g_global_count;
 
 // One-time initialization control
 #if _WIN32
@@ -29,10 +33,18 @@ static void transaction_id_do_init(void) {
     platform_lock_init(&g_txn_id_lock);
 }
 
+#if _WIN32
+static BOOL CALLBACK transaction_id_init_wrapper(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    transaction_id_do_init();
+    return TRUE;
+}
+#endif
+
 // Initialize global transaction ID generator (safe to call multiple times)
 void transaction_id_init(void) {
 #if _WIN32
-    InitOnceExecuteOnce(&g_init_once, transaction_id_do_init, NULL, NULL);
+    InitOnceExecuteOnce(&g_init_once, transaction_id_init_wrapper, NULL, NULL);
 #else
     pthread_once(&g_init_once, transaction_id_do_init);
 #endif
@@ -40,16 +52,26 @@ void transaction_id_init(void) {
 
 // Generate unique transaction ID (thread-safe with atomic counter)
 transaction_id_t transaction_id_get_next(void) {
+#if _WIN32
+    LARGE_INTEGER freq, counter;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&counter);
+    uint64_t secs = (uint64_t)(counter.QuadPart / freq.QuadPart);
+    uint64_t nsecs = (uint64_t)((counter.QuadPart % freq.QuadPart) * 1000000000ULL / freq.QuadPart);
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t secs = (uint64_t)ts.tv_sec;
+    uint64_t nsecs = (uint64_t)ts.tv_nsec;
+#endif
 
     // Atomic increment - much faster than mutex lock
     // Count rollover is handled by timestamp-first ordering in comparison
     uint64_t count = atomic_fetch_add(&g_global_count, 1);
 
     transaction_id_t next = {
-        .time = (uint64_t)ts.tv_sec,
-        .nanos = (uint64_t)ts.tv_nsec,
+        .time = secs,
+        .nanos = nsecs,
         .count = count
     };
 

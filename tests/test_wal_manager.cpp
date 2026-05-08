@@ -7,13 +7,22 @@
 #include "Buffer/buffer.h"
 #include "Workers/transaction_id.h"
 #include "Util/path_join.h"
+#include "Util/threadding.h"
 #include <cbor.h>
+#ifndef _WIN32
 #include <pthread.h>
+#endif
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include <fcntl.h>
 #include <cstring>
-#include <sys/stat.h>
-#include <dirent.h>
+#include "Util/dirent_compat.h"
 
 class WalManagerTest : public ::testing::Test {
 protected:
@@ -23,8 +32,15 @@ protected:
 
     void SetUp() override {
         // Create temporary directory using mkdtemp
+#if _WIN32
+        strcpy(temp_dir, getenv("TEMP"));
+        strcat(temp_dir, "/wal_test_XXXXXX");
+        ASSERT_NE(_mktemp(temp_dir), nullptr) << "Failed to create temp dir template";
+        ASSERT_EQ(_mkdir(temp_dir), 0) << "Failed to create temp dir";
+#else
         strcpy(temp_dir, "/tmp/wal_test_XXXXXX");
         ASSERT_NE(mkdtemp(temp_dir), nullptr) << "Failed to create temp dir";
+#endif
 
         // Initialize transaction ID generator
         transaction_id_init();
@@ -47,7 +63,11 @@ protected:
         clear_thread_wal_reference();
         // Remove temporary directory
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", temp_dir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+#endif
         system(cmd);
     }
 };
@@ -192,7 +212,7 @@ TEST_F(WalManagerTest, RecoverFromMultipleThreads) {
 
     // Simulate another thread (would normally use pthread_create)
     // For testing, we'll manually create a second WAL
-    uint64_t thread_id_2 = (uint64_t)pthread_self() + 1;
+    uint64_t thread_id_2 = platform_self() + 1;
     thread_wal_t* twal2 = create_thread_wal(manager, thread_id_2);
 
     // Create CBOR: [["key2"], "value2"]

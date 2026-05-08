@@ -1,11 +1,28 @@
 #include "encryption.h"
 #include "../Util/allocator.h"
+#include <string.h>
+
+#ifdef WAVEDB_NO_OPENSSL
+/* Stub implementations when OpenSSL is not available */
+
+encryption_t* encryption_create_symmetric(const uint8_t* key, size_t key_length) { (void)key; (void)key_length; return NULL; }
+encryption_t* encryption_create_asymmetric(const uint8_t* private_key_der, size_t private_key_len, const uint8_t* public_key_der, size_t public_key_len) { (void)private_key_der; (void)private_key_len; (void)public_key_der; (void)public_key_len; return NULL; }
+encryption_t* encryption_create_from_config(encryption_type_t type, const uint8_t* key, size_t key_length, const uint8_t* private_key_der, size_t private_key_len, const uint8_t* public_key_der, size_t public_key_len, const uint8_t* salt, const uint8_t* check) { (void)type; (void)key; (void)key_length; (void)private_key_der; (void)private_key_len; (void)public_key_der; (void)public_key_len; (void)salt; (void)check; return NULL; }
+int encryption_encrypt(encryption_t* enc, const uint8_t* plaintext, size_t pt_len, uint8_t** ciphertext, size_t* ct_len) { (void)enc; (void)plaintext; (void)pt_len; (void)ciphertext; (void)ct_len; return -1; }
+int encryption_decrypt(encryption_t* enc, const uint8_t* ciphertext, size_t ct_len, uint8_t** plaintext, size_t* pt_len) { (void)enc; (void)ciphertext; (void)ct_len; (void)plaintext; (void)pt_len; return -1; }
+int encryption_generate_check(encryption_t* enc) { (void)enc; return -1; }
+int encryption_verify_check(encryption_t* enc) { (void)enc; return -1; }
+const uint8_t* encryption_get_salt(const encryption_t* enc) { (void)enc; return NULL; }
+const uint8_t* encryption_get_check(const encryption_t* enc) { (void)enc; return NULL; }
+void encryption_destroy(encryption_t* enc) { (void)enc; }
+
+#else /* WAVEDB_NO_OPENSSL */
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
 #include <openssl/err.h>
-#include <string.h>
 
 #define IV_LEN 12
 #define TAG_LEN 16
@@ -517,3 +534,5 @@ void encryption_destroy(encryption_t* enc) {
 
     free(enc);
 }
+
+#endif /* WAVEDB_NO_OPENSSL */

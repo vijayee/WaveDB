@@ -2,9 +2,18 @@
 // test_section_gc.cpp - Tests for section storage GC deallocation and persistence
 //
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 #include <string>
-#include <unistd.h>
 extern "C" {
 #include "Database/database.h"
 #include "Database/database_config.h"

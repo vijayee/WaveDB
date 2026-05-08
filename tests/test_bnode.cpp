@@ -39,9 +39,18 @@ TEST_F(BnodeTest, InsertFind) {
     ASSERT_NE(key_c, nullptr);
 
     // Create entries - bnode takes ownership of the chunks
-    bnode_entry_t entry_a = { .key = key_a, .child = nullptr, .has_value = 0 };
-    bnode_entry_t entry_b = { .key = key_b, .child = nullptr, .has_value = 0 };
-    bnode_entry_t entry_c = { .key = key_c, .child = nullptr, .has_value = 0 };
+    bnode_entry_t entry_a = {};
+    entry_a.child = nullptr;
+    entry_a.key = key_a;
+    entry_a.has_value = 0;
+    bnode_entry_t entry_b = {};
+    entry_b.child = nullptr;
+    entry_b.key = key_b;
+    entry_b.has_value = 0;
+    bnode_entry_t entry_c = {};
+    entry_c.child = nullptr;
+    entry_c.key = key_c;
+    entry_c.has_value = 0;
 
     // Insert entries
     EXPECT_EQ(bnode_insert(node, &entry_a), 0);
@@ -86,8 +95,14 @@ TEST_F(BnodeTest, Remove) {
     ASSERT_NE(key_a, nullptr);
     ASSERT_NE(key_b, nullptr);
 
-    bnode_entry_t entry_a = { .key = key_a, .child = nullptr, .has_value = 0 };
-    bnode_entry_t entry_b = { .key = key_b, .child = nullptr, .has_value = 0 };
+    bnode_entry_t entry_a = {};
+    entry_a.child = nullptr;
+    entry_a.key = key_a;
+    entry_a.has_value = 0;
+    bnode_entry_t entry_b = {};
+    entry_b.child = nullptr;
+    entry_b.key = key_b;
+    entry_b.has_value = 0;
 
     bnode_insert(node, &entry_a);
     bnode_insert(node, &entry_b);
@@ -125,9 +140,18 @@ TEST_F(BnodeTest, SortedInsertion) {
     chunk_t* key_a = chunk_create("aaa", 3);
     chunk_t* key_b = chunk_create("bbb", 3);
 
-    bnode_entry_t entry_c = { .key = key_c, .child = nullptr, .has_value = 0 };
-    bnode_entry_t entry_a = { .key = key_a, .child = nullptr, .has_value = 0 };
-    bnode_entry_t entry_b = { .key = key_b, .child = nullptr, .has_value = 0 };
+    bnode_entry_t entry_c = {};
+    entry_c.child = nullptr;
+    entry_c.key = key_c;
+    entry_c.has_value = 0;
+    bnode_entry_t entry_a = {};
+    entry_a.child = nullptr;
+    entry_a.key = key_a;
+    entry_a.has_value = 0;
+    bnode_entry_t entry_b = {};
+    entry_b.child = nullptr;
+    entry_b.key = key_b;
+    entry_b.has_value = 0;
 
     bnode_insert(node, &entry_c);
     bnode_insert(node, &entry_a);
@@ -163,7 +187,9 @@ TEST_F(BnodeTest, NeedsSplitMinimumEntries) {
         char key[4];
         snprintf(key, sizeof(key), "k%02d", i);
         chunk_t* chunk = chunk_create(key, 3);
-        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_entry_t entry = {};
+        entry.key = chunk;
+        entry.has_value = 0;
         bnode_insert(node, &entry);
     }
 
@@ -172,7 +198,9 @@ TEST_F(BnodeTest, NeedsSplitMinimumEntries) {
 
     // Add 4th entry
     chunk_t* chunk4 = chunk_create("k03", 3);
-    bnode_entry_t entry4 = {.key = chunk4, .has_value = 0};
+    bnode_entry_t entry4 = {};
+    entry4.key = chunk4;
+    entry4.has_value = 0;
     bnode_insert(node, &entry4);
 
     // Now has 4 entries, but size might still be under limit
@@ -190,7 +218,9 @@ TEST_F(BnodeTest, SplitMinimumEntries) {
         char key[4];
         snprintf(key, sizeof(key), "k%02d", i);
         chunk_t* chunk = chunk_create(key, 3);
-        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_entry_t entry = {};
+        entry.key = chunk;
+        entry.has_value = 0;
         bnode_insert(node, &entry);
     }
 
@@ -213,7 +243,9 @@ TEST_F(BnodeTest, SplitDistributesEvenly) {
         char key[4];
         snprintf(key, sizeof(key), "k%02d", i);
         chunk_t* chunk = chunk_create(key, 3);
-        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_entry_t entry = {};
+        entry.key = chunk;
+        entry.has_value = 0;
         bnode_insert(node, &entry);
     }
 
@@ -249,7 +281,9 @@ TEST_F(BnodeTest, SplitKeyOwnership) {
         char key[4];
         snprintf(key, sizeof(key), "k%02d", i);
         chunk_t* chunk = chunk_create(key, 3);
-        bnode_entry_t entry = {.key = chunk, .has_value = 0};
+        bnode_entry_t entry = {};
+        entry.key = chunk;
+        entry.has_value = 0;
         bnode_insert(node, &entry);
     }
 
@@ -278,11 +312,15 @@ TEST_F(BnodeTest, GetMinKey) {
 
     // Add entries in non-sorted order
     chunk_t* chunk_c = chunk_create("k02", 3);
-    bnode_entry_t entry_c = {.key = chunk_c, .has_value = 0};
+    bnode_entry_t entry_c = {};
+    entry_c.key = chunk_c;
+    entry_c.has_value = 0;
     bnode_insert(node, &entry_c);
 
     chunk_t* chunk_a = chunk_create("k00", 3);
-    bnode_entry_t entry_a = {.key = chunk_a, .has_value = 0};
+    bnode_entry_t entry_a = {};
+    entry_a.key = chunk_a;
+    entry_a.has_value = 0;
     bnode_insert(node, &entry_a);
 
     // First key should be "k00" (sorted order)

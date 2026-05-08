@@ -25,10 +25,22 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
-#include <dirent.h>
+#include "Util/dirent_compat.h"
 #include <sys/stat.h>
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define fsync(fd) _commit(fd)
+#define open _open
+#define O_RDONLY _O_RDONLY
+#define O_WRONLY _O_WRONLY
+#define O_RDWR _O_RDWR
+#define O_CREAT _O_CREAT
+#define O_TRUNC _O_TRUNC
+#define O_BINARY _O_BINARY
+#else
+#include <unistd.h>
+#endif
 
 typedef struct {
     database_t* db;
@@ -324,7 +336,11 @@ static int save_index(database_t* db) {
         return -1;
     }
 
-    int fd = open(index_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    int fd = open(index_file, O_WRONLY | O_CREAT | O_TRUNC
+#if _WIN32
+        | O_BINARY
+#endif
+        , 0644);
     if (fd < 0) {
         log_error("Failed to open index file: %s", index_file);
         free(buf);
@@ -377,7 +393,11 @@ static hbtrie_t* load_index(const char* location, uint8_t chunk_size,
     }
 
     // Read file
-    int fd = open(latest_file, O_RDONLY);
+    int fd = open(latest_file, O_RDONLY
+#if _WIN32
+        | O_BINARY
+#endif
+        );
     if (fd < 0) {
         free(latest_file);
         return hbtrie_create(chunk_size, btree_node_size);
@@ -663,7 +683,7 @@ static void database_eviction_task_execute(void* ctx) {
     if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) {
         // Work item lifecycle ends — decrement counter so database_destroy can proceed
         if (db != NULL) {
-            __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+            atomic_fetch_sub(&db->eviction_in_flight, 1);
         }
         return;
     }
@@ -684,23 +704,23 @@ static void database_eviction_task_execute(void* ctx) {
                                     database_eviction_task_abort,
                                     db);
         if (task != NULL) {
-            __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+            atomic_fetch_add(&db->eviction_in_flight, 1);
             refcounter_yield((refcounter_t*) task);
             if (work_pool_enqueue(db->pool, task) != 0) {
                 work_destroy(task);  // Pool stopped, undo the increment
-                __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+                atomic_fetch_sub(&db->eviction_in_flight, 1);
             }
         }
     }
 
     // This work item's lifecycle ends — decrement counter
-    __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+    atomic_fetch_sub(&db->eviction_in_flight, 1);
 }
 
 static void database_eviction_task_abort(void* ctx) {
     database_t* db = (database_t*)ctx;
     if (db != NULL) {
-        __atomic_sub_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+        atomic_fetch_sub(&db->eviction_in_flight, 1);
     }
 }
 
@@ -969,7 +989,7 @@ database_t* database_create_with_config(const char* location,
                                                     database_eviction_task_abort,
                                                     db);
                         if (task != NULL) {
-                            __atomic_add_fetch(&db->eviction_in_flight, 1, __ATOMIC_SEQ_CST);
+                            atomic_fetch_add(&db->eviction_in_flight, 1);
                             refcounter_yield((refcounter_t*) task);
                             work_pool_enqueue(db->pool, task);
                         }
@@ -1285,7 +1305,7 @@ void database_destroy(database_t* db) {
         if (!db->owns_pool && db->pool != NULL) {
             uint64_t offsets[64];
             eviction_queue_drain(&db->eviction_queue, offsets, 64);
-            while (__atomic_load_n(&db->eviction_in_flight, __ATOMIC_SEQ_CST) > 0) {
+            while (atomic_load(&db->eviction_in_flight) > 0) {
                 // Yield to the worker thread executing the eviction task
                 sched_yield();
             }

@@ -5,6 +5,17 @@
 #include <gtest/gtest.h>
 #include "Storage/page_file.h"
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -14,14 +25,25 @@ protected:
     char tmpdir[256];
 
     void SetUp() override {
+#if _WIN32
+        strcpy(tmpdir, getenv("TEMP"));
+        strcat(tmpdir, "/page_file_test_XXXXXX");
+        _mktemp(tmpdir);
+        _mkdir(tmpdir);
+#else
         strcpy(tmpdir, "/tmp/page_file_test_XXXXXX");
         mkdtemp(tmpdir);
+#endif
     }
 
     void TearDown() override {
         // Remove files in tmpdir
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
         system(cmd);
     }
 

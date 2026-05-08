@@ -7,7 +7,17 @@
 #include <cstdlib>
 #include <vector>
 #include <string>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
 #include <sys/stat.h>
+#endif
 
 #include <openssl/evp.h>
 #include <openssl/rsa.h>
@@ -27,13 +37,25 @@ extern "C" {
 // ---------------------------------------------------------------------------
 
 static std::string make_temp_dir() {
+#if _WIN32
+    char tmpl[256];
+    strcpy(tmpl, getenv("TEMP"));
+    strcat(tmpl, "/wavedb_enc_test_XXXXXX");
+    if (_mktemp(tmpl) == NULL || _mkdir(tmpl) != 0) return "";
+    return std::string(tmpl);
+#else
     char tmpl[] = "/tmp/wavedb_enc_test_XXXXXX";
     char* dir = mkdtemp(tmpl);
     return std::string(dir);
+#endif
 }
 
 static void remove_temp_dir(const std::string& dir) {
+#if _WIN32
+    std::string cmd = "rmdir /s /q " + dir;
+#else
     std::string cmd = "rm -rf " + dir;
+#endif
     system(cmd.c_str());
 }
 

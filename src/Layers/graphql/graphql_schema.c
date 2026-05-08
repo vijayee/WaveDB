@@ -18,7 +18,13 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define rmdir _rmdir
+#define unlink _unlink
+#else
 #include <unistd.h>
+#endif
 
 // ============================================================
 // Forward declarations for internal helpers
@@ -245,9 +251,19 @@ graphql_layer_t* graphql_layer_create(const char* path,
             return NULL;
         }
         const char* tmpdir = getenv("TMPDIR");
+#if _WIN32
+        if (tmpdir == NULL) tmpdir = getenv("TEMP");
+        if (tmpdir == NULL) tmpdir = ".";
+#else
         if (tmpdir == NULL) tmpdir = "/tmp";
+#endif
         snprintf(db_path, GRAPHQL_BUF_SIZE, "%s/wavedb_graphql_XXXXXX", tmpdir);
+#if _WIN32
+        // Windows doesn't have mkdtemp; use _mktemp + _mkdir
+        if (_mktemp(db_path) == NULL || _mkdir(db_path) != 0) {
+#else
         if (mkdtemp(db_path) == NULL) {
+#endif
             free(db_path);
             graphql_layer_config_destroy(cfg);
             return NULL;

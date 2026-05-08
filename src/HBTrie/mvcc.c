@@ -10,7 +10,7 @@
 #include "../Util/memory_pool.h"
 #include "../Util/log.h"
 #include <string.h>
-#include <stdatomic.h>
+#include "Util/atomic_compat.h"
 
 #define DEFAULT_GC_INTERVAL_MS 100
 

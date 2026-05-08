@@ -1,7 +1,16 @@
 #include <gtest/gtest.h>
 #include <cstdio>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 #include <cstring>
 extern "C" {
 #include "Database/database_config.h"
@@ -75,8 +84,16 @@ TEST(DatabaseConfig, WalConfigDefaults) {
 // Test: Save and load preserves values
 TEST(DatabaseConfig, SaveAndLoadPreservesValues) {
     // Create temp directory
-    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    char temp_dir[256];
+#if _WIN32
+    strcpy(temp_dir, getenv("TEMP"));
+    strcat(temp_dir, "/wavedb_config_test_XXXXXX");
+    _mktemp(temp_dir);
+    _mkdir(temp_dir);
+#else
+    strcpy(temp_dir, "/tmp/wavedb_config_test_XXXXXX");
     mkdtemp(temp_dir);
+#endif
 
     // Create config with custom values
     database_config_t* original = database_config_default();
@@ -110,8 +127,13 @@ TEST(DatabaseConfig, SaveAndLoadPreservesValues) {
     // Cleanup
     char config_path[256];
     snprintf(config_path, sizeof(config_path), "%s/.config", temp_dir);
+#if _WIN32
+    _unlink(config_path);
+    _rmdir(temp_dir);
+#else
     unlink(config_path);
     rmdir(temp_dir);
+#endif
 }
 
 // Test: Load returns NULL for non-existent config
@@ -184,8 +206,16 @@ TEST(DatabaseConfig, MergeBothNull) {
 
 // Test: Create database with config
 TEST(DatabaseConfig, CreateWithConfig) {
-    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    char temp_dir[256];
+#if _WIN32
+    strcpy(temp_dir, getenv("TEMP"));
+    strcat(temp_dir, "/wavedb_config_test_XXXXXX");
+    _mktemp(temp_dir);
+    _mkdir(temp_dir);
+#else
+    strcpy(temp_dir, "/tmp/wavedb_config_test_XXXXXX");
     mkdtemp(temp_dir);
+#endif
 
     database_config_t* config = database_config_default();
     config->lru_memory_mb = 10;
@@ -205,14 +235,26 @@ TEST(DatabaseConfig, CreateWithConfig) {
 
     // Cleanup
     char cmd[256];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", temp_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+#endif
     system(cmd);
 }
 
 // Test: Reopen preserves immutable settings
 TEST(DatabaseConfig, ReopenPreservesImmutable) {
-    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    char temp_dir[256];
+#if _WIN32
+    strcpy(temp_dir, getenv("TEMP"));
+    strcat(temp_dir, "/wavedb_config_test_XXXXXX");
+    _mktemp(temp_dir);
+    _mkdir(temp_dir);
+#else
+    strcpy(temp_dir, "/tmp/wavedb_config_test_XXXXXX");
     mkdtemp(temp_dir);
+#endif
 
     // Create with chunk_size=8
     database_config_t* config1 = database_config_default();
@@ -242,14 +284,26 @@ TEST(DatabaseConfig, ReopenPreservesImmutable) {
 
     // Cleanup
     char cmd[256];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", temp_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+#endif
     system(cmd);
 }
 
 // Test: External pool/wheel not owned
 TEST(DatabaseConfig, ExternalResourcesNotOwned) {
-    char temp_dir[] = "/tmp/wavedb_config_test_XXXXXX";
+    char temp_dir[256];
+#if _WIN32
+    strcpy(temp_dir, getenv("TEMP"));
+    strcat(temp_dir, "/wavedb_config_test_XXXXXX");
+    _mktemp(temp_dir);
+    _mkdir(temp_dir);
+#else
+    strcpy(temp_dir, "/tmp/wavedb_config_test_XXXXXX");
     mkdtemp(temp_dir);
+#endif
 
     // Create external resources
     work_pool_t* pool = work_pool_create(2);
@@ -283,6 +337,10 @@ TEST(DatabaseConfig, ExternalResourcesNotOwned) {
 
     // Cleanup
     char cmd[256];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", temp_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", temp_dir);
+#endif
     system(cmd);
 }

@@ -12,8 +12,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,7 +36,11 @@ typedef struct {
 
 // Initialize WAL for benchmark
 static void wal_benchmark_init(wal_benchmark_context_t* ctx, const char* test_name) {
+#if _WIN32
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir), "%s\\wal_benchmark_%s_%d", getenv("TEMP"), test_name, getpid());
+#else
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/wal_benchmark_%s_%d", test_name, getpid());
+#endif
     mkdir(ctx->test_dir, 0755);
 
     int error_code = 0;
@@ -49,7 +61,11 @@ static void wal_benchmark_cleanup(wal_benchmark_context_t* ctx) {
 
     // Remove test directory
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", ctx->test_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", ctx->test_dir);
+#endif
     system(cmd);
 }
 
@@ -196,7 +212,11 @@ void run_wal_benchmarks(void) {
 
 int main(int argc, char** argv) {
     // Create benchmark directory if it doesn't exist
+#if _WIN32
+    system("mkdir .benchmarks 2>nul");
+#else
     system("mkdir -p .benchmarks");
+#endif
 
     run_wal_benchmarks();
 

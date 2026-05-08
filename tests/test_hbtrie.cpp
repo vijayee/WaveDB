@@ -3,6 +3,7 @@
 //
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include "HBTrie/hbtrie.h"
 #include "HBTrie/mvcc.h"
 #include "Buffer/buffer.h"

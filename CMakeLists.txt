@@ -7,9 +7,11 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Compiler flags
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Wextra -Werror=return-type")
-set(CMAKE_C_FLAGS_DEBUG "-g -O0")
-set(CMAKE_C_FLAGS_RELEASE "-O3")
+if(MSVC)
+    add_compile_options(/W4 /std:c11 /experimental:c11atomics)
+else()
+    add_compile_options(-Wall -Wextra -Werror=return-type -Wno-incompatible-pointer-types)
+endif()
 
 # Position Independent Code for shared library linking
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -115,8 +117,10 @@ set(WAVEDB_SOURCES
 # Create WaveDB library
 add_library(wavedb STATIC ${WAVEDB_SOURCES})
 
-# Link with atomic library for C11 atomics
-target_link_libraries(wavedb PUBLIC atomic)
+# Link with atomic library for C11 atomics (not needed on MSVC)
+if(NOT MSVC)
+    target_link_libraries(wavedb PUBLIC atomic)
+endif()
 
 # Modern CMake: Use target-specific include directories
 target_include_directories(wavedb
@@ -148,10 +152,21 @@ target_include_directories(hashmap
 target_link_libraries(wavedb PUBLIC hashmap)
 
 # Platform-specific settings
+find_package(Threads REQUIRED)
 if(WIN32)
     target_compile_definitions(wavedb PRIVATE _WIN32)
+    target_link_libraries(wavedb PUBLIC Threads::Threads ws2_32)
+    # MSVC deprecates POSIX names; use underscore versions
+    target_compile_definitions(wavedb PRIVATE _CRT_NONSTDC_NO_WARNINGS)
+    find_package(OpenSSL)
+    if(OpenSSL_FOUND)
+        target_link_libraries(wavedb PUBLIC OpenSSL::Crypto)
+        target_include_directories(wavedb PRIVATE ${OPENSSL_INCLUDE_DIR})
+    else()
+        # Provide stub implementations when OpenSSL is not available
+        target_compile_definitions(wavedb PRIVATE WAVEDB_NO_OPENSSL)
+    endif()
 else()
-    find_package(Threads REQUIRED)
     find_package(OpenSSL REQUIRED)
     target_link_libraries(wavedb PUBLIC Threads::Threads OpenSSL::Crypto)
     target_include_directories(wavedb PRIVATE ${OPENSSL_INCLUDE_DIR})
@@ -162,7 +177,8 @@ option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
     enable_testing()
 
-    # Add googletest
+    # Add googletest — use shared CRT on MSVC to match the main library
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     add_subdirectory(deps/googletest)
 
     # Test for chunk
@@ -270,15 +286,17 @@ if(BUILD_TESTS)
     target_link_libraries(test_persistence_phase2 wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_persistence_phase2 COMMAND test_persistence_phase2)
 
-    # Encryption module tests
-    add_executable(test_encryption tests/test_encryption.cpp)
-    target_link_libraries(test_encryption wavedb gtest gtest_main OpenSSL::Crypto)
-    add_test(NAME test_encryption COMMAND test_encryption)
+    # Encryption module tests (require OpenSSL)
+    if(OpenSSL_FOUND)
+        add_executable(test_encryption tests/test_encryption.cpp)
+        target_link_libraries(test_encryption wavedb gtest gtest_main OpenSSL::Crypto)
+        add_test(NAME test_encryption COMMAND test_encryption)
 
-    # Encrypted database integration tests
-    add_executable(test_encrypted_database tests/test_encrypted_database.cpp)
-    target_link_libraries(test_encrypted_database wavedb gtest gtest_main Threads::Threads OpenSSL::Crypto)
-    add_test(NAME test_encrypted_database COMMAND test_encrypted_database)
+        # Encrypted database integration tests
+        add_executable(test_encrypted_database tests/test_encrypted_database.cpp)
+        target_link_libraries(test_encrypted_database wavedb gtest gtest_main Threads::Threads OpenSSL::Crypto)
+        add_test(NAME test_encrypted_database COMMAND test_encrypted_database)
+    endif()
 
     # Sync-only mode functional and cross-mode tests
     add_executable(test_sync_only tests/test_sync_only.c)
@@ -472,10 +490,22 @@ option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
 if(BUILD_DART_BINDINGS)
   # Build shared library for Dart FFI
   add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
-  target_link_libraries(wavedb_shared PUBLIC atomic xxhash cbor hashmap OpenSSL::Crypto)
-  if(NOT WIN32)
-    target_link_libraries(wavedb_shared PUBLIC Threads::Threads)
+  # libatomic is not a separate library on MSYS2/UCRT64 or MSVC
+  include(CheckLibraryExists)
+  check_library_exists(atomic __atomic_fetch_add_8 "" HAVE_LIBATOMIC)
+  if(HAVE_LIBATOMIC)
+    target_link_libraries(wavedb_shared PUBLIC atomic)
   endif()
+  target_link_libraries(wavedb_shared PUBLIC xxhash cbor hashmap)
+  if(WIN32)
+    target_compile_definitions(wavedb_shared PRIVATE _WIN32)
+    target_link_libraries(wavedb_shared PUBLIC ws2_32)
+  endif()
+  find_package(OpenSSL)
+  if(OpenSSL_FOUND)
+    target_link_libraries(wavedb_shared PUBLIC OpenSSL::Crypto)
+  endif()
+  target_link_libraries(wavedb_shared PUBLIC Threads::Threads)
   target_include_directories(wavedb_shared
     PUBLIC
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>

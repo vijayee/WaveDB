@@ -2,9 +2,18 @@
 // Test for variable-size section storage with transaction IDs
 //
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include "Storage/section.h"
 #include "Workers/transaction_id.h"
 

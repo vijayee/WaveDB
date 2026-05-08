@@ -20,12 +20,18 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
-#include <stdatomic.h>
+#include "Util/atomic_compat.h"
+#include "Util/dirent_compat.h"
+#if _WIN32
+#include "Util/unistd_compat.h"
+#include "Util/windows_compat.h"
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
 #include <sys/uio.h>
-#include <dirent.h>
+#endif
 
 // Error codes
 #define WAL_ERROR_INVALID_ARG -1
@@ -204,7 +210,7 @@ static int decode_delete_entry_binary(uint8_t* data, size_t data_len,
 }
 
 // Thread-local storage for WAL
-static __thread thread_wal_t* thread_local_wal = NULL;
+static THREAD_LOCAL thread_wal_t* thread_local_wal = NULL;
 
 // Default configuration
 static void init_default_config(wal_config_t* config) {
@@ -769,7 +775,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     // Get current timestamp in milliseconds
     timeval_t now;
     get_time(&now);
-    header.migration_timestamp = (now.tv_sec * 1000) + (now.tv_usec / 1000);
+    header.migration_timestamp = timeval_to_ms(now);
 
     // Seek to beginning and write header
     if (lseek(manager->manifest_fd, 0, SEEK_SET) < 0) {
@@ -1038,7 +1044,7 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
     }
 
     // Get thread ID
-    uint64_t thread_id = (uint64_t)pthread_self();
+    uint64_t thread_id = platform_self();
 
     // Create thread-local WAL
     thread_local_wal = create_thread_wal(manager, thread_id);
@@ -1271,12 +1277,19 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
 
         // If entry itself is too large for the buffer, write directly
         if (entry_size > sizeof(twal->entry_buf)) {
+#if _WIN32
+            ssize_t bytes_written = _write(twal->fd, header_buf, sizeof(header_buf));
+            if (bytes_written == sizeof(header_buf)) {
+                bytes_written += _write(twal->fd, payload, payload_len);
+            }
+#else
             struct iovec iov[2];
             iov[0].iov_base = header_buf;
             iov[0].iov_len = sizeof(header_buf);
             iov[1].iov_base = payload;
             iov[1].iov_len = payload_len;
             ssize_t bytes_written = writev(twal->fd, iov, 2);
+#endif
             if (bytes_written != (ssize_t)(sizeof(header_buf) + payload_len)) {
                 platform_unlock(&twal->lock);
                 free(encrypted_buf);

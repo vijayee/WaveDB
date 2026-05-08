@@ -13,8 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-#include <stdatomic.h>
-#include <unistd.h>  // for close(), unlink()
+#include "Util/atomic_compat.h"
+#include "Util/unistd_compat.h"  // for close(), unlink()
 
 // D3.js will be embedded as base64 in HTML output
 // Size: ~274KB minified, ~365KB base64 encoded
@@ -234,7 +234,7 @@ static const char* HTML_TEMPLATE =
 "</html>";
 
 // Static counter for unique node IDs
-static atomic_size_t g_node_id_counter = ATOMIC_VAR_INIT(0);
+static atomic_size_t g_node_id_counter;
 
 // Forward declarations
 static int serialize_hbtrie_node(hbtrie_node_t* node, FILE* fp, uint8_t chunk_size, size_t* node_count, int depth);
@@ -470,7 +470,12 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
 
     // Create temporary file for JSON
     const char* tmpdir = getenv("TMPDIR");
+#if _WIN32
+    if (tmpdir == NULL) tmpdir = getenv("TEMP");
+    if (tmpdir == NULL) tmpdir = ".";
+#else
     if (tmpdir == NULL) tmpdir = "/tmp";
+#endif
     char temp_path[512];
     snprintf(temp_path, sizeof(temp_path), "%s/hbtrie_viz_json_XXXXXX", tmpdir);
     int temp_fd = mkstemp(temp_path);

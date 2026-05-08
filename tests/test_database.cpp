@@ -2,6 +2,21 @@
 // Created by victor on 3/11/26.
 //
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#endif
+
+#if _WIN32
+#include "../src/Util/windows_compat.h"
+#define usleep(us) Sleep((us) / 1000)
+#endif
+
 #include <gtest/gtest.h>
 #include <future>
 #include <vector>

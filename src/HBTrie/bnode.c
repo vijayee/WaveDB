@@ -3,7 +3,7 @@
 //
 
 #include "bnode.h"
-#include <stdatomic.h>
+#include "Util/atomic_compat.h"
 #include "bs_array.h"
 #include "chunk.h"
 #include "identifier.h"

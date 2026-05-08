@@ -60,8 +60,19 @@
 
 #elif defined(__WINDOWS__)
 
-#	include <winsock2.h>
-#	include <sys/param.h>
+#	include "Util/windows_compat.h"
+#	ifdef _MSC_VER
+/* MSVC does not provide <sys/param.h> — define BYTE_ORDER macros */
+#	 ifndef BYTE_ORDER
+#		define LITTLE_ENDIAN 1234
+#		define BIG_ENDIAN    4321
+#		define BYTE_ORDER    LITTLE_ENDIAN
+#	 endif
+#	else
+#		include <sys/param.h>
+#	endif
+
+/* WinSock2.h provides htonll/ntohll on modern Windows SDK — no need to define them here. */
 
 #	if BYTE_ORDER == LITTLE_ENDIAN
 
@@ -82,21 +93,39 @@
 
 #	elif BYTE_ORDER == BIG_ENDIAN
 
-		/* that would be xbox 360 */
-#		define htobe16(x) (x)
-#		define htole16(x) __builtin_bswap16(x)
-#		define be16toh(x) (x)
-#		define le16toh(x) __builtin_bswap16(x)
+			/* that would be xbox 360 */
+#		ifdef _MSC_VER
+#			include <stdlib.h>
+#			define htobe16(x) (x)
+#			define htole16(x) _byteswap_ushort(x)
+#			define be16toh(x) (x)
+#			define le16toh(x) _byteswap_ushort(x)
 
-#		define htobe32(x) (x)
-#		define htole32(x) __builtin_bswap32(x)
-#		define be32toh(x) (x)
-#		define le32toh(x) __builtin_bswap32(x)
+#			define htobe32(x) (x)
+#			define htole32(x) _byteswap_ulong(x)
+#			define be32toh(x) (x)
+#			define le32toh(x) _byteswap_ulong(x)
 
-#		define htobe64(x) (x)
-#		define htole64(x) __builtin_bswap64(x)
-#		define be64toh(x) (x)
-#		define le64toh(x) __builtin_bswap64(x)
+#			define htobe64(x) (x)
+#			define htole64(x) _byteswap_uint64(x)
+#			define be64toh(x) (x)
+#			define le64toh(x) _byteswap_uint64(x)
+#		else
+#			define htobe16(x) (x)
+#			define htole16(x) __builtin_bswap16(x)
+#			define be16toh(x) (x)
+#			define le16toh(x) __builtin_bswap16(x)
+
+#			define htobe32(x) (x)
+#			define htole32(x) __builtin_bswap32(x)
+#			define be32toh(x) (x)
+#			define le32toh(x) __builtin_bswap32(x)
+
+#			define htobe64(x) (x)
+#			define htole64(x) __builtin_bswap64(x)
+#			define be64toh(x) (x)
+#			define le64toh(x) __builtin_bswap64(x)
+#		endif
 
 #	else
 

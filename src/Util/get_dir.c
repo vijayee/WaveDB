@@ -3,10 +3,10 @@
 //
 #include "get_dir.h"
 #include "allocator.h"
-#include <dirent.h>
+#include "Util/dirent_compat.h"
 #include <string.h>
 #include <stdio.h>
-
+#include <sys/stat.h>
 
 int sortstring( const void *str1, const void *str2 ){
   char *const *pp1 = str1;
@@ -24,10 +24,23 @@ vec_str_t* get_dir(const char* directory) {
   dir = opendir(directory);
   if (dir != NULL) {
     while ((ent = readdir(dir)) != NULL) {
+#ifdef DT_DIR
       if (ent->d_type != DT_DIR) {
         char *str = strdup(ent->d_name);
         vec_push(files, str);
       }
+#else
+      // Fallback: stat each entry if d_type is not available
+      {
+        char fullpath[4096];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", directory, ent->d_name);
+        struct stat st;
+        if (stat(fullpath, &st) == 0 && !S_ISDIR(st.st_mode)) {
+          char *str = strdup(ent->d_name);
+          vec_push(files, str);
+        }
+      }
+#endif
     }
     closedir(dir);
     vec_sort(files, sortstring);

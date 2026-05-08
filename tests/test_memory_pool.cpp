@@ -60,12 +60,12 @@ TEST_F(MemoryPoolTest, MultipleAllocations) {
 
 TEST_F(MemoryPoolTest, Statistics) {
     // Allocate and free some blocks
-    void* small = memory_pool_alloc(32);
+    void* small_blk = memory_pool_alloc(32);
     void* medium = memory_pool_alloc(128);
     void* large = memory_pool_alloc(512);
     void* fallback = memory_pool_alloc(2048);
 
-    memory_pool_free(small, 32);
+    memory_pool_free(small_blk, 32);
     memory_pool_free(medium, 128);
     memory_pool_free(large, 512);
     memory_pool_free(fallback, 2048);

@@ -16,12 +16,12 @@ static uint8_t g_medium_pool[MEMORY_POOL_MEDIUM_SIZE * MEMORY_POOL_MEDIUM_COUNT]
 static uint8_t g_large_pool[MEMORY_POOL_LARGE_SIZE * MEMORY_POOL_LARGE_COUNT];
 
 // Thread-local caches for each size class
-static __thread tls_cache_t tls_small = {0};
-static __thread tls_cache_t tls_medium = {0};
-static __thread tls_cache_t tls_large = {0};
+static THREAD_LOCAL tls_cache_t tls_small = {0};
+static THREAD_LOCAL tls_cache_t tls_medium = {0};
+static THREAD_LOCAL tls_cache_t tls_large = {0};
 
 // Track if TLS caches are initialized for this thread
-static __thread int tls_initialized = 0;
+static THREAD_LOCAL int tls_initialized = 0;
 
 // Initialize a size class pool
 static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,

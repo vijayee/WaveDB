@@ -6,7 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if _WIN32
-#include <windows.h>
+#include "Util/windows_compat.h"
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -93,8 +93,8 @@ int platform_core_count() {
   GetSystemInfo(&sysinfo);
   return sysinfo.dwNumberOfProcessors;
 }
-int platform_self() {
-  return GetCurrentThreadId();
+uint64_t platform_self() {
+  return (uint64_t)GetCurrentThreadId();
 }
 #else
 void platform_lock(pthread_mutex_t* lock) {

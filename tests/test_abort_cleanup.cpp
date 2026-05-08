@@ -3,6 +3,16 @@
 // when work items are queued but not executed during shutdown
 //
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#endif
+
 #include <gtest/gtest.h>
 #include "../src/Database/database.h"
 #include "../src/Workers/pool.h"

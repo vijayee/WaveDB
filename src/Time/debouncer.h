@@ -9,7 +9,7 @@
 #include "wheel.h"
 #include "../RefCounter/refcounter.h"
 #if _WIN32
-#include <windows.h>
+#include "Util/windows_compat.h"
 typedef LARGE_INTEGER timeval_t;
 #else
 #include <sys/time.h>
@@ -35,6 +35,17 @@ void debouncer_debounce(debouncer_t* bouncer);
 void debouncer_flush(debouncer_t* bouncer);
 uint64_t elapsed_time(timeval_t start, timeval_t end);
 void get_time(timeval_t* tv);
+
+// Convert timeval_t to milliseconds
+static inline uint64_t timeval_to_ms(timeval_t tv) {
+#if _WIN32
+    LARGE_INTEGER frequency;
+    QueryPerformanceFrequency(&frequency);
+    return (uint64_t)(tv.QuadPart * 1000ULL / frequency.QuadPart);
+#else
+    return (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+#endif
+}
 
 // High-resolution benchmark timers (nanosecond precision)
 #if _WIN32

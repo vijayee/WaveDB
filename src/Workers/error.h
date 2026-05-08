@@ -28,6 +28,9 @@ void error_destroy(async_error_t* error);
  */
 const char* error_get_message(async_error_t* error);
 
+#ifdef ERROR
+#undef ERROR
+#endif
 #define ERROR(MESSAGE) error_create(MESSAGE, (char*)__FILE__, (char*)__func__, __LINE__)
 
 #ifdef __cplusplus

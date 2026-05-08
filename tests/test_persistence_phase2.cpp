@@ -16,6 +16,17 @@ extern "C" {
 #include "Util/allocator.h"
 }
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -26,8 +37,15 @@ protected:
     database_t* db = nullptr;
 
     void SetUp() override {
+#if _WIN32
+        strcpy(tmpdir, getenv("TEMP"));
+        strcat(tmpdir, "/wavedb_phase2_test_XXXXXX");
+        _mktemp(tmpdir);
+        _mkdir(tmpdir);
+#else
         strcpy(tmpdir, "/tmp/wavedb_phase2_test_XXXXXX");
         mkdtemp(tmpdir);
+#endif
     }
 
     void TearDown() override {
@@ -36,7 +54,11 @@ protected:
             db = nullptr;
         }
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
         system(cmd);
     }
 
@@ -373,7 +395,11 @@ TEST_F(PersistencePhase2Test, PersistenceWithoutWAL) {
     // WAL files are named thread_*.wal and current.wal and <sequence>.wal
     // Also delete manifest.dat which tracks WAL files
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "del /q %s\\*.wal %s\\manifest.dat 2>nul", tmpdir, tmpdir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -f %s/*.wal %s/manifest.dat", tmpdir, tmpdir);
+#endif
     system(cmd);
 
     // Reopen — must load from page file, not WAL

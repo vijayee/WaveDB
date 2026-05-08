@@ -7,11 +7,45 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define open _open
+#define ftruncate _chsize
+#define fsync _commit
+#define O_RDONLY _O_RDONLY
+#define O_RDWR _O_RDWR
+#define O_CREAT _O_CREAT
+#define O_TRUNC _O_TRUNC
+#define O_BINARY _O_BINARY
+#define S_IRUSR _S_IREAD
+#define S_IWUSR _S_IWRITE
+#define S_IRGRP 0
+#define S_IROTH 0
+// Compatibility: Windows doesn't have pread/pwrite, implement using lseek+read/write
+static ssize_t _pread_compat(int fd, void* buf, size_t count, __int64 offset) {
+    __int64 saved = _lseeki64(fd, 0, SEEK_CUR);
+    _lseeki64(fd, offset, SEEK_SET);
+    ssize_t rd = _read(fd, buf, (unsigned int)count);
+    _lseeki64(fd, saved, SEEK_SET);
+    return rd;
+}
+static ssize_t _pwrite_compat(int fd, const void* buf, size_t count, __int64 offset) {
+    __int64 saved = _lseeki64(fd, 0, SEEK_CUR);
+    _lseeki64(fd, offset, SEEK_SET);
+    ssize_t wr = _write(fd, buf, (unsigned int)count);
+    _lseeki64(fd, saved, SEEK_SET);
+    return wr;
+}
+#define pread(fd, buf, count, offset) _pread_compat(fd, buf, count, offset)
+#define pwrite(fd, buf, count, offset) _pwrite_compat(fd, buf, count, offset)
+#else
+#include <unistd.h>
+#endif
 
 #include <xxhash.h>
 
@@ -103,6 +137,9 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
     }
 
     int flags = writable ? (O_RDWR | O_CREAT) : O_RDONLY;
+#if _WIN32
+    flags |= O_BINARY;
+#endif
     int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // 0644
 
     pf->fd = open(pf->path, flags, mode);

@@ -21,6 +21,17 @@
 #include <cstring>
 #include <cstdio>
 #include <random>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 
 extern "C" {
 #include "Database/database.h"
@@ -180,8 +191,14 @@ int main(int argc, char* argv[]) {
     if (argc > 1) NUM_KEYS = atoi(argv[1]);
     if (argc > 2) NUM_UPDATES = atoi(argv[2]);
 
+#if _WIN32
+    snprintf(tmpdir, sizeof(tmpdir), "%s/wavedb_bench_phase2_XXXXXX", getenv("TEMP") ?: ".");
+    _mktemp(tmpdir);
+    _mkdir(tmpdir);
+#else
     strcpy(tmpdir, "/tmp/wavedb_bench_phase2_XXXXXX");
     mkdtemp(tmpdir);
+#endif
 
     database_t* db = create_db();
     if (db == nullptr) {
@@ -238,7 +255,11 @@ int main(int argc, char* argv[]) {
 
     // Delete WAL files and manifest to force page-file-only load
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "del /q %s\\*.wal %s\\manifest.dat 2>nul", tmpdir, tmpdir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -f %s/*.wal %s/manifest.dat", tmpdir, tmpdir);
+#endif
     system(cmd);
 
     // Reopen and verify a few keys
@@ -262,7 +283,11 @@ int main(int argc, char* argv[]) {
 
     database_destroy(db);
 
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
     system(cmd);
 
     return 0;

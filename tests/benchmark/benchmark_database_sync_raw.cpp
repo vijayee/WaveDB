@@ -12,8 +12,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 extern "C" {
 #include "Database/database.h"
 }
@@ -27,8 +35,13 @@ typedef struct {
 // Helper function to initialize benchmark context
 static int raw_sync_benchmark_init(raw_sync_benchmark_ctx_t* ctx, const char* test_name) {
     // Create unique test directory
+#if _WIN32
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir),
+             "%s\\raw_sync_db_bench_%s_%d", getenv("TEMP"), test_name, getpid());
+#else
     snprintf(ctx->test_dir, sizeof(ctx->test_dir),
              "/tmp/raw_sync_db_bench_%s_%d", test_name, getpid());
+#endif
 
     // Create directory
     mkdir(ctx->test_dir, 0755);
@@ -56,7 +69,11 @@ static void raw_sync_benchmark_cleanup(raw_sync_benchmark_ctx_t* ctx) {
     // Clean up test directory
     if (ctx->test_dir[0] != '\0') {
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", ctx->test_dir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", ctx->test_dir);
+#endif
         system(cmd);
     }
 }
@@ -272,7 +289,11 @@ static void run_raw_sync_benchmarks() {
 
 int main(int argc, char** argv) {
     // Ensure benchmark output directory exists
+#if _WIN32
+    system("mkdir .benchmarks 2>nul");
+#else
     system("mkdir -p .benchmarks");
+#endif
 
     printf("Starting raw synchronous database benchmarks...\n\n");
     run_raw_sync_benchmarks();

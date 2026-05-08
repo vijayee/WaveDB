@@ -6,14 +6,23 @@
 #include "../Util/allocator.h"
 #include "../Time/debouncer.h"
 #include <stdlib.h>
+#if _WIN32
+#include "Util/unistd_compat.h"
+#include "Util/windows_compat.h"
+#else
 #include <unistd.h>
+#endif
 
 // Background thread function
 static void* compaction_thread_func(void* arg) {
     wal_compactor_t* compactor = (wal_compactor_t*)arg;
 
     while (1) {
+#if _WIN32
+        Sleep(1000);  // Check every second
+#else
         sleep(1);  // Check every second
+#endif
 
         platform_lock(&compactor->lock);
 
@@ -23,10 +32,9 @@ static void* compaction_thread_func(void* arg) {
             break;
         }
 
-        uint64_t now = 0;
         timeval_t tv;
         get_time(&tv);
-        now = (uint64_t)tv.tv_sec * 1000 + (uint64_t)tv.tv_usec / 1000;
+        uint64_t now = timeval_to_ms(tv);
 
         uint64_t time_since_last_write = now - compactor->last_write_time;
         uint64_t time_since_last_compact = now - compactor->last_compact_time;
@@ -64,7 +72,7 @@ wal_compactor_t* wal_compactor_create(wal_manager_t* manager,
 
     timeval_t now;
     get_time(&now);
-    compactor->last_write_time = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_usec / 1000;
+    compactor->last_write_time = timeval_to_ms(now);
     compactor->last_compact_time = 0;
     compactor->running = 1;
 
@@ -72,10 +80,18 @@ wal_compactor_t* wal_compactor_create(wal_manager_t* manager,
     platform_condition_init(&compactor->cond);
 
     // Create thread
+#if _WIN32
+    compactor->thread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)compaction_thread_func, compactor, 0, NULL);
+    if (compactor->thread == NULL) {
+        free(compactor);
+        return NULL;
+    }
+#else
     if (pthread_create(&compactor->thread, NULL, compaction_thread_func, compactor) != 0) {
         free(compactor);
         return NULL;
     }
+#endif
 
     return compactor;
 }
@@ -87,7 +103,7 @@ void wal_compactor_destroy(wal_compactor_t* compactor) {
     compactor->running = 0;
 
     // Wait for thread to finish (it will complete its current sleep cycle)
-    pthread_join(compactor->thread, NULL);
+    platform_join(compactor->thread);
 
     // Now safe to destroy locks - thread has exited and released all locks
     platform_lock_destroy(&compactor->lock);
@@ -100,7 +116,7 @@ void wal_compactor_signal_write(wal_compactor_t* compactor) {
     platform_lock(&compactor->lock);
     timeval_t now;
     get_time(&now);
-    compactor->last_write_time = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_usec / 1000;
+    compactor->last_write_time = timeval_to_ms(now);
     platform_unlock(&compactor->lock);
 }
 

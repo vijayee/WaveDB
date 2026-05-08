@@ -5,7 +5,7 @@
 #include "fs_block_size.h"
 
 #if _WIN32
-#include <windows.h>
+#include "Util/windows_compat.h"
 #else
 #include <sys/statvfs.h>
 #endif

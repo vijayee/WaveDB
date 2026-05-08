@@ -14,8 +14,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,7 +41,11 @@ typedef struct {
 
 // Initialize thread-local WAL for benchmark
 static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sync_mode_e sync_mode) {
+#if _WIN32
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir), "%s\\thread_wal_bench_%s_%d", getenv("TEMP"), test_name, getpid());
+#else
     snprintf(ctx->test_dir, sizeof(ctx->test_dir), "/tmp/thread_wal_bench_%s_%d", test_name, getpid());
+#endif
     mkdir(ctx->test_dir, 0755);
 
     // Create work pool and timing wheel for debouncer (needed for DEBOUNCED mode)
@@ -109,7 +121,11 @@ static void thread_wal_cleanup(thread_wal_ctx_t* ctx) {
 
     // Remove test directory
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", ctx->test_dir);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", ctx->test_dir);
+#endif
     system(cmd);
 }
 
@@ -246,7 +262,11 @@ int main(int argc, char** argv) {
     transaction_id_init();
 
     // Create benchmark directory if it doesn't exist
+#if _WIN32
+    system("mkdir .benchmarks 2>nul");
+#else
     system("mkdir -p .benchmarks");
+#endif
 
     run_thread_wal_benchmarks();
 

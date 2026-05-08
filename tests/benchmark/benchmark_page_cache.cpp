@@ -8,8 +8,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 #include <chrono>
 #include <vector>
 
@@ -41,14 +49,25 @@ static uint8_t* make_prefixed_data(const uint8_t* payload, size_t payload_len, s
 
 // Create a temp directory for a benchmark run; caller must rm -rf it
 static int make_temp_dir(char* buf, size_t bufsize, const char* prefix) {
+#if _WIN32
+    snprintf(buf, bufsize, "%s\\%s_%d_XXXXXX", getenv("TEMP"), prefix, getpid());
+    if (_mktemp(buf) == NULL) return -1;
+    if (_mkdir(buf) != 0) return -1;
+    return 0;
+#else
     snprintf(buf, bufsize, "/tmp/%s_%d_XXXXXX", prefix, getpid());
     return mkdtemp(buf) ? 0 : -1;
+#endif
 }
 
 // Remove a directory tree
 static void remove_dir(const char* path) {
     char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", path);
+#else
     snprintf(cmd, sizeof(cmd), "rm -rf %s", path);
+#endif
     system(cmd);
 }
 

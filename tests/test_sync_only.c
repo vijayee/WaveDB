@@ -5,7 +5,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#else
 #include <unistd.h>
+#endif
+
 #include "Database/database.h"
 #include "Database/database_config.h"
 #include "HBTrie/path.h"
@@ -63,7 +72,13 @@ static void test_sync_only_put_get(void) {
     printf("\n=== test_sync_only_put_get ===\n");
 
     char tmpdir[256];
+#if _WIN32
+    const char* tmpbase = getenv("TEMP");
+    if (!tmpbase) tmpbase = ".";
+    snprintf(tmpdir, sizeof(tmpdir), "%s\\wavedb_sync_test1_%d", tmpbase, getpid());
+#else
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/wavedb_sync_test1_%d", getpid());
+#endif
 
     /* Create sync_only config */
     database_config_t* config = database_config_default();
@@ -114,7 +129,11 @@ static void test_sync_only_put_get(void) {
     /* Remove test directory */
     {
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
         system(cmd);
     }
 
@@ -127,7 +146,13 @@ static void test_sync_only_cross_mode(void) {
     printf("\n=== test_sync_only_cross_mode ===\n");
 
     char tmpdir[256];
+#if _WIN32
+    const char* tmpbase = getenv("TEMP");
+    if (!tmpbase) tmpbase = ".";
+    snprintf(tmpdir, sizeof(tmpdir), "%s\\wavedb_sync_cross_%d", tmpbase, getpid());
+#else
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/wavedb_sync_cross_%d", getpid());
+#endif
 
     /* ===== Phase 1: sync_only mode ===== */
     printf("  Phase 1: Create DB in sync_only mode\n");
@@ -323,7 +348,11 @@ static void test_sync_only_cross_mode(void) {
     /* Clean up test directory */
     {
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
         system(cmd);
     }
 

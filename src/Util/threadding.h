@@ -6,12 +6,21 @@
 #define WAVEDB_THREADDING_H
 #include <stdint.h>
 
+/* Thread-local storage keyword */
+#if defined(_MSC_VER)
+  #define THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__)
+  #define THREAD_LOCAL __thread
+#else
+  #define THREAD_LOCAL /* fall back — no TLS */
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #if _WIN32
-#include <windows.h>
+#include "Util/windows_compat.h"
 #define sched_yield() SwitchToThread()
 #define PLATFORMLOCKTYPE(N) CRITICAL_SECTION N
 #define PLATFORMLOCKTYPEPTR(N) CRITICAL_SECTION* N
@@ -76,28 +85,34 @@ uint64_t platform_self();
 
 // Spin-loop hint: reduces power consumption and improves performance
 // on SMT/HT processors during busy-wait loops
-#if defined(__x86_64__) || defined(__i386__)
-#define cpu_relax() __asm__ __volatile__("pause" ::: "memory")
+#if defined(_MSC_VER)
+  #include <intrin.h>
+  #define cpu_relax() _mm_pause()
+#elif defined(__x86_64__) || defined(__i386__)
+  #define cpu_relax() __asm__ __volatile__("pause" ::: "memory")
 #elif defined(__aarch64__) || defined(__arm__)
-#define cpu_relax() __asm__ __volatile__("yield" ::: "memory")
+  #define cpu_relax() __asm__ __volatile__("yield" ::: "memory")
 #elif defined(__powerpc__) || defined(__ppc__)
-#define cpu_relax() __asm__ __volatile__("or 27,27,27" ::: "memory")
+  #define cpu_relax() __asm__ __volatile__("or 27,27,27" ::: "memory")
 #else
-#define cpu_relax() ((void)0)
+  #define cpu_relax() ((void)0)
 #endif
+
+#include "Util/atomic_compat.h"
 
 /* Adaptive spinlock - spins up to 128 iterations, then yields */
 typedef struct {
-    uint8_t state;  /* 0=unlocked, 1=exclusive (accessed via __atomic builtins) */
+    ATOMIC_TYPE(uint8_t) state;  /* 0=unlocked, 1=exclusive */
 } spinlock_t;
 
+#ifdef __cplusplus
 static inline void spinlock_init(spinlock_t* l) {
-    __atomic_store_n(&l->state, 0, __ATOMIC_RELEASE);
+    l->state.store(0, std::memory_order_release);
 }
 
 static inline void spinlock_lock(spinlock_t* l) {
     int spins = 0;
-    while (__atomic_exchange_n(&l->state, 1, __ATOMIC_ACQUIRE)) {
+    while (l->state.exchange(1, std::memory_order_acquire)) {
         spins++;
         if (spins > 128) {
             sched_yield();
@@ -108,8 +123,29 @@ static inline void spinlock_lock(spinlock_t* l) {
 }
 
 static inline void spinlock_unlock(spinlock_t* l) {
-    __atomic_store_n(&l->state, 0, __ATOMIC_RELEASE);
+    l->state.store(0, std::memory_order_release);
 }
+#else
+static inline void spinlock_init(spinlock_t* l) {
+    atomic_store_explicit(&l->state, 0, memory_order_release);
+}
+
+static inline void spinlock_lock(spinlock_t* l) {
+    int spins = 0;
+    while (atomic_exchange_explicit(&l->state, 1, memory_order_acquire)) {
+        spins++;
+        if (spins > 128) {
+            sched_yield();
+            spins = 0;
+        }
+        cpu_relax();
+    }
+}
+
+static inline void spinlock_unlock(spinlock_t* l) {
+    atomic_store_explicit(&l->state, 0, memory_order_release);
+}
+#endif
 
 static inline void spinlock_destroy(spinlock_t* l) {
     (void)l; /* No-op — nothing to destroy */
@@ -123,7 +159,11 @@ static inline void spinlock_destroy(spinlock_t* l) {
 #define CACHE_LINE_SIZE 64
 #endif
 
-#define CACHE_ALIGNED __attribute__((aligned(CACHE_LINE_SIZE)))
+#if defined(_MSC_VER)
+  #define CACHE_ALIGNED __declspec(align(CACHE_LINE_SIZE))
+#else
+  #define CACHE_ALIGNED __attribute__((aligned(CACHE_LINE_SIZE)))
+#endif
 
 #ifdef __cplusplus
 }

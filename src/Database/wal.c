@@ -15,10 +15,15 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <fcntl.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sys/stat.h>
-#include <dirent.h>
+#include "Util/dirent_compat.h"
+#if _WIN32
+#include "Util/unistd_compat.h"
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#endif
 
 // Default debounce wait time for fsync (250ms)
 #define WAL_DEFAULT_DEBOUNCE_MS 250

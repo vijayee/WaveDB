@@ -13,8 +13,7 @@
       "<!@(node -p \"require('node-addon-api').include\")",
       "../../src",
       "../../deps/libcbor/src",
-      "../../build-release/deps/libcbor/src",
-      "../../build-release/deps/libcbor",
+      "../../build/deps/libcbor/src",
       "../../deps/hashmap/include",
       "../../deps/xxhash"
     ],
@@ -29,27 +28,36 @@
     "cflags_cc": ["-O3"],
     "ldflags": [""],
     "libraries": [
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libwavedb.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libxxhash.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libhashmap.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/deps/libcbor/src/libcbor.a",
-      "-lcrypto",
-      "-lssl",
-      "-lpthread",
-      "-latomic"
+      "../../build/libwavedb.a",
+      "../../build/libxxhash.a",
+      "../../build/libhashmap.a",
+      "../../build/deps/libcbor/src/libcbor.a"
     ],
     "conditions": [
       ["OS=='linux'", {
-        "libraries": ["-lpthread"]
+        "libraries": ["-lpthread", "-latomic", "-lcrypto", "-lssl"]
       }],
       ["OS=='mac'", {
         "xcode_settings": {
           "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
           "MACOSX_DEPLOYMENT_TARGET": "10.7"
-        }
+        },
+        "libraries": ["-lcrypto", "-lssl"]
       }],
       ["OS=='win'", {
-        "libraries": ["ws2_32.lib"]
+        "libraries": [
+          "../../build/Release/wavedb.lib",
+          "../../build/Release/xxhash.lib",
+          "../../build/Release/hashmap.lib",
+          "../../build/deps/libcbor/src/Release/cbor.lib",
+          "ws2_32.lib",
+          "bcrypt.lib"
+        ],
+        "msvs_settings": {
+          "VCCLCompilerTool": {
+            "AdditionalOptions": ["/std:c11"]
+          }
+        }
       }]
     ]
   }, {
@@ -63,8 +71,7 @@
       "<!@(node -p \"require('node-addon-api').include\")",
       "../../src",
       "../../deps/libcbor/src",
-      "../../build-release/deps/libcbor/src",
-      "../../build-release/deps/libcbor",
+      "../../build/deps/libcbor/src",
       "../../deps/hashmap/include",
       "../../deps/xxhash"
     ],
@@ -79,27 +86,36 @@
     "cflags_cc": ["-O3"],
     "ldflags": [""],
     "libraries": [
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libwavedb.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libxxhash.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/libhashmap.a",
-      "/home/victor/Workspace/src/github.com/vijayee/WaveDB/build-release/deps/libcbor/src/libcbor.a",
-      "-lcrypto",
-      "-lssl",
-      "-lpthread",
-      "-latomic"
+      "../../build/libwavedb.a",
+      "../../build/libxxhash.a",
+      "../../build/libhashmap.a",
+      "../../build/deps/libcbor/src/libcbor.a"
     ],
     "conditions": [
       ["OS=='linux'", {
-        "libraries": ["-lpthread"]
+        "libraries": ["-lpthread", "-latomic", "-lcrypto", "-lssl"]
       }],
       ["OS=='mac'", {
         "xcode_settings": {
           "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
           "MACOSX_DEPLOYMENT_TARGET": "10.7"
-        }
+        },
+        "libraries": ["-lcrypto", "-lssl"]
       }],
       ["OS=='win'", {
-        "libraries": ["ws2_32.lib"]
+        "libraries": [
+          "../../build/Release/wavedb.lib",
+          "../../build/Release/xxhash.lib",
+          "../../build/Release/hashmap.lib",
+          "../../build/deps/libcbor/src/Release/cbor.lib",
+          "ws2_32.lib",
+          "bcrypt.lib"
+        ],
+        "msvs_settings": {
+          "VCCLCompilerTool": {
+            "AdditionalOptions": ["/std:c11"]
+          }
+        }
       }]
     ]
   }]

@@ -4,7 +4,7 @@
 #include "refcounter.h"
 #include <stdint.h>
 #include <limits.h>
-#include <stdatomic.h>
+#include "Util/atomic_compat.h"
 
 void refcounter_init(refcounter_t* refcounter) {
     if (refcounter == NULL) return;

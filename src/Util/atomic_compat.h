@@ -15,10 +15,19 @@
 #define WAVEDB_ATOMIC_COMPAT_H
 
 #ifdef __cplusplus
+  #include <atomic>
   #define ATOMIC_TYPE(T) ::std::atomic<T>
 #else
   #include <stdatomic.h>
   #define ATOMIC_TYPE(T) _Atomic(T)
+#endif
+
+// ATOMIC_VAR_INIT was removed in C23 (deprecated in C17).
+// MSVC's <stdatomic.h> does not provide it. Use plain initialization instead.
+#ifndef ATOMIC_VAR_INIT
+  #define ATOMIC_VAR_INIT_COMPAT(v) (v)
+#else
+  #define ATOMIC_VAR_INIT_COMPAT(v) ATOMIC_VAR_INIT(v)
 #endif
 
 #endif // WAVEDB_ATOMIC_COMPAT_H

@@ -3,7 +3,7 @@
 //
 #include "ticker.h"
 #ifdef _WIN32
-#include <synchapi.h>
+#include "Util/windows_compat.h"
 void ticker_start(ticker_t ticker, uint64_t delay) {
   Sleep(delay);
   ticker.cb(ticker.ctx);

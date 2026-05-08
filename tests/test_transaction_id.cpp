@@ -3,7 +3,8 @@
 //
 
 #include <gtest/gtest.h>
-#include <pthread.h>
+#include <thread>
+#include <vector>
 #include <vector>
 #include <algorithm>
 #include "Workers/transaction_id.h"
@@ -164,12 +165,10 @@ struct ThreadArg {
     int count;
 };
 
-void* generate_ids(void* arg) {
-    ThreadArg* ta = (ThreadArg*)arg;
+static void generate_ids(ThreadArg* ta) {
     for (int i = 0; i < ta->count; i++) {
         ta->ids->push_back(transaction_id_get_next());
     }
-    return nullptr;
 }
 
 TEST_F(TransactionIdTest, ThreadSafety) {
@@ -177,7 +176,7 @@ TEST_F(TransactionIdTest, ThreadSafety) {
     const int ids_per_thread = 100;
 
     std::vector<std::vector<transaction_id_t>> thread_ids(num_threads);
-    std::vector<pthread_t> threads(num_threads);
+    std::vector<std::thread> threads;
     std::vector<ThreadArg> args(num_threads);
 
     // Create threads
@@ -185,12 +184,12 @@ TEST_F(TransactionIdTest, ThreadSafety) {
         thread_ids[i].reserve(ids_per_thread);
         args[i].ids = &thread_ids[i];
         args[i].count = ids_per_thread;
-        pthread_create(&threads[i], nullptr, generate_ids, &args[i]);
+        threads.emplace_back(generate_ids, &args[i]);
     }
 
     // Wait for threads
-    for (int i = 0; i < num_threads; i++) {
-        pthread_join(threads[i], nullptr);
+    for (auto& t : threads) {
+        t.join();
     }
 
     // Collect all IDs

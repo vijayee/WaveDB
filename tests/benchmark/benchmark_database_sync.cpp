@@ -12,8 +12,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 extern "C" {
 #include "Database/database.h"
 #include "Database/wal_manager.h"
@@ -32,8 +40,15 @@ typedef struct {
 // Helper function to initialize benchmark context
 static int sync_benchmark_init(sync_benchmark_ctx_t* ctx, const char* test_name) {
     // Create unique test directory
+#if _WIN32
+    const char* tmpdir = getenv("TEMP");
+    if (!tmpdir) tmpdir = ".";
+    snprintf(ctx->test_dir, sizeof(ctx->test_dir),
+             "%s/sync_db_bench_%s_%d", tmpdir, test_name, getpid());
+#else
     snprintf(ctx->test_dir, sizeof(ctx->test_dir),
              "/tmp/sync_db_bench_%s_%d", test_name, getpid());
+#endif
 
     // Create directory
     mkdir(ctx->test_dir, 0755);
@@ -293,7 +308,11 @@ static void run_sync_benchmarks() {
 
 int main(int argc, char** argv) {
     // Ensure benchmark output directory exists
+#if _WIN32
+    system("if not exist .benchmarks mkdir .benchmarks");
+#else
     system("mkdir -p .benchmarks");
+#endif
 
     printf("Starting synchronous database benchmarks...\n\n");
     run_sync_benchmarks();

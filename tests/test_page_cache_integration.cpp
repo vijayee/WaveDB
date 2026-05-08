@@ -7,6 +7,17 @@
 #include "Storage/page_file.h"
 #include "Storage/bnode_cache.h"
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -20,8 +31,15 @@ protected:
     char path[512];
 
     void SetUp() override {
+#if _WIN32
+        strcpy(tmpdir, getenv("TEMP"));
+        strcat(tmpdir, "/page_cache_integ_test_XXXXXX");
+        _mktemp(tmpdir);
+        _mkdir(tmpdir);
+#else
         strcpy(tmpdir, "/tmp/page_cache_integ_test_XXXXXX");
         mkdtemp(tmpdir);
+#endif
         snprintf(path, sizeof(path), "%s/test.db", tmpdir);
         mgr = nullptr;
         fcache = nullptr;
@@ -33,7 +51,11 @@ protected:
         if (mgr) bnode_cache_mgr_destroy(mgr);
         if (pf) page_file_destroy(pf);
         char cmd[512];
+#if _WIN32
+        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
         snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
         system(cmd);
     }
 

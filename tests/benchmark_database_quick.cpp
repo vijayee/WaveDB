@@ -2,8 +2,21 @@
 // Quick Database Benchmark: Sharded vs Lock-Free LRU
 //
 
-#include <gtest/gtest.h>
+#if _WIN32
+#define rand_r(seed) rand()
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#define fsync(fd) _commit(fd)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
 #include <cstring>
+#include <iostream>
+#include <gtest/gtest.h>
 #include <thread>
 #include <vector>
 #include <atomic>
@@ -56,8 +69,16 @@ private:
 class DatabaseBenchmark : public ::testing::Test {
 protected:
     void SetUp() override {
+#if _WIN32
+        char tmpdir[256];
+        strcpy(tmpdir, getenv("TEMP"));
+        strcat(tmpdir, "/wavedb_bench_XXXXXX");
+        _mktemp(tmpdir);
+        _mkdir(tmpdir);
+#else
         char tmpdir[] = "/tmp/wavedb_bench_XXXXXX";
         mkdtemp(tmpdir);
+#endif
         db_path = std::string(tmpdir);
 
         // Create work pool and timing wheel
@@ -92,7 +113,11 @@ protected:
             work_pool_destroy(pool);
         }
         // Cleanup temp directory
+#if _WIN32
+        std::string cmd = "rmdir /s /q " + db_path;
+#else
         std::string cmd = "rm -rf " + db_path;
+#endif
         system(cmd.c_str());
     }
 
