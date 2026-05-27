@@ -305,8 +305,9 @@ TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     mkdtemp(temp_dir);
 #endif
 
-    // Create external resources
+    // Create external resources (pool must be launched before use)
     work_pool_t* pool = work_pool_create(2);
+    work_pool_launch(pool);
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(10, pool);
 
     database_config_t* config = database_config_default();

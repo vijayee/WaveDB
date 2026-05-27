@@ -14,6 +14,7 @@
       "../../src",
       "../../deps/libcbor/src",
       "../../build/deps/libcbor/src",
+      "../../build/deps/libcbor",
       "../../deps/hashmap/include",
       "../../deps/xxhash"
     ],
@@ -28,10 +29,10 @@
     "cflags_cc": ["-O3"],
     "ldflags": [""],
     "libraries": [
-      "../../build/libwavedb.a",
-      "../../build/libxxhash.a",
-      "../../build/libhashmap.a",
-      "../../build/deps/libcbor/src/libcbor.a"
+      "../../../build/libwavedb.a",
+      "../../../build/libxxhash.a",
+      "../../../build/libhashmap.a",
+      "../../../build/deps/libcbor/src/libcbor.a"
     ],
     "conditions": [
       ["OS=='linux'", {
@@ -46,10 +47,10 @@
       }],
       ["OS=='win'", {
         "libraries": [
-          "../../build/Release/wavedb.lib",
-          "../../build/Release/xxhash.lib",
-          "../../build/Release/hashmap.lib",
-          "../../build/deps/libcbor/src/Release/cbor.lib",
+          "../../../build/Release/wavedb.lib",
+          "../../../build/Release/xxhash.lib",
+          "../../../build/Release/hashmap.lib",
+          "../../../build/deps/libcbor/src/Release/cbor.lib",
           "ws2_32.lib",
           "bcrypt.lib"
         ],
@@ -72,6 +73,7 @@
       "../../src",
       "../../deps/libcbor/src",
       "../../build/deps/libcbor/src",
+      "../../build/deps/libcbor",
       "../../deps/hashmap/include",
       "../../deps/xxhash"
     ],
@@ -86,10 +88,10 @@
     "cflags_cc": ["-O3"],
     "ldflags": [""],
     "libraries": [
-      "../../build/libwavedb.a",
-      "../../build/libxxhash.a",
-      "../../build/libhashmap.a",
-      "../../build/deps/libcbor/src/libcbor.a"
+      "../../../build/libwavedb.a",
+      "../../../build/libxxhash.a",
+      "../../../build/libhashmap.a",
+      "../../../build/deps/libcbor/src/libcbor.a"
     ],
     "conditions": [
       ["OS=='linux'", {
@@ -104,10 +106,10 @@
       }],
       ["OS=='win'", {
         "libraries": [
-          "../../build/Release/wavedb.lib",
-          "../../build/Release/xxhash.lib",
-          "../../build/Release/hashmap.lib",
-          "../../build/deps/libcbor/src/Release/cbor.lib",
+          "../../../build/Release/wavedb.lib",
+          "../../../build/Release/xxhash.lib",
+          "../../../build/Release/hashmap.lib",
+          "../../../build/deps/libcbor/src/Release/cbor.lib",
           "ws2_32.lib",
           "bcrypt.lib"
         ],

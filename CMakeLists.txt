@@ -386,6 +386,14 @@ if(BUILD_BENCHMARKS)
     add_executable(benchmark_database_sync tests/benchmark/benchmark_database_sync.cpp)
     target_link_libraries(benchmark_database_sync benchmark_base wavedb Threads::Threads)
 
+    # Sync-Only Database Benchmark (no concurrency control)
+    add_executable(benchmark_database_sync_only tests/benchmark/benchmark_database_sync_only.cpp)
+    target_link_libraries(benchmark_database_sync_only benchmark_base wavedb Threads::Threads)
+
+    # Micro-benchmark: hbtrie_insert vs hbtrie_insert_unsafe
+    add_executable(micro_bench_trie tests/benchmark/micro_bench_trie.cpp)
+    target_link_libraries(micro_bench_trie wavedb Threads::Threads)
+
     # Raw Sync Database Benchmark
     add_executable(benchmark_database_sync_raw tests/benchmark/benchmark_database_sync_raw.cpp)
     target_link_libraries(benchmark_database_sync_raw benchmark_base wavedb gtest gtest_main Threads::Threads)
