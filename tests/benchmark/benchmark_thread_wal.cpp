@@ -8,8 +8,7 @@
 #include "../../src/Database/wal_manager.h"
 #include "../../src/Buffer/buffer.h"
 #include "../../src/Workers/transaction_id.h"
-#include "../../src/Time/wheel.h"
-#include "../../src/Workers/pool.h"
+#include "../../src/Time/timer_actor.h"
 #include "../../src/Util/allocator.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,8 +32,7 @@ extern "C" {
 typedef struct {
     wal_manager_t* manager;
     thread_wal_t* twal;
-    hierarchical_timing_wheel_t* wheel;
-    work_pool_t* pool;
+    timer_actor_t* timer_actor;
     char test_dir[256];
     uint64_t counter;
 } thread_wal_ctx_t;
@@ -48,21 +46,12 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
 #endif
     mkdir(ctx->test_dir, 0755);
 
-    // Create work pool and timing wheel for debouncer (needed for DEBOUNCED mode)
-    ctx->pool = work_pool_create(4);  // 4 worker threads
-    if (ctx->pool == NULL) {
-        fprintf(stderr, "Failed to create work pool\n");
+    // Create timer actor for debouncer (needed for DEBOUNCED mode)
+    ctx->timer_actor = timer_actor_create();
+    if (ctx->timer_actor == NULL) {
+        fprintf(stderr, "Failed to create timer actor\n");
         exit(1);
     }
-    work_pool_launch(ctx->pool);
-
-    ctx->wheel = hierarchical_timing_wheel_create(8, ctx->pool);  // 8 slots
-    if (ctx->wheel == NULL) {
-        fprintf(stderr, "Failed to create timing wheel\n");
-        work_pool_destroy(ctx->pool);
-        exit(1);
-    }
-    hierarchical_timing_wheel_run(ctx->wheel);
 
     wal_config_t config = {
         .sync_mode = sync_mode,
@@ -74,13 +63,12 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     };
 
     int error_code = 0;
-    ctx->manager = wal_manager_create(ctx->test_dir, &config, ctx->wheel, NULL, &error_code);
+    ctx->manager = wal_manager_create(ctx->test_dir, &config, ctx->timer_actor, NULL, &error_code);
     ctx->counter = 0;
 
     if (error_code != 0 || ctx->manager == NULL) {
         fprintf(stderr, "Failed to create WAL manager: error_code=%d\n", error_code);
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-        work_pool_destroy(ctx->pool);
+        timer_actor_destroy(ctx->timer_actor);
         exit(1);
     }
 
@@ -88,35 +76,21 @@ static void thread_wal_init(thread_wal_ctx_t* ctx, const char* test_name, wal_sy
     if (ctx->twal == NULL) {
         fprintf(stderr, "Failed to get thread WAL\n");
         wal_manager_destroy(ctx->manager);
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-        work_pool_destroy(ctx->pool);
+        timer_actor_destroy(ctx->timer_actor);
         exit(1);
     }
 }
 
 // Cleanup thread-local WAL benchmark
 static void thread_wal_cleanup(thread_wal_ctx_t* ctx) {
-    // Stop wheel and pool before destroying WAL manager
-    // to ensure no timer callbacks fire on freed memory
-    if (ctx->wheel) {
-        hierarchical_timing_wheel_stop(ctx->wheel);
-    }
-    if (ctx->pool) {
-        work_pool_shutdown(ctx->pool);
-        work_pool_join_all(ctx->pool);
-    }
-
     if (ctx->manager) {
         wal_manager_destroy(ctx->manager);
     }
     // Clear thread-local WAL reference so next init gets a fresh one
     clear_thread_wal_reference();
 
-    if (ctx->wheel) {
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-    }
-    if (ctx->pool) {
-        work_pool_destroy(ctx->pool);
+    if (ctx->timer_actor) {
+        timer_actor_destroy(ctx->timer_actor);
     }
 
     // Remove test directory

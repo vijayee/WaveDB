@@ -41,8 +41,7 @@
 #endif
 extern "C" {
 #include "Database/database.h"
-#include "Time/wheel.h"
-#include "Workers/pool.h"
+#include "Time/timer_actor.h"
 #include "Workers/promise.h"
 #include "Workers/transaction_id.h"
 #include "HBTrie/path.h"
@@ -70,8 +69,7 @@ typedef struct {
 
 // Global context for benchmark
 typedef struct {
-    work_pool_t* pool;
-    hierarchical_timing_wheel_t* wheel;
+    timer_actor_t* timer_actor;
     database_t* db;
     char test_dir[256];
 } bench_context_t;
@@ -428,11 +426,7 @@ static void print_concurrent_summary(const char* scenario,
 
 // Setup helper
 static void setup_database(bench_context_t* ctx) {
-    ctx->pool = work_pool_create(platform_core_count());
-    work_pool_launch(ctx->pool);
-
-    ctx->wheel = hierarchical_timing_wheel_create(8, ctx->pool);
-    hierarchical_timing_wheel_run(ctx->wheel);
+    ctx->timer_actor = timer_actor_create();
 
     // Create temporary test directory
 #if _WIN32
@@ -452,7 +446,7 @@ static void setup_database(bench_context_t* ctx) {
     };
 
     int error = 0;
-    ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, ctx->pool, ctx->wheel, &error);
+    ctx->db = database_create(ctx->test_dir, 50, &wal_config, 4, 4096, 0, ctx->timer_actor, &error);
     if (error != 0 || ctx->db == NULL) {
         fprintf(stderr, "Failed to create database: error=%d\n", error);
         exit(1);
@@ -461,27 +455,12 @@ static void setup_database(bench_context_t* ctx) {
 
 // Teardown helper
 static void teardown_database(bench_context_t* ctx) {
-    // Stop wheel and pool before destroying database
-    // to ensure no timer callbacks fire on freed memory
-    if (ctx->wheel) {
-        hierarchical_timing_wheel_stop(ctx->wheel);
-    }
-
-    if (ctx->pool) {
-        work_pool_shutdown(ctx->pool);
-        work_pool_join_all(ctx->pool);
-    }
-
     if (ctx->db) {
         database_destroy(ctx->db);
     }
 
-    if (ctx->wheel) {
-        hierarchical_timing_wheel_destroy(ctx->wheel);
-    }
-
-    if (ctx->pool) {
-        work_pool_destroy(ctx->pool);
+    if (ctx->timer_actor) {
+        timer_actor_destroy(ctx->timer_actor);
     }
 
     // Cleanup test directory
