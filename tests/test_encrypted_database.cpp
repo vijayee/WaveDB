@@ -200,7 +200,7 @@ TEST_F(EncryptedDatabaseTest, SymmetricCreatePutGet) {
 // ---------------------------------------------------------------------------
 
 TEST_F(EncryptedDatabaseTest, SymmetricReopenWithKey) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     auto key = make_symmetric_key();
 
     // First instance: create and insert

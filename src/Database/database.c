@@ -44,6 +44,74 @@
 #define WAL_BINARY_MAGIC 0xB1
 
 // ============================================================================
+// WAL write helpers for sync operations
+// ============================================================================
+
+static void _wal_write_put(database_t* db, path_t* path, identifier_t* value,
+                            transaction_id_t txn_id) {
+    if (db == NULL || db->wal_actor == NULL || path == NULL || value == NULL) return;
+
+    cbor_item_t* wal_arr = cbor_new_definite_array(2);
+    if (wal_arr == NULL) return;
+
+    cbor_item_t* path_cbor = path_to_cbor(path);
+    cbor_item_t* value_cbor = identifier_to_cbor(value);
+    if (path_cbor && value_cbor) {
+        cbor_array_push(wal_arr, path_cbor);
+        cbor_decref(&path_cbor);
+        path_cbor = NULL;
+        cbor_array_push(wal_arr, value_cbor);
+        cbor_decref(&value_cbor);
+        value_cbor = NULL;
+        unsigned char* cbor_data = NULL;
+        size_t cbor_size = 0;
+        size_t alen = cbor_serialize_alloc(wal_arr, &cbor_data, &cbor_size);
+        if (alen > 0 && cbor_data) {
+            buffer_t* wal_buf = buffer_create(cbor_size);
+            if (wal_buf) {
+                memcpy(wal_buf->data, cbor_data, cbor_size);
+                wal_buf->size = cbor_size;
+                wal_actor_write(db->wal_actor, platform_self(), txn_id,
+                                'p', wal_buf, NULL);
+            }
+            free(cbor_data);
+        }
+    }
+    if (path_cbor) { cbor_decref(&path_cbor); path_cbor = NULL; }
+    if (value_cbor) { cbor_decref(&value_cbor); value_cbor = NULL; }
+    cbor_decref(&wal_arr);
+}
+
+static void _wal_write_delete(database_t* db, path_t* path,
+                               transaction_id_t txn_id) {
+    if (db == NULL || db->wal_actor == NULL || path == NULL) return;
+
+    cbor_item_t* wal_arr = cbor_new_definite_array(1);
+    if (wal_arr == NULL) return;
+
+    cbor_item_t* path_cbor = path_to_cbor(path);
+    if (path_cbor) {
+        cbor_array_push(wal_arr, path_cbor);
+        cbor_decref(&path_cbor);
+        path_cbor = NULL;
+        unsigned char* cbor_data = NULL;
+        size_t cbor_size = 0;
+        size_t alen = cbor_serialize_alloc(wal_arr, &cbor_data, &cbor_size);
+        if (alen > 0 && cbor_data) {
+            buffer_t* wal_buf = buffer_create(cbor_size);
+            if (wal_buf) {
+                memcpy(wal_buf->data, cbor_data, cbor_size);
+                wal_buf->size = cbor_size;
+                wal_actor_write(db->wal_actor, platform_self(), txn_id,
+                                'd', wal_buf, NULL);
+            }
+            free(cbor_data);
+        }
+    }
+    cbor_decref(&wal_arr);
+}
+
+// ============================================================================
 // WAL encode helpers (kept for future use with WAL actor)
 // ============================================================================
 
@@ -284,83 +352,309 @@ static void collect_dirty_bnodes_from_hbnode(
     }
 }
 
-int database_flush_dirty_bnodes(database_t* db) {
-    if (db == NULL || db->trie == NULL || db->page_file == NULL) return -1;
+// Like collect_dirty_bnodes_from_hbnode but collects all bnodes that have been
+// written to the page file (disk_offset != UINT64_MAX), regardless of is_dirty.
+// Used for re-serialization after child_disk_offset propagation.
+static void collect_written_bnodes_from_hbnode(
+    hbtrie_node_t* hbnode, vec_t(bnode_t*) * written_vec) {
+    if (hbnode == NULL || !hbnode->is_loaded || hbnode->btree == NULL) return;
 
-    hbtrie_node_t* root = atomic_load(&db->trie->root);
-    if (root == NULL || !root->is_loaded) return -1;
-
-    vec_t(bnode_t*) dirty_vec;
-    vec_init(&dirty_vec);
-    collect_dirty_bnodes_from_hbnode(root, &dirty_vec);
-
-    if (dirty_vec.length == 0) {
-        vec_deinit(&dirty_vec);
-        return 0;
+    bnode_t* root = hbnode->btree;
+    int has_offset = (root->disk_offset != UINT64_MAX);
+    log_info("Collect written: hbnode=%p btree=%p disk_offset=%lu has_offset=%d entries=%zu",
+             (void*)hbnode, (void*)root, (unsigned long)root->disk_offset,
+             has_offset, root->entries.length);
+    if (has_offset) {
+        vec_push(written_vec, root);
     }
 
-    qsort(dirty_vec.data, dirty_vec.length, sizeof(bnode_t*), compare_dirty_by_level);
+    size_t n = root->entries.length;
+    for (size_t i = 0; i < n; i++) {
+        bnode_entry_t* entry = &root->entries.data[i];
+        if (entry->is_bnode_child && entry->child_bnode != NULL &&
+            entry->child_bnode->disk_offset != UINT64_MAX) {
+            log_info("Collect written: pushing child_bnode entry[%zu] disk_offset=%lu",
+                     i, (unsigned long)entry->child_bnode->disk_offset);
+            vec_push(written_vec, entry->child_bnode);
+        }
+        if (!entry->has_value && !entry->is_bnode_child && entry->child != NULL) {
+            log_info("Collect written: recursing into hbtrie child entry[%zu]", i);
+            collect_written_bnodes_from_hbnode(entry->child, written_vec);
+        }
+    }
+}
 
-    uint64_t last_written_offset = 0;
-    size_t last_written_size = 0;
+// After all dirty bnodes are written to new page file offsets, update
+// child_disk_offset in every bnode_entry so the V3 serializer emits the
+// correct (new) offsets.
+static void propagate_child_offsets(hbtrie_node_t* hbnode) {
+    if (hbnode == NULL || !hbnode->is_loaded || hbnode->btree == NULL) return;
 
-    for (size_t i = 0; i < dirty_vec.length; i++) {
-        bnode_t* bnode = dirty_vec.data[i];
-        uint8_t* buf = NULL;
-        size_t buf_len = 0;
+    bnode_t* btree = hbnode->btree;
+    for (size_t i = 0; i < btree->entries.length; i++) {
+        bnode_entry_t* entry = &btree->entries.data[i];
 
-        bnode_cache_item_t* item = NULL;
-        if (db->bnode_cache) {
-            item = bnode_cache_read(db->bnode_cache, bnode->disk_offset);
+        if (entry->is_bnode_child && entry->child_bnode != NULL) {
+            entry->child_disk_offset = entry->child_bnode->disk_offset;
+        } else if (!entry->has_value && entry->child != NULL) {
+            entry->child_disk_offset =
+                entry->child->btree ? entry->child->btree->disk_offset : 0;
+            propagate_child_offsets(entry->child);
+        } else if (entry->has_value && entry->trie_child != NULL) {
+            entry->child_disk_offset =
+                entry->trie_child->btree ? entry->trie_child->btree->disk_offset : 0;
+            propagate_child_offsets(entry->trie_child);
+        }
+    }
+}
+
+int database_flush_dirty_bnodes(database_t* db) {
+    if (db == NULL || db->page_file == NULL) return -1;
+
+    fprintf(stderr, "DEBUG: database_flush_dirty_bnodes ENTER\n");
+    fflush(stderr);
+
+    // Flush WAL actor to disk before flushing dirty bnodes to page file.
+    // This ensures WAL entries that were sent to the WAL actor but not yet
+    // written to disk are persisted before we write the page file snapshot.
+    if (db->wal_actor) {
+        message_t msg = { .type = WAL_FLUSH, .payload = NULL, .payload_destroy = NULL };
+        actor_send(&db->wal_actor->actor, &msg);
+        scheduler_pool_wait_for_idle(db->scheduler_pool);
+    }
+
+    // Per-shard root offsets/sizes for the shard directory
+    uint64_t shard_offsets[64];
+    uint64_t shard_sizes[64];
+    memset(shard_offsets, 0, sizeof(shard_offsets));
+    memset(shard_sizes, 0, sizeof(shard_sizes));
+
+    int any_dirty = 0;
+
+    // Flush each shard's dirty bnodes independently
+    for (size_t s = 0; s < db->shard_count; s++) {
+        hbtrie_t* trie = db->shard_actors[s]->trie;
+        if (trie == NULL) continue;
+
+        hbtrie_node_t* root = atomic_load(&trie->root);
+        if (root == NULL || !root->is_loaded) continue;
+
+        vec_t(bnode_t*) dirty_vec;
+        vec_init(&dirty_vec);
+        collect_dirty_bnodes_from_hbnode(root, &dirty_vec);
+
+        if (dirty_vec.length > 0) {
+            log_info("Flush: shard %zu has %zu dirty bnodes (root is_dirty=%d, root is_loaded=%d)",
+                     s, dirty_vec.length, root->btree ? root->btree->is_dirty : -1,
+                     root->is_loaded);
+        }
+
+        if (dirty_vec.length == 0) {
+            vec_deinit(&dirty_vec);
+            continue;
+        }
+
+        qsort(dirty_vec.data, dirty_vec.length, sizeof(bnode_t*),
+              compare_dirty_by_level);
+
+        for (size_t i = 0; i < dirty_vec.length; i++) {
+            bnode_t* bnode = dirty_vec.data[i];
+            uint8_t* buf = NULL;
+            size_t buf_len = 0;
+
+            bnode_cache_item_t* item = NULL;
+            if (db->bnode_cache) {
+                item = bnode_cache_read(db->bnode_cache, bnode->disk_offset);
+                if (item) {
+                    buf = item->data;
+                    buf_len = item->data_len;
+                }
+            }
+
+            bool owns_buf = false;
+            if (buf == NULL) {
+                uint8_t* serialized = NULL;
+                int s_rc = bnode_serialize_v3(bnode, db->chunk_size,
+                                              &serialized, &buf_len);
+                if (s_rc == 0 && serialized) {
+                    buf = serialized;
+                    owns_buf = true;
+                }
+            }
+
+            if (buf && buf_len > 0) {
+                uint64_t new_offset = 0;
+                uint64_t out_bids = 0;
+                size_t out_num_bids = 0;
+                int rc = page_file_write_node(db->page_file, buf, buf_len,
+                    &new_offset, &out_bids, 1, &out_num_bids);
+                if (rc == 0) {
+                    if (bnode->disk_offset != UINT64_MAX) {
+                        page_file_mark_stale(db->page_file,
+                            bnode->disk_offset, buf_len);
+                    }
+                    bnode->disk_offset = new_offset;
+                    bnode->is_dirty = 0;
+
+                    // Track the root bnode of this shard
+                    if (bnode == root->btree) {
+                        shard_offsets[s] = new_offset;
+                        shard_sizes[s] = buf_len;
+                        log_info("Flush: shard %zu root bnode written at offset=%lu size=%lu",
+                                 s, (unsigned long)new_offset, (unsigned long)buf_len);
+                    }
+                }
+            }
+
             if (item) {
-                buf = item->data;
-                buf_len = item->data_len;
+                bnode_cache_release(db->bnode_cache, item);
+            } else if (owns_buf && buf) {
+                free(buf);
             }
         }
 
-        bool owns_buf = false;
-        if (buf == NULL) {
-            uint8_t* serialized = NULL;
-            int s_rc = bnode_serialize_v3(bnode, db->chunk_size, &serialized, &buf_len);
-            if (s_rc == 0 && serialized) {
-                buf = serialized;
-                owns_buf = true;
-            }
+        vec_deinit(&dirty_vec);
+        any_dirty = 1;
+    }
+
+    if (!any_dirty) return 0;
+
+    // Propagate child_disk_offset: after writing children to new offsets,
+    // update parent entries so the V3 serializer emits correct offsets.
+    // This MUST happen before re-serialization (second write pass) so the
+    // stored data contains correct child_disk_offset values.
+    for (size_t s = 0; s < db->shard_count; s++) {
+        propagate_child_offsets(db->shard_actors[s]->trie->root);
+    }
+
+    // Second pass: re-serialize ALL dirty bnodes (not just roots) after
+    // child_disk_offset propagation. This ensures lazy loading works on reopen
+    // because the stored data has the correct offset references.
+    for (size_t s = 0; s < db->shard_count; s++) {
+        hbtrie_t* trie = db->shard_actors[s]->trie;
+        if (trie == NULL) continue;
+
+        hbtrie_node_t* root = atomic_load(&trie->root);
+        if (root == NULL || !root->is_loaded) continue;
+
+        vec_t(bnode_t*) dirty_vec2;
+        vec_init(&dirty_vec2);
+        collect_written_bnodes_from_hbnode(root, &dirty_vec2);
+
+        if (dirty_vec2.length == 0) {
+            vec_deinit(&dirty_vec2);
+            continue;
         }
 
-        if (buf && buf_len > 0) {
-            uint64_t new_offset = 0;
+        log_info("Flush: shard %zu re-collected %zu written bnodes for re-serialization",
+                 s, dirty_vec2.length);
+
+        qsort(dirty_vec2.data, dirty_vec2.length, sizeof(bnode_t*),
+              compare_dirty_by_level);
+
+        for (size_t i = 0; i < dirty_vec2.length; i++) {
+            bnode_t* bnode = dirty_vec2.data[i];
+
+            // Re-serialize with updated child_disk_offset values
+            uint8_t* serialized2 = NULL;
+            size_t buf_len2 = 0;
+            int s_rc2 = bnode_serialize_v3(bnode, db->chunk_size,
+                                           &serialized2, &buf_len2);
+            if (s_rc2 != 0 || serialized2 == NULL || buf_len2 == 0) continue;
+
+            uint64_t new_offset2 = 0;
+            uint64_t out_bids2 = 0;
+            size_t out_num_bids2 = 0;
+            int rc2 = page_file_write_node(db->page_file, serialized2, buf_len2,
+                &new_offset2, &out_bids2, 1, &out_num_bids2);
+            if (rc2 == 0) {
+                // Mark previous offset as stale
+                if (bnode->disk_offset != UINT64_MAX) {
+                    page_file_mark_stale(db->page_file, bnode->disk_offset, buf_len2);
+                }
+                bnode->disk_offset = new_offset2;
+                bnode->is_dirty = 0;
+
+                // Update the root bnode tracking for this shard
+                if (bnode == root->btree) {
+                    shard_offsets[s] = new_offset2;
+                    shard_sizes[s] = buf_len2;
+                    log_info("Flush: shard %zu root bnode re-written at offset=%lu size=%lu",
+                             s, (unsigned long)new_offset2, (unsigned long)buf_len2);
+                } else {
+                    log_info("Flush: shard %zu child bnode[%zu] re-written at offset=%lu size=%lu",
+                             s, i, (unsigned long)new_offset2, (unsigned long)buf_len2);
+                }
+            }
+            free(serialized2);
+        }
+
+        vec_deinit(&dirty_vec2);
+    }
+
+    // Third pass: after re-writing all bnodes, child disk offsets changed again.
+    // Re-propagate child_disk_offset values and re-write root bnodes so the
+    // shard directory entries point to bnodes with correct child references.
+    for (size_t s = 0; s < db->shard_count; s++) {
+        propagate_child_offsets(db->shard_actors[s]->trie->root);
+    }
+    for (size_t s = 0; s < db->shard_count; s++) {
+        if (shard_offsets[s] == 0) continue;
+        hbtrie_t* trie = db->shard_actors[s]->trie;
+        if (trie == NULL) continue;
+        hbtrie_node_t* root = atomic_load(&trie->root);
+        if (root == NULL || root->btree == NULL) continue;
+
+        // Re-serialize root bnode with final child_disk_offset values
+        uint8_t* serialized = NULL;
+        size_t buf_len = 0;
+        int s_rc = bnode_serialize_v3(root->btree, db->chunk_size,
+                                      &serialized, &buf_len);
+        if (s_rc == 0 && serialized && buf_len > 0) {
+            uint64_t new_root_offset = 0;
             uint64_t out_bids = 0;
             size_t out_num_bids = 0;
-            int rc = page_file_write_node(db->page_file, buf, buf_len, &new_offset,
-                                           &out_bids, 1, &out_num_bids);
+            int rc = page_file_write_node(db->page_file, serialized, buf_len,
+                &new_root_offset, &out_bids, 1, &out_num_bids);
             if (rc == 0) {
-                if (bnode->disk_offset != UINT64_MAX) {
-                    page_file_mark_stale(db->page_file, bnode->disk_offset, buf_len);
-                }
-                bnode->disk_offset = new_offset;
-                bnode->is_dirty = 0;
-                last_written_offset = new_offset;
-                last_written_size = buf_len;
+                page_file_mark_stale(db->page_file, shard_offsets[s], shard_sizes[s]);
+                root->btree->disk_offset = new_root_offset;
+                shard_offsets[s] = new_root_offset;
+                shard_sizes[s] = buf_len;
+                log_info("Flush: shard %zu root bnode final re-write at offset=%lu size=%lu",
+                         s, (unsigned long)new_root_offset, (unsigned long)buf_len);
             }
-        }
-
-        if (item) {
-            bnode_cache_release(db->bnode_cache, item);
-        } else if (owns_buf && buf) {
-            free(buf);
+            free(serialized);
         }
     }
 
-    if (dirty_vec.length > 0 && last_written_offset != 0) {
+    // Write shard directory: 64 entries of (offset:u64, size:u64) = 1024 bytes
+    uint8_t shard_dir[64 * 16];
+    memset(shard_dir, 0, sizeof(shard_dir));
+    for (size_t s = 0; s < 64; s++) {
+        write_be64(shard_dir + s * 16, shard_offsets[s]);
+        write_be64(shard_dir + s * 16 + 8, shard_sizes[s]);
+        if (shard_offsets[s] != 0) {
+            log_info("Flush: shard directory entry %zu: offset=%lu size=%lu",
+                     s, (unsigned long)shard_offsets[s], (unsigned long)shard_sizes[s]);
+        }
+    }
+
+    uint64_t dir_offset = 0;
+    uint64_t dir_bid = 0;
+    size_t dir_num_bids = 0;
+    int rc = page_file_write_node(db->page_file, shard_dir, sizeof(shard_dir),
+                                   &dir_offset, &dir_bid, 1, &dir_num_bids);
+    if (rc == 0) {
         transaction_id_t txn_id = {0, 0, 0};
         if (db->tx_manager) {
             txn_id = tx_manager_get_last_committed(db->tx_manager);
         }
-        page_file_write_superblock(db->page_file, last_written_offset, last_written_size, &txn_id);
+        // Superblock points to the shard directory, not a single bnode
+        page_file_write_superblock(db->page_file, dir_offset, sizeof(shard_dir),
+                                    &txn_id);
     }
 
-    vec_deinit(&dirty_vec);
     return 0;
 }
 
@@ -504,6 +798,38 @@ database_t* database_create_with_config(const char* location,
         free(meta_path);
     }
 
+    // Read page file superblock early to get pending_txn_id and check for
+    // existing data.  Must happen BEFORE tx_manager is created so the
+    // MVCC transaction ID from the previous run can be advanced past.
+    int has_pf_data = 0;
+    if (effective_config->enable_persist) {
+        char page_path[1024];
+        snprintf(page_path, sizeof(page_path), "%s/data.wdbp", location);
+        struct stat pf_st;
+        if (stat(page_path, &pf_st) == 0 && pf_st.st_size > 0) {
+            // Page file exists -- open read-only, read superblock, then close.
+            // The file is reopened writable later when bnode_cache is set up.
+            page_file_t* tmp_pf = page_file_create(page_path,
+                PAGE_FILE_DEFAULT_BLOCK_SIZE, PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS,
+                db->encryption);
+            if (tmp_pf != NULL) {
+                if (page_file_open(tmp_pf, 0) == 0) {
+                    page_superblock_t pf_sb;
+                    memset(&pf_sb, 0, sizeof(pf_sb));
+                    if (page_file_read_superblock(tmp_pf, &pf_sb) == 0
+                        && pf_sb.root_offset > 0) {
+                        has_pf_data = 1;
+                        db->pending_txn_id.time   = pf_sb.last_txn_time;
+                        db->pending_txn_id.nanos  = pf_sb.last_txn_nanos;
+                        db->pending_txn_id.count  = pf_sb.last_txn_count;
+                        db->has_pending_txn_id = 1;
+                    }
+                }
+                page_file_destroy(tmp_pf);
+            }
+        }
+    }
+
     // Load or create trie (for backward compat; shard actors own their own tries)
     db->trie = load_index(location, db->chunk_size, db->btree_node_size);
     if (db->trie == NULL) {
@@ -523,11 +849,11 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
 
-    // Apply pending MVCC txn ID from page file if any
+    // Apply pending MVCC txn ID from page file superblock (read above)
     if (db->has_pending_txn_id) {
         transaction_id_advance_to(&db->pending_txn_id);
         atomic_store(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
-        db->has_pending_txn_id = 0;
+        // Keep has_pending_txn_id=1 until shard roots are loaded below
     }
 
     // Create WAL actor (if persistence enabled)
@@ -636,6 +962,77 @@ database_t* database_create_with_config(const char* location,
                 if (db->bnode_cache_actor != NULL) {
                     bnode_cache_actor_set_pool(db->bnode_cache_actor, db->scheduler_pool);
                 }
+
+                // ============================================================
+                // Load shard roots from page file (reopen existing database)
+                // ============================================================
+                if (has_pf_data) {
+                    page_superblock_t pf_sb;
+                    memset(&pf_sb, 0, sizeof(pf_sb));
+                    if (page_file_read_superblock(db->page_file, &pf_sb) == 0
+                        && pf_sb.root_offset > 0 && pf_sb.root_size > 0) {
+
+                        size_t dir_len = 0;
+                        uint8_t* dir_data = page_file_read_node(db->page_file,
+                            pf_sb.root_offset, &dir_len);
+
+                        if (dir_data != NULL && dir_len >= (64 * 16)) {
+                            // Shard directory: 64 entries of (offset:u64, size:u64)
+                            // Skip 4-byte size prefix (page_file_read_node prefix)
+                            uint8_t* p = dir_data + 4;
+
+                            int loaded_count = 0;
+                            for (size_t s = 0; s < db->shard_count && s < 64; s++) {
+                                uint64_t root_off = read_be64(p + s * 16);
+                                uint64_t root_sz  = read_be64(p + s * 16 + 8);
+
+                                if (root_off == 0 || root_sz == 0) continue;
+
+                                log_info("Page file loading: shard %zu root_off=%lu root_sz=%lu",
+                                         s, (unsigned long)root_off, (unsigned long)root_sz);
+
+                                size_t node_len = 0;
+                                uint8_t* node_data = page_file_read_node(
+                                    db->page_file, root_off, &node_len);
+
+                                if (node_data != NULL && node_len > 0) {
+                                    node_location_t* locs = NULL;
+                                    size_t num_locs = 0;
+
+                                    bnode_t* root_bnode = bnode_deserialize_v3(
+                                        node_data + 4, node_len,
+                                        db->chunk_size, db->btree_node_size,
+                                        &locs, &num_locs);
+
+                                    if (root_bnode != NULL) {
+                                        hbtrie_node_t* hbnode =
+                                            hbtrie_node_create(db->btree_node_size);
+                                        hbnode->btree = root_bnode;
+                                        hbnode->is_loaded = 1;
+                                        hbnode->disk_offset = root_off;
+
+                                        // Set fcache so children lazy-load from the bnode cache
+                                        db->shard_actors[s]->trie->fcache = db->bnode_cache;
+
+                                        // Replace the empty trie root with the loaded one
+                                        db->shard_actors[s]->trie->root = hbnode;
+                                        ATOMIC_STORE(&db->shard_actors[s]->root, hbnode);
+                                        loaded_count++;
+                                    }
+
+                                    if (locs) free(locs);
+                                    free(node_data);
+                                }
+                            }
+                            free(dir_data);
+                            log_info("Page file loaded: %d shard roots restored", loaded_count);
+                        } else if (dir_data != NULL) {
+                            free(dir_data);
+                        }
+
+                        log_info("Page file loaded: shard roots restored from superblock");
+                    }
+                }
             } else {
                 log_warn("Failed to open page file: %s", page_path);
                 page_file_destroy(db->page_file);
@@ -655,8 +1052,14 @@ database_t* database_create_with_config(const char* location,
 
     // Recovery: replay WAL if persistence enabled and WAL actor present
     db->is_rebuilding = 1;
-    // Note: WAL recovery via wal_actor is not yet implemented;
-    // in-memory databases don't need it.
+    if (db->wal_actor != NULL && has_pf_data) {
+        // WAL recovery replays any un-flushed writes into the shard tries.
+        // The page file already loaded committed data above; WAL covers
+        // writes that were logged but not yet flushed.
+        wal_actor_recover(db->wal_actor, db->shard_actors, db->shard_count);
+    }
+    // Clear pending txn flag — the ID was already advanced past above
+    db->has_pending_txn_id = 0;
     db->is_rebuilding = 0;
 
     refcounter_init((refcounter_t*)db);
@@ -841,11 +1244,11 @@ void database_destroy(database_t* db) {
             db->bnode_cache->on_evict_data = NULL;
         }
 
+        // Persist before stopping the scheduler (so WAL flush can be processed)
+        database_persist(db);
+
         // Stop scheduler pool before destroying data structures
         scheduler_pool_stop(db->scheduler_pool);
-
-        // Persist before teardown
-        database_persist(db);
 
         // Destroy actors
         if (db->shard_actors) {
@@ -1045,6 +1448,9 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         return -1;
     }
 
+    // Write to WAL BEFORE insert (WAL pattern: log first, then apply)
+    _wal_write_put(db, path, value, txn->txn_id);
+
     hbtrie_insert(shard->trie, path, value, txn->txn_id);
     ATOMIC_STORE(&shard->root, shard->trie->root);
     tx_manager_commit(db->tx_manager, txn);
@@ -1107,6 +1513,10 @@ int database_delete_sync(database_t* db, path_t* path) {
     identifier_t* removed = hbtrie_delete(shard->trie, path, txn->txn_id);
     ATOMIC_STORE(&shard->root, shard->trie->root);
     tx_manager_commit(db->tx_manager, txn);
+
+    // Write to WAL for persistence
+    _wal_write_delete(db, path, txn->txn_id);
+
     txn_desc_destroy(txn);
 
     if (removed) identifier_destroy(removed);

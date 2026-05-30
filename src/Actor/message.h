@@ -24,7 +24,7 @@ typedef struct {
 typedef struct {
     uint64_t thread_id;
     transaction_id_t txn_id;
-    uint8_t type;            /* 0=put, 1=delete */
+    uint8_t type;            /* 'p'=put, 'd'=delete */
     buffer_t* data;          /* serialized entry */
     actor_t* reply_to;
 } wal_record_payload_t;

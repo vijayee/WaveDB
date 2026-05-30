@@ -576,12 +576,11 @@ TEST_F(DatabaseTest, ConcurrentOperations) {
 }
 
 TEST_F(DatabaseTest, Persistence) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model (WAL recovery pending)";
     int error = 0;
 
-    // First instance: create and insert
+    // First instance: create and insert (enable_persist=1 for page file)
     {
-        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
@@ -624,7 +623,7 @@ TEST_F(DatabaseTest, Persistence) {
 
     // Second instance: reopen and verify
     {
-        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, pool, wheel, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 

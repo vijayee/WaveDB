@@ -2,6 +2,8 @@
 #include "../RefCounter/refcounter.h"
 #include "../Util/allocator.h"
 #include "../Workers/error.h"
+#include "../Util/threadding.h"
+#include <cbor.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -26,6 +28,39 @@ static void trie_shard_dispatch(void* state, message_t* msg) {
                     promise_reject(p->promise, &err);
                 }
                 break;
+            }
+
+            // Write to WAL BEFORE insert (write-ahead logging: log first, then apply)
+            if (shard->wal) {
+                cbor_item_t* wal_arr = cbor_new_definite_array(2);
+                if (wal_arr) {
+                    cbor_item_t* path_cbor = path_to_cbor(p->path);
+                    cbor_item_t* value_cbor = identifier_to_cbor(p->value);
+                    if (path_cbor && value_cbor) {
+                        cbor_array_push(wal_arr, path_cbor);
+                        cbor_decref(&path_cbor);
+                        path_cbor = NULL;
+                        cbor_array_push(wal_arr, value_cbor);
+                        cbor_decref(&value_cbor);
+                        value_cbor = NULL;
+                        unsigned char* cbor_data = NULL;
+                        size_t cbor_size = 0;
+                        size_t alen = cbor_serialize_alloc(wal_arr, &cbor_data, &cbor_size);
+                        if (alen > 0 && cbor_data) {
+                            buffer_t* wal_buf = buffer_create(cbor_size);
+                            if (wal_buf) {
+                                memcpy(wal_buf->data, cbor_data, cbor_size);
+                                wal_buf->size = cbor_size;
+                                wal_actor_write(shard->wal, platform_self(),
+                                                txn->txn_id, 'p', wal_buf, NULL);
+                            }
+                            free(cbor_data);
+                        }
+                    }
+                    if (path_cbor) { cbor_decref(&path_cbor); path_cbor = NULL; }
+                    if (value_cbor) { cbor_decref(&value_cbor); value_cbor = NULL; }
+                    cbor_decref(&wal_arr);
+                }
             }
 
             // Insert into trie (single-threaded, no locks needed)
@@ -77,6 +112,33 @@ static void trie_shard_dispatch(void* state, message_t* msg) {
                     promise_reject(p->promise, &err);
                 }
                 break;
+            }
+
+            // Write to WAL BEFORE delete (write-ahead logging)
+            if (shard->wal) {
+                cbor_item_t* wal_arr = cbor_new_definite_array(1);
+                if (wal_arr) {
+                    cbor_item_t* path_cbor = path_to_cbor(p->path);
+                    if (path_cbor) {
+                        cbor_array_push(wal_arr, path_cbor);
+                        cbor_decref(&path_cbor);
+                        path_cbor = NULL;
+                        unsigned char* cbor_data = NULL;
+                        size_t cbor_size = 0;
+                        size_t alen = cbor_serialize_alloc(wal_arr, &cbor_data, &cbor_size);
+                        if (alen > 0 && cbor_data) {
+                            buffer_t* wal_buf = buffer_create(cbor_size);
+                            if (wal_buf) {
+                                memcpy(wal_buf->data, cbor_data, cbor_size);
+                                wal_buf->size = cbor_size;
+                                wal_actor_write(shard->wal, platform_self(),
+                                                txn->txn_id, 'd', wal_buf, NULL);
+                            }
+                            free(cbor_data);
+                        }
+                    }
+                    cbor_decref(&wal_arr);
+                }
             }
 
             // Delete from trie (single-threaded, no locks needed)

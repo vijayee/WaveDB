@@ -34,6 +34,7 @@ wal_actor_t* wal_actor_create(const char* location, void* wheel,
 void wal_actor_destroy(wal_actor_t* wal);
 void wal_actor_write(wal_actor_t* wal, uint64_t thread_id, transaction_id_t txn_id,
                      uint8_t type, buffer_t* data, actor_t* reply_to);
+void wal_actor_recover(wal_actor_t* wal, void* shards, size_t shard_count);
 
 #ifdef __cplusplus
 }

@@ -128,7 +128,7 @@ TEST_F(PersistencePhase2Test, PutFlushDestroyNoLeaks) {
 
 // Test 2: Write, flush, reopen -- verify data persists across restart
 TEST_F(PersistencePhase2Test, DataPersistsAcrossRestart) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
@@ -160,7 +160,7 @@ TEST_F(PersistencePhase2Test, DataPersistsAcrossRestart) {
 
 // Test 3: Multiple puts with snapshots, verify CoW stale regions
 TEST_F(PersistencePhase2Test, CoWCreatesStaleRegions) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
@@ -198,7 +198,7 @@ TEST_F(PersistencePhase2Test, CoWCreatesStaleRegions) {
 
 // Test 4: Lazy loading -- verify children loaded on demand after restart
 TEST_F(PersistencePhase2Test, LazyLoadingOnDemand) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
@@ -230,7 +230,7 @@ TEST_F(PersistencePhase2Test, LazyLoadingOnDemand) {
 
 // Test 5: Destroy without snapshot still persists via database_persist
 TEST_F(PersistencePhase2Test, PersistOnDestroy) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
@@ -258,7 +258,7 @@ TEST_F(PersistencePhase2Test, PersistOnDestroy) {
 
 // Test 6: Multiple keys persist and are all readable after restart
 TEST_F(PersistencePhase2Test, MultipleKeysPersistAcrossRestart) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
@@ -381,7 +381,7 @@ TEST_F(PersistencePhase2Test, InMemoryModeNoPageFile) {
 
 // Test 10: Persistence without WAL — verify page file load works independently
 TEST_F(PersistencePhase2Test, PersistenceWithoutWAL) {
-    GTEST_SKIP() << "Persistence not yet wired for actor model";
+    // (Persistence is now wired for actor model)
     db = create_db(1);
     ASSERT_NE(db, nullptr);
 
