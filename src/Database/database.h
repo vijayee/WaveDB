@@ -40,15 +40,11 @@ extern "C" {
  * - Single trie with version chains
  * - Transaction manager tracks active transactions
  * - Lock-free reads (no read lock needed)
- * - Single writer (write lock serializes writers)
  * - WAL provides durability for writes
  *
  * Storage modes:
  * - In-memory only: storage = NULL, no persistence
  */
-// Number of shards for write locks (reduces contention)
-#define WRITE_LOCK_SHARDS 64
-
 // Encryption error codes
 #define DATABASE_ERR_ENCRYPTION_REQUIRED   -100
 #define DATABASE_ERR_ENCRYPTION_KEY_INVALID -101
