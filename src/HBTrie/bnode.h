@@ -114,8 +114,6 @@ typedef struct bnode_t {
     ATOMIC_TYPE(uint16_t) level;        // B+tree level: 1 = leaf, > 1 = internal
     uint32_t node_size;                // Configurable max size in bytes
     vec_t(bnode_entry_t) entries;      // Sorted by chunk key
-    ATOMIC_TYPE(uint64_t) seq;         // Seqlock: even=stable, odd=writing
-    spinlock_t write_lock;               // Writer mutual exclusion (adaptive spinlock)
 
     // Per-bnode disk tracking (Phase 2: flat per-bnode persistence)
     uint64_t disk_offset;              // File offset of this bnode (UINT64_MAX if not persisted)
