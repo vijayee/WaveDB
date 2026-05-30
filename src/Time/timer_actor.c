@@ -29,6 +29,10 @@ typedef struct timer_entry_t {
     uint64_t interval_ms;         /* 0 = one-shot, >0 = repeating */
     char* key;                    /* strdup'd, NULL for non-debounce */
 
+    /* Debounce starvation protection */
+    uint64_t first_call_ms;       /* Monotonic time of first debounce call (0 = not set) */
+    uint64_t max_wait_ms;         /* Max ms from first_call before forced fire (0 = none) */
+
     /* Actor path */
     actor_t* target_actor;
     uint32_t completion_type;
@@ -115,16 +119,6 @@ static int _remove_by_id(timer_entry_t** head, timer_id_t id) {
         cur = cur->next;
     }
     return 0;
-}
-
-static timer_entry_t* _find_by_key(timer_entry_t* head, const char* key) {
-    timer_entry_t* cur = head;
-    while (cur != NULL) {
-        if (cur->key && strcmp(cur->key, key) == 0)
-            return cur;
-        cur = cur->next;
-    }
-    return NULL;
 }
 
 static timer_entry_t* _remove_by_key(timer_entry_t** head, const char* key) {
@@ -321,21 +315,26 @@ timer_id_t timer_actor_debounce(timer_actor_t* ta,
                                  uint64_t max_wait_ms,
                                  actor_t* target_actor,
                                  uint32_t completion_type) {
-    (void)max_wait_ms;
     if (key == NULL) return 0;
     uint64_t now = timer_actor_now_ms();
 
     platform_mutex_lock(ta->mutex);
 
-    timer_entry_t* existing = _find_by_key(ta->head, key);
-    if (existing != NULL)
-        existing->cancelled = 1;
+    /* Remove existing entry with this key completely */
+    timer_entry_t* old = _remove_by_key(&ta->head, key);
+    uint64_t first_call = (old != NULL) ? old->first_call_ms : now;
+    uint64_t max_deadline = (max_wait_ms > 0) ? first_call + max_wait_ms : UINT64_MAX;
+    if (old != NULL) _free_entry(old);
 
     timer_entry_t* entry = (timer_entry_t*)get_clear_memory(sizeof(timer_entry_t));
     if (entry == NULL) { platform_mutex_unlock(ta->mutex); return 0; }
 
-    entry->deadline_ms = now + timeout_ms;
+    /* Clamp deadline to not exceed max_wait from first call */
+    uint64_t desired = now + timeout_ms;
+    entry->deadline_ms = (desired < max_deadline) ? desired : max_deadline;
     entry->interval_ms = 0;
+    entry->first_call_ms = first_call;
+    entry->max_wait_ms = max_wait_ms;
     entry->key = strdup(key);
     entry->target_actor = target_actor;
     entry->completion_type = completion_type;
@@ -400,21 +399,26 @@ timer_id_t timer_actor_debounce_callback(timer_actor_t* ta,
                                           timer_callback_t cb,
                                           timer_abort_t abort_cb,
                                           void* ctx) {
-    (void)max_wait_ms;
     if (key == NULL || cb == NULL) return 0;
     uint64_t now = timer_actor_now_ms();
 
     platform_mutex_lock(ta->mutex);
 
-    timer_entry_t* existing = _find_by_key(ta->head, key);
-    if (existing != NULL)
-        existing->cancelled = 1;
+    /* Remove existing entry with this key completely */
+    timer_entry_t* old = _remove_by_key(&ta->head, key);
+    uint64_t first_call = (old != NULL) ? old->first_call_ms : now;
+    uint64_t max_deadline = (max_wait_ms > 0) ? first_call + max_wait_ms : UINT64_MAX;
+    if (old != NULL) _free_entry(old);
 
     timer_entry_t* entry = (timer_entry_t*)get_clear_memory(sizeof(timer_entry_t));
     if (entry == NULL) { platform_mutex_unlock(ta->mutex); return 0; }
 
-    entry->deadline_ms = now + timeout_ms;
+    /* Clamp deadline to not exceed max_wait from first call */
+    uint64_t desired = now + timeout_ms;
+    entry->deadline_ms = (desired < max_deadline) ? desired : max_deadline;
     entry->interval_ms = 0;
+    entry->first_call_ms = first_call;
+    entry->max_wait_ms = max_wait_ms;
     entry->key = strdup(key);
     entry->cb = cb;
     entry->abort_cb = abort_cb;

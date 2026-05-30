@@ -1612,62 +1612,8 @@ graphql_result_t* graphql_mutate_sync(graphql_layer_t* layer, const char* mutati
 }
 
 // ============================================================
-// Public API - Asynchronous (worker pool dispatch)
+// Public API - Synchronous (actor model: no work pool needed)
 // ============================================================
-
-typedef struct {
-    graphql_layer_t* layer;
-    char* query;
-    promise_t* promise;
-    void* user_data;
-} graphql_query_ctx_t;
-
-typedef struct {
-    graphql_layer_t* layer;
-    char* mutation;
-    promise_t* promise;
-    void* user_data;
-} graphql_mutate_ctx_t;
-
-static void graphql_query_execute(void* arg) {
-    graphql_query_ctx_t* ctx = (graphql_query_ctx_t*)arg;
-    graphql_result_t* result = graphql_query_impl(ctx->layer, ctx->query);
-    promise_resolve(ctx->promise, result);
-    free(ctx->query);
-    refcounter_dereference((refcounter_t*)ctx->layer);
-    refcounter_dereference((refcounter_t*)ctx->promise);
-    free(ctx);
-}
-
-static void graphql_query_abort(void* arg) {
-    graphql_query_ctx_t* ctx = (graphql_query_ctx_t*)arg;
-    async_error_t* error = ERROR("Query aborted due to shutdown");
-    promise_reject(ctx->promise, error);
-    free(ctx->query);
-    refcounter_dereference((refcounter_t*)ctx->layer);
-    refcounter_dereference((refcounter_t*)ctx->promise);
-    free(ctx);
-}
-
-static void graphql_mutate_execute(void* arg) {
-    graphql_mutate_ctx_t* ctx = (graphql_mutate_ctx_t*)arg;
-    graphql_result_t* result = graphql_mutate_impl(ctx->layer, ctx->mutation);
-    promise_resolve(ctx->promise, result);
-    free(ctx->mutation);
-    refcounter_dereference((refcounter_t*)ctx->layer);
-    refcounter_dereference((refcounter_t*)ctx->promise);
-    free(ctx);
-}
-
-static void graphql_mutate_abort(void* arg) {
-    graphql_mutate_ctx_t* ctx = (graphql_mutate_ctx_t*)arg;
-    async_error_t* error = ERROR("Mutation aborted due to shutdown");
-    promise_reject(ctx->promise, error);
-    free(ctx->mutation);
-    refcounter_dereference((refcounter_t*)ctx->layer);
-    refcounter_dereference((refcounter_t*)ctx->promise);
-    free(ctx);
-}
 
 void graphql_query(graphql_layer_t* layer, const char* query,
                    promise_t* promise, void* user_data) {
