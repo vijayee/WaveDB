@@ -349,6 +349,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_graphql_resolve wavedb gtest gtest_main)
     add_test(NAME test_graphql_resolve COMMAND test_graphql_resolve)
 
+    # Test for actor/scheduler core
+    add_executable(test_actor_scheduler tests/test_actor_scheduler.c)
+    target_link_libraries(test_actor_scheduler PRIVATE wavedb Threads::Threads)
+    add_test(NAME test_actor_scheduler COMMAND test_actor_scheduler)
+
     # Visualization examples removed (used non-MVCC API, will be revisited)
 
     # Example programs

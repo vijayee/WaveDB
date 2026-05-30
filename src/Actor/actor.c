@@ -90,14 +90,17 @@ bool actor_run(actor_t* actor, size_t batch_size) {
     actor->dispatch(actor->state, &node->msg);
 
     /* If dispatch requested self-destruction, stop processing immediately.
-       The node may have been freed by actor_destroy — use saved payload info.
-       Dispatch functions that self-destruct do not CONSUME; they leave
-       normal payload cleanup to actor_run.
-       The caller (typically the scheduler) must check ACTOR_FLAG_DESTROY
-       and skip further operations on this actor. */
+       When actor_destroy is called from within dispatch (self-destruct),
+       the node may have been freed — use saved payload info. When
+       actor_destroy is called externally during processing, the node is
+       still valid and dispatch has already CONSUME'd the payload, so
+       node->msg.payload is NULL. Try the node first; if its payload is
+       non-NULL (self-destruct case), fall back to the saved pointer. */
     if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
-      if (payload_destroy != NULL && payload != NULL) {
-        payload_destroy(payload);
+      void* p = node->msg.payload ? node->msg.payload : payload;
+      void (*d)(void*) = node->msg.payload_destroy ? node->msg.payload_destroy : payload_destroy;
+      if (d != NULL && p != NULL) {
+        d(p);
       }
       return false;
     }
