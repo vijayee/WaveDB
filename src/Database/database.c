@@ -1270,9 +1270,16 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     }
 
     // Write to WAL actor if present
+    #define WAL_MAX_FILE_SIZE (128 * 1024)
     if (db->wal_actor) {
         buffer_t* data = serialize_batch(batch);
         if (data != NULL) {
+            if (data->size > WAL_MAX_FILE_SIZE) {
+                buffer_destroy(data);
+                txn_desc_destroy(txn);
+                platform_unlock(&batch->lock);
+                return -5;
+            }
             wal_actor_write(db->wal_actor, 0, txn->txn_id, WAL_BATCH, data, NULL);
         }
     }

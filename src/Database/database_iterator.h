@@ -44,6 +44,9 @@ typedef struct database_iterator_t {
 
     transaction_id_t read_txn_id;      // Transaction ID for visibility check
     uint8_t finished;                  // 1 when iteration complete
+
+    // Multi-shard support
+    size_t shard_index;                // Current shard being iterated
 } database_iterator_t;
 
 /**

@@ -133,6 +133,7 @@ database_iterator_t* database_scan_start(database_t* db,
     iter->end_path = end_path ? path_copy(end_path) : NULL;
     iter->current_path = path_create();
     iter->finished = 0;
+    iter->shard_index = 0;
 
     // Allocate initial stack
     iter->stack = get_clear_memory(INITIAL_STACK_SIZE * sizeof(iterator_frame_t));
@@ -150,15 +151,17 @@ database_iterator_t* database_scan_start(database_t* db,
     // For synchronous scans, we use the current transaction context
     iter->read_txn_id = tx_manager_get_last_committed(db->tx_manager);
 
-    // Push root node onto stack
-    if (db->trie && db->trie->root) {
-        iter->stack[0].node = db->trie->root;
+    // Push root node from the first shard onto stack
+    hbtrie_t* first_trie = (db->shard_actors && db->shard_count > 0)
+        ? db->shard_actors[0]->trie : db->trie;
+    if (first_trie && first_trie->root) {
+        iter->stack[0].node = first_trie->root;
         iter->stack[0].entry_index = 0;
         iter->stack[0].path_index = 0;
         iter->stack_depth = 1;
 
         // Reference the root node
-        REFERENCE(db->trie->root, hbtrie_node_t);
+        REFERENCE(first_trie->root, hbtrie_node_t);
     }
 
     refcounter_init((refcounter_t*)iter);
@@ -193,6 +196,40 @@ void database_scan_end(database_iterator_t* iter) {
     }
 }
 
+/**
+ * Switch the iterator to the next shard's trie.
+ * Returns 0 on success, -1 if no more shards.
+ */
+static int switch_to_next_shard(database_iterator_t* iter) {
+    // Destroy current stack frames
+    for (size_t i = 0; i < iter->stack_depth; i++) {
+        if (iter->stack[i].node) {
+            DEREFERENCE(iter->stack[i].node);
+        }
+    }
+    iter->stack_depth = 0;
+
+    // Advance to next shard
+    iter->shard_index++;
+
+    if (iter->db->shard_actors == NULL || iter->shard_index >= iter->db->shard_count) {
+        return -1;
+    }
+
+    hbtrie_t* next_trie = iter->db->shard_actors[iter->shard_index]->trie;
+    if (next_trie && next_trie->root) {
+        iter->stack[0].node = next_trie->root;
+        iter->stack[0].entry_index = 0;
+        iter->stack[0].path_index = 0;
+        iter->stack_depth = 1;
+        REFERENCE(next_trie->root, hbtrie_node_t);
+        return 0;
+    }
+
+    // Empty shard — try next one recursively
+    return switch_to_next_shard(iter);
+}
+
 int database_scan_next(database_iterator_t* iter,
                         path_t** out_path,
                         identifier_t** out_value) {
@@ -203,12 +240,24 @@ int database_scan_next(database_iterator_t* iter,
     *out_path = NULL;
     *out_value = NULL;
 
-    if (iter->finished || iter->stack_depth == 0) {
+    if (iter->finished) {
         return -1;  // End of iteration
     }
 
-    // Get chunk_size from database trie
-    uint8_t chunk_size = iter->db->trie ? iter->db->trie->chunk_size : DEFAULT_CHUNK_SIZE;
+    // Try switching to next shard if current one is exhausted
+try_next_shard:
+    if (iter->stack_depth == 0) {
+        if (switch_to_next_shard(iter) < 0) {
+            iter->finished = 1;
+            return -1;
+        }
+        // Continue to process the new shard's trie
+    }
+
+    // Get chunk_size from current trie (first shard as reference)
+    hbtrie_t* ref_trie = (iter->db->shard_actors && iter->db->shard_count > 0)
+        ? iter->db->shard_actors[0]->trie : iter->db->trie;
+    uint8_t chunk_size = ref_trie ? ref_trie->chunk_size : DEFAULT_CHUNK_SIZE;
 
     // Depth-first traversal
     while (iter->stack_depth > 0) {
@@ -243,10 +292,10 @@ int database_scan_next(database_iterator_t* iter,
                 frame->entry_index++;  // Move past this entry since we're processing it
 
                 // If entry also has a trie_child, push it for later traversal
-                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
-                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
-                                                     iter->db->trie->chunk_size,
-                                                     iter->db->trie->btree_node_size);
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && ref_trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, ref_trie->fcache,
+                                                     ref_trie->chunk_size,
+                                                     ref_trie->btree_node_size);
                 }
                 if (entry->trie_child) {
                     if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
@@ -393,10 +442,10 @@ int database_scan_next(database_iterator_t* iter,
                 break;  // Will continue with child on next iteration
             } else if (entry->trie_child || entry->child_disk_offset != 0) {
                 // Lazy-load trie_child if needed
-                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
-                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
-                                                     iter->db->trie->chunk_size,
-                                                     iter->db->trie->btree_node_size);
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && ref_trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, ref_trie->fcache,
+                                                     ref_trie->chunk_size,
+                                                     ref_trie->btree_node_size);
                 }
                 if (entry->trie_child == NULL) {
                     frame->entry_index++;
@@ -421,7 +470,6 @@ int database_scan_next(database_iterator_t* iter,
         }
     }
 
-    // No more entries
-    iter->finished = 1;
-    return -1;
+    // No more entries in current shard — try next shard
+    goto try_next_shard;
 }
