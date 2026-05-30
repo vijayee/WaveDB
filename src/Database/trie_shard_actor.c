@@ -72,6 +72,8 @@ static void trie_shard_dispatch(void* state, message_t* msg) {
                     async_error_t err = {0};
                     promise_reject(p->promise, &err);
                 }
+                DESTROY(p->path, path);
+                DESTROY(p->value, identifier);
                 break;
             }
 
@@ -85,6 +87,8 @@ static void trie_shard_dispatch(void* state, message_t* msg) {
             if (p->promise) {
                 promise_resolve(p->promise, NULL);
             }
+            DESTROY(p->path, path);
+            DESTROY(p->value, identifier);
             break;
         }
         case SHARD_GET: {
@@ -160,6 +164,7 @@ static void trie_shard_dispatch(void* state, message_t* msg) {
             if (p->promise) {
                 promise_resolve(p->promise, deleted);
             }
+            DESTROY(p->path, path);
             break;
         }
         default:

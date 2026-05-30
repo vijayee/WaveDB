@@ -110,10 +110,9 @@ extern "C" void bench_error_callback(void* ctx, async_error_t* payload) {
 
 extern "C" void bench_get_callback(void* ctx, void* payload) {
     auto bctx = static_cast<bench_ctx*>(ctx);
-    // CONSUME'd values have yield=1, REFERENCE consumes the yield ticket
+    // CONSUME the REFERENCE'd value from hbtrie_find
     if (payload) {
-        identifier_t* id = (identifier_t*)REFERENCE(payload, identifier_t);
-        identifier_destroy(id);
+        identifier_destroy((identifier_t*)payload);
     }
     bctx->promise->set_value();
     free(ctx);

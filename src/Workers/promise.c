@@ -6,6 +6,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../Util/allocator.h"
+#if _WIN32
+#include <windows.h>
+#else
+#include <sched.h>
+#endif
 
 promise_t* promise_create(void (*resolve)(void*, void*), void (*reject)(void*, async_error_t*), void* ctx) {
   promise_t* promise = get_clear_memory(sizeof(promise_t));
@@ -31,6 +36,14 @@ void promise_resolve(promise_t* promise, void* payload) {
   if (promise->hasFired == 0) {
     promise->hasFired = 1;
     promise->resolve(promise->ctx, payload);
+  }
+}
+
+void promise_wait(promise_t* promise) {
+  if (promise == NULL) return;
+  // Busy-wait with sched_yield — simple and correct
+  while (!promise->hasFired) {
+    sched_yield();
   }
 }
 

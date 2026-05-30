@@ -24,6 +24,7 @@ promise_t* promise_create(void (*resolve)(void*, void*), void (*reject)(void*, a
 void promise_destroy(promise_t* promise);
 void promise_resolve(promise_t* promise, void* payload);
 void promise_reject(promise_t* promise, async_error_t* error);
+void promise_wait(promise_t* promise);
 
 #ifdef __cplusplus
 }

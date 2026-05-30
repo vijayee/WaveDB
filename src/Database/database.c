@@ -1428,8 +1428,10 @@ size_t database_count(database_t* db) {
 }
 
 // ============================================================================
-// Synchronous operations — actor-based with wait-for-idle
+// Synchronous operations — via actor system for thread safety
 // ============================================================================
+
+static void _sync_noop(void* ctx, void* payload) { (void)ctx; (void)payload; }
 
 int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
     if (db == NULL || path == NULL || value == NULL) {
@@ -1438,24 +1440,11 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         return -1;
     }
 
-    // Direct sync: operate on the shard's trie directly (single-threaded context)
-    size_t idx = path_hash(path) % db->shard_count;
-    trie_shard_actor_t* shard = db->shard_actors[idx];
-
-    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
-    if (txn == NULL) {
-        path_destroy(path);
-        identifier_destroy(value);
-        return -1;
-    }
-
-    // Write to WAL BEFORE insert (WAL pattern: log first, then apply)
-    _wal_write_put(db, path, value, txn->txn_id);
-
-    hbtrie_insert(shard->trie, path, value, txn->txn_id);
-    ATOMIC_STORE(&shard->root, shard->trie->root);
-    tx_manager_commit(db->tx_manager, txn);
-    txn_desc_destroy(txn);
+    // Route through shard actor for thread safety (supports concurrent callers)
+    promise_t* prom = promise_create(_sync_noop, NULL, NULL);
+    trie_shard_put(db->shard_actors, db->shard_count, path, value, prom);
+    promise_wait(prom);
+    promise_destroy(prom);
     return 0;
 }
 
@@ -1501,26 +1490,11 @@ int database_delete_sync(database_t* db, path_t* path) {
         return -1;
     }
 
-    // Direct sync: operate on the shard's trie directly
-    size_t idx = path_hash(path) % db->shard_count;
-    trie_shard_actor_t* shard = db->shard_actors[idx];
-
-    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
-    if (txn == NULL) {
-        path_destroy(path);
-        return -1;
-    }
-
-    identifier_t* removed = hbtrie_delete(shard->trie, path, txn->txn_id);
-    ATOMIC_STORE(&shard->root, shard->trie->root);
-    tx_manager_commit(db->tx_manager, txn);
-
-    // Write to WAL for persistence
-    _wal_write_delete(db, path, txn->txn_id);
-
-    txn_desc_destroy(txn);
-
-    if (removed) identifier_destroy(removed);
+    // Route through shard actor for thread safety (supports concurrent callers)
+    promise_t* prom = promise_create(_sync_noop, NULL, NULL);
+    trie_shard_delete(db->shard_actors, db->shard_count, path, prom);
+    promise_wait(prom);
+    promise_destroy(prom);
     return 0;
 }
 
