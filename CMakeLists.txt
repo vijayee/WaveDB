@@ -106,6 +106,7 @@ set(WAVEDB_SOURCES
 
     # Actor
     src/Actor/message_queue.c
+    src/Actor/actor.c
 
     # Layers - GraphQL
     src/Layers/graphql/graphql_types.c
