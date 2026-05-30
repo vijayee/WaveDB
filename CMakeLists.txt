@@ -105,6 +105,7 @@ set(WAVEDB_SOURCES
     src/Database/eviction_queue.c
     src/Database/lru_actor.c
     src/Database/bnode_cache_actor.c
+    src/Database/wal_actor.c
 
     # Actor
     src/Actor/message_queue.c
