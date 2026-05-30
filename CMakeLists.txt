@@ -104,6 +104,9 @@ set(WAVEDB_SOURCES
     src/Database/batch.c
     src/Database/eviction_queue.c
 
+    # Actor
+    src/Actor/message_queue.c
+
     # Layers - GraphQL
     src/Layers/graphql/graphql_types.c
     src/Layers/graphql/graphql_lexer.c
