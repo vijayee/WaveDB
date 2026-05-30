@@ -15,8 +15,6 @@
 extern "C" {
 #include "Database/database_config.h"
 #include "Database/database.h"
-#include "Workers/pool.h"
-#include "Time/wheel.h"
 }
 
 // Test: database_config_default creates valid config
@@ -30,9 +28,7 @@ TEST(DatabaseConfig, DefaultCreatesValidConfig) {
     EXPECT_EQ(config->enable_persist, 1);
     EXPECT_EQ(config->lru_memory_mb, 50u);
     EXPECT_EQ(config->worker_threads, 4u);
-    EXPECT_EQ(config->timer_resolution_ms, 10u);
-    EXPECT_EQ(config->external_pool, nullptr);
-    EXPECT_EQ(config->external_wheel, nullptr);
+    EXPECT_EQ(config->external_timer_actor, nullptr);
 
     database_config_destroy(config);
 }
@@ -226,9 +222,8 @@ TEST(DatabaseConfig, CreateWithConfig) {
     ASSERT_NE(db, nullptr);
     EXPECT_EQ(error, 0);
 
-    // Verify owns_pool is true (created own)
-    EXPECT_TRUE(db->owns_pool);
-    EXPECT_TRUE(db->owns_wheel);
+    // Verify owns_timer_actor is true (created own)
+    EXPECT_TRUE(db->owns_timer_actor);
 
     database_destroy(db);
     database_config_destroy(config);
@@ -292,7 +287,7 @@ TEST(DatabaseConfig, ReopenPreservesImmutable) {
     system(cmd);
 }
 
-// Test: External pool/wheel not owned
+// Test: External timer actor not owned
 TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     char temp_dir[256];
 #if _WIN32
@@ -305,36 +300,24 @@ TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     mkdtemp(temp_dir);
 #endif
 
-    // Create external resources (pool must be launched before use)
-    work_pool_t* pool = work_pool_create(2);
-    work_pool_launch(pool);
-    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(10, pool);
+    // Create external timer actor
+    timer_actor_t* ta = timer_actor_create();
 
     database_config_t* config = database_config_default();
-    config->external_pool = pool;
-    config->external_wheel = wheel;
+    database_config_set_external_timer_actor(config, ta);
 
     int error = 0;
     database_t* db = database_create_with_config(temp_dir, config, &error);
     ASSERT_NE(db, nullptr);
 
     // Verify not owned
-    EXPECT_FALSE(db->owns_pool);
-    EXPECT_FALSE(db->owns_wheel);
+    EXPECT_FALSE(db->owns_timer_actor);
 
     database_destroy(db);
     database_config_destroy(config);
 
-    // Stop wheel and pool before cleanup
-    if (wheel) {
-        hierarchical_timing_wheel_stop(wheel);
-    }
-    if (pool) {
-        work_pool_shutdown(pool);
-        work_pool_join_all(pool);
-    }
-    hierarchical_timing_wheel_destroy(wheel);
-    work_pool_destroy(pool);
+    // Destroy external timer actor after database is destroyed
+    timer_actor_destroy(ta);
 
     // Cleanup
     char cmd[256];

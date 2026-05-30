@@ -16,8 +16,6 @@
 #include "../../Database/database.h"
 #include "../../Database/database_iterator.h"
 #include "../../Database/batch.h"
-#include "../../Workers/pool.h"
-#include "../../Workers/work.h"
 #include "../../Workers/promise.h"
 #include "../../Workers/error.h"
 #include "../../Util/log.h"
@@ -1680,45 +1678,9 @@ void graphql_query(graphql_layer_t* layer, const char* query,
         return;
     }
 
-    // No pool — execute synchronously and resolve inline
-    if (layer->pool == NULL) {
-        graphql_result_t* result = graphql_query_impl(layer, query);
-        promise_resolve(promise, result);
-        return;
-    }
-
-    // Dispatch to worker pool
-    graphql_query_ctx_t* ctx = get_clear_memory(sizeof(graphql_query_ctx_t));
-    if (ctx == NULL) {
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    ctx->layer = (graphql_layer_t*)refcounter_reference((refcounter_t*)layer);
-    ctx->query = strdup(query);
-    ctx->promise = (promise_t*)refcounter_reference((refcounter_t*)promise);
-    ctx->user_data = user_data;
-
-    if (ctx->query == NULL) {
-        refcounter_dereference((refcounter_t*)ctx->layer);
-        refcounter_dereference((refcounter_t*)ctx->promise);
-        free(ctx);
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    work_t* work = work_create(graphql_query_execute, graphql_query_abort, ctx);
-    if (work == NULL) {
-        free(ctx->query);
-        refcounter_dereference((refcounter_t*)ctx->layer);
-        refcounter_dereference((refcounter_t*)ctx->promise);
-        free(ctx);
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    refcounter_yield((refcounter_t*)work);
-    work_pool_enqueue(layer->pool, work);
+    // Execute synchronously (actor model: no work pool needed)
+    graphql_result_t* result = graphql_query_impl(layer, query);
+    promise_resolve(promise, result);
 }
 
 void graphql_mutate(graphql_layer_t* layer, const char* mutation,
@@ -1730,43 +1692,7 @@ void graphql_mutate(graphql_layer_t* layer, const char* mutation,
         return;
     }
 
-    // No pool — execute synchronously and resolve inline
-    if (layer->pool == NULL) {
-        graphql_result_t* result = graphql_mutate_impl(layer, mutation);
-        promise_resolve(promise, result);
-        return;
-    }
-
-    // Dispatch to worker pool
-    graphql_mutate_ctx_t* ctx = get_clear_memory(sizeof(graphql_mutate_ctx_t));
-    if (ctx == NULL) {
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    ctx->layer = (graphql_layer_t*)refcounter_reference((refcounter_t*)layer);
-    ctx->mutation = strdup(mutation);
-    ctx->promise = (promise_t*)refcounter_reference((refcounter_t*)promise);
-    ctx->user_data = user_data;
-
-    if (ctx->mutation == NULL) {
-        refcounter_dereference((refcounter_t*)ctx->layer);
-        refcounter_dereference((refcounter_t*)ctx->promise);
-        free(ctx);
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    work_t* work = work_create(graphql_mutate_execute, graphql_mutate_abort, ctx);
-    if (work == NULL) {
-        free(ctx->mutation);
-        refcounter_dereference((refcounter_t*)ctx->layer);
-        refcounter_dereference((refcounter_t*)ctx->promise);
-        free(ctx);
-        promise_resolve(promise, make_error_result("Out of memory", NULL));
-        return;
-    }
-
-    refcounter_yield((refcounter_t*)work);
-    work_pool_enqueue(layer->pool, work);
+    // Execute synchronously (actor model: no work pool needed)
+    graphql_result_t* result = graphql_mutate_impl(layer, mutation);
+    promise_resolve(promise, result);
 }

@@ -85,7 +85,6 @@ static void test_sync_only_put_get(void) {
     config->enable_persist = 1;
     config->sync_only = 1;
     config->worker_threads = 0;
-    config->timer_resolution_ms = 0;
     config->chunk_size = 4;
     config->btree_node_size = 4096;
 
@@ -160,7 +159,6 @@ static void test_sync_only_cross_mode(void) {
     config->enable_persist = 1;
     config->sync_only = 1;
     config->worker_threads = 0;
-    config->timer_resolution_ms = 0;
     config->chunk_size = 4;
     config->btree_node_size = 4096;
 
@@ -196,7 +194,6 @@ static void test_sync_only_cross_mode(void) {
     config->chunk_size = 4;
     config->btree_node_size = 4096;
     config->worker_threads = 2;
-    config->timer_resolution_ms = 100;
     config->wal_config.sync_mode = WAL_SYNC_ASYNC;
     config->wal_config.debounce_ms = 100;
 
@@ -282,7 +279,6 @@ static void test_sync_only_cross_mode(void) {
     config->enable_persist = 1;
     config->sync_only = 1;
     config->worker_threads = 0;
-    config->timer_resolution_ms = 0;
     config->chunk_size = 4;
     config->btree_node_size = 4096;
 

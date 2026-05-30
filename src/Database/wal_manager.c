@@ -14,7 +14,7 @@
 #include "../Util/mkdir_p.h"
 #include "../Util/path_join.h"
 #include "../Util/endian.h"
-#include "../Time/wheel.h"
+#include "../Time/timer_actor.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdlib.h>
@@ -658,7 +658,7 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     log_info("Created WAL file: %s (thread_id=%lu, fd=%d)", twal->file_path, (unsigned long)thread_id, twal->fd);
 
     // Initialize batch write buffer
-    twal->wheel = manager->wheel;
+    twal->timer_actor = manager->timer_actor;
     twal->entry_buf_used = 0;
     twal->batch_count = 0;
     // IMMEDIATE mode requires batch_size=1 (fsync after every entry).
@@ -690,7 +690,7 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
 
 // Skeleton implementations (to be filled in next tasks)
 wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
-                                   hierarchical_timing_wheel_t* wheel, encryption_t* encryption, int* error_code) {
+                                   timer_actor_t* timer_actor, encryption_t* encryption, int* error_code) {
     if (error_code) *error_code = 0;
 
     // Create directory if needed
@@ -720,7 +720,7 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->thread_count = 0;
     manager->thread_capacity = 0;
     manager->sealed_count = 0;
-    manager->wheel = wheel;  // Store timing wheel for one-shot timers
+    manager->timer_actor = timer_actor;
     manager->encryption = encryption;
 
     // Create manifest file
@@ -773,9 +773,7 @@ static wal_manager_t* migrate_legacy_wal(const char* location,
     header.migration_state = MIGRATION_IN_PROGRESS;
 
     // Get current timestamp in milliseconds
-    timeval_t now;
-    get_time(&now);
-    header.migration_timestamp = timeval_to_ms(now);
+    header.migration_timestamp = timer_actor_now_ms();
 
     // Seek to beginning and write header
     if (lseek(manager->manifest_fd, 0, SEEK_SET) < 0) {
@@ -966,8 +964,8 @@ void wal_manager_destroy(wal_manager_t* manager) {
                     if (twal->batch_count > 0) {
                         thread_wal_flush_buffer_locked(twal);
                     }
-                    if (twal->timer_active && twal->wheel != NULL) {
-                        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+                    if (twal->timer_active && twal->timer_actor != NULL) {
+                        timer_actor_cancel(twal->timer_actor, twal->timer_id);
                         twal->timer_active = 0;
                     }
                     platform_unlock(&twal->lock);
@@ -1068,8 +1066,8 @@ thread_wal_t* get_thread_wal(wal_manager_t* manager) {
                     free(thread_local_wal->file_path);
                 }
                 // Cancel timer if active
-                if (thread_local_wal->timer_active && thread_local_wal->wheel != NULL) {
-                    hierarchical_timing_wheel_cancel_timer(thread_local_wal->wheel, thread_local_wal->timer_id);
+                if (thread_local_wal->timer_active && thread_local_wal->timer_actor != NULL) {
+                    timer_actor_cancel(thread_local_wal->timer_actor, thread_local_wal->timer_id);
                 }
                 platform_lock_destroy(&thread_local_wal->lock);
                 free(thread_local_wal);
@@ -1366,12 +1364,11 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         // DEBOUNCED: flush buffer + fsync on timer fire.
         // ASYNC: flush buffer to kernel only (survives process crash, not power failure).
         // IMMEDIATE: no timer needed (batch_size=1 flushes every entry).
-        if (twal->sync_mode != WAL_SYNC_IMMEDIATE && twal->wheel != NULL && twal->debounce_ms > 0) {
+        if (twal->sync_mode != WAL_SYNC_IMMEDIATE && twal->timer_actor != NULL && twal->debounce_ms > 0) {
             twal->timer_active = 1;
-            twal->timer_id = hierarchical_timing_wheel_set_timer(
-                twal->wheel, twal,
-                wal_flush_timer_callback, NULL,
-                (timer_duration_t){.milliseconds = twal->debounce_ms});
+            twal->timer_id = timer_actor_set_callback(
+                twal->timer_actor, twal->debounce_ms, 0,
+                wal_flush_timer_callback, NULL, twal);
         }
     }
 
@@ -1393,8 +1390,8 @@ int thread_wal_seal(thread_wal_t* twal) {
     }
 
     // Cancel one-shot timer if active
-    if (twal->timer_active && twal->wheel != NULL) {
-        hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+    if (twal->timer_active && twal->timer_actor != NULL) {
+        timer_actor_cancel(twal->timer_actor, twal->timer_id);
         twal->timer_active = 0;
     }
 
@@ -2066,8 +2063,8 @@ int wal_manager_flush(wal_manager_t* manager) {
                 twal->pending_writes = 0;
             }
             // Cancel timer if active
-            if (twal->timer_active && twal->wheel != NULL) {
-                hierarchical_timing_wheel_cancel_timer(twal->wheel, twal->timer_id);
+            if (twal->timer_active && twal->timer_actor != NULL) {
+                timer_actor_cancel(twal->timer_actor, twal->timer_id);
                 twal->timer_active = 0;
             }
 

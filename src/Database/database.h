@@ -12,8 +12,7 @@
 #include "../Util/threadding.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/mvcc.h"
-#include "../Time/wheel.h"
-#include "../Workers/pool.h"
+#include "../Time/timer_actor.h"
 #include "../Workers/promise.h"
 #include "database_lru.h"
 #include "batch.h"
@@ -78,9 +77,11 @@ typedef struct {
     transaction_id_t pending_txn_id;
     uint8_t has_pending_txn_id;
 
+    // Timer actor for debounced WAL writes and deferred work
+    timer_actor_t* timer_actor;
+
     // Config ownership tracking
-    bool owns_pool;                     /* True if database created the pool */
-    bool owns_wheel;                   /* True if database created the wheel */
+    bool owns_timer_actor;             /* True if database created the timer actor */
     volatile bool destroying;          /* Set early in database_destroy to stop eviction rescheduling */
     ATOMIC_TYPE(int) eviction_in_flight;   /* Non-zero while eviction task is executing */
 
@@ -122,7 +123,7 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
                             wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist,
-                            work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
+                            timer_actor_t* timer_actor,
                             int* error_code);
 
 /**

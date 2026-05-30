@@ -49,13 +49,11 @@ database_config_t* database_config_default(void) {
     config->wal_config.compact_interval_ms = WAL_DEFAULT_COMPACT_INTERVAL_MS;
     config->wal_config.max_file_size = WAL_DEFAULT_MAX_FILE_SIZE;
 
-    // Threading settings
+    // Scheduler settings
     config->worker_threads = DATABASE_CONFIG_DEFAULT_WORKER_THREADS;
-    config->timer_resolution_ms = DATABASE_CONFIG_DEFAULT_TIMER_RESOLUTION_MS;
 
     // External resources (NULL = create own)
-    config->external_pool = NULL;
-    config->external_wheel = NULL;
+    config->external_timer_actor = NULL;
 
     return config;
 }
@@ -72,8 +70,7 @@ database_config_t* database_config_copy(const database_config_t* config) {
 
     memcpy(copy, config, sizeof(database_config_t));
     // External resources are not owned, so just copy pointers
-    copy->external_pool = config->external_pool;
-    copy->external_wheel = config->external_wheel;
+    copy->external_timer_actor = config->external_timer_actor;
 
     // Deep copy encryption key material
     if (config->encryption.key != NULL) {
@@ -226,11 +223,6 @@ int database_config_save(const char* location, const database_config_t* config) 
     cbor_map_add(root, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("worker_threads")),
         .value = cbor_move(cbor_build_uint8(config->worker_threads))
-    });
-
-    cbor_map_add(root, (struct cbor_pair) {
-        .key = cbor_move(cbor_build_string("timer_resolution_ms")),
-        .value = cbor_move(cbor_build_uint16(config->timer_resolution_ms))
     });
 
     // Add encryption settings
@@ -411,7 +403,6 @@ database_config_t* database_config_load(const char* location) {
 
     // Read threading settings
     config->worker_threads = (uint8_t)get_map_uint(root, "worker_threads", DATABASE_CONFIG_DEFAULT_WORKER_THREADS);
-    config->timer_resolution_ms = (uint16_t)get_map_uint(root, "timer_resolution_ms", DATABASE_CONFIG_DEFAULT_TIMER_RESOLUTION_MS);
 
     // Read WAL config from nested map
     cbor_item_t* key_item = cbor_build_string("wal");
@@ -522,12 +513,10 @@ database_config_t* database_config_merge(const database_config_t* saved,
 
     // THREADING: Use passed values
     merged->worker_threads = passed->worker_threads;
-    merged->timer_resolution_ms = passed->timer_resolution_ms;
     merged->sync_only = passed->sync_only;  // Mutable: mode can change on reopen
 
     // EXTERNAL: Use passed values (runtime only)
-    merged->external_pool = passed->external_pool;
-    merged->external_wheel = passed->external_wheel;
+    merged->external_timer_actor = passed->external_timer_actor;
 
     return merged;
 }
@@ -589,9 +578,9 @@ void database_config_set_wal_max_file_size(database_config_t* config, size_t siz
     config->wal_config.max_file_size = size;
 }
 
-void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms) {
+void database_config_set_external_timer_actor(database_config_t* config, timer_actor_t* ta) {
     if (config == NULL) return;
-    config->timer_resolution_ms = ms;
+    config->external_timer_actor = ta;
 }
 
 void database_config_set_sync_only(database_config_t* config, uint8_t sync_only) {

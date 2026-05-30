@@ -8,7 +8,6 @@
 #include "../Workers/promise.h"
 #include "../Workers/transaction_id.h"
 #include "../Storage/bnode_cache.h"
-#include "../Time/wheel.h"
 
 /* Forward declarations */
 typedef struct actor_t actor_t;

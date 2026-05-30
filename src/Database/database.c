@@ -7,7 +7,6 @@
 #include "database_iterator.h"
 #include "batch.h"
 #include "eviction_queue.h"
-#include "../Workers/work.h"
 #include "../Workers/error.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
@@ -779,14 +778,15 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
     scheduler_pool_start(db->scheduler_pool);
-    // Actor model: scheduler_pool replaces work_pool_t.
-    // If external pool was provided, mark as not owned (caller's lifecycle).
-    db->owns_pool = (effective_config->external_pool == NULL);
-    // Actor model: no hierarchical timing wheel. Set owns_wheel for backward
-    // compat with tests that check it when auto-creating resources.
-    db->owns_wheel = (effective_config->external_wheel == NULL
-                      && !effective_config->sync_only
-                      && effective_config->worker_threads > 0);
+
+    // Create timer actor for debounced WAL writes and deferred work
+    if (effective_config->external_timer_actor != NULL) {
+        db->timer_actor = effective_config->external_timer_actor;
+        db->owns_timer_actor = 0;
+    } else {
+        db->timer_actor = timer_actor_create();
+        db->owns_timer_actor = 1;
+    }
 
     // Create storage directories if persistent
     if (effective_config->enable_persist) {
@@ -836,8 +836,8 @@ database_t* database_create_with_config(const char* location,
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // Create MVCC transaction manager (no pool/wheel needed — GC is per-shard)
-    db->tx_manager = tx_manager_create(NULL, NULL, NULL, 0);
+    // Create MVCC transaction manager (GC is per-shard, no timer needed here)
+    db->tx_manager = tx_manager_create(NULL, 0);
     if (db->tx_manager == NULL) {
         hbtrie_destroy(db->trie);
         scheduler_pool_stop(db->scheduler_pool);
@@ -1183,7 +1183,7 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
                             wal_config_t* wal_config,
                             uint8_t chunk_size, uint32_t btree_node_size,
                             uint8_t enable_persist,
-                            work_pool_t* pool, hierarchical_timing_wheel_t* wheel,
+                            timer_actor_t* timer_actor,
                             int* error_code) {
     database_config_t* config = database_config_default();
     if (config == NULL) {
@@ -1198,14 +1198,9 @@ database_t* database_create(const char* location, size_t lru_memory_mb,
 
     if (wal_config != NULL) config->wal_config = *wal_config;
 
-    // Actor model: ignore external pool/wheel — we create our own scheduler_pool.
-    // The caller's pool/wheel are still valid for their own lifecycle (e.g. tests).
-    (void)pool;
-    (void)wheel;
-
-    // Determine worker threads from pool or default
-    config->worker_threads = 4;  // Default in actor mode
-    config->timer_resolution_ms = 0;  // No hierarchical wheel in actor mode
+    // Use external timer_actor if provided, otherwise create our own
+    config->external_timer_actor = timer_actor;
+    config->worker_threads = 4;
 
     database_t* db = database_create_with_config(location, config, error_code);
     database_config_destroy(config);
@@ -1266,6 +1261,12 @@ void database_destroy(database_t* db) {
         if (db->bnode_cache_actor) {
             bnode_cache_actor_destroy(db->bnode_cache_actor);
             db->bnode_cache_actor = NULL;
+        }
+
+        // Destroy timer actor (must be after actors that use it)
+        if (db->timer_actor && db->owns_timer_actor) {
+            timer_actor_destroy(db->timer_actor);
+            db->timer_actor = NULL;
         }
 
         // Process remaining eviction callbacks

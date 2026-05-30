@@ -7,7 +7,7 @@
 #include "../Buffer/buffer.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
-#include "../Time/wheel.h"
+#include "../Time/timer_actor.h"
 #include "../Storage/encryption.h"
 #include "wal.h"
 
@@ -83,7 +83,7 @@ typedef struct {
     char* file_path;                     // Path to thread-local file
     int fd;                              // File descriptor
     wal_sync_mode_e sync_mode;          // Durability mode
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timer
+    timer_actor_t* timer_actor;            // Timer actor for one-shot timers
     transaction_id_t oldest_txn_id;      // First transaction in file
     transaction_id_t newest_txn_id;      // Last transaction in file
     size_t current_size;                 // Current file size
@@ -116,7 +116,7 @@ struct wal_manager {
     size_t thread_count;                 // Number of threads
     size_t thread_capacity;              // Capacity of threads array
     PLATFORMLOCKTYPE(threads_lock);      // Lock for threads array
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for one-shot timers
+    timer_actor_t* timer_actor;            // Timer actor for one-shot timerss
     size_t sealed_count;                 // Number of sealed WAL files not yet compacted
     encryption_t* encryption;            // Encryption context (NULL if no encryption)
 };
@@ -141,7 +141,7 @@ typedef struct {
 /**
  * Create WAL manager
  */
-wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, hierarchical_timing_wheel_t* wheel, encryption_t* encryption, int* error_code);
+wal_manager_t* wal_manager_create(const char* location, wal_config_t* config, timer_actor_t* timer_actor, encryption_t* encryption, int* error_code);
 
 /**
  * Load or create WAL manager with recovery options

@@ -260,7 +260,6 @@ struct graphql_layer_t {
     refcounter_t refcounter;                // MUST be first member
     database_t* db;                          // Owned by the layer
     graphql_type_registry_t* registry;       // In-memory type definitions
-    work_pool_t* pool;                       // Reuses db's worker pool
     char delimiter;                           // Path delimiter (default '/')
     char* version;                           // Layer version string
     char* db_path;                           // Database storage path (owned if auto-generated)

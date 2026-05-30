@@ -9,8 +9,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "wal_manager.h"
-#include "../Workers/pool.h"
-#include "../Time/wheel.h"
+#include "../Time/timer_actor.h"
 #include "../Storage/encryption.h"
 
 #ifdef __cplusplus
@@ -71,13 +70,11 @@ typedef struct {
     uint16_t bnode_cache_shards;  // Bnode cache shard count (default: 4)
     wal_config_t wal_config;      // WAL settings
 
-    // === THREADING SETTINGS ===
-    uint8_t worker_threads;       // Number of workers (default: 4)
-    uint16_t timer_resolution_ms; // Timer resolution (default: 10)
+    // === SCHEDULER SETTINGS ===
+    uint8_t worker_threads;       // Number of scheduler workers (default: 4)
 
     // === EXTERNAL RESOURCES (not saved) ===
-    work_pool_t* external_pool;
-    hierarchical_timing_wheel_t* external_wheel;
+    timer_actor_t* external_timer_actor;
 } database_config_t;
 
 /**
@@ -150,10 +147,10 @@ void database_config_set_lru_shards(database_config_t* config, uint16_t shards);
 void database_config_set_bnode_cache_memory_mb(database_config_t* config, size_t mb);
 void database_config_set_bnode_cache_shards(database_config_t* config, uint16_t shards);
 void database_config_set_worker_threads(database_config_t* config, uint8_t threads);
+void database_config_set_external_timer_actor(database_config_t* config, timer_actor_t* ta);
 void database_config_set_wal_sync_mode(database_config_t* config, uint8_t mode);
 void database_config_set_wal_debounce_ms(database_config_t* config, uint64_t ms);
 void database_config_set_wal_max_file_size(database_config_t* config, size_t size);
-void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms);
 void database_config_set_sync_only(database_config_t* config, uint8_t sync_only);
 
 /**

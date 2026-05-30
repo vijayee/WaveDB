@@ -68,7 +68,6 @@ protected:
         config->chunk_size = 4;
         config->btree_node_size = 4096;
         config->worker_threads = 2;
-        config->timer_resolution_ms = 100;
         int error_code = 0;
         database_t* result = database_create_with_config(tmpdir, config, &error_code);
         database_config_destroy(config);

@@ -15,8 +15,6 @@
 
 #include <gtest/gtest.h>
 #include "../src/Database/database.h"
-#include "../src/Workers/pool.h"
-#include "../src/Time/wheel.h"
 #include "../src/HBTrie/path.h"
 #include "../src/HBTrie/identifier.h"
 #include "../src/Buffer/buffer.h"
@@ -32,47 +30,18 @@ protected:
         test_dir = "/tmp/wavedb_abort_test_" + std::to_string(getpid());
         mkdir(test_dir.c_str(), 0755);
 
-        // Create worker pool with only 1 thread
-        pool = work_pool_create(1);
-        ASSERT_NE(pool, nullptr);
-
-        // Create timing wheel
-        wheel = hierarchical_timing_wheel_create(1000, pool);
-        ASSERT_NE(wheel, nullptr);
-
-        // Create database
+        // Create database (passes NULL for timer_actor, database creates its own)
         int error = 0;
-        db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 10, NULL, 4, 4096, 0, NULL, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
     }
 
     void TearDown() override {
-        // Stop wheel and pool before destroying database
-        // to ensure no timer callbacks fire on freed memory.
-        if (wheel) {
-            hierarchical_timing_wheel_stop(wheel);
-        }
-
-        if (pool) {
-            work_pool_shutdown(pool);
-            work_pool_join_all(pool);
-        }
-
-        // Destroy database (WAL manager, LRU, trie, etc.)
+        // Destroy database (stops timer actor, WAL manager, LRU, trie, etc.)
         if (db) {
             database_destroy(db);
             db = nullptr;
-        }
-
-        if (wheel) {
-            hierarchical_timing_wheel_destroy(wheel);
-            wheel = nullptr;
-        }
-
-        if (pool) {
-            work_pool_destroy(pool);
-            pool = nullptr;
         }
 
         // Clean up test directory
@@ -102,8 +71,6 @@ protected:
     }
 
     std::string test_dir;
-    work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
     database_t* db = nullptr;
 };
 
@@ -131,9 +98,6 @@ TEST_F(AbortCleanupTest, QueuedPutNoLeak) {
 
     // Destroy pool immediately - triggers abort path
     // This should call abort_database_put which destroys path and value
-    work_pool_destroy(pool);
-    pool = nullptr;
-
     // Destroy promise (should already be resolved or aborted)
     promise_destroy(promise);
 
@@ -153,9 +117,6 @@ TEST_F(AbortCleanupTest, QueuedGetNoLeak) {
     database_get(db, path, promise);
 
     // Destroy pool - triggers abort path
-    work_pool_destroy(pool);
-    pool = nullptr;
-
     // Destroy promise
     promise_destroy(promise);
 }
@@ -172,9 +133,6 @@ TEST_F(AbortCleanupTest, QueuedDeleteNoLeak) {
     database_delete(db, path, promise);
 
     // Destroy pool - triggers abort path
-    work_pool_destroy(pool);
-    pool = nullptr;
-
     // Destroy promise
     promise_destroy(promise);
 }

@@ -25,8 +25,6 @@
 #include <chrono>
 extern "C" {
 #include "Database/database.h"
-#include "Time/wheel.h"
-#include "Workers/pool.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
@@ -41,44 +39,13 @@ protected:
         // Create test directory
         test_dir = "/tmp/wavedb_test_" + std::to_string(getpid()) + "_" + std::to_string(test_counter++);
         mkdir(test_dir.c_str(), 0700);
-
-        // Create work pool (match reference pattern)
-        pool = work_pool_create(platform_core_count());
-        work_pool_launch(pool);
-
-        // Create timing wheel (match reference pattern)
-        wheel = hierarchical_timing_wheel_create(8, pool);
-        hierarchical_timing_wheel_run(wheel);
     }
 
     void TearDown() override {
-        // Stop wheel and pool before destroying database
-        // to ensure no timer callbacks fire on freed memory.
-        // Do NOT call wait_for_idle_signal — debouncers reschedule
-        // indefinitely so the idle condition is never reached.
-        if (wheel) {
-            hierarchical_timing_wheel_stop(wheel);
-        }
-
-        if (pool) {
-            work_pool_shutdown(pool);
-            work_pool_join_all(pool);
-        }
-
-        // Destroy database (WAL manager, LRU, trie, etc.)
+        // Destroy database (stops timer actor, WAL manager, LRU, trie, etc.)
         if (db) {
             database_destroy(db);
             db = nullptr;
-        }
-
-        // Destroy wheel then pool
-        if (wheel) {
-            hierarchical_timing_wheel_destroy(wheel);
-            wheel = nullptr;
-        }
-        if (pool) {
-            work_pool_destroy(pool);
-            pool = nullptr;
         }
 
         // Cleanup test directory
@@ -117,8 +84,6 @@ protected:
     }
 
     database_t* db = nullptr;
-    work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
     std::string test_dir;
     static int test_counter;
 
@@ -196,14 +161,14 @@ extern "C" void delete_callback_err_wrapper(void* ctx, async_error_t* payload) {
 
 TEST_F(DatabaseTest, CreateDestroy) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     EXPECT_EQ(error, 0);
 }
 
 TEST_F(DatabaseTest, PutGet) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -251,7 +216,7 @@ TEST_F(DatabaseTest, PutGet) {
 
 TEST_F(DatabaseTest, PutGetMultiple) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -311,7 +276,7 @@ TEST_F(DatabaseTest, PutGetMultiple) {
 
 TEST_F(DatabaseTest, GetNonExistent) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -338,7 +303,7 @@ TEST_F(DatabaseTest, GetNonExistent) {
 
 TEST_F(DatabaseTest, UpdateValue) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -421,7 +386,7 @@ TEST_F(DatabaseTest, UpdateValue) {
 
 TEST_F(DatabaseTest, Delete) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -497,7 +462,7 @@ TEST_F(DatabaseTest, Delete) {
 
 TEST_F(DatabaseTest, DeleteNonExistent) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -519,7 +484,7 @@ TEST_F(DatabaseTest, DeleteNonExistent) {
 
 TEST_F(DatabaseTest, ConcurrentOperations) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -580,7 +545,7 @@ TEST_F(DatabaseTest, Persistence) {
 
     // First instance: create and insert (enable_persist=1 for page file)
     {
-        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, NULL, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
@@ -623,7 +588,7 @@ TEST_F(DatabaseTest, Persistence) {
 
     // Second instance: reopen and verify
     {
-        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, pool, wheel, &error);
+        db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 1, NULL, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
 
@@ -668,7 +633,7 @@ TEST_F(DatabaseTest, Persistence) {
 
 TEST_F(DatabaseTest, VaryingPathDepths) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -743,7 +708,7 @@ TEST_F(DatabaseTest, VaryingPathDepths) {
 
 TEST_F(DatabaseTest, WriteBatchSyncBasic) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -785,7 +750,7 @@ TEST_F(DatabaseTest, WriteBatchSyncBasic) {
 
 TEST_F(DatabaseTest, WriteBatchSyncEmpty) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -805,7 +770,7 @@ TEST_F(DatabaseTest, WriteBatchSyncTooLarge) {
     int error = 0;
     // Actor model: WAL actor is only created when enable_persist=1.
     // Without WAL, batch size is unlimited in sync mode — the write succeeds.
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -842,7 +807,7 @@ TEST_F(DatabaseTest, WriteBatchSyncTooLarge) {
 
 TEST_F(DatabaseTest, WriteBatchSyncDoubleSubmit) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -869,7 +834,7 @@ TEST_F(DatabaseTest, WriteBatchSyncDoubleSubmit) {
 
 TEST_F(DatabaseTest, WriteBatchSyncWithDelete) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -933,7 +898,7 @@ TEST_F(DatabaseTest, WriteBatchSyncWithDelete) {
 
 TEST_F(DatabaseTest, WriteBatchSyncUpdateExistingKey) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -976,7 +941,7 @@ TEST_F(DatabaseTest, WriteBatchSyncUpdateExistingKey) {
 
 TEST_F(DatabaseTest, Snapshot) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 
@@ -1044,7 +1009,7 @@ TEST_F(DatabaseTest, Snapshot) {
 
 TEST_F(DatabaseTest, BatchVsIndividualPutPerformance) {
     int error = 0;
-    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &error);
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, NULL, &error);
     ASSERT_NE(db, nullptr);
     ASSERT_EQ(error, 0);
 

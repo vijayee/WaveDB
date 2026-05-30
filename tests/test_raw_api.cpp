@@ -20,8 +20,6 @@ extern "C" {
 #include "HBTrie/path.h"
 #include "Buffer/buffer.h"
 #include "Database/database.h"
-#include "Workers/work.h"
-#include "Workers/pool.h"
 #include "Workers/promise.h"
 #include "Workers/error.h"
 }

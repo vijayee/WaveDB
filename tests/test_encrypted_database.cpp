@@ -27,8 +27,6 @@
 extern "C" {
 #include "Database/database.h"
 #include "Database/database_config.h"
-#include "Time/wheel.h"
-#include "Workers/pool.h"
 #include "Storage/encryption.h"
 }
 
@@ -115,42 +113,18 @@ class EncryptedDatabaseTest : public ::testing::Test {
 protected:
     void SetUp() override {
         test_dir = make_temp_dir();
-        pool = work_pool_create(platform_core_count());
-        work_pool_launch(pool);
-        wheel = hierarchical_timing_wheel_create(8, pool);
-        hierarchical_timing_wheel_run(wheel);
     }
 
     void TearDown() override {
-        // Stop wheel and pool before destroying database
-        if (wheel) {
-            hierarchical_timing_wheel_stop(wheel);
-        }
-        if (pool) {
-            work_pool_shutdown(pool);
-            work_pool_join_all(pool);
-        }
-
         if (db) {
             database_destroy(db);
             db = nullptr;
-        }
-
-        if (wheel) {
-            hierarchical_timing_wheel_destroy(wheel);
-            wheel = nullptr;
-        }
-        if (pool) {
-            work_pool_destroy(pool);
-            pool = nullptr;
         }
 
         remove_temp_dir(test_dir);
     }
 
     database_t* db = nullptr;
-    work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
     std::string test_dir;
 };
 
@@ -166,9 +140,7 @@ TEST_F(EncryptedDatabaseTest, SymmetricCreatePutGet) {
     encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
     encrypted_database_config_set_symmetric_key(config, key.data(), key.size());
     database_config_set_enable_persist(&config->config, 1);
-    config->config.external_pool = pool;
-    config->config.external_wheel = wheel;
-
+        
     int error = 0;
     db = database_create_encrypted(test_dir.c_str(), config, &error);
     ASSERT_NE(db, nullptr) << "Error code: " << error;
@@ -210,8 +182,6 @@ TEST_F(EncryptedDatabaseTest, SymmetricReopenWithKey) {
         encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
         encrypted_database_config_set_symmetric_key(config, key.data(), key.size());
         database_config_set_enable_persist(&config->config, 1);
-        config->config.external_pool = pool;
-        config->config.external_wheel = wheel;
 
         int error = 0;
         db = database_create_encrypted(test_dir.c_str(), config, &error);
@@ -242,8 +212,6 @@ TEST_F(EncryptedDatabaseTest, SymmetricReopenWithKey) {
         encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
         encrypted_database_config_set_symmetric_key(config, key.data(), key.size());
         database_config_set_enable_persist(&config->config, 1);
-        config->config.external_pool = pool;
-        config->config.external_wheel = wheel;
 
         int error = 0;
         db = database_create_encrypted(test_dir.c_str(), config, &error);
@@ -283,8 +251,6 @@ TEST_F(EncryptedDatabaseTest, WrongKeyRejected) {
         encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
         encrypted_database_config_set_symmetric_key(config, key1.data(), key1.size());
         database_config_set_enable_persist(&config->config, 1);
-        config->config.external_pool = pool;
-        config->config.external_wheel = wheel;
 
         int error = 0;
         db = database_create_encrypted(test_dir.c_str(), config, &error);
@@ -313,8 +279,6 @@ TEST_F(EncryptedDatabaseTest, WrongKeyRejected) {
         encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
         encrypted_database_config_set_symmetric_key(config, key2.data(), key2.size());
         database_config_set_enable_persist(&config->config, 1);
-        config->config.external_pool = pool;
-        config->config.external_wheel = wheel;
 
         int error = 0;
         database_t* result = database_create_encrypted(test_dir.c_str(), config, &error);
@@ -339,8 +303,6 @@ TEST_F(EncryptedDatabaseTest, UnencryptedOpenOnEncryptedDB) {
         encrypted_database_config_set_type(config, ENCRYPTION_SYMMETRIC);
         encrypted_database_config_set_symmetric_key(config, key.data(), key.size());
         database_config_set_enable_persist(&config->config, 1);
-        config->config.external_pool = pool;
-        config->config.external_wheel = wheel;
 
         int error = 0;
         db = database_create_encrypted(test_dir.c_str(), config, &error);
@@ -366,9 +328,7 @@ TEST_F(EncryptedDatabaseTest, UnencryptedOpenOnEncryptedDB) {
         database_config_t* config = database_config_default();
         ASSERT_NE(config, nullptr);
         database_config_set_enable_persist(config, 1);
-        config->external_pool = pool;
-        config->external_wheel = wheel;
-
+                
         int error = 0;
         database_t* result = database_create_with_config(test_dir.c_str(), config, &error);
         EXPECT_EQ(result, nullptr);
@@ -392,9 +352,7 @@ TEST_F(EncryptedDatabaseTest, AsymmetricRoundTrip) {
     encrypted_database_config_set_asymmetric_private_key(config, priv_der.data(), priv_der.size());
     encrypted_database_config_set_asymmetric_public_key(config, pub_der.data(), pub_der.size());
     database_config_set_enable_persist(&config->config, 1);
-    config->config.external_pool = pool;
-    config->config.external_wheel = wheel;
-
+        
     int error = 0;
     db = database_create_encrypted(test_dir.c_str(), config, &error);
     ASSERT_NE(db, nullptr) << "Error code: " << error;

@@ -19,15 +19,11 @@ static void tx_manager_gc_callback(void* arg);
 static void recompute_global_min(tx_manager_t* manager);
 
 tx_manager_t* tx_manager_create(hbtrie_t* trie,
-                                 work_pool_t* pool,
-                                 hierarchical_timing_wheel_t* wheel,
                                  uint64_t gc_interval_ms) {
     tx_manager_t* manager = get_clear_memory(sizeof(tx_manager_t));
     if (manager == NULL) return NULL;
 
     manager->trie = trie;
-    manager->pool = pool;
-    manager->wheel = wheel;
     manager->gc_interval_ms = (gc_interval_ms == 0) ? DEFAULT_GC_INTERVAL_MS : gc_interval_ms;
     manager->last_gc_time = 0;
 

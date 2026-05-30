@@ -6,6 +6,7 @@
 #include "HBTrie/hbtrie.h"
 #include "HBTrie/mvcc.h"
 #include "Buffer/buffer.h"
+#include "Time/timer_actor.h"
 #include <vector>
 #include <thread>
 #include <chrono>
@@ -352,26 +353,13 @@ protected:
         trie = hbtrie_create(4, 4096);
         ASSERT_NE(trie, nullptr) << "Failed to create trie";
 
-        // Create work pool and timing wheel (minimal for testing)
-        pool = work_pool_create(1);  // Single thread for testing
-        ASSERT_NE(pool, nullptr) << "Failed to create work pool";
-
-        wheel = hierarchical_timing_wheel_create(1000, pool);
-        ASSERT_NE(wheel, nullptr) << "Failed to create timing wheel";
-
-        tx_manager = tx_manager_create(trie, pool, wheel, 100);
+        tx_manager = tx_manager_create(trie, 100);
         ASSERT_NE(tx_manager, nullptr) << "Failed to create transaction manager";
     }
 
     void TearDown() override {
         if (tx_manager) {
             tx_manager_destroy(tx_manager);
-        }
-        if (wheel) {
-            hierarchical_timing_wheel_destroy(wheel);
-        }
-        if (pool) {
-            work_pool_destroy(pool);
         }
         if (trie) {
             hbtrie_destroy(trie);
@@ -380,8 +368,6 @@ protected:
 
     hbtrie_t* trie;
     tx_manager_t* tx_manager;
-    work_pool_t* pool;
-    hierarchical_timing_wheel_t* wheel;
 
     path_t* make_path(std::initializer_list<const char*> subscripts) {
         path_t* path = path_create();

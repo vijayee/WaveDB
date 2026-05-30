@@ -315,7 +315,6 @@ graphql_layer_t* graphql_layer_create(const char* path,
     refcounter_init((refcounter_t*)layer);
     layer->db = db;
     layer->registry = graphql_type_registry_create();
-    layer->pool = NULL;   /* Actor model: no work_pool_t; graphql executes synchronously */
     layer->delimiter = active_config->delimiter ? active_config->delimiter : '/';
     layer->version = strdup(GRAPHQL_LAYER_VERSION);
     layer->db_path = owns_path ? db_path : (path ? strdup(path) : NULL);

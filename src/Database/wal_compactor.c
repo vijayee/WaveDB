@@ -4,7 +4,7 @@
 
 #include "wal_compactor.h"
 #include "../Util/allocator.h"
-#include "../Time/debouncer.h"
+#include "../Time/timer_actor.h"
 #include <stdlib.h>
 #if _WIN32
 #include "Util/unistd_compat.h"
@@ -32,9 +32,7 @@ static void* compaction_thread_func(void* arg) {
             break;
         }
 
-        timeval_t tv;
-        get_time(&tv);
-        uint64_t now = timeval_to_ms(tv);
+        uint64_t now = timer_actor_now_ms();
 
         uint64_t time_since_last_write = now - compactor->last_write_time;
         uint64_t time_since_last_compact = now - compactor->last_compact_time;
@@ -70,9 +68,7 @@ wal_compactor_t* wal_compactor_create(wal_manager_t* manager,
     compactor->idle_threshold_ms = idle_threshold_ms;
     compactor->compact_interval_ms = compact_interval_ms;
 
-    timeval_t now;
-    get_time(&now);
-    compactor->last_write_time = timeval_to_ms(now);
+    compactor->last_write_time = timer_actor_now_ms();
     compactor->last_compact_time = 0;
     compactor->running = 1;
 
@@ -114,9 +110,7 @@ void wal_compactor_destroy(wal_compactor_t* compactor) {
 
 void wal_compactor_signal_write(wal_compactor_t* compactor) {
     platform_lock(&compactor->lock);
-    timeval_t now;
-    get_time(&now);
-    compactor->last_write_time = timeval_to_ms(now);
+    compactor->last_write_time = timer_actor_now_ms();
     platform_unlock(&compactor->lock);
 }
 

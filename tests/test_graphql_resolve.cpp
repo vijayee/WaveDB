@@ -25,7 +25,6 @@
 #include <atomic>
 #include <sys/stat.h>
 #include "Layers/graphql/graphql.h"
-#include "Workers/pool.h"
 
 class GraphQLResolveTest : public ::testing::Test {
 protected:
@@ -545,11 +544,6 @@ protected:
         layer = graphql_layer_create(test_dir, config);
         ASSERT_NE(layer, nullptr);
 
-        // Launch worker pool threads for async execution
-        if (layer->pool) {
-            work_pool_launch(layer->pool);
-        }
-
         const char* sdl = "type User { name: String age: Int friends: [User] }";
         int rc = graphql_schema_parse(layer, sdl, NULL);
         ASSERT_EQ(rc, 0);
@@ -557,10 +551,6 @@ protected:
 
     void TearDown() override {
         if (layer) {
-            if (layer->pool) {
-                work_pool_shutdown(layer->pool);
-                work_pool_join_all(layer->pool);
-            }
             graphql_layer_destroy(layer);
         }
         if (config) graphql_layer_config_destroy(config);

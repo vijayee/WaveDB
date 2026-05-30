@@ -73,17 +73,12 @@ set(WAVEDB_SOURCES
     src/HBTrie/mvcc.c
 
     # Time
-    src/Time/ticker.c
-    src/Time/wheel.c
-    src/Time/debouncer.c
+    src/Time/timer_actor.c
 
     # Workers
     src/Workers/error.c
     src/Workers/transaction_id.c
-    src/Workers/work.c
     src/Workers/promise.c
-    src/Workers/queue.c
-    src/Workers/pool.c
     src/Workers/join.c
 
     # Storage

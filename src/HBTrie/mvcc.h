@@ -14,8 +14,6 @@
 #include "../Util/vec.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
-#include "../Workers/pool.h"
-#include "../Time/wheel.h"
 #include "hbtrie.h"
 
 #ifdef __cplusplus
@@ -76,8 +74,6 @@ typedef struct tx_manager_t {
     ATOMIC_TYPE(transaction_id_t) last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
 
     hbtrie_t* trie;                      // Reference to trie
-    work_pool_t* pool;                   // Work pool for async GC
-    hierarchical_timing_wheel_t* wheel;  // Timing wheel for GC scheduling
 
     uint64_t gc_interval_ms;             // GC interval in milliseconds
     uint64_t last_gc_time;               // Last GC execution time
@@ -93,8 +89,6 @@ typedef struct tx_manager_t {
  * @return New transaction manager or NULL on failure
  */
 tx_manager_t* tx_manager_create(hbtrie_t* trie,
-                                 work_pool_t* pool,
-                                 hierarchical_timing_wheel_t* wheel,
                                  uint64_t gc_interval_ms);
 
 /**

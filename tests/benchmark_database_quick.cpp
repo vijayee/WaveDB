@@ -28,8 +28,6 @@ extern "C" {
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
-#include "Workers/pool.h"
-#include "Time/wheel.h"
 }
 
 // Helper to create a path
@@ -81,36 +79,15 @@ protected:
 #endif
         db_path = std::string(tmpdir);
 
-        // Create work pool and timing wheel
-        pool = work_pool_create(4);
-        ASSERT_NE(pool, nullptr);
-
-        wheel = hierarchical_timing_wheel_create(1000, pool);
-        ASSERT_NE(wheel, nullptr);
-
         int error = 0;
-        db = database_create(db_path.c_str(), 0, NULL, 4, 4096, 0, pool, wheel, &error);
+        db = database_create(db_path.c_str(), 0, NULL, 4, 4096, 0, NULL, &error);
         ASSERT_NE(db, nullptr);
         ASSERT_EQ(error, 0);
     }
 
     void TearDown() override {
-        // Stop wheel and pool before destroying database
-        if (wheel) {
-            hierarchical_timing_wheel_stop(wheel);
-        }
-        if (pool) {
-            work_pool_shutdown(pool);
-            work_pool_join_all(pool);
-        }
         if (db) {
             database_destroy(db);
-        }
-        if (wheel) {
-            hierarchical_timing_wheel_destroy(wheel);
-        }
-        if (pool) {
-            work_pool_destroy(pool);
         }
         // Cleanup temp directory
 #if _WIN32
@@ -134,8 +111,6 @@ protected:
     }
 
     database_t* db;
-    work_pool_t* pool;
-    hierarchical_timing_wheel_t* wheel;
     std::string db_path;
 };
 

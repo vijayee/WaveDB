@@ -11,7 +11,7 @@
 #include "../Buffer/buffer.h"
 #include "../Util/threadding.h"
 #include "../Workers/transaction_id.h"
-#include "../Time/debouncer.h"  // For debouncer_t and timing wheel
+#include "../Time/timer_actor.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,9 +77,9 @@ typedef struct {
 
     // Fsync batching support
     wal_sync_mode_e sync_mode;     // Sync mode (immediate/debounced/async)
-    debouncer_t* fsync_debouncer;   // Debouncer for batched fsync
+    timer_actor_t* timer_actor;    // Timer actor for debounced fsync
+    char* fsync_debounce_key;      // Debounce key (allocated, freed on destroy)
     uint64_t pending_writes;         // Count of writes since last fsync
-    hierarchical_timing_wheel_t* wheel; // Timing wheel for debouncer
 } wal_t;
 
 /**
@@ -114,7 +114,7 @@ wal_t* wal_create(char* location, size_t max_size, int* error_code);
  * @return New WAL or NULL on failure
  */
 wal_t* wal_create_with_sync(char* location, size_t max_size, wal_sync_mode_e sync_mode,
-                             hierarchical_timing_wheel_t* wheel, uint64_t debounce_ms, int* error_code);
+                             timer_actor_t* timer_actor, uint64_t debounce_ms, int* error_code);
 
 /**
  * Load existing WAL from directory.
