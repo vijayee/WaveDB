@@ -1576,7 +1576,6 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     buffer_destroy(val_buf);
     if (new_id == NULL) { path_destroy(path); return -1; }
 
-    // Direct write
     txn_desc_t* txn = tx_manager_begin(db->tx_manager);
     if (txn == NULL) {
         path_destroy(path);
@@ -1662,13 +1661,28 @@ database_iterator_t* database_scan_range(database_t* db,
 int database_write_batch_sync(database_t* db, batch_t* batch) {
     if (db == NULL || batch == NULL) return -1;
 
+    // Serialize batch for WAL BEFORE locking (serialize_batch acquires its own lock)
+    buffer_t* wal_data = NULL;
+    if (db->wal_actor) {
+        wal_data = serialize_batch(batch);
+        if (wal_data != NULL) {
+            #define WAL_MAX_FILE_SIZE (128 * 1024)
+            if (wal_data->size > WAL_MAX_FILE_SIZE) {
+                buffer_destroy(wal_data);
+                return -5;
+            }
+        }
+    }
+
     platform_lock(&batch->lock);
     if (batch->count == 0) {
         platform_unlock(&batch->lock);
+        if (wal_data) buffer_destroy(wal_data);
         return -3;
     }
     if (batch->submitted) {
         platform_unlock(&batch->lock);
+        if (wal_data) buffer_destroy(wal_data);
         return -6;
     }
     batch->submitted = 1;
@@ -1677,22 +1691,13 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
     txn_desc_t* txn = tx_manager_begin(db->tx_manager);
     if (txn == NULL) {
         platform_unlock(&batch->lock);
+        if (wal_data) buffer_destroy(wal_data);
         return -1;
     }
 
-    // Write to WAL actor if present
-    #define WAL_MAX_FILE_SIZE (128 * 1024)
-    if (db->wal_actor) {
-        buffer_t* data = serialize_batch(batch);
-        if (data != NULL) {
-            if (data->size > WAL_MAX_FILE_SIZE) {
-                buffer_destroy(data);
-                txn_desc_destroy(txn);
-                platform_unlock(&batch->lock);
-                return -5;
-            }
-            wal_actor_write(db->wal_actor, 0, txn->txn_id, WAL_BATCH, data, NULL);
-        }
+    // Write to WAL actor if present (already serialized above)
+    if (wal_data != NULL) {
+        wal_actor_write(db->wal_actor, 0, txn->txn_id, WAL_BATCH, wal_data, NULL);
     }
 
     // Apply each operation directly to the trie

@@ -1719,6 +1719,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
   }
 
   hbtrie_node_t* current = atomic_load(&trie->root);
+  uint64_t _hf_guard = 0;
 
   // Traverse through each identifier in the path
   for (size_t i = 0; i < path_len_ids; i++) {
@@ -1733,6 +1734,11 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
+        return NULL;
+      }
+
+      if (++_hf_guard > 10000) {
+        log_error("hbtrie_find: iteration limit exceeded (path_len_ids=%zu, i=%zu, j=%zu)", path_len_ids, i, j);
         return NULL;
       }
 
