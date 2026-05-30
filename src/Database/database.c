@@ -1431,8 +1431,6 @@ size_t database_count(database_t* db) {
 // Synchronous operations — via actor system for thread safety
 // ============================================================================
 
-static void _sync_noop(void* ctx, void* payload) { (void)ctx; (void)payload; }
-
 int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
     if (db == NULL || path == NULL || value == NULL) {
         if (path) path_destroy(path);
@@ -1440,11 +1438,24 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         return -1;
     }
 
-    // Route through shard actor for thread safety (supports concurrent callers)
-    promise_t* prom = promise_create(_sync_noop, NULL, NULL);
-    trie_shard_put(db->shard_actors, db->shard_count, path, value, prom);
-    promise_wait(prom);
-    promise_destroy(prom);
+    // Thread-safe via per-shard sync_lock (faster than actor message round-trip)
+    size_t idx = path_hash(path) % db->shard_count;
+    trie_shard_actor_t* shard = db->shard_actors[idx];
+
+    platform_mutex_lock(shard->sync_lock);
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        platform_mutex_unlock(shard->sync_lock);
+        path_destroy(path);
+        identifier_destroy(value);
+        return -1;
+    }
+    _wal_write_put(db, path, value, txn->txn_id);
+    hbtrie_insert(shard->trie, path, value, txn->txn_id);
+    ATOMIC_STORE(&shard->root, shard->trie->root);
+    tx_manager_commit(db->tx_manager, txn);
+    txn_desc_destroy(txn);
+    platform_mutex_unlock(shard->sync_lock);
     return 0;
 }
 
@@ -1460,10 +1471,10 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
         return -1;
     }
 
-    // Lock-free read path: read from shard via atomic root snapshot
-    transaction_id_t read_txn = tx_manager_get_last_committed(db->tx_manager);
+    // Direct read via shard trie (hbtrie_find uses atomic_load internally)
     size_t idx = path_hash(path) % db->shard_count;
     trie_shard_actor_t* shard = db->shard_actors[idx];
+    transaction_id_t read_txn = tx_manager_get_last_committed(db->tx_manager);
 
     hbtrie_node_t* root = ATOMIC_LOAD(&shard->root);
     if (!root) {
@@ -1471,10 +1482,7 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
         return -2;
     }
 
-    hbtrie_node_t* saved_root = shard->trie->root;
-    shard->trie->root = root;
     identifier_t* value = hbtrie_find(shard->trie, path, read_txn);
-    shard->trie->root = saved_root;
     path_destroy(path);
 
     if (value) {
@@ -1490,11 +1498,25 @@ int database_delete_sync(database_t* db, path_t* path) {
         return -1;
     }
 
-    // Route through shard actor for thread safety (supports concurrent callers)
-    promise_t* prom = promise_create(_sync_noop, NULL, NULL);
-    trie_shard_delete(db->shard_actors, db->shard_count, path, prom);
-    promise_wait(prom);
-    promise_destroy(prom);
+    // Thread-safe via per-shard sync_lock (faster than actor message round-trip)
+    size_t idx = path_hash(path) % db->shard_count;
+    trie_shard_actor_t* shard = db->shard_actors[idx];
+
+    platform_mutex_lock(shard->sync_lock);
+    txn_desc_t* txn = tx_manager_begin(db->tx_manager);
+    if (txn == NULL) {
+        platform_mutex_unlock(shard->sync_lock);
+        path_destroy(path);
+        return -1;
+    }
+    identifier_t* removed = hbtrie_delete(shard->trie, path, txn->txn_id);
+    ATOMIC_STORE(&shard->root, shard->trie->root);
+    tx_manager_commit(db->tx_manager, txn);
+    _wal_write_delete(db, path, txn->txn_id);
+    txn_desc_destroy(txn);
+    platform_mutex_unlock(shard->sync_lock);
+
+    if (removed) identifier_destroy(removed);
     return 0;
 }
 
@@ -1514,10 +1536,7 @@ int64_t database_increment_sync(database_t* db, path_t* path, int64_t delta) {
     identifier_t* current = NULL;
     hbtrie_node_t* root = ATOMIC_LOAD(&shard->root);
     if (root) {
-        hbtrie_node_t* saved_root = shard->trie->root;
-        shard->trie->root = root;
         current = hbtrie_find(shard->trie, read_path, read_txn);
-        shard->trie->root = saved_root;
     }
     path_destroy(read_path);
 

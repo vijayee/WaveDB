@@ -62,7 +62,7 @@ static int sync_benchmark_init(sync_benchmark_ctx_t* ctx, const char* test_name)
         .max_file_size = 100 * 1024 * 1024      // 100MB WAL file
     };
 
-    // Create database with 50MB LRU, no work pool or timing wheel
+    // Create database with 50MB LRU
     int error_code = 0;
     ctx->db = database_create(
         ctx->test_dir,
@@ -71,8 +71,7 @@ static int sync_benchmark_init(sync_benchmark_ctx_t* ctx, const char* test_name)
         0,                     // Default chunk size
         0,                     // Default btree node size
         1,                     // Enable persistent storage
-        NULL,                  // No work pool (synchronous)
-        NULL,                  // No timing wheel (synchronous)
+        NULL,                  // No external timer actor
         &error_code
     );
 

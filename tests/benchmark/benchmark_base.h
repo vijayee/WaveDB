@@ -8,7 +8,24 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "../../src/Time/timer_actor.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+// High-resolution benchmark timer (nanosecond precision)
+#if _WIN32
+typedef struct {
+    LARGE_INTEGER start;
+    LARGE_INTEGER end;
+} benchmark_timer_t;
+#else
+#include <time.h>
+typedef struct {
+    struct timespec start;
+    struct timespec end;
+} benchmark_timer_t;
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,6 +60,10 @@ typedef struct {
     uint64_t batch_size;             // Operations per iteration
     void* user_data;                 // User-provided context
 } benchmark_config_t;
+
+// Benchmark timer functions
+void benchmark_start(benchmark_timer_t* timer);
+uint64_t benchmark_end(benchmark_timer_t* timer);
 
 // Benchmark function type
 typedef void (*benchmark_func_t)(void* user_data, uint64_t iterations);

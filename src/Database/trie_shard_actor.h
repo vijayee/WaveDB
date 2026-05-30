@@ -7,6 +7,7 @@
 #include "../Actor/message.h"
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/mvcc.h"
+#include "../Platform/platform_thread.h"
 #include "wal_actor.h"
 
 #ifdef __cplusplus
@@ -19,6 +20,7 @@ typedef struct trie_shard_actor_t {
     tx_manager_t* tx_manager;
     wal_actor_t* wal;
     ATOMIC(hbtrie_node_t*) root;
+    platform_mutex_t* sync_lock;       /* Lock for sync operations */
     uint32_t chunk_size;
     uint32_t btree_node_size;
 } trie_shard_actor_t;

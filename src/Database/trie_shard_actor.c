@@ -13,6 +13,9 @@ static size_t get_shard_index(trie_shard_actor_t** shards, size_t count, path_t*
     return (size_t)(hash % count);
 }
 
+#include "../Util/allocator.h"
+#include "../Util/hash.h"
+
 static void trie_shard_dispatch(void* state, message_t* msg) {
     trie_shard_actor_t* shard = (trie_shard_actor_t*)state;
 
@@ -204,11 +207,26 @@ trie_shard_actor_t** trie_shard_actors_create(size_t count, uint8_t chunk_size,
             return NULL;
         }
 
-        shard->trie = hbtrie_create(chunk_size, btree_node_size);
-        if (shard->trie == NULL) {
+        shard->sync_lock = platform_mutex_create();
+        if (shard->sync_lock == NULL) {
             free(shard);
             for (size_t j = 0; j < i; j++) {
                 hbtrie_destroy(shards[j]->trie);
+                platform_mutex_destroy(shards[j]->sync_lock);
+                actor_destroy(&shards[j]->actor);
+                free(shards[j]);
+            }
+            free(shards);
+            return NULL;
+        }
+
+        shard->trie = hbtrie_create(chunk_size, btree_node_size);
+        if (shard->trie == NULL) {
+            platform_mutex_destroy(shard->sync_lock);
+            free(shard);
+            for (size_t j = 0; j < i; j++) {
+                hbtrie_destroy(shards[j]->trie);
+                platform_mutex_destroy(shards[j]->sync_lock);
                 actor_destroy(&shards[j]->actor);
                 free(shards[j]);
             }
@@ -235,6 +253,7 @@ void trie_shard_actors_destroy(trie_shard_actor_t** shards, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (shards[i] != NULL) {
             hbtrie_destroy(shards[i]->trie);
+            platform_mutex_destroy(shards[i]->sync_lock);
             actor_destroy(&shards[i]->actor);
             free(shards[i]);
         }
