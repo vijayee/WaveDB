@@ -45,10 +45,8 @@ void platform_condition_destroy(CONDITION_VARIABLE* condition);
 void platform_signal_condition(CONDITION_VARIABLE* condition);
 void platform_broadcast_condition(CONDITION_VARIABLE* condition);
 void platform_barrier_init(SYNCHRONIZATION_BARRIER* barrier, long count);
-#ifndef OFFS_PLATFORM_THREAD_H
 int platform_barrier_wait(SYNCHRONIZATION_BARRIER* barrier);
 void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier);
-#endif
 int platform_join(HANDLE thread);
 int platform_core_count();
 uint64_t platform_self();
@@ -78,10 +76,8 @@ void platform_condition_destroy(pthread_cond_t* condition);
 void platform_signal_condition(pthread_cond_t* condition);
 void platform_broadcast_condition(pthread_cond_t* condition);
 void platform_barrier_init(pthread_barrier_t* barrier, unsigned int count);
-#ifndef OFFS_PLATFORM_THREAD_H
 int platform_barrier_wait(pthread_barrier_t* barrier);
 void platform_barrier_destroy(pthread_barrier_t* barrier);
-#endif
 int platform_join(pthread_t thread);
 int platform_core_count();
 uint64_t platform_self();

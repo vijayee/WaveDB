@@ -16,14 +16,18 @@
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
 #include "database_lru.h"
-#include "wal.h"
-#include "wal_manager.h"
 #include "batch.h"
 #include "database_config.h"
 #include "../Storage/encryption.h"
 #include "../Storage/page_file.h"
 #include "../Storage/bnode_cache.h"
 #include "eviction_queue.h"
+#include "../Actor/actor.h"
+#include "../Scheduler/scheduler.h"
+#include "trie_shard_actor.h"
+#include "lru_actor.h"
+#include "wal_actor.h"
+#include "bnode_cache_actor.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,25 +56,26 @@ extern "C" {
 
 typedef struct {
     refcounter_t refcounter;
-    spinlock_t write_locks[WRITE_LOCK_SHARDS];  // Sharded write locks (adaptive spinlocks)
-    hbtrie_t* trie;                      // Single trie with MVCC (renamed from write_trie)
-    tx_manager_t* tx_manager;           // Transaction manager for MVCC
-    database_lru_cache_t* lru;          // In-memory LRU cache
-    wal_t* wal;                         // Legacy WAL (for migration)
-    wal_manager_t* wal_manager;         // Thread-local WAL manager
-    work_pool_t* pool;                  // Thread pool for async ops
-    hierarchical_timing_wheel_t* wheel; // Timing wheel
-    char* location;                      // Storage directory
-    size_t lru_memory_mb;                // LRU cache max size in megabytes
-    uint8_t chunk_size;                  // HBTrie chunk size
-    uint32_t btree_node_size;            // B+tree node size
-    uint8_t is_rebuilding;               // Flag for recovery mode
+    trie_shard_actor_t** shard_actors;  /* Array of trie shard actors (replaces write_locks) */
+    size_t shard_count;
+    hbtrie_t* trie;                      /* Legacy/deprecated — kept for backward compat, points to shard[0]->trie */
+    tx_manager_t* tx_manager;           /* Transaction manager for MVCC (shared across shards) */
+    database_lru_cache_t* lru;          /* Legacy LRU cache (may be NULL if using actor) */
+    lru_actor_t* lru_actor;             /* Actor-based LRU */
+    wal_actor_t* wal_actor;             /* Actor-based WAL */
+    bnode_cache_actor_t* bnode_cache_actor; /* Actor-based bnode cache */
+    scheduler_pool_t* scheduler_pool;   /* Replaces work_pool_t */
+    char* location;                      /* Storage directory */
+    size_t lru_memory_mb;                /* LRU cache max size in megabytes */
+    uint8_t chunk_size;                  /* HBTrie chunk size */
+    uint32_t btree_node_size;            /* B+tree node size */
+    uint8_t is_rebuilding;               /* Flag for recovery mode */
 
     // Page-based persistence (Phase 2: replaces CBOR index files)
     page_file_t* page_file;
     file_bnode_cache_t* bnode_cache;
-    eviction_queue_t eviction_queue;     // Lock-free ring buffer for eviction offsets
-    uint64_t next_index_id;              // Incrementing ID for index files
+    eviction_queue_t eviction_queue;     /* Lock-free ring buffer for eviction offsets */
+    uint64_t next_index_id;              /* Incrementing ID for index files */
 
     // Pending MVCC transaction ID from page file superblock
     // Applied after tx_manager is created (page file loads before tx_manager)
@@ -78,18 +83,18 @@ typedef struct {
     uint8_t has_pending_txn_id;
 
     // Config ownership tracking
-    bool owns_pool;                     // True if database created the pool
-    bool owns_wheel;                   // True if database created the wheel
-    volatile bool destroying;          // Set early in database_destroy to stop eviction rescheduling
-    ATOMIC_TYPE(int) eviction_in_flight;   // Non-zero while eviction task is executing
+    bool owns_pool;                     /* True if database created the pool */
+    bool owns_wheel;                   /* True if database created the wheel */
+    volatile bool destroying;          /* Set early in database_destroy to stop eviction rescheduling */
+    ATOMIC_TYPE(int) eviction_in_flight;   /* Non-zero while eviction task is executing */
 
     // Active configuration
-    database_config_t* active_config;   // Current config (for runtime queries)
+    database_config_t* active_config;   /* Current config (for runtime queries) */
 
     // Encryption context (NULL if no encryption)
     encryption_t* encryption;
 
-    uint8_t sync_only;                  // 1 = sync-only mode (no concurrency control)
+    uint8_t sync_only;                  /* 1 = sync-only mode (no concurrency control) */
 } database_t;
 
 /**

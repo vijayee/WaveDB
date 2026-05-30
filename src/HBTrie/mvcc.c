@@ -22,8 +22,6 @@ tx_manager_t* tx_manager_create(hbtrie_t* trie,
                                  work_pool_t* pool,
                                  hierarchical_timing_wheel_t* wheel,
                                  uint64_t gc_interval_ms) {
-    if (trie == NULL) return NULL;
-
     tx_manager_t* manager = get_clear_memory(sizeof(tx_manager_t));
     if (manager == NULL) return NULL;
 

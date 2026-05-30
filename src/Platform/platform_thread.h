@@ -43,10 +43,10 @@ void platform_condvar_wait(platform_condvar_t* cv, platform_mutex_t* m);
 void platform_condvar_signal(platform_condvar_t* cv);
 void platform_condvar_broadcast(platform_condvar_t* cv);
 
-/* Barrier */
-platform_barrier_t* platform_barrier_create(unsigned int count);
-void platform_barrier_destroy(platform_barrier_t* b);
-int platform_barrier_wait(platform_barrier_t* b);
+/* Barrier (pl_ prefix avoids conflict with threadding.h platform_barrier_* functions) */
+platform_barrier_t* pl_barrier_create(unsigned int count);
+void pl_barrier_destroy(platform_barrier_t* b);
+int pl_barrier_wait(platform_barrier_t* b);
 
 #ifdef __cplusplus
 }

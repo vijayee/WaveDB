@@ -212,3 +212,7 @@ void bnode_cache_actor_invalidate(bnode_cache_actor_t* cache, uint64_t offset) {
     message_t msg = { .type = BNODE_CACHE_INVALIDATE, .payload = p, .payload_destroy = free };
     actor_send(&cache->actor, &msg);
 }
+
+void bnode_cache_actor_set_pool(bnode_cache_actor_t* cache, scheduler_pool_t* pool) {
+    if (cache) cache->actor.pool = pool;
+}

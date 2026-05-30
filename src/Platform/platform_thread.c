@@ -129,7 +129,7 @@ void platform_condvar_broadcast(platform_condvar_t* cv) { WakeAllConditionVariab
 
 /* --- Barrier --- */
 
-platform_barrier_t* platform_barrier_create(unsigned int count) {
+platform_barrier_t* pl_barrier_create(unsigned int count) {
   platform_barrier_t* b = (platform_barrier_t*)calloc(1, sizeof(platform_barrier_t));
   if (b == NULL) return NULL;
   if (!InitializeSynchronizationBarrier(&b->handle, count, -1)) {
@@ -139,11 +139,11 @@ platform_barrier_t* platform_barrier_create(unsigned int count) {
   return b;
 }
 
-void platform_barrier_destroy(platform_barrier_t* b) {
+void pl_barrier_destroy(platform_barrier_t* b) {
   free(b);
 }
 
-int platform_barrier_wait(platform_barrier_t* b) {
+int pl_barrier_wait(platform_barrier_t* b) {
   return EnterSynchronizationBarrier(&b->handle, SYNCHRONIZATION_BARRIER_FLAGS_NO_DELETE) ? 1 : 0;
 }
 
@@ -316,7 +316,7 @@ void platform_condvar_broadcast(platform_condvar_t* cv) {
 
 /* --- Barrier --- */
 
-platform_barrier_t* platform_barrier_create(unsigned int count) {
+platform_barrier_t* pl_barrier_create(unsigned int count) {
   platform_barrier_t* b = (platform_barrier_t*)calloc(1, sizeof(platform_barrier_t));
   if (b == NULL) {
     return NULL;
@@ -328,7 +328,7 @@ platform_barrier_t* platform_barrier_create(unsigned int count) {
   return b;
 }
 
-void platform_barrier_destroy(platform_barrier_t* b) {
+void pl_barrier_destroy(platform_barrier_t* b) {
   if (b == NULL) {
     return;
   }
@@ -336,7 +336,7 @@ void platform_barrier_destroy(platform_barrier_t* b) {
   free(b);
 }
 
-int platform_barrier_wait(platform_barrier_t* b) {
+int pl_barrier_wait(platform_barrier_t* b) {
   int rc = pthread_barrier_wait(&b->handle);
   return (rc == PTHREAD_BARRIER_SERIAL_THREAD) ? 1 : 0;
 }

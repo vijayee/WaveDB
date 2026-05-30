@@ -107,7 +107,7 @@ static void* _scheduler_worker_loop(void* arg) {
   scheduler_t* self = &pool->workers[my_index];
   current_scheduler = self;
 
-  platform_barrier_wait(pool->barrier);
+  pl_barrier_wait(pool->barrier);
 
   uint32_t spin_count = 0;
   while (!atomic_load_explicit(&pool->terminate, memory_order_acquire)) {
@@ -192,7 +192,7 @@ scheduler_pool_t* scheduler_pool_create(size_t worker_count) {
     atomic_store_explicit(&pool->workers[index].last_victim, (uint32_t)((index + 1) % worker_count), memory_order_relaxed);
   }
   _inject_queue_init(&pool->inject);
-  pool->barrier = platform_barrier_create(worker_count + 1);
+  pool->barrier = pl_barrier_create(worker_count + 1);
   pool->idle_lock = platform_mutex_create();
   pool->idle = platform_condvar_create();
   pool->deref_lock = platform_mutex_create();
@@ -211,7 +211,7 @@ void scheduler_pool_destroy(scheduler_pool_t* pool) {
     deque_destroy(&pool->workers[index].local_queue);
   }
   _inject_queue_destroy(&pool->inject);
-  platform_barrier_destroy(pool->barrier);
+  pl_barrier_destroy(pool->barrier);
   platform_mutex_destroy(pool->idle_lock);
   platform_condvar_destroy(pool->idle);
   free(pool->workers);
@@ -228,7 +228,7 @@ void scheduler_pool_start(scheduler_pool_t* pool) {
       abort();
     }
   }
-  platform_barrier_wait(pool->barrier);
+  pl_barrier_wait(pool->barrier);
 }
 
 void scheduler_pool_stop(scheduler_pool_t* pool) {
