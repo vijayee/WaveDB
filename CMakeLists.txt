@@ -103,6 +103,7 @@ set(WAVEDB_SOURCES
     src/Database/database_iterator.c
     src/Database/batch.c
     src/Database/eviction_queue.c
+    src/Database/lru_actor.c
 
     # Actor
     src/Actor/message_queue.c
@@ -353,6 +354,11 @@ if(BUILD_TESTS)
     add_executable(test_actor_scheduler tests/test_actor_scheduler.c)
     target_link_libraries(test_actor_scheduler PRIVATE wavedb Threads::Threads)
     add_test(NAME test_actor_scheduler COMMAND test_actor_scheduler)
+
+    # Test for LRU actor cache
+    add_executable(test_cache_actors tests/test_cache_actors.c)
+    target_link_libraries(test_cache_actors PRIVATE wavedb Threads::Threads)
+    add_test(NAME test_cache_actors COMMAND test_cache_actors)
 
     # Visualization examples removed (used non-MVCC API, will be revisited)
 
