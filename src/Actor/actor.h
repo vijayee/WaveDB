@@ -5,6 +5,7 @@
 #ifndef OFFS_ACTOR_H
 #define OFFS_ACTOR_H
 
+#include "../Platform/platform_thread.h"
 #include "message_queue.h"
 #include "../Util/atomic_compat.h"
 #include <stddef.h>

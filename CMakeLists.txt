@@ -107,6 +107,14 @@ set(WAVEDB_SOURCES
     # Actor
     src/Actor/message_queue.c
     src/Actor/actor.c
+    src/Actor/pool.c
+
+    # Scheduler
+    src/Scheduler/deque.c
+    src/Scheduler/scheduler.c
+
+    # Platform
+    src/Platform/platform_thread.c
 
     # Layers - GraphQL
     src/Layers/graphql/graphql_types.c

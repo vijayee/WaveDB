@@ -1,6 +1,7 @@
 //
 // Created by victor on 3/18/25.
 //
+#include "Platform/platform_thread.h"
 #include "threadding.h"
 #include "log.h"
 #include <stdlib.h>
@@ -78,12 +79,14 @@ void platform_barrier_init(SYNCHRONIZATION_BARRIER* barrier, long count) {
     abort();
   }
 }
+#ifndef OFFS_PLATFORM_THREAD_H
 int platform_barrier_wait(SYNCHRONIZATION_BARRIER* barrier) {
   return EnterSynchronizationBarrier(barrier, SYNCHRONIZATION_BARRIER_FLAGS_BLOCK_ONLY);
 }
 void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier) {
   BOOL result = DeleteSynchronizationBarrier(barrier);
 }
+#endif
 int platform_join(HANDLE thread) {
   return WaitForSingleObject(thread, INFINITE);
 }
@@ -222,6 +225,7 @@ void platform_barrier_init(pthread_barrier_t* barrier, unsigned int count) {
     abort();
   }
 }
+#ifndef OFFS_PLATFORM_THREAD_H
 int platform_barrier_wait(pthread_barrier_t* barrier) {
   return pthread_barrier_wait(barrier);
 }
@@ -232,6 +236,7 @@ void platform_barrier_destroy(pthread_barrier_t* barrier) {
     abort();
   }
 }
+#endif
 int platform_join(pthread_t thread) {
   return pthread_join(thread, NULL);
 }
