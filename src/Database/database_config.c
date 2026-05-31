@@ -583,6 +583,12 @@ void database_config_set_external_timer_actor(database_config_t* config, timer_a
     config->external_timer_actor = ta;
 }
 
+// Backward compat stub — timer resolution is now handled by timer_actor_t
+void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms) {
+    (void)config;
+    (void)ms;
+}
+
 void database_config_set_sync_only(database_config_t* config, uint8_t sync_only) {
     if (config == NULL) return;
     config->sync_only = sync_only ? 1 : 0;

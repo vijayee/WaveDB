@@ -18,8 +18,7 @@ import '../exceptions.dart';
 ///   uint8_t chunk_size,
 ///   uint32_t btree_node_size,
 ///   uint8_t enable_persist,
-///   work_pool_t* pool,
-///   hierarchical_timing_wheel_t* wheel,
+///   timer_actor_t* timer_actor,
 ///   int* error_code
 /// )
 typedef DatabaseCreateC = Pointer<database_t> Function(
@@ -29,8 +28,7 @@ typedef DatabaseCreateC = Pointer<database_t> Function(
   Uint8 chunk_size,
   Uint32 btree_node_size,
   Uint8 enable_persist,
-  Pointer<Void> pool,
-  Pointer<Void> wheel,
+  Pointer<Void> timer_actor,
   Pointer<Int32> error_code,
 );
 
@@ -42,8 +40,7 @@ typedef DatabaseCreate = Pointer<database_t> Function(
   int chunk_size,
   int btree_node_size,
   int enable_persist,
-  Pointer<Void> pool,
-  Pointer<Void> wheel,
+  Pointer<Void> timer_actor,
   Pointer<Int32> error_code,
 );
 
@@ -1166,8 +1163,7 @@ class WaveDBNative {
         chunkSize,
         btreeNodeSize,
         enablePersist,
-        nullptr, // pool
-        nullptr, // wheel
+        nullptr, // timer_actor (creates internal one)
         errorPtr,
       );
 

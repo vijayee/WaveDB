@@ -148,6 +148,7 @@ void database_config_set_bnode_cache_memory_mb(database_config_t* config, size_t
 void database_config_set_bnode_cache_shards(database_config_t* config, uint16_t shards);
 void database_config_set_worker_threads(database_config_t* config, uint8_t threads);
 void database_config_set_external_timer_actor(database_config_t* config, timer_actor_t* ta);
+void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t ms);
 void database_config_set_wal_sync_mode(database_config_t* config, uint8_t mode);
 void database_config_set_wal_debounce_ms(database_config_t* config, uint64_t ms);
 void database_config_set_wal_max_file_size(database_config_t* config, size_t size);
