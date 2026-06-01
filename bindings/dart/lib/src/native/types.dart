@@ -25,6 +25,14 @@ base class database_config_t extends Opaque {}
 /// Maps to encrypted_database_config_t in C
 base class encrypted_database_config_t extends Opaque {}
 
+/// Opaque handle to a Graph layer
+/// Maps to graph_layer_t in C
+base class graph_layer_t extends Opaque {}
+
+/// Opaque handle to a Graph result (array of vertex strings)
+/// Maps to graph_result_t in C
+base class graph_result_t extends Opaque {}
+
 /// WAL sync mode enumeration
 /// Maps to wal_sync_mode_e in C
 enum WalSyncMode {

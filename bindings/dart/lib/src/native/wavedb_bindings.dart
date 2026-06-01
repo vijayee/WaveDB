@@ -828,6 +828,102 @@ typedef GraphQLMutateAsync = void Function(
   Pointer<promise_t> promise,
   Pointer<Void> user_data,
 );
+// ============================================================
+// C TYPEDEFS - Graph Layer
+// ============================================================
+
+/// C signature: graph_layer_t* graph_layer_create(
+///   const char* path,
+///   database_config_t* config
+/// )
+typedef GraphLayerCreateC = Pointer<graph_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<database_config_t> config,
+);
+
+typedef GraphLayerCreate = Pointer<graph_layer_t> Function(
+  Pointer<Utf8> path,
+  Pointer<database_config_t> config,
+);
+
+/// C signature: void graph_layer_destroy(graph_layer_t* layer)
+typedef GraphLayerDestroyC = Void Function(Pointer<graph_layer_t> layer);
+typedef GraphLayerDestroy = void Function(Pointer<graph_layer_t> layer);
+
+/// C signature: int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o)
+typedef GraphInsertSyncC = Int32 Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+);
+typedef GraphInsertSync = int Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+);
+
+/// C signature: int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const char* o)
+typedef GraphDeleteSyncC = Int32 Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+);
+typedef GraphDeleteSync = int Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+);
+
+/// C signature: graph_result_t* graph_parse_execute(
+///   const char* dsl,
+///   graph_layer_t* layer,
+///   graph_parse_error_t* error
+/// )
+typedef GraphParseExecuteC = Pointer<graph_result_t> Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Void> error,
+);
+typedef GraphParseExecute = Pointer<graph_result_t> Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Void> error,
+);
+
+/// C signature: int graph_parse_count(
+///   const char* dsl,
+///   graph_layer_t* layer,
+///   size_t* count,
+///   graph_parse_error_t* error
+/// )
+typedef GraphParseCountC = Int32 Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Size> count,
+  Pointer<Void> error,
+);
+typedef GraphParseCount = int Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Size> count,
+  Pointer<Void> error,
+);
+
+/// C signature: void graph_result_destroy(graph_result_t* result)
+typedef GraphResultDestroyC = Void Function(Pointer<graph_result_t> result);
+typedef GraphResultDestroy = void Function(Pointer<graph_result_t> result);
+
+/// C signature: size_t graph_result_count(graph_result_t* result)
+typedef GraphResultCountC = Size Function(Pointer<graph_result_t> result);
+typedef GraphResultCount = int Function(Pointer<graph_result_t> result);
+
+/// C signature: const char* const* graph_result_vertices(graph_result_t* result)
+typedef GraphResultVerticesC = Pointer<Pointer<Utf8>> Function(Pointer<graph_result_t> result);
+typedef GraphResultVertices = Pointer<Pointer<Utf8>> Function(Pointer<graph_result_t> result);
 
 // ============================================================
 // C TYPEDEFS - Promise
@@ -1120,6 +1216,40 @@ class WaveDBNative {
 
   static late final GraphQLMutateAsync _graphQLMutateAsync = WaveDBLibrary.load()
       .lookupFunction<GraphQLMutateAsyncC, GraphQLMutateAsync>('graphql_mutate');
+
+  // ============================================================
+  // LAZY FUNCTIONS - Graph Layer
+  // ============================================================
+
+  static late final GraphLayerCreate _graphLayerCreate = WaveDBLibrary.load()
+      .lookupFunction<GraphLayerCreateC, GraphLayerCreate>('graph_layer_create');
+
+  static late final GraphLayerDestroy _graphLayerDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphLayerDestroyC, GraphLayerDestroy>('graph_layer_destroy');
+
+  static late final Pointer<NativeFunction<GraphLayerDestroyC>> graphLayerDestroyNative =
+      WaveDBLibrary.load().lookup('graph_layer_destroy');
+
+  static late final GraphInsertSync _graphInsertSync = WaveDBLibrary.load()
+      .lookupFunction<GraphInsertSyncC, GraphInsertSync>('graph_insert_sync');
+
+  static late final GraphDeleteSync _graphDeleteSync = WaveDBLibrary.load()
+      .lookupFunction<GraphDeleteSyncC, GraphDeleteSync>('graph_delete_sync');
+
+  static late final GraphParseExecute _graphParseExecute = WaveDBLibrary.load()
+      .lookupFunction<GraphParseExecuteC, GraphParseExecute>('graph_parse_execute');
+
+  static late final GraphParseCount _graphParseCount = WaveDBLibrary.load()
+      .lookupFunction<GraphParseCountC, GraphParseCount>('graph_parse_count');
+
+  static late final GraphResultDestroy _graphResultDestroy = WaveDBLibrary.load()
+      .lookupFunction<GraphResultDestroyC, GraphResultDestroy>('graph_result_destroy');
+
+  static late final GraphResultCount _graphResultCount = WaveDBLibrary.load()
+      .lookupFunction<GraphResultCountC, GraphResultCount>('graph_result_count');
+
+  static late final GraphResultVertices _graphResultVertices = WaveDBLibrary.load()
+      .lookupFunction<GraphResultVerticesC, GraphResultVertices>('graph_result_vertices');
 
   // Promise operations
   static late final PromiseCreate _promiseCreate = WaveDBLibrary.load()
@@ -1956,6 +2086,113 @@ class WaveDBNative {
     } finally {
       calloc.free(mutationPtr);
     }
+  }
+
+  // ============================================================
+  // PUBLIC API - Graph Layer
+  // ============================================================
+
+  /// Create a Graph layer
+  static Pointer<graph_layer_t> graphLayerCreate(
+    String? path, {
+    Pointer<database_config_t>? config,
+  }) {
+    final pathPtr = path != null ? path.toNativeUtf8() : nullptr;
+    try {
+      final layer = _graphLayerCreate(pathPtr.cast(), config ?? nullptr);
+      if (layer == nullptr) {
+        throw WaveDBException.ioError('graph_layer_create', 'Failed to create graph layer');
+      }
+      return layer;
+    } finally {
+      if (pathPtr != nullptr) {
+        calloc.free(pathPtr);
+      }
+    }
+  }
+
+  /// Destroy a Graph layer
+  static void graphLayerDestroy(Pointer<graph_layer_t> layer) {
+    _graphLayerDestroy(layer);
+  }
+
+  /// Insert a triple synchronously
+  static int graphInsertSync(
+    Pointer<graph_layer_t> layer,
+    String s, String p, String o,
+  ) {
+    final sPtr = s.toNativeUtf8();
+    final pPtr = p.toNativeUtf8();
+    final oPtr = o.toNativeUtf8();
+    try {
+      return _graphInsertSync(layer, sPtr.cast(), pPtr.cast(), oPtr.cast());
+    } finally {
+      calloc.free(sPtr);
+      calloc.free(pPtr);
+      calloc.free(oPtr);
+    }
+  }
+
+  /// Delete a triple synchronously
+  static int graphDeleteSync(
+    Pointer<graph_layer_t> layer,
+    String s, String p, String o,
+  ) {
+    final sPtr = s.toNativeUtf8();
+    final pPtr = p.toNativeUtf8();
+    final oPtr = o.toNativeUtf8();
+    try {
+      return _graphDeleteSync(layer, sPtr.cast(), pPtr.cast(), oPtr.cast());
+    } finally {
+      calloc.free(sPtr);
+      calloc.free(pPtr);
+      calloc.free(oPtr);
+    }
+  }
+
+  /// Execute a DSL query and return results
+  static Pointer<graph_result_t> graphParseExecute(
+    Pointer<graph_layer_t> layer,
+    String dsl,
+  ) {
+    final dslPtr = dsl.toNativeUtf8();
+    try {
+      return _graphParseExecute(dslPtr.cast(), layer, nullptr);
+    } finally {
+      calloc.free(dslPtr);
+    }
+  }
+
+  /// Execute a DSL query and return the count
+  static int graphParseCount(
+    Pointer<graph_layer_t> layer,
+    String dsl,
+  ) {
+    final dslPtr = dsl.toNativeUtf8();
+    final countPtr = calloc<Size>();
+    try {
+      final rc = _graphParseCount(dslPtr.cast(), layer, countPtr, nullptr);
+      if (rc != 0) return 0;
+      return countPtr.value;
+    } finally {
+      calloc.free(dslPtr);
+      calloc.free(countPtr);
+    }
+  }
+
+  /// Destroy a graph result
+  static void graphResultDestroy(Pointer<graph_result_t> result) {
+    _graphResultDestroy(result);
+  }
+
+  /// Get the number of vertices in a result
+  static int graphResultCount(Pointer<graph_result_t> result) {
+    return _graphResultCount(result);
+  }
+
+  /// Get the vertices array from a result
+  static Pointer<Pointer<Utf8>> graphResultVertices(Pointer<graph_result_t> result) {
+    return _graphResultVertices(result);
   }
 
   // ============================================================
