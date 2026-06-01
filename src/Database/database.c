@@ -740,46 +740,50 @@ database_t* database_create_with_config(const char* location,
         effective_config = config;
     }
 
-    // Check if database already exists
-    char config_path[1024];
-    snprintf(config_path, sizeof(config_path), "%s/.config", location);
-    struct stat st;
-    bool db_exists = (stat(config_path, &st) == 0);
+    bool is_memory_only = (location == NULL);
 
-    if (db_exists) {
-        // Load saved config and merge
-        database_config_t* saved_config = database_config_load(location);
-        if (saved_config != NULL) {
-            // If saved config has encryption enabled, the caller must provide
-            // an encryption context via database_create_encrypted.
-            // Exception: if the passed config already has encryption enabled,
-            // the caller is database_create_encrypted and has already verified
-            // the key — allow the merge to proceed.
-            if (saved_config->encryption.has_encryption &&
-                saved_config->encryption.type != ENCRYPTION_NONE &&
-                !(effective_config->encryption.has_encryption &&
-                  effective_config->encryption.type != ENCRYPTION_NONE)) {
+    // Check if database already exists (skip for in-memory)
+    if (!is_memory_only) {
+        char config_path[1024];
+        snprintf(config_path, sizeof(config_path), "%s/.config", location);
+        struct stat st;
+        bool db_exists = (stat(config_path, &st) == 0);
+
+        if (db_exists) {
+            // Load saved config and merge
+            database_config_t* saved_config = database_config_load(location);
+            if (saved_config != NULL) {
+                // If saved config has encryption enabled, the caller must provide
+                // an encryption context via database_create_encrypted.
+                // Exception: if the passed config already has encryption enabled,
+                // the caller is database_create_encrypted and has already verified
+                // the key — allow the merge to proceed.
+                if (saved_config->encryption.has_encryption &&
+                    saved_config->encryption.type != ENCRYPTION_NONE &&
+                    !(effective_config->encryption.has_encryption &&
+                      effective_config->encryption.type != ENCRYPTION_NONE)) {
+                    database_config_destroy(saved_config);
+                    if (owns_config) database_config_destroy(effective_config);
+                    if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_REQUIRED;
+                    return NULL;
+                }
+
+                database_config_t* merged = database_config_merge(saved_config, effective_config);
+                if (owns_config) {
+                    database_config_destroy(effective_config);
+                }
                 database_config_destroy(saved_config);
-                if (owns_config) database_config_destroy(effective_config);
-                if (error_code) *error_code = DATABASE_ERR_ENCRYPTION_REQUIRED;
-                return NULL;
+                effective_config = merged;
+                owns_config = true;
             }
-
-            database_config_t* merged = database_config_merge(saved_config, effective_config);
-            if (owns_config) {
-                database_config_destroy(effective_config);
-            }
-            database_config_destroy(saved_config);
-            effective_config = merged;
-            owns_config = true;
         }
-    }
 
-    // Create directory if needed
-    if (mkdir_p((char*)location) != 0) {
-        if (error_code) *error_code = errno;
-        if (owns_config) database_config_destroy(effective_config);
-        return NULL;
+        // Create directory if needed
+        if (mkdir_p((char*)location) != 0) {
+            if (error_code) *error_code = errno;
+            if (owns_config) database_config_destroy(effective_config);
+            return NULL;
+        }
     }
 
     // Initialize memory pool (call once per process)
@@ -795,7 +799,7 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
 
-    db->location = strdup(location);
+    db->location = location ? strdup(location) : strdup("");
     db->lru_memory_mb = effective_config->lru_memory_mb;
     db->chunk_size = effective_config->chunk_size;
     db->btree_node_size = effective_config->btree_node_size;
@@ -878,8 +882,8 @@ database_t* database_create_with_config(const char* location,
         }
     }
 
-    // Create storage directories if persistent
-    if (effective_config->enable_persist) {
+    // Create storage directories if persistent (skip for in-memory)
+    if (!is_memory_only && effective_config->enable_persist) {
         char* data_path = path_join(location, "data");
         char* meta_path = path_join(location, "meta");
         mkdir_p(data_path);
@@ -888,14 +892,14 @@ database_t* database_create_with_config(const char* location,
         free(meta_path);
     }
 
-    // Load or create trie
-    db->trie = load_index(location, db->chunk_size, db->btree_node_size);
+    // Load or create trie (skip loading from disk for in-memory)
+    db->trie = is_memory_only ? NULL : load_index(location, db->chunk_size, db->btree_node_size);
     if (db->trie == NULL) {
         db->trie = hbtrie_create(db->chunk_size, db->btree_node_size);
     }
 
-    // Create page file and bnode cache (Phase 2)
-    if (effective_config->enable_persist) {
+    // Create page file and bnode cache (Phase 2) (skip for in-memory)
+    if (!is_memory_only && effective_config->enable_persist) {
         char page_path[1024];
         snprintf(page_path, sizeof(page_path), "%s/data.wdbp", location);
 
@@ -1050,26 +1054,30 @@ database_t* database_create_with_config(const char* location,
         return NULL;
     }
 
-    // Create WAL manager
-    db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, db->encryption, error_code);
-    if (db->wal_manager == NULL) {
-        tx_manager_destroy(db->tx_manager);
-        hbtrie_destroy(db->trie);
-        database_lru_cache_destroy(db->lru);
-        if (db->owns_pool) work_pool_destroy(db->pool);
-        if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
-        if (!db->sync_only) {
-            for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
-                spinlock_destroy(&db->write_locks[i]);
+    // Create WAL manager (skip for in-memory databases)
+    if (!is_memory_only) {
+        db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, db->encryption, error_code);
+        if (db->wal_manager == NULL) {
+            tx_manager_destroy(db->tx_manager);
+            hbtrie_destroy(db->trie);
+            database_lru_cache_destroy(db->lru);
+            if (db->owns_pool) work_pool_destroy(db->pool);
+            if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
+            if (!db->sync_only) {
+                for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+                    spinlock_destroy(&db->write_locks[i]);
+                }
             }
+            free(db->location);
+            free(db);
+            if (owns_config) database_config_destroy(effective_config);
+            if (error_code && *error_code == 0) {
+                *error_code = ENOMEM;
+            }
+            return NULL;
         }
-        free(db->location);
-        free(db);
-        if (owns_config) database_config_destroy(effective_config);
-        if (error_code && *error_code == 0) {
-            *error_code = ENOMEM;
-        }
-        return NULL;
+    } else {
+        db->wal_manager = NULL;
     }
 
     // Set legacy WAL to NULL
@@ -1078,13 +1086,17 @@ database_t* database_create_with_config(const char* location,
     // Store active config
     db->active_config = database_config_copy(effective_config);
 
-    // Save config
-    database_config_save(location, effective_config);
+    // Save config (skip for in-memory)
+    if (!is_memory_only) {
+        database_config_save(location, effective_config);
+    }
 
-    // Replay WAL for recovery
-    db->is_rebuilding = 1;
-    wal_manager_recover(db->wal_manager, db);
-    db->is_rebuilding = 0;
+    // Replay WAL for recovery (skip for in-memory)
+    if (db->wal_manager != NULL) {
+        db->is_rebuilding = 1;
+        wal_manager_recover(db->wal_manager, db);
+        db->is_rebuilding = 0;
+    }
 
     refcounter_init((refcounter_t*)db);
 
@@ -2305,6 +2317,7 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
 
         platform_lock(&batch->lock);
         batch->submitted = 1;
+        platform_unlock(&batch->lock);
 
         // Serialize and write to WAL
         buffer_t* data = serialize_batch(batch);
@@ -2328,7 +2341,6 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
             }
         }
 
-        platform_unlock(&batch->lock);
         return 0;
     }
 
