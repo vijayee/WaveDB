@@ -6,8 +6,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <string>
-#include <future>
-#include <chrono>
 
 #if _WIN32
 #include <io.h>
