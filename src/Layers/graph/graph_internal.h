@@ -42,6 +42,28 @@ typedef struct {
     struct query_step_t* steps;
 } morphism_entry_t;
 
+/* ── Schema types (internal) ── */
+
+typedef struct {
+    char* name;                  // field/predicate name
+    char* type;                  // target type
+    uint8_t is_array;            // 1 = [Type], 0 = Type
+    graph_index_flags_t indices;  // which indices to maintain
+} graph_schema_field_t;
+
+typedef struct {
+    char* name;                  // type name
+    graph_index_flags_t indices;  // default indices for the type
+    graph_schema_field_t* fields;
+    size_t field_count;
+} graph_schema_type_t;
+
+struct graph_schema_t {
+    graph_schema_type_t* types;
+    size_t type_count;
+    size_t type_capacity;
+};
+
 /* ── Query Step (internal) ── */
 
 typedef struct query_step_t query_step_t;
@@ -70,11 +92,15 @@ int graph_execute_in(database_t* db, const vertex_set_t* input, const char* pred
 int graph_execute_has(database_t* db, const vertex_set_t* input,
                        const char* predicate, const char* value,
                        vertex_set_t* output);
+int graph_execute_osp(database_t* db, const vertex_set_t* input,
+                       const char* object, vertex_set_t* output);
+int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output);
 
 /* ── Layer + Query struct (shared by graph.c and graph_parser.c) ── */
 
 struct graph_layer_t {
     database_t* db;
+    graph_schema_t* schema;
     morphism_entry_t* morphisms;
     size_t morphism_count;
     size_t morphism_capacity;
@@ -92,6 +118,12 @@ graph_query_t* graph_parse_query(const char* input, size_t len, graph_layer_t* l
 int graph_morphism_parse_and_store(graph_layer_t* layer, const char* name,
                                     const char* input, size_t len,
                                     graph_parse_error_t* error);
+
+/* ── Schema parser internals (implemented in graph_schema_parser.c) ── */
+
+int graph_schema_parse_dsl(graph_layer_t* layer, const char* input, size_t len, char** error_out);
+int graph_schema_store_type(graph_layer_t* layer, graph_schema_type_t* type);
+int graph_schema_load(graph_layer_t* layer);
 
 #ifdef __cplusplus
 }

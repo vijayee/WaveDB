@@ -92,6 +92,23 @@ int graph_parse_count(const char* dsl, graph_layer_t* layer, size_t* count, grap
 
 int graph_morphism_define(graph_layer_t* layer, const char* name, const char* dsl, graph_parse_error_t* error);
 
+/* ── Index types for schema ── */
+
+typedef enum {
+    GRAPH_INDEX_NONE = 0,
+    GRAPH_INDEX_SPO  = 1 << 0,
+    GRAPH_INDEX_POS  = 1 << 1,
+    GRAPH_INDEX_OSP  = 1 << 2,
+    GRAPH_INDEX_PSO  = 1 << 3,
+} graph_index_flags_t;
+
+/* ── Schema definition ── */
+
+typedef struct graph_schema_t graph_schema_t;
+
+int graph_schema_parse(graph_layer_t* layer, const char* dsl, char** error_out);
+int graph_schema_needs_index(graph_layer_t* layer, const char* predicate, graph_index_flags_t index);
+
 #ifdef __cplusplus
 }
 #endif

@@ -160,6 +160,59 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
     return 0;
 }
 
+/* ── OSP scan: /osp/<object>/<subject>/ → collect predicates ── */
+
+int graph_execute_osp(database_t* db, const vertex_set_t* input,
+                       const char* object, vertex_set_t* output) {
+    if (!db || !input || !object || !output) return -1;
+
+    for (size_t i = 0; i < input->count; i++) {
+        char prefix[1024];
+        int len = snprintf(prefix, sizeof(prefix), "/osp/%s/%s/", object, input->vertices[i]);
+        if (len < 0 || (size_t)len >= sizeof(prefix)) continue;
+
+        raw_result_t* results = NULL;
+        size_t count = 0;
+        int rc = database_scan_sync_raw(db, prefix, strlen(prefix), '/', &results, &count);
+        if (rc != 0) continue;
+
+        for (size_t j = 0; j < count; j++) {
+            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix))
+                continue;
+            char buf[1024];
+            const char* pred = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
+            if (pred) vertex_set_add(output, pred);
+        }
+        database_raw_results_free(results, count);
+    }
+    return 0;
+}
+
+/* ── PSO scan: /pso/<predicate>/ → collect subjects ── */
+
+int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output) {
+    if (!db || !predicate || !output) return -1;
+
+    char prefix[1024];
+    int len = snprintf(prefix, sizeof(prefix), "/pso/%s/", predicate);
+    if (len < 0 || (size_t)len >= sizeof(prefix)) return -1;
+
+    raw_result_t* results = NULL;
+    size_t count = 0;
+    int rc = database_scan_sync_raw(db, prefix, strlen(prefix), '/', &results, &count);
+    if (rc != 0) return 0;
+
+    for (size_t j = 0; j < count; j++) {
+        if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix))
+            continue;
+        char buf[1024];
+        const char* subj = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
+        if (subj) vertex_set_add(output, subj);
+    }
+    database_raw_results_free(results, count);
+    return 0;
+}
+
 /* ── Vertex step: produce a singleton set ── */
 
 int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* output) {

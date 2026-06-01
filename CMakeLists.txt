@@ -118,6 +118,7 @@ set(WAVEDB_SOURCES
     src/Layers/graph/graph_set.c
     src/Layers/graph/graph_ops.c
     src/Layers/graph/graph_parser.c
+    src/Layers/graph/graph_schema_parser.c
 )
 
 # Create WaveDB library
@@ -357,6 +358,11 @@ if(BUILD_TESTS)
     add_executable(test_graph_parser tests/test_graph_parser.cpp)
     target_link_libraries(test_graph_parser wavedb gtest gtest_main)
     add_test(NAME test_graph_parser COMMAND test_graph_parser)
+
+    # Test for Graph Schema
+    add_executable(test_graph_schema tests/test_graph_schema.cpp)
+    target_link_libraries(test_graph_schema wavedb gtest gtest_main)
+    add_test(NAME test_graph_schema COMMAND test_graph_schema)
 
     # Visualization examples removed (used non-MVCC API, will be revisited)
 

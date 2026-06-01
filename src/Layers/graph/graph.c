@@ -34,6 +34,7 @@ graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
         free(layer);
         return NULL;
     }
+    layer->schema = NULL;
     layer->morphisms = NULL;
     layer->morphism_count = 0;
     layer->morphism_capacity = 0;
@@ -72,6 +73,18 @@ void graph_layer_destroy(graph_layer_t* layer) {
             s = next;
         }
     }
+    if (layer->schema) {
+        for (size_t i = 0; i < layer->schema->type_count; i++) {
+            free(layer->schema->types[i].name);
+            for (size_t j = 0; j < layer->schema->types[i].field_count; j++) {
+                free(layer->schema->types[i].fields[j].name);
+                free(layer->schema->types[i].fields[j].type);
+            }
+            free(layer->schema->types[i].fields);
+        }
+        free(layer->schema->types);
+        free(layer->schema);
+    }
     free(layer->morphisms);
     free(layer);
 }
@@ -85,35 +98,81 @@ database_t* graph_layer_get_db(graph_layer_t* layer) {
 int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o) {
     if (!layer || !s || !p || !o) return -1;
 
-    char path_spo[1024], path_pos[1024];
+    char path_spo[1024], path_pos[1024], path_osp[1024], path_pso[1024];
     uint8_t empty_val = 0;
+    raw_op_t ops[4];
+    int count = 0;
 
-    build_index_path(path_spo, sizeof(path_spo), "spo", s, p, o);
-    build_index_path(path_pos, sizeof(path_pos), "pos", p, o, s);
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) {
+        build_index_path(path_spo, sizeof(path_spo), "spo", s, p, o);
+        ops[count].key = path_spo;
+        ops[count].key_len = strlen(path_spo);
+        ops[count].value = &empty_val;
+        ops[count].value_len = 0;
+        ops[count].type = 0;
+        count++;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) {
+        build_index_path(path_pos, sizeof(path_pos), "pos", p, o, s);
+        ops[count].key = path_pos;
+        ops[count].key_len = strlen(path_pos);
+        ops[count].value = &empty_val;
+        ops[count].value_len = 0;
+        ops[count].type = 0;
+        count++;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) {
+        build_index_path(path_osp, sizeof(path_osp), "osp", o, s, p);
+        ops[count].key = path_osp;
+        ops[count].key_len = strlen(path_osp);
+        ops[count].value = &empty_val;
+        ops[count].value_len = 0;
+        ops[count].type = 0;
+        count++;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) {
+        build_index_path(path_pso, sizeof(path_pso), "pso", p, s, o);
+        ops[count].key = path_pso;
+        ops[count].key_len = strlen(path_pso);
+        ops[count].value = &empty_val;
+        ops[count].value_len = 0;
+        ops[count].type = 0;
+        count++;
+    }
 
-    // Use raw batch API to ensure both indices are written atomically
-    raw_op_t ops[2];
-    ops[0].key = path_spo; ops[0].key_len = strlen(path_spo);
-    ops[0].value = &empty_val; ops[0].value_len = 0; ops[0].type = 0;
-    ops[1].key = path_pos; ops[1].key_len = strlen(path_pos);
-    ops[1].value = &empty_val; ops[1].value_len = 0; ops[1].type = 0;
+    if (count == 0) return 0;  // Schema says no indices needed — valid
 
-    return database_batch_sync_raw(layer->db, '/', ops, 2);
+    return database_batch_sync_raw(layer->db, '/', ops, count);
 }
 
 int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const char* o) {
     if (!layer || !s || !p || !o) return -1;
 
     char path[1024];
-    int rc;
+    int rc = 0;
 
-    build_index_path(path, sizeof(path), "spo", s, p, o);
-    rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
-    if (rc != 0) return rc;
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) {
+        build_index_path(path, sizeof(path), "spo", s, p, o);
+        rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+        if (rc != 0) return rc;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) {
+        build_index_path(path, sizeof(path), "pos", p, o, s);
+        rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+        if (rc != 0) return rc;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) {
+        build_index_path(path, sizeof(path), "osp", o, s, p);
+        rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+        if (rc != 0) return rc;
+    }
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) {
+        build_index_path(path, sizeof(path), "pso", p, s, o);
+        rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+        if (rc != 0) return rc;
+    }
 
-    build_index_path(path, sizeof(path), "pos", p, o, s);
-    rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
-    return rc;
+    return 0;
 }
 
 /* ── Triple operations (async) ── */
@@ -433,4 +492,27 @@ int graph_morphism_define(graph_layer_t* layer, const char* name, const char* ds
         return -1;
     }
     return graph_morphism_parse_and_store(layer, name, dsl, strlen(dsl), error);
+}
+
+/* ── Schema definition ── */
+
+int graph_schema_parse(graph_layer_t* layer, const char* dsl, char** error_out) {
+    if (!layer || !dsl) return -1;
+    extern int graph_schema_parse_dsl(graph_layer_t* layer, const char* input, size_t len, char** error_out);
+    return graph_schema_parse_dsl(layer, dsl, strlen(dsl), error_out);
+}
+
+int graph_schema_needs_index(graph_layer_t* layer, const char* predicate, graph_index_flags_t index) {
+    if (!layer || !predicate) return 1;
+    if (!layer->schema) return 1;
+
+    for (size_t i = 0; i < layer->schema->type_count; i++) {
+        for (size_t j = 0; j < layer->schema->types[i].field_count; j++) {
+            graph_schema_field_t* f = &layer->schema->types[i].fields[j];
+            if (strcmp(f->name, predicate) == 0) {
+                return (f->indices & index) != 0;
+            }
+        }
+    }
+    return 1;  // Unknown predicate: maintain index (backward compat)
 }
