@@ -29,6 +29,7 @@ typedef enum {
     GRAPH_STEP_INTERSECT,   // Intersection of sub-query results
     GRAPH_STEP_UNION,       // Union of sub-query results
     GRAPH_STEP_LIMIT,       // Cap result count
+    GRAPH_STEP_HAS,       // filter: intersect with POS scan of (predicate, value)
 } graph_step_type_t;
 
 /* ── Layer lifecycle ── */
@@ -72,6 +73,24 @@ void graph_query_execute(graph_query_t* q, promise_t* promise);
 size_t graph_result_count(graph_result_t* r);
 const char* const* graph_result_vertices(graph_result_t* r);
 void graph_result_destroy(graph_result_t* r);
+
+/* ── Parse error handling ── */
+
+typedef struct {
+    int ok;             // 1 = success, 0 = error
+    int position;       // Character position of error (0-based)
+    char message[256];  // Error message
+} graph_parse_error_t;
+
+/* ── DSL parser ── */
+
+graph_query_t* graph_parse(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error);
+graph_result_t* graph_parse_execute(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error);
+int graph_parse_count(const char* dsl, graph_layer_t* layer, size_t* count, graph_parse_error_t* error);
+
+/* ── Morphisms ── */
+
+int graph_morphism_define(graph_layer_t* layer, const char* name, const char* dsl, graph_parse_error_t* error);
 
 #ifdef __cplusplus
 }

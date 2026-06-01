@@ -32,35 +32,32 @@ static const char* key_last_component(const char* key, size_t key_len,
     return buf;
 }
 
-/* ── Check if a reconstructed key starts with a given index prefix ──
+/* ── Check if a reconstructed key starts with a full prefix ──
  *
- * Reconstructed keys have padding nulls after identifiers that don't
- * fill an entire chunk.  For example, "spo" (3 bytes) becomes "spox\\0"
- * in a 4-byte chunk, so the key looks like "/spox\\0/clip_abc/..." rather
- * than the expected "/spo/clip_abc/...".
+ * Database scans return all keys from the prefix onward (no upper bound),
+ * so we must filter results ourselves. This checks a multi-component
+ * prefix such as "/spo/clip_abc/tagged_with/".
  *
- * To handle this, we check byte-by-byte, skipping padding nulls.
+ * The prefix should include the leading '/' (e.g. "/spo/clip_abc/tagged_with/").
+ * Reconstructed keys do NOT have a leading '/', so we skip prefix[0].
+ *
+ * Null-padding bytes in the key are skipped during comparison.
  */
-static int key_starts_with_index(const char* key, size_t key_len,
-                                  const char* index_name) {
-    if (!key || !index_name) return 0;
-    size_t name_len = strlen(index_name);
-    if (key_len < name_len + 1) return 0;  /* name + at least "/" */
+static int key_starts_with_prefix(const char* key, size_t key_len,
+                                   const char* prefix) {
+    if (!key || !prefix) return 0;
+    size_t prefix_len = strlen(prefix);
+    if (prefix_len < 2) return 0;   /* need at least '/' + char */
 
-    /* Reconstructed keys start directly with the index name (no leading "/") */
     size_t ki = 0;
-    for (size_t ni = 0; ni < name_len; ni++) {
+    /* Skip leading '/' in prefix (key has no leading '/') */
+    for (size_t pi = 1; pi < prefix_len; pi++) {
         /* Skip padding nulls in the key */
         while (ki < key_len && key[ki] == '\0') ki++;
         if (ki >= key_len) return 0;
-        if (key[ki] != index_name[ni]) return 0;
+        if (key[ki] != prefix[pi]) return 0;
         ki++;
     }
-
-    /* Skip padding nulls then expect a '/' delimiter */
-    while (ki < key_len && key[ki] == '\0') ki++;
-    if (ki >= key_len || key[ki] != '/') return 0;
-
     return 1;
 }
 
@@ -81,8 +78,8 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
         if (rc != 0) continue;
 
         for (size_t j = 0; j < count; j++) {
-            /* Filter: key must start with "/spo/" */
-            if (!key_starts_with_index(results[j].key, results[j].key_len, "spo"))
+            /* Filter: key must start with expected prefix */
+            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix))
                 continue;
 
             char buf[1024];
@@ -112,8 +109,8 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
         if (rc != 0) continue;
 
         for (size_t j = 0; j < count; j++) {
-            /* Filter: key must start with "/pos/" */
-            if (!key_starts_with_index(results[j].key, results[j].key_len, "pos"))
+            /* Filter: key must start with expected prefix */
+            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix))
                 continue;
 
             char buf[1024];
@@ -123,6 +120,43 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
         }
         database_raw_results_free(results, count);
     }
+    return 0;
+}
+
+/* ── Has scan: POS scan for (predicate, value), intersect with input ── */
+
+int graph_execute_has(database_t* db, const vertex_set_t* input,
+                       const char* predicate, const char* value,
+                       vertex_set_t* output) {
+    if (!db || !input || !predicate || !value || !output) return -1;
+
+    char prefix[1024];
+    int len = snprintf(prefix, sizeof(prefix), "/pos/%s/%s/", predicate, value);
+    if (len < 0 || (size_t)len >= sizeof(prefix)) return -1;
+
+    raw_result_t* results = NULL;
+    size_t count = 0;
+    int rc = database_scan_sync_raw(db, prefix, strlen(prefix), '/', &results, &count);
+    if (rc != 0) return 0; // No results = no match
+
+    vertex_set_t pos_results;
+    vertex_set_init(&pos_results, count > 0 ? count : 8);
+    for (size_t j = 0; j < count; j++) {
+        if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix))
+            continue;
+        char buf[1024];
+        const char* subj = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
+        if (subj) vertex_set_add(&pos_results, subj);
+    }
+    database_raw_results_free(results, count);
+
+    // If input is empty, Has is the starting point — just return POS results
+    if (input->count == 0) {
+        vertex_set_copy(output, &pos_results);
+    } else {
+        vertex_set_intersect(output, input, &pos_results);
+    }
+    vertex_set_destroy(&pos_results);
     return 0;
 }
 
@@ -160,6 +194,16 @@ static int execute_child_steps(database_t* db, query_step_t* steps, vertex_set_t
             if (next.count > s->limit) {
                 next.count = s->limit;
             }
+        } else if (s->type == GRAPH_STEP_HAS) {
+            if (first) {
+                // Has as starting point: POS scan for (predicate, value)
+                vertex_set_t empty;
+                vertex_set_init(&empty, 0);
+                graph_execute_has(db, &empty, s->has_predicate, s->has_value, &next);
+                vertex_set_destroy(&empty);
+            } else {
+                graph_execute_has(db, &current, s->has_predicate, s->has_value, &next);
+            }
         } else if (s->type == GRAPH_STEP_INTERSECT || s->type == GRAPH_STEP_UNION) {
             vertex_set_t combined;
             vertex_set_init(&combined, 8);
@@ -184,7 +228,7 @@ static int execute_child_steps(database_t* db, query_step_t* steps, vertex_set_t
                 }
                 vertex_set_destroy(&child_result);
             }
-            if (first && current.count > 0) {
+            if (current.count > 0) {
                 vertex_set_t tmp;
                 vertex_set_init(&tmp, 8);
                 if (s->type == GRAPH_STEP_INTERSECT) {

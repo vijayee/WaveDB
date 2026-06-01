@@ -35,6 +35,13 @@ int vertex_set_union(vertex_set_t* result, const vertex_set_t* a, const vertex_s
 void vertex_set_clear(vertex_set_t* set);
 int vertex_set_copy(vertex_set_t* result, const vertex_set_t* src);
 
+/* ── Morphism storage ── */
+
+typedef struct {
+    char* name;
+    struct query_step_t* steps;
+} morphism_entry_t;
+
 /* ── Query Step (internal) ── */
 
 typedef struct query_step_t query_step_t;
@@ -43,6 +50,8 @@ struct query_step_t {
     graph_step_type_t type;
     char* vertex_id;                // For GRAPH_STEP_VERTEX
     char* predicate;                // For GRAPH_STEP_OUT, GRAPH_STEP_IN
+    char* has_predicate;            // For GRAPH_STEP_HAS
+    char* has_value;                // For GRAPH_STEP_HAS
     size_t limit;                   // For GRAPH_STEP_LIMIT
     query_step_t** children;        // For GRAPH_STEP_INTERSECT, GRAPH_STEP_UNION
     size_t num_children;
@@ -58,6 +67,31 @@ int graph_execute_chain(database_t* db, query_step_t* steps, vertex_set_t* outpu
 int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* output);
 int graph_execute_out(database_t* db, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
 int graph_execute_in(database_t* db, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
+int graph_execute_has(database_t* db, const vertex_set_t* input,
+                       const char* predicate, const char* value,
+                       vertex_set_t* output);
+
+/* ── Layer + Query struct (shared by graph.c and graph_parser.c) ── */
+
+struct graph_layer_t {
+    database_t* db;
+    morphism_entry_t* morphisms;
+    size_t morphism_count;
+    size_t morphism_capacity;
+};
+
+struct graph_query_t {
+    graph_layer_t* layer;
+    query_step_t* head;
+    query_step_t* tail;
+};
+
+/* ── Parser internals (implemented in graph_parser.c) ── */
+
+graph_query_t* graph_parse_query(const char* input, size_t len, graph_layer_t* layer, graph_parse_error_t* error);
+int graph_morphism_parse_and_store(graph_layer_t* layer, const char* name,
+                                    const char* input, size_t len,
+                                    graph_parse_error_t* error);
 
 #ifdef __cplusplus
 }

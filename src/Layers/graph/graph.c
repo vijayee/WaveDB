@@ -22,10 +22,6 @@ static int build_index_path(char* buf, size_t buf_size,
 
 /* ── Layer lifecycle ── */
 
-struct graph_layer_t {
-    database_t* db;
-};
-
 graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
     graph_layer_t* layer = (graph_layer_t*)get_clear_memory(sizeof(graph_layer_t));
     int error_code = 0;
@@ -38,6 +34,9 @@ graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
         free(layer);
         return NULL;
     }
+    layer->morphisms = NULL;
+    layer->morphism_count = 0;
+    layer->morphism_capacity = 0;
     return layer;
 }
 
@@ -46,6 +45,34 @@ void graph_layer_destroy(graph_layer_t* layer) {
     if (layer->db) {
         database_destroy(layer->db);
     }
+    for (size_t i = 0; i < layer->morphism_count; i++) {
+        free(layer->morphisms[i].name);
+        query_step_t* s = layer->morphisms[i].steps;
+        while (s) {
+            query_step_t* next = s->next;
+            free(s->vertex_id);
+            free(s->predicate);
+            free(s->has_predicate);
+            free(s->has_value);
+            for (size_t j = 0; j < s->num_children; j++) {
+                query_step_t* cs = s->children[j];
+                while (cs) {
+                    query_step_t* cn = cs->next;
+                    free(cs->vertex_id);
+                    free(cs->predicate);
+                    free(cs->has_predicate);
+                    free(cs->has_value);
+                    free(cs->children);
+                    free(cs);
+                    cs = cn;
+                }
+            }
+            free(s->children);
+            free(s);
+            s = next;
+        }
+    }
+    free(layer->morphisms);
     free(layer);
 }
 
@@ -174,12 +201,6 @@ void graph_delete(graph_layer_t* layer, const char* s, const char* p, const char
 
 /* ── Query builder ── */
 
-struct graph_query_t {
-    graph_layer_t* layer;
-    query_step_t* head;
-    query_step_t* tail;
-};
-
 graph_query_t* graph_query_create(graph_layer_t* layer) {
     if (!layer) return NULL;
     graph_query_t* q = (graph_query_t*)get_clear_memory(sizeof(graph_query_t));
@@ -194,12 +215,16 @@ void graph_query_destroy(graph_query_t* q) {
         query_step_t* next = s->next;
         free(s->vertex_id);
         free(s->predicate);
+        free(s->has_predicate);
+        free(s->has_value);
         for (size_t i = 0; i < s->num_children; i++) {
             query_step_t* cs = s->children[i];
             while (cs) {
                 query_step_t* cn = cs->next;
                 free(cs->vertex_id);
                 free(cs->predicate);
+                free(cs->has_predicate);
+                free(cs->has_value);
                 free(cs->children);
                 free(cs);
                 cs = cn;
@@ -373,4 +398,39 @@ void graph_result_destroy(graph_result_t* r) {
     if (!r) return;
     vertex_set_destroy(&r->set);
     free(r);
+}
+
+/* ── DSL parser ── */
+
+graph_query_t* graph_parse(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error) {
+    if (!dsl || !layer) {
+        if (error) { error->ok = 0; snprintf(error->message, sizeof(error->message), "NULL argument"); error->position = 0; }
+        return NULL;
+    }
+    return graph_parse_query(dsl, strlen(dsl), layer, error);
+}
+
+graph_result_t* graph_parse_execute(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error) {
+    graph_query_t* q = graph_parse(dsl, layer, error);
+    if (!q) return NULL;
+    graph_result_t* r = graph_query_execute_sync(q);
+    graph_query_destroy(q);
+    return r;
+}
+
+int graph_parse_count(const char* dsl, graph_layer_t* layer, size_t* count, graph_parse_error_t* error) {
+    if (!count) return -1;
+    graph_result_t* r = graph_parse_execute(dsl, layer, error);
+    if (!r) return -1;
+    *count = graph_result_count(r);
+    graph_result_destroy(r);
+    return 0;
+}
+
+int graph_morphism_define(graph_layer_t* layer, const char* name, const char* dsl, graph_parse_error_t* error) {
+    if (!layer || !name || !dsl) {
+        if (error) { error->ok = 0; snprintf(error->message, sizeof(error->message), "NULL argument"); error->position = 0; }
+        return -1;
+    }
+    return graph_morphism_parse_and_store(layer, name, dsl, strlen(dsl), error);
 }
