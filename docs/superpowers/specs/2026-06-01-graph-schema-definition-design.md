@@ -25,7 +25,7 @@ Grammar:
 ```
 schema       → type_def+
 type_def     → "type" NAME "@index" "(" index_list ")" "{" field+ "}"
-index_list   → NAME ("," NAME)*      // spo, pos
+index_list   → NAME ("," NAME)*      // spo, pos, osp, pso
 field        → NAME ":" type_ref ("@" NAME)? 
 type_ref     → "[" NAME "]" | NAME | "String" | "DateTime"
 ```
@@ -37,6 +37,8 @@ typedef enum {
     GRAPH_INDEX_NONE = 0,
     GRAPH_INDEX_SPO  = 1 << 0,
     GRAPH_INDEX_POS  = 1 << 1,
+    GRAPH_INDEX_OSP  = 1 << 2,
+    GRAPH_INDEX_PSO  = 1 << 3,
 } graph_index_flags_t;
 
 typedef struct {
@@ -77,6 +79,38 @@ __gschema/Clip/fields/tagged_with     → Tag
 __gschema/Clip/fields/tagged_with/indices → spo,pos
 __gschema/Clip/fields/tagged_with/array → 1
 ```
+
+## New Index Scan Operators
+
+Two new scan functions in `graph_ops.c`, matching the existing `graph_execute_out` (SPO) and `graph_execute_in` (POS):
+
+```
+/osp/<object>/<subject>/  →  predicates linking object to subject
+/pso/<predicate>/          →  all subjects with this predicate
+```
+
+```c
+// OSP scan: /osp/<object>/<subject>/ → collect predicates
+int graph_execute_osp(database_t* db, const vertex_set_t* input,
+                       const char* object, vertex_set_t* output);
+
+// PSO scan: /pso/<predicate>/ → collect subjects
+int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output);
+```
+
+These are declared in `graph_internal.h` and implemented in `graph_ops.c` following the same key extraction pattern as the existing scans.
+
+The `graph_insert_sync` and `graph_delete_sync` functions are updated to write/delete OSP and PSO indices when the schema declares them:
+
+```c
+if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) ops[count++] = spo_op;
+if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) ops[count++] = pos_op;
+if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) ops[count++] = osp_op;
+if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) ops[count++] = pso_op;
+```
+
+The OSP path is: `/osp/<o>/<s>/<p>`
+The PSO path is: `/pso/<p>/<s>/<o>`
 
 ## Files
 
