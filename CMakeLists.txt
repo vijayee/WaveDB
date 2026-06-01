@@ -112,6 +112,11 @@ set(WAVEDB_SOURCES
     src/Layers/graphql/graphql_result.c
     src/Layers/graphql/graphql_plan.c
     src/Layers/graphql/graphql_resolve.c
+
+    # Layers - Graph
+    src/Layers/graph/graph.c
+    src/Layers/graph/graph_set.c
+    src/Layers/graph/graph_ops.c
 )
 
 # Create WaveDB library
@@ -336,6 +341,16 @@ if(BUILD_TESTS)
     add_executable(test_graphql_resolve tests/test_graphql_resolve.cpp)
     target_link_libraries(test_graphql_resolve wavedb gtest gtest_main)
     add_test(NAME test_graphql_resolve COMMAND test_graphql_resolve)
+
+    # Test for graph vertex set
+    add_executable(test_graph_set tests/test_graph_set.c)
+    target_link_libraries(test_graph_set wavedb)
+    add_test(NAME test_graph_set COMMAND test_graph_set)
+
+    # Test for Graph Layer
+    add_executable(test_graph tests/test_graph.cpp)
+    target_link_libraries(test_graph wavedb gtest gtest_main)
+    add_test(NAME test_graph COMMAND test_graph)
 
     # Visualization examples removed (used non-MVCC API, will be revisited)
 
