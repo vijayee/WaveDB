@@ -58,34 +58,35 @@ database_t* graph_layer_get_db(graph_layer_t* layer) {
 int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o) {
     if (!layer || !s || !p || !o) return -1;
 
-    char path[1024];
+    char path_spo[1024], path_pos[1024];
     uint8_t empty_val = 0;
 
-    // SPO: /spo/<s>/<p>/<o>
-    build_index_path(path, sizeof(path), "spo", s, p, o);
-    if (database_put_sync_raw(layer->db, path, strlen(path), '/', &empty_val, 0) != 0) return -1;
+    build_index_path(path_spo, sizeof(path_spo), "spo", s, p, o);
+    build_index_path(path_pos, sizeof(path_pos), "pos", p, o, s);
 
-    // POS: /pos/<p>/<o>/<s>
-    build_index_path(path, sizeof(path), "pos", p, o, s);
-    if (database_put_sync_raw(layer->db, path, strlen(path), '/', &empty_val, 0) != 0) return -1;
+    // Use raw batch API to ensure both indices are written atomically
+    raw_op_t ops[2];
+    ops[0].key = path_spo; ops[0].key_len = strlen(path_spo);
+    ops[0].value = &empty_val; ops[0].value_len = 0; ops[0].type = 0;
+    ops[1].key = path_pos; ops[1].key_len = strlen(path_pos);
+    ops[1].value = &empty_val; ops[1].value_len = 0; ops[1].type = 0;
 
-    return 0;
+    return database_batch_sync_raw(layer->db, '/', ops, 2);
 }
 
 int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const char* o) {
     if (!layer || !s || !p || !o) return -1;
 
     char path[1024];
+    int rc;
 
-    // SPO
     build_index_path(path, sizeof(path), "spo", s, p, o);
-    database_delete_sync_raw(layer->db, path, strlen(path), '/');
+    rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+    if (rc != 0) return rc;
 
-    // POS
     build_index_path(path, sizeof(path), "pos", p, o, s);
-    database_delete_sync_raw(layer->db, path, strlen(path), '/');
-
-    return 0;
+    rc = database_delete_sync_raw(layer->db, path, strlen(path), '/');
+    return rc;
 }
 
 /* ── Triple operations (async) ── */
@@ -96,20 +97,16 @@ typedef struct {
     char* p;
     char* o;
     int is_delete;
+    int result;             // Store result inline, no malloc needed
     promise_t* promise;
 } triple_work_ctx_t;
 
 static void triple_work_execute(void* ctx) {
     triple_work_ctx_t* tc = (triple_work_ctx_t*)ctx;
-    int result;
-    if (tc->is_delete) {
-        result = graph_delete_sync(tc->layer, tc->s, tc->p, tc->o);
-    } else {
-        result = graph_insert_sync(tc->layer, tc->s, tc->p, tc->o);
-    }
-    int* res = (int*)get_memory(sizeof(int));
-    *res = result;
-    promise_resolve(tc->promise, res);
+    tc->result = tc->is_delete
+        ? graph_delete_sync(tc->layer, tc->s, tc->p, tc->o)
+        : graph_insert_sync(tc->layer, tc->s, tc->p, tc->o);
+    promise_resolve(tc->promise, &tc->result);
     free(tc->s); free(tc->p); free(tc->o);
     promise_destroy(tc->promise);
     free(tc);
@@ -363,8 +360,6 @@ void graph_query_execute(graph_query_t* q, promise_t* promise) {
 }
 
 /* ── Result handling ── */
-
-// graph_result_t struct defined at line ~295 (before graph_query_execute_sync)
 
 size_t graph_result_count(graph_result_t* r) {
     return r ? r->set.count : 0;

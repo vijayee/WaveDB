@@ -22,9 +22,6 @@
 extern "C" {
 #include "../src/Layers/graph/graph.h"
 #include "../src/Layers/graph/graph_internal.h"
-#include "../src/Workers/pool.h"
-#include "../src/Time/wheel.h"
-#include "../src/Util/allocator.h"
 }
 
 static int test_counter = 0;

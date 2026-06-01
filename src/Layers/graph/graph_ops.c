@@ -73,7 +73,7 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
     for (size_t i = 0; i < input->count; i++) {
         char prefix[1024];
         int len = snprintf(prefix, sizeof(prefix), "/spo/%s/%s/", input->vertices[i], predicate);
-        if (len < 0 || (size_t)len >= sizeof(prefix)) continue;
+        if (len < 0 || (size_t)len >= sizeof(prefix)) continue; // Truncated: skip (path > 1024)
 
         raw_result_t* results = NULL;
         size_t count = 0;
@@ -104,7 +104,7 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
     for (size_t i = 0; i < input->count; i++) {
         char prefix[1024];
         int len = snprintf(prefix, sizeof(prefix), "/pos/%s/%s/", predicate, input->vertices[i]);
-        if (len < 0 || (size_t)len >= sizeof(prefix)) continue;
+        if (len < 0 || (size_t)len >= sizeof(prefix)) continue; // Truncated: skip (path > 1024)
 
         raw_result_t* results = NULL;
         size_t count = 0;

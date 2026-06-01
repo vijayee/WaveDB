@@ -62,7 +62,6 @@ void vertex_set_destroy(vertex_set_t* set) {
 static int vertex_set_resize(vertex_set_t* set, size_t new_capacity) {
     char** old_vertices = set->vertices;
     size_t old_count = set->count;
-    size_t old_capacity = set->capacity;
     uint32_t* old_buckets = set->buckets;
     uint32_t old_num_buckets = set->num_buckets;
 
@@ -81,7 +80,6 @@ static int vertex_set_resize(vertex_set_t* set, size_t new_capacity) {
     }
     free(old_vertices);
     free(old_buckets);
-    (void)old_capacity; // unused
     return 0;
 }
 
