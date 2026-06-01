@@ -190,9 +190,11 @@ static int execute_child_steps(database_t* db, query_step_t* steps, vertex_set_t
         } else if (s->type == GRAPH_STEP_IN) {
             graph_execute_in(db, &current, s->predicate, &next);
         } else if (s->type == GRAPH_STEP_LIMIT) {
-            vertex_set_copy(&next, &current);
-            if (next.count > s->limit) {
-                next.count = s->limit;
+            vertex_set_destroy(&next);
+            size_t copy_count = current.count < s->limit ? current.count : s->limit;
+            vertex_set_init(&next, copy_count > 0 ? copy_count : 8);
+            for (size_t _i = 0; _i < copy_count; _i++) {
+                vertex_set_add(&next, current.vertices[_i]);
             }
         } else if (s->type == GRAPH_STEP_HAS) {
             if (first) {

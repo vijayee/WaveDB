@@ -297,6 +297,7 @@ TEST_F(GraphLayerTest, AsyncInsertExecutesInline) {
     ASSERT_EQ(status, std::future_status::ready);
     int result = fut.get();
     EXPECT_EQ(result, 0);
+    promise_destroy(cpromise);
 
     graph_query_t* q = graph_query_create(layer);
     graph_query_vertex(q, "clip_abc");
