@@ -9,7 +9,6 @@ describe('GraphLayer', function() {
   let graph;
   beforeEach(function() {
     graph = new GraphLayer();
-    setDefaultGraph(graph);
   });
   afterEach(function() {
     graph.close();

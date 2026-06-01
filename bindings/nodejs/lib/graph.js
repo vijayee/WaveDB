@@ -38,29 +38,24 @@ class Query {
 
 // g is a traversal source object (Gremlin-style).
 // g.V(), g.Has() etc. create new Query objects bound to the default graph.
-const _gState = {};
-const g = new Proxy(_gState, {
-  get(_target, prop, _receiver) {
+const QUERY_METHODS = new Set([
+  'V', 'Out', 'In', 'Has', 'And', 'Or', 'Limit', 'Count', 'All', 'toString'
+]);
+const g = new Proxy({}, {
+  get(_target, prop) {
     if (prop === Symbol.toPrimitive || prop === 'inspect' || prop === 'then') {
       return undefined;
     }
+    if (!QUERY_METHODS.has(prop)) return undefined;
     return function (...args) {
       const q = new Query(_defaultGraph);
-      if (typeof q[prop] === 'function') {
-        return q[prop](...args);
-      }
-      return q;
+      return q[prop](...args);
     };
-  },
-  set(_target, prop, value) {
-    _target[prop] = value;
-    return true;
   }
 });
 
 function setDefaultGraph(layer) {
   _defaultGraph = layer;
-  g.GraphLayer = layer;
 }
 
 class GraphLayer {
@@ -94,6 +89,7 @@ class GraphLayer {
 
   close() {
     if (this._layer && !this._closed) {
+      if (_defaultGraph === this) _defaultGraph = null;
       this._closed = true;
       this._layer.close();
     }
