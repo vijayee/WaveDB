@@ -385,6 +385,8 @@ graph_result_t* graph_query_execute_sync(graph_query_t* q) {
     graph_result_t* r = (graph_result_t*)get_clear_memory(sizeof(graph_result_t));
     vertex_set_init(&r->set, 64);
 
+    graph_optimize(&q->head);
+
     int rc = graph_execute_chain(q->layer->db, q->head, &r->set);
     if (rc != 0) {
         vertex_set_destroy(&r->set);

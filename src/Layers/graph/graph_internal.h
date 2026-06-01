@@ -96,6 +96,8 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
                        const char* object, vertex_set_t* output);
 int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output);
 
+int graph_optimize(query_step_t** steps);
+
 /* ── Layer + Query struct (shared by graph.c and graph_parser.c) ── */
 
 struct graph_layer_t {
