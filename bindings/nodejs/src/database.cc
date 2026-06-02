@@ -6,10 +6,10 @@
 #include <cctype>
 #include <string>
 #include <unistd.h>
-#include "../../../src/Database/database.h"
-#include "../../../src/Database/database_config.h"
-#include "../../../src/Database/database_iterator.h"
-#include "../../../src/Storage/encryption.h"
+#include "Database/database.h"
+#include "Database/database_config.h"
+#include "Database/database_iterator.h"
+#include "Storage/encryption.h"
 #include "path.h"
 #include "identifier.h"
 #include "async_bridge.h"

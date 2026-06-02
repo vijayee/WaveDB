@@ -3,7 +3,7 @@
 
 #include <napi.h>
 #include <string>
-#include "../../../src/HBTrie/identifier.h"
+#include "HBTrie/identifier.h"
 
 // Extract JS value (string or Buffer) into a std::string (no truncation).
 // For Buffers: copies data into the string (safe for async/batch where data must outlive the call).

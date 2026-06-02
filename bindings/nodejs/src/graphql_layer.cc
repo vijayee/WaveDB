@@ -5,7 +5,7 @@
 #include <napi.h>
 #include <cstdlib>
 #include <string>
-#include "../../../src/Layers/graphql/graphql.h"
+#include "Layers/graphql/graphql.h"
 #include "async_bridge.h"
 #include "graphql_result_js.h"
 

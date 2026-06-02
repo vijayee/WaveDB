@@ -2,7 +2,7 @@
 #define WAVEDB_BINDINGS_GRAPHQL_RESULT_JS_H
 
 #include <napi.h>
-#include "../../../src/Layers/graphql/graphql.h"
+#include "Layers/graphql/graphql.h"
 
 // Convert a graphql_result_t to a JS object: { success, data, errors }
 Napi::Value GraphQLResultToJS(Napi::Env env, graphql_result_t* result);

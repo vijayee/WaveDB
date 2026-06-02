@@ -1,5 +1,6 @@
 node_modules/
 build/
+c_src/
 *.node
 npm-debug.log
 .DS_Store

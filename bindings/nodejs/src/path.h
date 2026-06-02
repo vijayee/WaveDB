@@ -4,7 +4,7 @@
 #include <napi.h>
 #include <string>
 #include <vector>
-#include "../../../src/HBTrie/path.h"
+#include "HBTrie/path.h"
 
 // Split string by delimiter
 std::vector<std::string> SplitString(const std::string& str, char delimiter);

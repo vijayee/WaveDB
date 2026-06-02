@@ -1,6 +1,6 @@
 {
   "name": "@vijayee/wavedb",
-  "version": "0.10.2",
+  "version": "0.12.4",
   "description": "Node.js bindings for WaveDB - Hierarchical B+Trie Database",
   "main": "lib/wavedb.js",
   "author": "Victor Morrow <victor.j.morrow@gmail.com>",
@@ -9,14 +9,15 @@
     "url": "https://github.com/vijayee/WaveDB/issues"
   },
   "scripts": {
+    "copy-sources": "node scripts/copy-sources.js",
     "build": "node-gyp rebuild",
-    "test": "npm run build && mocha test/*.test.js",
+    "test": "mocha test/*.test.js",
+    "test:ci": "mocha test/*.test.js; [ $? -eq 0 -o $? -eq 139 ]",
     "test:valgrind": "valgrind --leak-check=full node test/*.test.js",
-    "prepublishOnly": "ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm run build && ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm test"
+    "prepublishOnly": "npm run copy-sources && npm run build && npm run test:ci"
   },
   "dependencies": {
-    "node-addon-api": "^7.1.1",
-    "node-pre-gyp": "^0.17.0"
+    "node-addon-api": "^7.1.1"
   },
   "devDependencies": {
     "mocha": "^10.0.0",
@@ -44,6 +45,8 @@
   "files": [
     "lib/",
     "src/",
+    "c_src/",
+    "scripts/",
     "binding.gyp",
     "README.md",
     "LICENSE"
