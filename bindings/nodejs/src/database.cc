@@ -5,7 +5,9 @@
 #include <napi.h>
 #include <cctype>
 #include <string>
+#ifndef _MSC_VER
 #include <unistd.h>
+#endif
 #include "../../../src/Database/database.h"
 #include "../../../src/Database/database_config.h"
 #include "../../../src/Database/database_iterator.h"

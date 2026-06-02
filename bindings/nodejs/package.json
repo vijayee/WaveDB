@@ -9,7 +9,7 @@
     "url": "https://github.com/vijayee/WaveDB/issues"
   },
   "scripts": {
-    "build": "node-gyp rebuild",
+    "build": "node scripts/build.js",
     "test": "npm run build && mocha test/*.test.js",
     "test:valgrind": "valgrind --leak-check=full node test/*.test.js",
     "prepublishOnly": "ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm run build && ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm test"
