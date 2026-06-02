@@ -687,7 +687,7 @@ The planner should apply simple optimizations:
 │  (shard by prefix, route scans, merge results)           │
 └──────────────────────────────────────────────────────────┘
 ```
-
+/c
 This gives you:
 - **One storage engine** (WaveDB) — no second database
 - **Rich graph queries** — multi-hop, intersections, unions

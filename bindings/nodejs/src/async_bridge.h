@@ -3,6 +3,8 @@
 
 #include <napi.h>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include "../../../src/Workers/promise.h"
 #include "../../../src/Workers/error.h"
 #include "../../../src/Database/database.h"
@@ -30,6 +32,7 @@ struct AsyncOpContext {
   napi_env env;                           // Stored for TSFN callback
   napi_threadsafe_function tsfn;          // Raw TSFN handle for C callbacks
   std::atomic<int>* pending_count;        // Pointer to bridge's pending counter
+  std::condition_variable* shutdown_cv;   // Pointer to bridge's shutdown condition variable
   AsyncOpType type;                       // Operation type (determines result conversion)
   void* result;                           // C result payload (set by resolve callback)
   async_error_t* error;                   // C error (set by reject callback)
@@ -67,6 +70,8 @@ private:
   napi_threadsafe_function raw_tsfn_;
   bool initialized_;
   std::atomic<int> pending_count_;
+  std::mutex shutdown_mutex_;
+  std::condition_variable shutdown_cv_;
 
   // C promise resolve callback — called from C worker thread
   static void CResolveCallback(void* ctx, void* payload);

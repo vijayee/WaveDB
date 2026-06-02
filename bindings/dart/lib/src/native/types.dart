@@ -33,9 +33,18 @@ base class graph_layer_t extends Opaque {}
 /// Maps to graph_result_t in C
 base class graph_result_t extends Opaque {}
 
-/// Opaque handle to a Graph parse error
-/// Maps to graph_parse_error_t in C
-base class graph_parse_error_t extends Opaque {}
+/// Parse error struct for graph DSL parsing
+/// Maps to graph_parse_error_t in C: { int ok; int position; char message[256]; }
+base class GraphParseError extends Struct {
+  @Int32()
+  external int ok;
+
+  @Int32()
+  external int position;
+
+  @Array(256)
+  external Array<Uint8> message;
+}
 
 /// WAL sync mode enumeration
 /// Maps to wal_sync_mode_e in C

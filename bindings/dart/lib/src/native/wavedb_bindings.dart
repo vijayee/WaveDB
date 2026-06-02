@@ -894,6 +894,18 @@ typedef GraphParseExecute = Pointer<graph_result_t> Function(
   Pointer<Void> error,
 );
 
+/// Error-aware variant of GraphParseExecute
+typedef GraphParseExecuteWithErrC = Pointer<graph_result_t> Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<GraphParseError> error,
+);
+typedef GraphParseExecuteWithErr = Pointer<graph_result_t> Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<GraphParseError> error,
+);
+
 /// C signature: int graph_parse_count(
 ///   const char* dsl,
 ///   graph_layer_t* layer,
@@ -911,6 +923,20 @@ typedef GraphParseCount = int Function(
   Pointer<graph_layer_t> layer,
   Pointer<Size> count,
   Pointer<Void> error,
+);
+
+/// Error-aware variant of GraphParseCount
+typedef GraphParseCountWithErrC = Int32 Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Size> count,
+  Pointer<GraphParseError> error,
+);
+typedef GraphParseCountWithErr = int Function(
+  Pointer<Utf8> dsl,
+  Pointer<graph_layer_t> layer,
+  Pointer<Size> count,
+  Pointer<GraphParseError> error,
 );
 
 /// C signature: void graph_result_destroy(graph_result_t* result)
@@ -932,10 +958,10 @@ typedef GraphSchemaParse = int Function(
 
 typedef GraphMorphismDefineC = Int32 Function(
     Pointer<graph_layer_t> layer, Pointer<Utf8> name, Pointer<Utf8> dsl,
-    Pointer<graph_parse_error_t> error);
+    Pointer<GraphParseError> error);
 typedef GraphMorphismDefine = int Function(
     Pointer<graph_layer_t> layer, Pointer<Utf8> name, Pointer<Utf8> dsl,
-    Pointer<graph_parse_error_t> error);
+    Pointer<GraphParseError> error);
 
 // ============================================================
 // C TYPEDEFS - Graph Async Operations
@@ -1267,8 +1293,14 @@ class WaveDBNative {
   static late final GraphParseExecute _graphParseExecute = WaveDBLibrary.load()
       .lookupFunction<GraphParseExecuteC, GraphParseExecute>('graph_parse_execute');
 
+  static late final GraphParseExecuteWithErr _graphParseExecuteWithErr = WaveDBLibrary.load()
+      .lookupFunction<GraphParseExecuteWithErrC, GraphParseExecuteWithErr>('graph_parse_execute');
+
   static late final GraphParseCount _graphParseCount = WaveDBLibrary.load()
       .lookupFunction<GraphParseCountC, GraphParseCount>('graph_parse_count');
+
+  static late final GraphParseCountWithErr _graphParseCountWithErr = WaveDBLibrary.load()
+      .lookupFunction<GraphParseCountWithErrC, GraphParseCountWithErr>('graph_parse_count');
 
   static late final GraphResultDestroy _graphResultDestroy = WaveDBLibrary.load()
       .lookupFunction<GraphResultDestroyC, GraphResultDestroy>('graph_result_destroy');
@@ -1283,6 +1315,9 @@ class WaveDBNative {
       .lookupFunction<GraphSchemaParseC, GraphSchemaParse>('graph_schema_parse');
 
   static late final GraphMorphismDefine _graphMorphismDefine = WaveDBLibrary.load()
+      .lookupFunction<GraphMorphismDefineC, GraphMorphismDefine>('graph_morphism_define');
+
+  static late final GraphMorphismDefine _graphMorphismDefineWithErr = WaveDBLibrary.load()
       .lookupFunction<GraphMorphismDefineC, GraphMorphismDefine>('graph_morphism_define');
 
   static late final GraphInsertAsync _graphInsertAsync = WaveDBLibrary.load()
@@ -2190,6 +2225,20 @@ class WaveDBNative {
     }
   }
 
+  /// Execute a DSL query and return results (with error details)
+  static Pointer<graph_result_t> graphParseExecuteWithErr(
+    Pointer<graph_layer_t> layer,
+    String dsl,
+    Pointer<GraphParseError> error,
+  ) {
+    final dslPtr = dsl.toNativeUtf8();
+    try {
+      return _graphParseExecuteWithErr(dslPtr.cast(), layer, error);
+    } finally {
+      calloc.free(dslPtr);
+    }
+  }
+
   /// Execute a DSL query and return results
   static Pointer<graph_result_t> graphParseExecute(
     Pointer<graph_layer_t> layer,
@@ -2198,6 +2247,21 @@ class WaveDBNative {
     final dslPtr = dsl.toNativeUtf8();
     try {
       return _graphParseExecute(dslPtr.cast(), layer, nullptr);
+    } finally {
+      calloc.free(dslPtr);
+    }
+  }
+
+  /// Execute a DSL query and return the count (with error details)
+  static int graphParseCountWithErr(
+    Pointer<graph_layer_t> layer,
+    String dsl,
+    Pointer<Size> countPtr,
+    Pointer<GraphParseError> error,
+  ) {
+    final dslPtr = dsl.toNativeUtf8();
+    try {
+      return _graphParseCountWithErr(dslPtr.cast(), layer, countPtr, error);
     } finally {
       calloc.free(dslPtr);
     }
@@ -2253,13 +2317,26 @@ class WaveDBNative {
     }
   }
 
+  /// Define a named morphism (with error details)
+  static int graphMorphismDefineWithErr(
+      Pointer<graph_layer_t> layer, String name, String dsl,
+      Pointer<GraphParseError> error) {
+    final namePtr = name.toNativeUtf8();
+    final dslPtr = dsl.toNativeUtf8();
+    try {
+      return _graphMorphismDefineWithErr(layer, namePtr.cast(), dslPtr.cast(), error);
+    } finally {
+      calloc.free(namePtr);
+      calloc.free(dslPtr);
+    }
+  }
+
   /// Define a named morphism
   static int graphMorphismDefine(
       Pointer<graph_layer_t> layer, String name, String dsl) {
     final namePtr = name.toNativeUtf8();
     final dslPtr = dsl.toNativeUtf8();
     try {
-      // Pass nullptr for error — we'll just check the return code
       final rc = _graphMorphismDefine(layer, namePtr.cast(), dslPtr.cast(), nullptr);
       if (rc != 0) {
         throw WaveDBException.invalidArgument('Morphism define failed');

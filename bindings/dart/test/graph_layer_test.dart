@@ -8,8 +8,8 @@ void main() {
     graph = GraphLayer();
   });
 
-  tearDown(() {
-    graph.close();
+  tearDown(() async {
+    await graph.close();
   });
 
   test('insert and query triples', () {
@@ -106,8 +106,8 @@ void main() {
     expect(q.toString(), 'g.V("alice").Out("follows").Out("likes").Limit(5)');
   });
 
-  test('GraphLayerException on failed insert', () {
-    graph.close();
+  test('GraphLayerException on failed insert', () async {
+    await graph.close();
     expect(
       () => graph.insertSync('a', 'b', 'c'),
       throwsA(isA<StateError>()),

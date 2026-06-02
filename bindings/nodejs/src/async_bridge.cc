@@ -1,11 +1,12 @@
 // C++ headers that include <atomic> must come before C headers
 // that use ATOMIC_TYPE() macros expanding to std::atomic<T> in C++.
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 
 #include "async_bridge.h"
 #include "identifier.h"
 #include "graphql_result_js.h"
-#include <unistd.h>
 
 AsyncBridge::AsyncBridge()
   : raw_tsfn_(nullptr),
@@ -56,13 +57,12 @@ void AsyncBridge::Shutdown() {
   // Release the TSFN — prevents new calls from C threads
   tsfn_.Release();
 
-  // Wait for pending operations to drain
-  uint32_t max_wait_ms = 5000;
-  uint32_t waited_ms = 0;
-  while (pending_count_.load(std::memory_order_acquire) > 0 && waited_ms < max_wait_ms) {
-    usleep(1000);  // 1ms
-    waited_ms += 1;
-  }
+  // Wait for pending operations to drain using condition variable
+  // (cross-platform, no busy-wait, no usleep)
+  std::unique_lock<std::mutex> lock(shutdown_mutex_);
+  shutdown_cv_.wait_for(lock, std::chrono::seconds(5), [this] {
+    return pending_count_.load(std::memory_order_acquire) == 0;
+  });
 
   raw_tsfn_ = nullptr;
   initialized_ = false;
@@ -73,9 +73,10 @@ promise_t* AsyncBridge::CreatePromise(AsyncOpContext* ctx) {
 
   pending_count_.fetch_add(1, std::memory_order_relaxed);
 
-  // Store the raw TSFN handle and pending counter in the context
+  // Store the raw TSFN handle, pending counter, and shutdown cv in the context
   ctx->tsfn = raw_tsfn_;
   ctx->pending_count = &pending_count_;
+  ctx->shutdown_cv = &shutdown_cv_;
 
   promise_t* promise = promise_create(CResolveCallback, CRejectCallback, ctx);
   if (!promise) {
@@ -114,7 +115,11 @@ void AsyncBridge::CallJs(napi_env env, napi_value jsCallback, void* context, voi
 
   // Decrement pending count — this operation is now complete
   if (opCtx->pending_count) {
-    opCtx->pending_count->fetch_sub(1, std::memory_order_relaxed);
+    int remaining = opCtx->pending_count->fetch_sub(1, std::memory_order_acq_rel) - 1;
+    // Notify Shutdown() if all pending ops have drained
+    if (remaining == 0 && opCtx->shutdown_cv) {
+      opCtx->shutdown_cv->notify_all();
+    }
   }
 
   Napi::Env napiEnv(env);
@@ -178,12 +183,10 @@ void AsyncBridge::CallJs(napi_env env, napi_value jsCallback, void* context, voi
   }
 
   // Clean up C-side allocations
-  // Free int* result from batch/put/delete resolve callbacks
+  // Free int* result from batch/put/delete/insert/delete resolve callbacks
   if (opCtx->result && opCtx->type != AsyncOpType::Get &&
       opCtx->type != AsyncOpType::Query && opCtx->type != AsyncOpType::Mutate &&
-      opCtx->type != AsyncOpType::GraphQuery &&
-      opCtx->type != AsyncOpType::GraphInsert &&
-      opCtx->type != AsyncOpType::GraphDelete) {
+      opCtx->type != AsyncOpType::GraphQuery) {
     free(opCtx->result);
   }
 

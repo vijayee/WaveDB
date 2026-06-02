@@ -92,8 +92,7 @@ class GraphLayer implements Finalizable {
       switch (pending.type) {
         case _GraphAsyncOpType.insert:
         case _GraphAsyncOpType.delete:
-          // payload is &tc->result — points into freed triple_work_ctx_t,
-          // do NOT free it. The C worker already freed the context.
+          // C resolves with NULL on success, rejects on failure.
           pending.completer.complete(null);
           break;
       }
@@ -194,24 +193,36 @@ class GraphLayer implements Finalizable {
   List<String> exec(Object dsl) {
     _checkOpen();
     final dslStr = dsl is GraphQuery ? dsl._toDSL() : dsl as String;
-    final resultPtr = WaveDBNative.graphParseExecute(_layer!, dslStr);
-    if (resultPtr == nullptr) return const [];
-
+    final errorPtr = calloc<GraphParseError>();
     try {
-      final count = WaveDBNative.graphResultCount(resultPtr);
-      if (count == 0) return const [];
-
-      final verts = WaveDBNative.graphResultVertices(resultPtr);
-      final results = <String>[];
-      for (int i = 0; i < count; i++) {
-        final strPtr = verts.elementAt(i).value;
-        if (strPtr != nullptr) {
-          results.add(strPtr.toDartString());
+      final resultPtr = WaveDBNative.graphParseExecuteWithErr(_layer!, dslStr, errorPtr);
+      if (resultPtr == nullptr) {
+        if (errorPtr.ref.ok == 0) {
+          final msgPtr = errorPtr.cast<Uint8>().elementAt(8).cast<Utf8>();
+          final msg = msgPtr.toDartString();
+          throw GraphLayerException('Parse error at position ${errorPtr.ref.position}: $msg');
         }
+        return const [];
       }
-      return results;
+
+      try {
+        final count = WaveDBNative.graphResultCount(resultPtr);
+        if (count == 0) return const [];
+
+        final verts = WaveDBNative.graphResultVertices(resultPtr);
+        final results = <String>[];
+        for (int i = 0; i < count; i++) {
+          final strPtr = verts.elementAt(i).value;
+          if (strPtr != nullptr) {
+            results.add(strPtr.toDartString());
+          }
+        }
+        return results;
+      } finally {
+        WaveDBNative.graphResultDestroy(resultPtr);
+      }
     } finally {
-      WaveDBNative.graphResultDestroy(resultPtr);
+      calloc.free(errorPtr);
     }
   }
 
@@ -219,7 +230,23 @@ class GraphLayer implements Finalizable {
   int count(Object dsl) {
     _checkOpen();
     final dslStr = dsl is GraphQuery ? dsl._toDSL() : dsl as String;
-    return WaveDBNative.graphParseCount(_layer!, dslStr);
+    final countPtr = calloc<Size>();
+    final errorPtr = calloc<GraphParseError>();
+    try {
+      final rc = WaveDBNative.graphParseCountWithErr(_layer!, dslStr, countPtr, errorPtr);
+      if (rc != 0) {
+        if (errorPtr.ref.ok == 0) {
+          final msgPtr = errorPtr.cast<Uint8>().elementAt(8).cast<Utf8>();
+          final msg = msgPtr.toDartString();
+          throw GraphLayerException('Parse error at position ${errorPtr.ref.position}: $msg');
+        }
+        return 0;
+      }
+      return countPtr.value;
+    } finally {
+      calloc.free(countPtr);
+      calloc.free(errorPtr);
+    }
   }
 
   /// Insert a triple synchronously.
@@ -249,15 +276,40 @@ class GraphLayer implements Finalizable {
   /// Define a named morphism (reusable traversal path).
   void defineMorphism(String name, String dsl) {
     _checkOpen();
-    WaveDBNative.graphMorphismDefine(_layer!, name, dsl);
+    final errorPtr = calloc<GraphParseError>();
+    try {
+      final rc = WaveDBNative.graphMorphismDefineWithErr(_layer!, name, dsl, errorPtr);
+      if (rc != 0) {
+        String errMsg = 'Morphism define failed';
+        if (errorPtr.ref.ok == 0) {
+          final msgPtr = errorPtr.cast<Uint8>().elementAt(8).cast<Utf8>();
+          final msg = msgPtr.toDartString();
+          errMsg = 'Parse error at position ${errorPtr.ref.position}: $msg';
+        }
+        throw GraphLayerException(errMsg);
+      }
+    } finally {
+      calloc.free(errorPtr);
+    }
   }
 
   /// Close the graph layer and release C resources.
-  void close() {
+  ///
+  /// Waits for pending async operations to complete (up to 2 seconds),
+  /// then cancels any remaining and destroys the underlying C layer.
+  Future<void> close() async {
     if (!_closed && _layer != null) {
       if (_defaultGraph == this) _defaultGraph = null;
 
-      // Cancel this instance's pending async operations
+      // Wait for pending async operations to drain (up to 2 seconds).
+      // Yield to the event loop so resolve/reject callbacks can fire.
+      final deadline = DateTime.now().add(Duration(seconds: 2));
+      while (_pending.entries.any((e) => e.value.instanceId == _instanceId)) {
+        if (DateTime.now().isAfter(deadline)) break;
+        await Future.delayed(Duration(milliseconds: 10));
+      }
+
+      // Cancel any remaining pending async operations for this instance
       final keysToRemove = <int>[];
       for (final entry in _pending.entries) {
         if (entry.value.instanceId == _instanceId) {
