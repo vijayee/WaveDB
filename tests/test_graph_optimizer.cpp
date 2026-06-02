@@ -21,7 +21,7 @@ extern "C" {
 }
 
 // Helper: allocate a step directly (alloc_step is static in graph.c,
-// and graph_query_intersect always sets num_children=2, so we need
+// and graph_query_intersect always pushes two children, so we need
 // direct construction for single-child tests.)
 static query_step_t* make_step(graph_step_type_t type) {
     query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
@@ -60,9 +60,8 @@ TEST_F(GraphOptimizerTest, FoldSingleChildIntersect) {
     in_step->predicate = strdup("tagged_with");
 
     query_step_t* intersect = make_step(GRAPH_STEP_INTERSECT);
-    intersect->num_children = 1;
-    intersect->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-    intersect->children[0] = in_step;
+    vec_init(&intersect->children);
+    vec_push(&intersect->children, in_step);
 
     v1->next = intersect;
 
@@ -99,12 +98,12 @@ TEST_F(GraphOptimizerTest, NoChangeForTwoChildIntersect) {
     graph_query_intersect(q, left, right);
 
     ASSERT_EQ(q->head->next->type, GRAPH_STEP_INTERSECT);
-    ASSERT_EQ(q->head->next->num_children, (size_t)2);
+    ASSERT_EQ((size_t)q->head->next->children.length, (size_t)2);
 
     graph_optimize(&q->head);
 
     ASSERT_EQ(q->head->next->type, GRAPH_STEP_INTERSECT);
-    ASSERT_EQ(q->head->next->num_children, (size_t)2);
+    ASSERT_EQ((size_t)q->head->next->children.length, (size_t)2);
 
     graph_query_destroy(q);
     // left and right are now empty shells (head/tail = NULL), safe to destroy
@@ -122,15 +121,13 @@ TEST_F(GraphOptimizerTest, MultipleSingleChildIntersects) {
 
     // Inner INTERSECT wrapping in_step
     query_step_t* inner = make_step(GRAPH_STEP_INTERSECT);
-    inner->num_children = 1;
-    inner->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-    inner->children[0] = in_step;
+    vec_init(&inner->children);
+    vec_push(&inner->children, in_step);
 
     // Outer INTERSECT wrapping inner
     query_step_t* outer = make_step(GRAPH_STEP_INTERSECT);
-    outer->num_children = 1;
-    outer->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-    outer->children[0] = inner;
+    vec_init(&outer->children);
+    vec_push(&outer->children, inner);
 
     query_step_t* v_clip = make_step(GRAPH_STEP_VERTEX);
     v_clip->vertex_id = strdup("clip_abc");
@@ -172,7 +169,7 @@ TEST_F(GraphOptimizerTest, ExecutionStillWorks) {
     graph_insert_sync(layer, "clip_abc", "tagged_with", "gaming");
     graph_insert_sync(layer, "clip_abc", "tagged_with", "tutorial");
 
-    // Build query with two different children (num_children=2, won't be folded).
+    // Build query with two different children (won't be folded).
     // Both children return the same set as the main traversal so the final
     // intersect is non-empty.
     graph_query_t* left = graph_query_create(layer);
@@ -220,9 +217,8 @@ TEST_F(GraphOptimizerTest, FoldSingleChildUnion) {
     in_step->predicate = strdup("tagged_with");
 
     query_step_t* union_step = make_step(GRAPH_STEP_UNION);
-    union_step->num_children = 1;
-    union_step->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-    union_step->children[0] = in_step;
+    vec_init(&union_step->children);
+    vec_push(&union_step->children, in_step);
 
     v1->next = union_step;
 
@@ -231,7 +227,7 @@ TEST_F(GraphOptimizerTest, FoldSingleChildUnion) {
     q->tail = in_step;
 
     ASSERT_EQ(q->head->next->type, GRAPH_STEP_UNION);
-    ASSERT_EQ(q->head->next->num_children, (size_t)1);
+    ASSERT_EQ((size_t)q->head->next->children.length, (size_t)1);
 
     graph_optimize(&q->head);
 

@@ -170,3 +170,75 @@ TEST_F(GraphSchemaTest, ParseMultipleTypes) {
     ASSERT_EQ(rc, 0) << (error ? error : "parse failed");
     if (error) free(error);
 }
+
+TEST_F(GraphSchemaTest, SchemaPersistenceAcrossReopen) {
+    char* error = NULL;
+    int rc = graph_schema_parse(layer,
+        "type Clip @index(spo) { name: String @index(pos) }", &error);
+    ASSERT_EQ(rc, 0) << (error ? error : "parse failed");
+    if (error) free(error);
+
+    // Verify index selection works
+    ASSERT_EQ(graph_schema_needs_index(layer, "name", GRAPH_INDEX_SPO), 0);
+    ASSERT_EQ(graph_schema_needs_index(layer, "name", GRAPH_INDEX_POS), 1);
+
+    // Close and reopen at the same path
+    graph_layer_destroy(layer);
+    layer = graph_layer_create(test_dir.c_str(), NULL);
+    ASSERT_NE(layer, nullptr);
+
+    // Schema should be loaded from __gschema/ paths
+    EXPECT_EQ(graph_schema_needs_index(layer, "name", GRAPH_INDEX_SPO), 0);
+    EXPECT_EQ(graph_schema_needs_index(layer, "name", GRAPH_INDEX_POS), 1);
+
+    // Unknown predicates still backward compatible
+    EXPECT_EQ(graph_schema_needs_index(layer, "unknown", GRAPH_INDEX_SPO), 1);
+}
+
+TEST_F(GraphSchemaTest, IndexSelectionPersistsAfterReopen) {
+    char* error = NULL;
+    graph_schema_parse(layer,
+        "type Clip @index(spo, pos, osp, pso) {\n"
+        "  tags: [Tag] @index(spo)\n"
+        "}", &error);
+    if (error) free(error);
+
+    // Close and reopen
+    graph_layer_destroy(layer);
+    layer = graph_layer_create(test_dir.c_str(), NULL);
+    ASSERT_NE(layer, nullptr);
+
+    // Type default: all four
+    // Tags field: SPO only
+    EXPECT_EQ(graph_schema_needs_index(layer, "tags", GRAPH_INDEX_SPO), 1);
+    EXPECT_EQ(graph_schema_needs_index(layer, "tags", GRAPH_INDEX_POS), 0);
+    EXPECT_EQ(graph_schema_needs_index(layer, "tags", GRAPH_INDEX_OSP), 0);
+    EXPECT_EQ(graph_schema_needs_index(layer, "tags", GRAPH_INDEX_PSO), 0);
+}
+
+TEST_F(GraphSchemaTest, InsertStillWorksAfterReopenWithSchema) {
+    char* error = NULL;
+    graph_schema_parse(layer,
+        "type Clip @index(spo) { name: String @index(pos) }", &error);
+    if (error) free(error);
+
+    // Close and reopen
+    graph_layer_destroy(layer);
+    layer = graph_layer_create(test_dir.c_str(), NULL);
+    ASSERT_NE(layer, nullptr);
+
+    // Insert should write POS for name (since @index(pos) means POS is needed)
+    int rc = graph_insert_sync(layer, "clip_abc", "name", "My Clip");
+    ASSERT_EQ(rc, 0);
+
+    // Read via POS-based traversal: In("name") finds subjects by object value
+    graph_query_t* q = graph_query_create(layer);
+    graph_query_vertex(q, "My Clip");
+    graph_query_in(q, "name");
+    graph_result_t* r = graph_query_execute_sync(q);
+    ASSERT_NE(r, nullptr);
+    ASSERT_EQ(graph_result_count(r), (size_t)1);
+    EXPECT_STREQ(graph_result_vertices(r)[0], "clip_abc");
+    graph_result_destroy(r);
+    graph_query_destroy(q);
+}

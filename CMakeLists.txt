@@ -120,6 +120,7 @@ set(WAVEDB_SOURCES
     src/Layers/graph/graph_parser.c
     src/Layers/graph/graph_schema_parser.c
     src/Layers/graph/graph_optimizer.c
+    src/Layers/graph/graph_stats.c
 )
 
 # Create WaveDB library

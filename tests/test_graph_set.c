@@ -49,6 +49,36 @@ int main(void) {
     TEST("union contains alice", vertex_set_contains(&uresult, "alice") == 1);
     TEST("union contains dave", vertex_set_contains(&uresult, "dave") == 1);
 
+    // Difference
+    vertex_set_t dresult;
+    vertex_set_init(&dresult, 8);
+    vertex_set_difference(&dresult, &a, &b);
+    TEST("difference has correct count", dresult.count == 2);
+    TEST("difference contains alice", vertex_set_contains(&dresult, "alice") == 1);
+    TEST("difference contains charlie", vertex_set_contains(&dresult, "charlie") == 1);
+    TEST("difference does not contain bob", vertex_set_contains(&dresult, "bob") == 0);
+    TEST("difference does not contain dave", vertex_set_contains(&dresult, "dave") == 0);
+
+    // Difference: empty result when b contains all of a
+    vertex_set_t c, dempty;
+    vertex_set_init(&c, 8);
+    vertex_set_init(&dempty, 8);
+    vertex_set_add(&c, "bob");
+    vertex_set_difference(&dempty, &c, &b);
+    TEST("difference empty when b covers a", dempty.count == 0);
+
+    // Copy
+    vertex_set_t cpy;
+    vertex_set_init(&cpy, 8);
+    vertex_set_copy(&cpy, &a);
+    TEST("copy has same count", cpy.count == a.count);
+    TEST("copy contains alice", vertex_set_contains(&cpy, "alice") == 1);
+    TEST("copy contains charlie", vertex_set_contains(&cpy, "charlie") == 1);
+
+    vertex_set_destroy(&c);
+    vertex_set_destroy(&dempty);
+    vertex_set_destroy(&cpy);
+    vertex_set_destroy(&dresult);
     vertex_set_destroy(&a);
     vertex_set_destroy(&b);
     vertex_set_destroy(&result);

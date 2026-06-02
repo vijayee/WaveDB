@@ -123,9 +123,28 @@ static char* parse_identifier(parser_t* p) {
     return s;
 }
 
+/* Parse a comparison operator: >, >=, <, <=  Returns 1 on success, 0 on failure. */
+static int parse_cmp_op(parser_t* p, graph_cmp_op_t* out) {
+    skip_whitespace(p);
+    if (p->pos >= p->len) return 0;
+    char c = p->input[p->pos];
+    if (c == '>') {
+        p->pos++;
+        if (p->pos < p->len && p->input[p->pos] == '=') { p->pos++; *out = GRAPH_CMP_GTE; }
+        else { *out = GRAPH_CMP_GT; }
+        return 1;
+    } else if (c == '<') {
+        p->pos++;
+        if (p->pos < p->len && p->input[p->pos] == '=') { p->pos++; *out = GRAPH_CMP_LTE; }
+        else { *out = GRAPH_CMP_LT; }
+        return 1;
+    }
+    return 0;
+}
+
 /* ── Deep copy a step chain (for morphism inlining) ── */
 
-static query_step_t* copy_steps(query_step_t* src) {
+query_step_t* copy_steps(query_step_t* src) {
     if (!src) return NULL;
     query_step_t* head = NULL;
     query_step_t* tail = NULL;
@@ -137,11 +156,12 @@ static query_step_t* copy_steps(query_step_t* src) {
         if (src->predicate) s->predicate = strdup(src->predicate);
         if (src->has_predicate) s->has_predicate = strdup(src->has_predicate);
         if (src->has_value) s->has_value = strdup(src->has_value);
-        if (src->num_children > 0) {
-            s->num_children = src->num_children;
-            s->children = (query_step_t**)get_clear_memory(s->num_children * sizeof(query_step_t*));
-            for (size_t i = 0; i < s->num_children; i++) {
-                s->children[i] = copy_steps(src->children[i]);
+        s->has_cmp = src->has_cmp;
+        if (src->morphism_name) s->morphism_name = strdup(src->morphism_name);
+        if (src->children.length > 0) {
+            vec_init(&s->children);
+            for (int i = 0; i < src->children.length; i++) {
+                vec_push(&s->children, copy_steps(src->children.data[i]));
             }
         }
         if (tail) tail->next = s;
@@ -188,19 +208,40 @@ static int parse_step(parser_t* p, graph_query_t* q) {
         char* pred = parse_string(p);
         if (!pred) goto done;
         if (!expect_char(p, ',')) { free(pred); goto done; }
-        char* val = parse_string(p);
-        if (!val) { free(pred); goto done; }
-        if (!expect_char(p, ')')) { free(pred); free(val); goto done; }
-        // Create HAS step manually
-        query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
-        s->type = GRAPH_STEP_HAS;
-        s->has_predicate = pred;
-        s->has_value = val;
-        rc = 0;
-        // Append to query manually
-        if (q->tail) q->tail->next = s;
-        else q->head = s;
-        q->tail = s;
+        // Check for comparison operator: >, >=, <, <=  or a second string (equality)
+        graph_cmp_op_t cmp = GRAPH_CMP_EQ;
+        skip_whitespace(p);
+        if (p->pos < p->len && p->input[p->pos] == '"') {
+            // Second argument is a string — equality comparison
+            char* val = parse_string(p);
+            if (!val) { free(pred); goto done; }
+            if (!expect_char(p, ')')) { free(pred); free(val); goto done; }
+            query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
+            s->type = GRAPH_STEP_HAS;
+            s->has_predicate = pred;
+            s->has_value = val;
+            s->has_cmp = cmp;
+            rc = 0;
+            if (q->tail) q->tail->next = s;
+            else q->head = s;
+            q->tail = s;
+        } else {
+            // Second argument is a comparison operator
+            if (!parse_cmp_op(p, &cmp)) { set_error(p, "Expected comparison operator or string"); free(pred); goto done; }
+            if (!expect_char(p, ',')) { free(pred); goto done; }
+            char* val = parse_string(p);
+            if (!val) { free(pred); goto done; }
+            if (!expect_char(p, ')')) { free(pred); free(val); goto done; }
+            query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
+            s->type = GRAPH_STEP_HAS;
+            s->has_predicate = pred;
+            s->has_value = val;
+            s->has_cmp = cmp;
+            rc = 0;
+            if (q->tail) q->tail->next = s;
+            else q->head = s;
+            q->tail = s;
+        }
     } else if (strcmp(ident, "And") == 0) {
         if (!expect_char(p, '(')) goto done;
         // Parse sub-query inside And()
@@ -210,9 +251,8 @@ static int parse_step(parser_t* p, graph_query_t* q) {
         // Create INTERSECT step with the sub-query as its only child
         query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
         s->type = GRAPH_STEP_INTERSECT;
-        s->num_children = 1;
-        s->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-        s->children[0] = child->head;
+        vec_init(&s->children);
+        vec_push(&s->children, child->head);
         child->head = NULL; // Transfer ownership
         if (q->tail) q->tail->next = s;
         else q->head = s;
@@ -227,9 +267,24 @@ static int parse_step(parser_t* p, graph_query_t* q) {
         // Create UNION step with the sub-query as its only child
         query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
         s->type = GRAPH_STEP_UNION;
-        s->num_children = 1;
-        s->children = (query_step_t**)get_clear_memory(sizeof(query_step_t*));
-        s->children[0] = child->head;
+        vec_init(&s->children);
+        vec_push(&s->children, child->head);
+        child->head = NULL;
+        if (q->tail) q->tail->next = s;
+        else q->head = s;
+        q->tail = s;
+        graph_query_destroy(child);
+        rc = 0;
+    } else if (strcmp(ident, "Not") == 0 || strcmp(ident, "Difference") == 0) {
+        if (!expect_char(p, '(')) goto done;
+        graph_query_t* child = graph_query_create(q->layer);
+        if (!parse_query(p, child)) { graph_query_destroy(child); goto done; }
+        if (!expect_char(p, ')')) { graph_query_destroy(child); goto done; }
+        // Create DIFFERENCE step with the sub-query as its only child
+        query_step_t* s = (query_step_t*)get_clear_memory(sizeof(query_step_t));
+        s->type = GRAPH_STEP_DIFFERENCE;
+        vec_init(&s->children);
+        vec_push(&s->children, child->head);
         child->head = NULL;
         if (q->tail) q->tail->next = s;
         else q->head = s;
@@ -258,9 +313,9 @@ static int parse_step(parser_t* p, graph_query_t* q) {
 
         // Look up morphism
         morphism_entry_t* found = NULL;
-        for (size_t i = 0; i < p->layer->morphism_count; i++) {
-            if (strcmp(p->layer->morphisms[i].name, name) == 0) {
-                found = &p->layer->morphisms[i];
+        for (int i = 0; i < p->layer->morphisms.length; i++) {
+            if (strcmp(p->layer->morphisms.data[i].name, name) == 0) {
+                found = &p->layer->morphisms.data[i];
                 break;
             }
         }
@@ -441,22 +496,11 @@ int graph_morphism_parse_and_store(graph_layer_t* layer, const char* name,
     }
 
     // Store on layer
-    if (layer->morphism_count >= layer->morphism_capacity) {
-        size_t new_cap = layer->morphism_capacity ? layer->morphism_capacity * 2 : 4;
-        morphism_entry_t* new_m = (morphism_entry_t*)get_clear_memory(new_cap * sizeof(morphism_entry_t));
-        if (layer->morphisms) {
-            memcpy(new_m, layer->morphisms, layer->morphism_count * sizeof(morphism_entry_t));
-            free(layer->morphisms);
-        }
-        layer->morphisms = new_m;
-        layer->morphism_capacity = new_cap;
-    }
-
-    size_t idx = layer->morphism_count;
-    layer->morphisms[idx].name = strdup(name);
-    layer->morphisms[idx].steps = q->head;
+    morphism_entry_t entry;
+    entry.name = strdup(name);
+    entry.steps = q->head;
     q->head = NULL; // Transfer ownership
-    layer->morphism_count++;
+    vec_push(&layer->morphisms, entry);
 
     graph_query_destroy(q);
     return 0;

@@ -154,6 +154,17 @@ int vertex_set_union(vertex_set_t* result, const vertex_set_t* a, const vertex_s
     return 0;
 }
 
+int vertex_set_difference(vertex_set_t* result, const vertex_set_t* a, const vertex_set_t* b) {
+    if (!result || !a || !b) return -1;
+    vertex_set_clear(result);
+    for (size_t i = 0; i < a->count; i++) {
+        if (!vertex_set_contains((vertex_set_t*)b, a->vertices[i])) {
+            vertex_set_add(result, a->vertices[i]);
+        }
+    }
+    return 0;
+}
+
 void vertex_set_clear(vertex_set_t* set) {
     if (!set) return;
     for (size_t i = 0; i < set->count; i++) {

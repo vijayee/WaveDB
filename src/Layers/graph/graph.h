@@ -34,6 +34,16 @@ typedef enum {
     GRAPH_STEP_MORPHISM,    // Lazy reference to a named morphism
 } graph_step_type_t;
 
+/* ── Comparison operators for Has filter ── */
+
+typedef enum {
+    GRAPH_CMP_EQ = 0,
+    GRAPH_CMP_GT,
+    GRAPH_CMP_GTE,
+    GRAPH_CMP_LT,
+    GRAPH_CMP_LTE
+} graph_cmp_op_t;
+
 /* ── Layer lifecycle ── */
 
 graph_layer_t* graph_layer_create(const char* path, database_config_t* config);
@@ -58,6 +68,8 @@ void graph_query_destroy(graph_query_t* q);
 int graph_query_vertex(graph_query_t* q, const char* id);
 int graph_query_out(graph_query_t* q, const char* predicate);
 int graph_query_in(graph_query_t* q, const char* predicate);
+int graph_query_has(graph_query_t* q, const char* predicate, const char* value);
+int graph_query_has_cmp(graph_query_t* q, const char* predicate, const char* value, graph_cmp_op_t cmp);
 int graph_query_intersect(graph_query_t* q, graph_query_t* left, graph_query_t* right);
 int graph_query_union(graph_query_t* q, graph_query_t* left, graph_query_t* right);
 int graph_query_difference(graph_query_t* q, graph_query_t* left, graph_query_t* right);

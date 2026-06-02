@@ -53,6 +53,19 @@ typedef struct {
     graph_index_flags_t indices;  // which indices to maintain
 } graph_schema_field_t;
 
+/* ── Statistics for cost-based reordering ── */
+
+typedef struct {
+    char* predicate;
+    size_t triple_count;       // total triples with this predicate
+    size_t distinct_subjects;  // distinct subjects for this predicate
+} graph_pred_stats_t;
+
+typedef struct {
+    size_t total_vertices;
+    vec_t(graph_pred_stats_t) predicates;
+} graph_stats_t;
+
 typedef struct {
     char* name;                  // type name
     graph_index_flags_t indices;  // default indices for the type
@@ -71,8 +84,9 @@ struct query_step_t {
     graph_step_type_t type;
     char* vertex_id;                // For GRAPH_STEP_VERTEX
     char* predicate;                // For GRAPH_STEP_OUT, GRAPH_STEP_IN
-    char* has_predicate;            // For GRAPH_STEP_HAS
-    char* has_value;                // For GRAPH_STEP_HAS
+    char* has_predicate;            // For GRAPH_STEP_HAS, or fused filter on OUT/IN
+    char* has_value;                 // For GRAPH_STEP_HAS, or fused filter on OUT/IN
+    graph_cmp_op_t has_cmp;         // For GRAPH_STEP_HAS (comparison operator)
     char* morphism_name;            // For GRAPH_STEP_MORPHISM
     size_t limit;                   // For GRAPH_STEP_LIMIT
     vec_t(query_step_t*) children;  // For GRAPH_STEP_INTERSECT, GRAPH_STEP_UNION, GRAPH_STEP_DIFFERENCE
@@ -90,12 +104,13 @@ int graph_execute_out(database_t* db, const vertex_set_t* input, const char* pre
 int graph_execute_in(database_t* db, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
 int graph_execute_has(database_t* db, const vertex_set_t* input,
                        const char* predicate, const char* value,
-                       vertex_set_t* output);
+                       graph_cmp_op_t cmp, vertex_set_t* output);
 int graph_execute_osp(database_t* db, const vertex_set_t* input,
                        const char* object, vertex_set_t* output);
 int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output);
 
 int graph_optimize(query_step_t** steps);
+int graph_optimize_reorder_has(query_step_t** steps, graph_layer_t* layer);
 
 /* ── Layer + Query struct (shared by graph.c and graph_parser.c) ── */
 
@@ -103,6 +118,8 @@ struct graph_layer_t {
     database_t* db;
     graph_schema_t* schema;
     vec_t(morphism_entry_t) morphisms;
+    graph_stats_t* stats;
+    int stats_computed;
 };
 
 struct graph_query_t {
@@ -111,6 +128,18 @@ struct graph_query_t {
     query_step_t* tail;
 };
 
+/* ── Path building helpers (implemented in graph.c) ── */
+
+void build_path_vec(vec_char_t* v, const char* index_name,
+                    const char* c1, const char* c2, const char* c3);
+void build_prefix_vec(vec_char_t* v, const char* index_name,
+                      const char* c1, const char* c2);
+
+/* ── Key component extraction (implemented in graph_ops.c) ── */
+
+const char* key_nth_component(const char* key, size_t key_len, int n,
+                              char* buf, size_t buf_size);
+
 /* ── Parser internals (implemented in graph_parser.c) ── */
 
 query_step_t* copy_steps(query_step_t* steps);
@@ -118,6 +147,14 @@ graph_query_t* graph_parse_query(const char* input, size_t len, graph_layer_t* l
 int graph_morphism_parse_and_store(graph_layer_t* layer, const char* name,
                                     const char* input, size_t len,
                                     graph_parse_error_t* error);
+
+/* ── Statistics (implemented in graph_stats.c) ── */
+
+int graph_stats_compute(graph_layer_t* layer);
+size_t graph_stats_estimate_has(graph_stats_t* stats, const char* predicate,
+                                 const char* value, graph_cmp_op_t cmp);
+size_t graph_stats_estimate_out(graph_stats_t* stats, const char* predicate, size_t input_size);
+size_t graph_stats_estimate_in(graph_stats_t* stats, const char* predicate, size_t input_size);
 
 /* ── Schema parser internals (implemented in graph_schema_parser.c) ── */
 
