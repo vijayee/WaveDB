@@ -10,7 +10,7 @@ GraphQuery g([GraphLayer? layer]) => GraphQuery(layer ?? _defaultGraph);
 GraphLayer? _defaultGraph;
 
 /// Operation type for async graph dispatch
-enum _GraphAsyncOpType { insert, delete }
+enum _GraphAsyncOpType { insert, delete, query }
 
 /// Pending async operation context for graph layer
 class _GraphPendingOp {
@@ -26,6 +26,9 @@ class _GraphPendingOp {
 ///
 /// Provides triple insert/delete and DSL query execution on top of
 /// WaveDB's hierarchical key-value store.
+///
+/// When created without a path, data and schema are stored in a temporary
+/// directory that is deleted on close — use a persistent path for production.
 class GraphLayer implements Finalizable {
   Pointer<graph_layer_t>? _layer;
   bool _closed = false;
@@ -94,6 +97,25 @@ class GraphLayer implements Finalizable {
         case _GraphAsyncOpType.delete:
           // C resolves with NULL on success, rejects on failure.
           pending.completer.complete(null);
+          break;
+        case _GraphAsyncOpType.query:
+          // payload is a graph_result_t* — extract vertices
+          if (payload != nullptr) {
+            final resultPtr = payload.cast<graph_result_t>();
+            final count = WaveDBNative.graphResultCount(resultPtr);
+            final verticesPtr = WaveDBNative.graphResultVertices(resultPtr);
+            final results = <String>[];
+            for (var i = 0; i < count; i++) {
+              final vPtr = verticesPtr.elementAt(i).value;
+              if (vPtr != nullptr) {
+                results.add(vPtr.cast<Utf8>().toDartString());
+              }
+            }
+            WaveDBNative.graphResultDestroy(resultPtr);
+            pending.completer.complete(results);
+          } else {
+            pending.completer.complete(<String>[]);
+          }
           break;
       }
     } catch (e) {
@@ -178,13 +200,13 @@ class GraphLayer implements Finalizable {
     });
   }
 
-  /// Execute a DSL query asynchronously.
-  /// Note: query is currently synchronous (runs on main isolate) because
-  /// the C layer's async query API requires an opaque graph_query_t pointer
-  /// that cannot be constructed from Dart. A future C API addition of
-  /// graph_parse_execute_async would enable true async queries.
-  Future<List<String>> query(Object dsl) async {
-    return exec(dsl);
+  /// Execute a DSL query asynchronously (dispatches to C worker pool).
+  Future<List<String>> query(Object dsl) {
+    _checkOpen();
+    final dslStr = dsl is GraphQuery ? dsl._toDSL() : dsl as String;
+    return _dispatchAsync<List<String>>(_GraphAsyncOpType.query, (promise) {
+      WaveDBNative.graphParseExecuteAsync(_layer!, dslStr, promise);
+    });
   }
 
   // ── Sync operations ──

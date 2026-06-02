@@ -159,7 +159,7 @@ void main() {
     final results = g().HasGt('age', '25').All();
     expect(results, hasLength(1));
     expect(results[0], 'bob');
-  }, skip: 'Dart FFI encoding issue with > character in DSL');
+  });
 
   test('HasGte filter', () {
     graph.insertSync('alice', 'age', '25');
@@ -170,7 +170,7 @@ void main() {
     expect(results, hasLength(2));
     expect(results, contains('alice'));
     expect(results, contains('bob'));
-  }, skip: 'Dart FFI encoding issue with >= character in DSL');
+  });
 
   test('HasLt filter', () {
     graph.insertSync('alice', 'age', '25');
@@ -180,7 +180,7 @@ void main() {
     final results = g().HasLt('age', '25').All();
     expect(results, hasLength(1));
     expect(results[0], 'carol');
-  }, skip: 'Dart FFI encoding issue with < character in DSL');
+  });
 
   test('HasLte filter', () {
     graph.insertSync('alice', 'age', '25');
@@ -191,7 +191,7 @@ void main() {
     expect(results, hasLength(2));
     expect(results, contains('alice'));
     expect(results, contains('carol'));
-  }, skip: 'Dart FFI encoding issue with <= character in DSL');
+  });
 
   test('HasGte chained with Out traversal', () {
     graph.insertSync('alice', 'age', '25');
@@ -203,7 +203,7 @@ void main() {
     final results = g().V('alice').HasGte('age', '25').Out('follows').All();
     expect(results, hasLength(1));
     expect(results[0], 'carol');
-  }, skip: 'Dart FFI encoding issue with >= character in DSL');
+  });
 
   test('union query (Or)', () {
     graph.insertSync('clip_abc', 'tagged_with', 'gaming');

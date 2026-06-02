@@ -8,6 +8,7 @@
 #include "graph.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
+#include "../../Util/threadding.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -120,6 +121,7 @@ struct graph_layer_t {
     vec_t(morphism_entry_t) morphisms;
     graph_stats_t* stats;
     int stats_computed;
+    PLATFORMRWLOCKTYPE(lock);
 };
 
 struct graph_query_t {

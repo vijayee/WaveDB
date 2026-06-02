@@ -11,7 +11,8 @@ A hierarchical key-value database with MVCC concurrency, WAL durability, and sch
 - **Hierarchical key paths** — Store and retrieve values at paths like `users/alice/name`
 - **MVCC** — Lock-free concurrent reads with snapshot isolation
 - **WAL durability** — Thread-local write-ahead log with configurable sync modes
-- **Schema Layers** — GraphQL access today, SQL roadmap
+- **Schema Layers** — GraphQL and Graph access today, SQL roadmap
+- **Graph Layer** — Triple-store with Gremlin-style traversal, schema-driven indexing, and cost-based query optimization
 - **Language bindings** — C, Node.js, Dart
 - **High throughput** — Sharded LRU cache with memory pooling, inline key comparison, MVCC fast-path
 
@@ -100,7 +101,7 @@ WaveDB stores values at hierarchical key paths using an HBTrie — a B+tree wher
 
 **Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync every 250ms, recommended), ASYNC (buffer flushed to kernel on 250ms idle timer, survives process crash but not power failure).
 
-**Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans.
+**Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans. The Graph layer provides a triple-store with Gremlin-style traversal and cost-based optimization.
 
 ## Configuration
 
@@ -251,6 +252,56 @@ graphql_layer_destroy(layer);
 
 Query plans are compiled from SDL + query and executed as scan, get, or batch-get operations against the database. Custom resolvers can be registered for computed fields.
 
+### Graph
+
+The Graph layer provides a triple-store (subject-predicate-object) with Gremlin-inspired traversal, schema-driven automatic indexing, and cost-based query optimization.
+
+```c
+#include "Layers/graph/graph.h"
+
+graph_layer_t* layer = graph_layer_create("/path/to/db", NULL);
+
+// Define schema with index hints
+graph_schema_parse(layer,
+    "type Clip @index(spo, pos) {"
+    "  tagged_with: [Tag];"
+    "  name: String @index(pos);"
+    "}", NULL);
+
+// Insert triples
+graph_insert_sync(layer, "clip_abc", "tagged_with", "gaming");
+graph_insert_sync(layer, "clip_abc", "name", "My Clip");
+graph_insert_sync(layer, "clip_xyz", "tagged_with", "gaming");
+
+// Query with Gremlin-style DSL
+graph_result_t* r1 = graph_parse_execute(
+    "g.V(\"clip_abc\").Out(\"tagged_with\")", layer, NULL);
+// r1 → ["gaming"]
+
+// Intersection
+graph_result_t* r2 = graph_parse_execute(
+    "g.V(\"gaming\").In(\"tagged_with\")"
+    ".And(g.V(\"clip_abc\").Out(\"tagged_with\"))", layer, NULL);
+
+// Range predicates
+graph_result_t* r3 = graph_parse_execute(
+    "g.Has(\"age\", >=, \"25\").Out(\"follows\")", layer, NULL);
+
+// Morphisms (reusable query fragments)
+graph_morphism_define(layer, "friends_content",
+    "g.Morphism(\"friends_content\").Out(\"follows\").Out(\"likes\")", NULL);
+graph_result_t* r4 = graph_parse_execute(
+    "g.V(\"alice\").Follow(\"friends_content\")", layer, NULL);
+
+graph_result_destroy(r1);
+graph_result_destroy(r2);
+graph_result_destroy(r3);
+graph_result_destroy(r4);
+graph_layer_destroy(layer);
+```
+
+The optimizer automatically reorders `Has` filters by selectivity and sorts `Intersect` children by estimated cardinality, using statistics computed from PSO index scans. See `docs/graph-db-schema-layer.md` for the full design.
+
 ## Language Bindings
 
 ### Node.js
@@ -297,6 +348,14 @@ while ((entry = iter.read())) {
   console.log(entry.key, entry.value);
 }
 iter.end();
+
+// Graph Layer
+const { GraphLayer, g } = require('wavedb');
+const graph = new GraphLayer();
+graph.parseSchema('type Clip @index(spo, pos) { tagged_with: [Tag]; }');
+graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+const tags = g.V('clip_abc').Out('tagged_with').All(); // ['gaming']
+graph.close();
 ```
 
 See [bindings/nodejs/README.md](bindings/nodejs/README.md) for full API reference.
@@ -336,6 +395,12 @@ final layer = GraphQLLayer();
 layer.create(GraphQLLayerConfig(path: '/path/to/db'));
 layer.parseSchema('type User { name: String } type Query { user(id: ID!): User }');
 final result = layer.querySync('{ user(id: "alice") { name } }');
+
+// Graph Layer
+final graph = GraphLayer();
+graph.parseSchema('type Clip @index(spo, pos) { tagged_with: [Tag]; }');
+graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+final clips = g().V('clip_abc').Out('tagged_with').All(); // ['gaming']
 
 db.close();
 ```

@@ -102,6 +102,7 @@ typedef struct {
 
 graph_query_t* graph_parse(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error);
 graph_result_t* graph_parse_execute(const char* dsl, graph_layer_t* layer, graph_parse_error_t* error);
+int graph_parse_execute_async(const char* dsl, graph_layer_t* layer, promise_t* promise, graph_parse_error_t* error);
 int graph_parse_count(const char* dsl, graph_layer_t* layer, size_t* count, graph_parse_error_t* error);
 
 /* ── Morphisms ── */

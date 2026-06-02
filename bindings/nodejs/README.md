@@ -297,6 +297,125 @@ layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
 // { success: true, data: { createUser: { id: '1', name: 'Alice' } } }
 ```
 
+## Graph Schema Layer
+
+A triple-store (subject-predicate-object) with Gremlin-style traversal, schema-driven indexing, and cost-based query optimization.
+
+```javascript
+const { GraphLayer, g } = require('wavedb');
+
+const graph = new GraphLayer();
+
+// Insert triples
+graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+graph.insertSync('clip_abc', 'tagged_with', 'tutorial');
+graph.insertSync('clip_xyz', 'tagged_with', 'gaming');
+
+// Traversal with query builder
+const tags = g.V('clip_abc').Out('tagged_with').All();
+// ['gaming', 'tutorial']
+
+// Incoming edges
+const clips = g.V('gaming').In('tagged_with').All();
+// ['clip_abc', 'clip_xyz']
+
+// Intersection
+const both = g.V('gaming').In('tagged_with')
+  .And(g.V('tutorial').In('tagged_with')).All();
+// ['clip_abc']
+
+// Union
+const any = g.V('clip_abc').Out('tagged_with')
+  .Or(g.V('clip_xyz').Out('tagged_with')).All();
+
+// Difference
+const only = g.V('gaming').In('tagged_with')
+  .Not(g.V('tutorial').In('tagged_with')).All();
+// ['clip_xyz']
+
+graph.close();
+```
+
+### Schema and Indexing
+
+Define types and index hints to enable multi-index lookups and filter pushdown:
+
+```javascript
+graph.parseSchema(`
+  type Clip @index(spo, pos) {
+    tagged_with: [Tag];
+    name: String @index(pos);
+    age: Int @index(pos);
+  }
+`);
+
+// Schema enables POS-index scan for Has filters
+const named = g.Has('name', 'My Clip').All();
+
+// Range predicates use POS range scans
+const adults = g.HasGte('age', '25').All();
+```
+
+### Range Predicates
+
+| Method | Operator | Example |
+|--------|----------|---------|
+| `Has(pred, val)` | `=` | `g.Has('age', '25')` |
+| `HasGt(pred, val)` | `>` | `g.HasGt('age', '25')` |
+| `HasGte(pred, val)` | `>=` | `g.HasGte('age', '25')` |
+| `HasLt(pred, val)` | `<` | `g.HasLt('age', '25')` |
+| `HasLte(pred, val)` | `<=` | `g.HasLte('age', '25')` |
+
+### DSL Execution
+
+```javascript
+// Direct DSL string
+const result = graph.exec('g.V("clip_abc").Out("tagged_with")');
+
+// Async query
+const result = await graph.query('g.V("gaming").In("tagged_with")');
+
+// Count
+const n = graph.count('g.V("gaming").In("tagged_with")');
+```
+
+### Morphisms
+
+Reusable query fragments:
+
+```javascript
+graph.defineMorphism('friends_content',
+  'g.Morphism("friends_content").Out("follows").Out("likes")');
+
+const result = g.V('alice').Follow('friends_content').All();
+```
+
+### Async Operations
+
+```javascript
+await graph.insert('clip_abc', 'tagged_with', 'gaming');
+await graph.del('clip_abc', 'tagged_with', 'gaming');
+const result = await graph.query('g.V("clip_abc").Out("tagged_with")');
+```
+
+### Query Builder API
+
+| Method | Description |
+|--------|-------------|
+| `g.V(id)` | Start from a vertex |
+| `.Out(pred)` | Traverse outgoing edges |
+| `.In(pred)` | Traverse incoming edges |
+| `.Has(pred, val)` | Filter by predicate=value |
+| `.HasGt/Gte/Lt/Lte(pred, val)` | Range filter |
+| `.And(sub)` | Intersect with sub-query |
+| `.Or(sub)` | Union with sub-query |
+| `.Not(sub)` | Difference from sub-query |
+| `.Limit(n)` | Limit results |
+| `.Follow(name)` | Follow a morphism |
+| `.All()` | Execute and return results array |
+| `.Count()` | Execute and return count |
+| `.toString()` | Render DSL string (debugging) |
+
 ## Error Handling
 
 ```javascript

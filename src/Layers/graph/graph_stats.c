@@ -15,6 +15,7 @@
 int graph_stats_compute(graph_layer_t* layer) {
     if (!layer || !layer->db) return -1;
     if (layer->stats) return 0; // already computed
+    // Caller must hold write-lock on layer->lock (writes layer->stats and layer->stats_computed)
 
     graph_stats_t* stats = (graph_stats_t*)get_clear_memory(sizeof(graph_stats_t));
     vec_init(&stats->predicates);
@@ -52,7 +53,7 @@ int graph_stats_compute(graph_layer_t* layer) {
 
                 size_t prefix_len = prefix.length - 1;
                 char end_buf[4096];
-                if (prefix_len >= sizeof(end_buf)) { vec_deinit(&prefix); continue; }
+                if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); continue; }
                 memcpy(end_buf, prefix.data, prefix_len);
                 size_t end_len = append_successor(end_buf, prefix_len);
 

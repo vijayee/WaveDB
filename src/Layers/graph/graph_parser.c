@@ -78,21 +78,33 @@ static char* parse_string(parser_t* p) {
     }
     p->pos++; // skip opening quote
 
-    size_t start = p->pos;
-    while (p->pos < p->len && p->input[p->pos] != '"') {
-        p->pos++;
-    }
-    if (p->pos >= p->len) {
-        set_error(p, "Unterminated string");
-        return NULL;
+    vec_char_t buf;
+    vec_init(&buf);
+
+    while (p->pos < p->len) {
+        if (p->input[p->pos] == '\\') {
+            // Escape sequence: consume backslash + next char
+            p->pos++;
+            if (p->pos >= p->len) {
+                vec_deinit(&buf);
+                set_error(p, "Unterminated escape in string");
+                return NULL;
+            }
+            vec_push(&buf, p->input[p->pos]);
+            p->pos++;
+        } else if (p->input[p->pos] == '"') {
+            p->pos++; // skip closing quote
+            break;
+        } else {
+            vec_push(&buf, p->input[p->pos]);
+            p->pos++;
+        }
     }
 
-    size_t slen = p->pos - start;
-    char* s = (char*)get_memory(slen + 1);
-    memcpy(s, p->input + start, slen);
-    s[slen] = '\0';
-    p->pos++; // skip closing quote
-    return s;
+    vec_push(&buf, '\0');
+    // Transfer ownership: buf.data is a heap-allocated null-terminated string
+    char* result = buf.data;
+    return result;
 }
 
 static long parse_number(parser_t* p) {

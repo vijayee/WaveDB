@@ -320,6 +320,119 @@ layer.mutateSync('mutation { createUser(name: "Alice") { id name } }');
 - `dynamic data` — Returned data
 - `List<GraphQLError> errors` — Error messages
 
+## Graph Schema Layer
+
+A triple-store (subject-predicate-object) with Gremlin-style traversal, schema-driven indexing, and cost-based query optimization.
+
+```dart
+import 'package:wavedb/wavedb.dart';
+
+final graph = GraphLayer();
+
+// Insert triples
+graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+graph.insertSync('clip_abc', 'tagged_with', 'tutorial');
+graph.insertSync('clip_xyz', 'tagged_with', 'gaming');
+
+// Traversal with query builder
+final tags = g().V('clip_abc').Out('tagged_with').All();
+// ['gaming', 'tutorial']
+
+// Incoming edges
+final clips = g().V('gaming').In('tagged_with').All();
+// ['clip_abc', 'clip_xyz']
+
+// Intersection
+final both = g().V('gaming').In('tagged_with')
+    .And(g().V('tutorial').In('tagged_with')).All();
+// ['clip_abc']
+
+// Union
+final any = g().V('clip_abc').Out('tagged_with')
+    .Or(g().V('clip_xyz').Out('tagged_with')).All();
+
+// Difference
+final only = g().V('gaming').In('tagged_with')
+    .Not(g().V('tutorial').In('tagged_with')).All();
+// ['clip_xyz']
+
+await graph.close();
+```
+
+### Schema and Indexing
+
+Define types and index hints to enable multi-index lookups and filter pushdown:
+
+```dart
+graph.parseSchema('type Clip @index(spo, pos) {'
+    '  tagged_with: [Tag];'
+    '  name: String @index(pos);'
+    '  age: Int @index(pos);'
+    '}');
+
+// Schema enables POS-index scan for Has filters
+final named = g().Has('name', 'My Clip').All();
+
+// Range predicates use POS range scans
+final adults = g().HasGte('age', '25').All();
+```
+
+### Range Predicates
+
+| Method | Operator | Example |
+|--------|----------|---------|
+| `Has(pred, val)` | `=` | `g().Has('age', '25')` |
+| `HasGt(pred, val)` | `>` | `g().HasGt('age', '25')` |
+| `HasGte(pred, val)` | `>=` | `g().HasGte('age', '25')` |
+| `HasLt(pred, val)` | `<` | `g().HasLt('age', '25')` |
+| `HasLte(pred, val)` | `<=` | `g().HasLte('age', '25')` |
+
+### DSL Execution
+
+```dart
+// Direct DSL string
+final result = graph.exec('g.V("clip_abc").Out("tagged_with")');
+
+// Count
+final n = graph.count('g.V("gaming").In("tagged_with")');
+```
+
+### Morphisms
+
+Reusable query fragments:
+
+```dart
+graph.defineMorphism('friends_content',
+    'g.Morphism("friends_content").Out("follows").Out("likes")');
+
+final result = g().V('alice').Follow('friends_content').All();
+```
+
+### Async Operations
+
+```dart
+await graph.insert('clip_abc', 'tagged_with', 'gaming');
+await graph.del('clip_abc', 'tagged_with', 'gaming');
+```
+
+### Query Builder API
+
+| Method | Description |
+|--------|-------------|
+| `g().V(id)` | Start from a vertex |
+| `.Out(pred)` | Traverse outgoing edges |
+| `.In(pred)` | Traverse incoming edges |
+| `.Has(pred, val)` | Filter by predicate=value |
+| `.HasGt/Gte/Lt/Lte(pred, val)` | Range filter |
+| `.And(sub)` | Intersect with sub-query |
+| `.Or(sub)` | Union with sub-query |
+| `.Not(sub)` | Difference from sub-query |
+| `.Limit(n)` | Limit results |
+| `.Follow(name)` | Follow a morphism |
+| `.All()` | Execute and return results list |
+| `.Count()` | Execute and return count |
+| `.toString()` | Render DSL string (debugging) |
+
 ## Performance
 
 Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 32 worker threads, async WAL.

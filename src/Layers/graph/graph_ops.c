@@ -106,6 +106,7 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
 
         char end_buf[4096];
         size_t prefix_len = prefix.length - 1;  /* exclude null terminator */
+        if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); continue; }
         memcpy(end_buf, prefix.data, prefix_len);
         size_t end_len = append_successor(end_buf, prefix_len);
 
@@ -146,6 +147,7 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
 
         char end_buf[4096];
         size_t prefix_len = prefix.length - 1;
+        if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); continue; }
         memcpy(end_buf, prefix.data, prefix_len);
         size_t end_len = append_successor(end_buf, prefix_len);
 
@@ -201,6 +203,7 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
 
         char end_buf[4096];
         size_t prefix_len = prefix.length - 1;
+        if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); return -1; }
         memcpy(end_buf, prefix.data, prefix_len);
         size_t end_len = append_successor(end_buf, prefix_len);
 
@@ -239,20 +242,26 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
         char end_buf[4096];
         const char* end_prefix = NULL;
         size_t end_prefix_len = 0;
+        size_t val_len = strlen(value);
+
+        if (prefix_len + val_len + 2 > sizeof(end_buf)) {
+            vec_deinit(&prefix);
+            return -1;
+        }
 
         if (cmp == GRAPH_CMP_LT) {
             /* LT: scan up to /pos/<predicate>/<value>/ (exclusive) */
             memcpy(end_buf, prefix.data, prefix_len);
-            memcpy(end_buf + prefix_len, value, strlen(value));
-            end_buf[prefix_len + strlen(value)] = '/';
-            end_buf[prefix_len + strlen(value) + 1] = '\0';
+            memcpy(end_buf + prefix_len, value, val_len);
+            end_buf[prefix_len + val_len] = '/';
+            end_buf[prefix_len + val_len + 1] = '\0';
             end_prefix = end_buf;
-            end_prefix_len = prefix_len + strlen(value) + 1;
+            end_prefix_len = prefix_len + val_len + 1;
         } else if (cmp == GRAPH_CMP_LTE) {
             /* LTE: scan up to /pos/<predicate>/<value>0 (exclusive) */
             memcpy(end_buf, prefix.data, prefix_len);
-            memcpy(end_buf + prefix_len, value, strlen(value));
-            end_prefix_len = prefix_len + strlen(value);
+            memcpy(end_buf + prefix_len, value, val_len);
+            end_prefix_len = prefix_len + val_len;
             end_prefix_len = append_successor(end_buf, end_prefix_len);
             end_prefix = end_buf;
         }
@@ -380,6 +389,7 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
 
         char end_buf[4096];
         size_t prefix_len = prefix.length - 1;
+        if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); continue; }
         memcpy(end_buf, prefix.data, prefix_len);
         size_t end_len = append_successor(end_buf, prefix_len);
 
@@ -420,6 +430,7 @@ int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* outpu
     size_t prefix_len = prefix.length - 1;
 
     char end_buf[4096];
+    if (prefix_len + 2 > sizeof(end_buf)) { vec_deinit(&prefix); return -1; }
     memcpy(end_buf, prefix.data, prefix_len);
     size_t end_len = append_successor(end_buf, prefix_len);
 

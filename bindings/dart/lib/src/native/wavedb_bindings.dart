@@ -979,6 +979,12 @@ typedef GraphDeleteAsyncC = Void Function(
 typedef GraphDeleteAsync = void Function(
   Pointer<graph_layer_t>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<promise_t>);
 
+/// C signature: int graph_parse_execute_async(const char* dsl, graph_layer_t*, promise_t*, graph_parse_error_t*)
+typedef GraphParseExecuteAsyncC = Int32 Function(
+  Pointer<Utf8>, Pointer<graph_layer_t>, Pointer<promise_t>, Pointer<GraphParseError>);
+typedef GraphParseExecuteAsync = int Function(
+  Pointer<Utf8>, Pointer<graph_layer_t>, Pointer<promise_t>, Pointer<GraphParseError>);
+
 // ============================================================
 // C TYPEDEFS - Promise
 // ============================================================
@@ -1325,6 +1331,9 @@ class WaveDBNative {
 
   static late final GraphDeleteAsync _graphDeleteAsync = WaveDBLibrary.load()
       .lookupFunction<GraphDeleteAsyncC, GraphDeleteAsync>('graph_delete');
+
+  static late final GraphParseExecuteAsync _graphParseExecuteAsync = WaveDBLibrary.load()
+      .lookupFunction<GraphParseExecuteAsyncC, GraphParseExecuteAsync>('graph_parse_execute_async');
 
   // Promise operations
   static late final PromiseCreate _promiseCreate = WaveDBLibrary.load()
@@ -2379,6 +2388,21 @@ class WaveDBNative {
       calloc.free(sPtr);
       calloc.free(pPtr);
       calloc.free(oPtr);
+    }
+  }
+
+  static int graphParseExecuteAsync(
+    Pointer<graph_layer_t> layer, String dsl,
+    Pointer<promise_t> promise,
+  ) {
+    final dslPtr = dsl.toNativeUtf8();
+    final errorPtr = calloc<GraphParseError>();
+    try {
+      final rc = _graphParseExecuteAsync(dslPtr.cast(), layer, promise, errorPtr);
+      return rc;
+    } finally {
+      calloc.free(dslPtr);
+      calloc.free(errorPtr);
     }
   }
 

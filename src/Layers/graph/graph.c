@@ -64,6 +64,7 @@ graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
     }
     layer->schema = NULL;
     vec_init(&layer->morphisms);
+    platform_rw_lock_init(&layer->lock);
 
     // Load persisted schema if reopening an existing database
     if (layer->db) {
@@ -75,6 +76,7 @@ graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
 
 void graph_layer_destroy(graph_layer_t* layer) {
     if (!layer) return;
+    platform_rw_lock_w(&layer->lock);
     if (layer->db) {
         // Flush any pending writes (schema metadata etc.) before closing
         database_snapshot(layer->db);
@@ -129,6 +131,8 @@ void graph_layer_destroy(graph_layer_t* layer) {
         free(layer->stats);
     }
     vec_deinit(&layer->morphisms);
+    platform_rw_unlock_w(&layer->lock);
+    platform_rw_lock_destroy(&layer->lock);
     free(layer);
 }
 
@@ -141,6 +145,8 @@ database_t* graph_layer_get_db(graph_layer_t* layer) {
 int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o) {
     if (!layer || !s || !p || !o) return -1;
     if (!layer->db) return -1;
+
+    platform_rw_lock_r(&layer->lock);
 
     vec_char_t path_spo, path_pos, path_osp, path_pso;
     uint8_t empty_val = 0;
@@ -188,7 +194,7 @@ int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const 
         count++;
     }
 
-    if (count == 0) return 0;  // Schema says no indices needed — valid
+    if (count == 0) { platform_rw_unlock_r(&layer->lock); return 0; }
 
     int rc = database_batch_sync_raw(layer->db, '/', ops, count);
 
@@ -197,6 +203,8 @@ int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const 
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) vec_deinit(&path_osp);
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) vec_deinit(&path_pso);
 
+    platform_rw_unlock_r(&layer->lock);
+
     return rc;
 }
 
@@ -204,39 +212,65 @@ int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const 
     if (!layer || !s || !p || !o) return -1;
     if (!layer->db) return -1;
 
-    vec_char_t path;
-    int rc = 0;
+    platform_rw_lock_r(&layer->lock);
+
+    vec_char_t path_spo, path_pos, path_osp, path_pso;
+    raw_op_t ops[4];
+    int count = 0;
 
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) {
-        vec_init(&path);
-        build_path_vec(&path, "spo", s, p, o);
-        rc = database_delete_sync_raw(layer->db, path.data, path.length - 1, '/');
-        vec_deinit(&path);
-        if (rc != 0) return rc;
+        vec_init(&path_spo);
+        build_path_vec(&path_spo, "spo", s, p, o);
+        ops[count].key = path_spo.data;
+        ops[count].key_len = path_spo.length - 1;
+        ops[count].value = NULL;
+        ops[count].value_len = 0;
+        ops[count].type = 1; // delete
+        count++;
     }
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) {
-        vec_init(&path);
-        build_path_vec(&path, "pos", p, o, s);
-        rc = database_delete_sync_raw(layer->db, path.data, path.length - 1, '/');
-        vec_deinit(&path);
-        if (rc != 0) return rc;
+        vec_init(&path_pos);
+        build_path_vec(&path_pos, "pos", p, o, s);
+        ops[count].key = path_pos.data;
+        ops[count].key_len = path_pos.length - 1;
+        ops[count].value = NULL;
+        ops[count].value_len = 0;
+        ops[count].type = 1;
+        count++;
     }
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) {
-        vec_init(&path);
-        build_path_vec(&path, "osp", o, s, p);
-        rc = database_delete_sync_raw(layer->db, path.data, path.length - 1, '/');
-        vec_deinit(&path);
-        if (rc != 0) return rc;
+        vec_init(&path_osp);
+        build_path_vec(&path_osp, "osp", o, s, p);
+        ops[count].key = path_osp.data;
+        ops[count].key_len = path_osp.length - 1;
+        ops[count].value = NULL;
+        ops[count].value_len = 0;
+        ops[count].type = 1;
+        count++;
     }
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) {
-        vec_init(&path);
-        build_path_vec(&path, "pso", p, s, o);
-        rc = database_delete_sync_raw(layer->db, path.data, path.length - 1, '/');
-        vec_deinit(&path);
-        if (rc != 0) return rc;
+        vec_init(&path_pso);
+        build_path_vec(&path_pso, "pso", p, s, o);
+        ops[count].key = path_pso.data;
+        ops[count].key_len = path_pso.length - 1;
+        ops[count].value = NULL;
+        ops[count].value_len = 0;
+        ops[count].type = 1;
+        count++;
     }
 
-    return 0;
+    int rc = 0;
+    if (count > 0) {
+        rc = database_batch_sync_raw(layer->db, '/', ops, count);
+    }
+
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) vec_deinit(&path_spo);
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) vec_deinit(&path_pos);
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP)) vec_deinit(&path_osp);
+    if (graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO)) vec_deinit(&path_pso);
+
+    platform_rw_unlock_r(&layer->lock);
+    return rc;
 }
 
 /* ── Triple operations (async) ── */
@@ -501,6 +535,15 @@ struct graph_result_t {
 graph_result_t* graph_query_execute_sync(graph_query_t* q) {
     if (!q || !q->head) return NULL;
 
+    // Ensure stats are computed before taking read-lock (stats_compute needs write-lock)
+    if (!q->layer->stats_computed) {
+        platform_rw_lock_w(&q->layer->lock);
+        graph_stats_compute(q->layer);
+        platform_rw_unlock_w(&q->layer->lock);
+    }
+
+    platform_rw_lock_r(&q->layer->lock);
+
     graph_result_t* r = (graph_result_t*)get_clear_memory(sizeof(graph_result_t));
     vertex_set_init(&r->set, 64);
 
@@ -512,9 +555,11 @@ graph_result_t* graph_query_execute_sync(graph_query_t* q) {
     if (rc != 0) {
         vertex_set_destroy(&r->set);
         free(r);
+        platform_rw_unlock_r(&q->layer->lock);
         return NULL;
     }
 
+    platform_rw_unlock_r(&q->layer->lock);
     return r;
 }
 
@@ -613,6 +658,27 @@ graph_result_t* graph_parse_execute(const char* dsl, graph_layer_t* layer, graph
     return r;
 }
 
+int graph_parse_execute_async(const char* dsl, graph_layer_t* layer, promise_t* promise, graph_parse_error_t* error) {
+    if (!dsl || !layer || !promise) {
+        if (error) { error->ok = 0; snprintf(error->message, sizeof(error->message), "NULL argument"); error->position = 0; }
+        if (promise) {
+            async_error_t* err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
+        return -1;
+    }
+    graph_query_t* q = graph_parse(dsl, layer, error);
+    if (!q) {
+        async_error_t* err = ERROR("Parse error");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return -1;
+    }
+    graph_query_execute(q, promise);
+    return 0;
+}
+
 int graph_parse_count(const char* dsl, graph_layer_t* layer, size_t* count, graph_parse_error_t* error) {
     if (!count) return -1;
     graph_result_t* r = graph_parse_execute(dsl, layer, error);
@@ -627,15 +693,21 @@ int graph_morphism_define(graph_layer_t* layer, const char* name, const char* ds
         if (error) { error->ok = 0; snprintf(error->message, sizeof(error->message), "NULL argument"); error->position = 0; }
         return -1;
     }
-    return graph_morphism_parse_and_store(layer, name, dsl, strlen(dsl), error);
+    platform_rw_lock_w(&layer->lock);
+    int rc = graph_morphism_parse_and_store(layer, name, dsl, strlen(dsl), error);
+    platform_rw_unlock_w(&layer->lock);
+    return rc;
 }
 
 /* ── Schema definition ── */
 
 int graph_schema_parse(graph_layer_t* layer, const char* dsl, char** error_out) {
     if (!layer || !dsl) return -1;
+    platform_rw_lock_w(&layer->lock);
     extern int graph_schema_parse_dsl(graph_layer_t* layer, const char* input, size_t len, char** error_out);
-    return graph_schema_parse_dsl(layer, dsl, strlen(dsl), error_out);
+    int rc = graph_schema_parse_dsl(layer, dsl, strlen(dsl), error_out);
+    platform_rw_unlock_w(&layer->lock);
+    return rc;
 }
 
 int graph_schema_needs_index(graph_layer_t* layer, const char* predicate, graph_index_flags_t index) {
