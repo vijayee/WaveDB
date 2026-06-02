@@ -8,6 +8,7 @@
 #include "../../../src/Database/database.h"
 #include "../../../src/Database/batch.h"
 #include "../../../src/Layers/graphql/graphql.h"
+#include "../../../src/Layers/graph/graph.h"
 
 // Type of async operation
 enum class AsyncOpType {
@@ -16,7 +17,10 @@ enum class AsyncOpType {
   Delete,
   Batch,
   Query,
-  Mutate
+  Mutate,
+  GraphInsert,
+  GraphDelete,
+  GraphQuery
 };
 
 // Per-operation context: bridges C promise callbacks to JS Promise

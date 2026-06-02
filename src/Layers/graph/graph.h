@@ -28,8 +28,10 @@ typedef enum {
     GRAPH_STEP_IN,          // Traverse incoming edges (POS scan)
     GRAPH_STEP_INTERSECT,   // Intersection of sub-query results
     GRAPH_STEP_UNION,       // Union of sub-query results
+    GRAPH_STEP_DIFFERENCE,  // Set difference: left minus right
     GRAPH_STEP_LIMIT,       // Cap result count
-    GRAPH_STEP_HAS,       // filter: intersect with POS scan of (predicate, value)
+    GRAPH_STEP_HAS,         // Filter: intersect with POS scan of (predicate, value)
+    GRAPH_STEP_MORPHISM,    // Lazy reference to a named morphism
 } graph_step_type_t;
 
 /* ── Layer lifecycle ── */
@@ -58,7 +60,9 @@ int graph_query_out(graph_query_t* q, const char* predicate);
 int graph_query_in(graph_query_t* q, const char* predicate);
 int graph_query_intersect(graph_query_t* q, graph_query_t* left, graph_query_t* right);
 int graph_query_union(graph_query_t* q, graph_query_t* left, graph_query_t* right);
+int graph_query_difference(graph_query_t* q, graph_query_t* left, graph_query_t* right);
 int graph_query_limit(graph_query_t* q, size_t limit);
+int graph_query_follow(graph_query_t* q, const char* name);
 
 /* ── Execution (sync) ── */
 

@@ -58,6 +58,19 @@ describe('GraphLayer', function() {
     assert.strictEqual(result[0], 'clip_abc');
   });
 
+  it('should handle union queries (Or)', function() {
+    graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+    graph.insertSync('clip_xyz', 'tagged_with', 'tutorial');
+
+    const result = g.V('clip_abc').Out('tagged_with')
+      .Or(g.V('clip_xyz').Out('tagged_with'))
+      .All();
+
+    assert.strictEqual(result.length, 2);
+    assert.ok(result.includes('gaming'));
+    assert.ok(result.includes('tutorial'));
+  });
+
   it('should handle Has filters', function() {
     graph.insertSync('clip_abc', 'name', 'My Clip');
     graph.insertSync('clip_xyz', 'name', 'Other Clip');
@@ -117,5 +130,105 @@ describe('GraphLayer', function() {
   it('should be able to use Query.toString() for debugging', function() {
     const q = g.V('alice').Out('follows').Out('likes').Limit(5);
     assert.strictEqual(q.toString(), 'g.V("alice").Out("follows").Out("likes").Limit(5)');
+  });
+
+  it('should handle difference queries', function() {
+    graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+    graph.insertSync('clip_abc', 'tagged_with', 'tutorial');
+    graph.insertSync('clip_xyz', 'tagged_with', 'gaming');
+
+    const result = g.V('gaming').In('tagged_with')
+      .Not(g.V('tutorial').In('tagged_with'))
+      .All();
+
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'clip_xyz');
+  });
+
+  it('should support morphism definition and Follow', function() {
+    graph.insertSync('alice', 'follows', 'bob');
+    graph.insertSync('bob', 'likes', 'clip_abc');
+
+    graph.defineMorphism('friends_content',
+      'g.Morphism("friends_content").Out("follows").Out("likes")');
+
+    const result = g.V('alice').Follow('friends_content').All();
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'clip_abc');
+  });
+
+  it('should support parseSchema', function() {
+    graph.parseSchema('type Clip @index(spo, pos) { tagged_with: [Tag]; name: String @index(pos); }');
+    // Schema is stored; insert should still work
+    graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+    const result = g.V('clip_abc').Out('tagged_with').All();
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'gaming');
+  });
+
+  // Async operations
+
+  describe('async operations', function() {
+    it('should insert triples asynchronously', async function() {
+      await graph.insert('clip_abc', 'tagged_with', 'gaming');
+      await graph.insert('clip_abc', 'tagged_with', 'tutorial');
+
+      const result = g.V('clip_abc').Out('tagged_with').All();
+      assert.strictEqual(result.length, 2);
+      assert.ok(result.includes('gaming'));
+      assert.ok(result.includes('tutorial'));
+    });
+
+    it('should delete triples asynchronously', async function() {
+      graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+      await graph.del('clip_abc', 'tagged_with', 'gaming');
+
+      const result = g.V('clip_abc').Out('tagged_with').All();
+      assert.strictEqual(result.length, 0);
+    });
+
+    it('should query asynchronously', async function() {
+      graph.insertSync('clip_abc', 'tagged_with', 'gaming');
+      graph.insertSync('clip_xyz', 'tagged_with', 'gaming');
+
+      const result = await graph.query('g.V("gaming").In("tagged_with")');
+      assert.ok(Array.isArray(result));
+      assert.strictEqual(result.length, 2);
+      assert.ok(result.includes('clip_abc'));
+      assert.ok(result.includes('clip_xyz'));
+    });
+
+    it('should query asynchronously with Query object', async function() {
+      graph.insertSync('alice', 'follows', 'bob');
+      graph.insertSync('bob', 'likes', 'clip_abc');
+
+      const q = new Query(graph);
+      q.V('alice').Out('follows').Out('likes');
+      const result = await graph.query(q);
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0], 'clip_abc');
+    });
+
+    it('should reject on query parse error', async function() {
+      try {
+        await graph.query('g.InvalidStep("test")');
+        assert.fail('Should have thrown');
+      } catch (e) {
+        assert.ok(e.message.length > 0);
+      }
+    });
+
+    it('should handle multiple async inserts concurrently', async function() {
+      const promises = [
+        graph.insert('a', 'knows', 'b'),
+        graph.insert('b', 'knows', 'c'),
+        graph.insert('c', 'knows', 'd'),
+      ];
+      await Promise.all(promises);
+
+      const result = g.V('a').Out('knows').Out('knows').All();
+      assert.strictEqual(result.length, 1);
+      assert.strictEqual(result[0], 'c');
+    });
   });
 });

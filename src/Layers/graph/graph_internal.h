@@ -7,6 +7,7 @@
 
 #include "graph.h"
 #include "../../Util/allocator.h"
+#include "../../Util/vec.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -32,6 +33,7 @@ int vertex_set_add(vertex_set_t* set, const char* vertex);
 int vertex_set_contains(vertex_set_t* set, const char* vertex);
 int vertex_set_intersect(vertex_set_t* result, const vertex_set_t* a, const vertex_set_t* b);
 int vertex_set_union(vertex_set_t* result, const vertex_set_t* a, const vertex_set_t* b);
+int vertex_set_difference(vertex_set_t* result, const vertex_set_t* a, const vertex_set_t* b);
 void vertex_set_clear(vertex_set_t* set);
 int vertex_set_copy(vertex_set_t* result, const vertex_set_t* src);
 
@@ -54,14 +56,11 @@ typedef struct {
 typedef struct {
     char* name;                  // type name
     graph_index_flags_t indices;  // default indices for the type
-    graph_schema_field_t* fields;
-    size_t field_count;
+    vec_t(graph_schema_field_t) fields;
 } graph_schema_type_t;
 
 struct graph_schema_t {
-    graph_schema_type_t* types;
-    size_t type_count;
-    size_t type_capacity;
+    vec_t(graph_schema_type_t) types;
 };
 
 /* ── Query Step (internal) ── */
@@ -74,16 +73,16 @@ struct query_step_t {
     char* predicate;                // For GRAPH_STEP_OUT, GRAPH_STEP_IN
     char* has_predicate;            // For GRAPH_STEP_HAS
     char* has_value;                // For GRAPH_STEP_HAS
+    char* morphism_name;            // For GRAPH_STEP_MORPHISM
     size_t limit;                   // For GRAPH_STEP_LIMIT
-    query_step_t** children;        // For GRAPH_STEP_INTERSECT, GRAPH_STEP_UNION
-    size_t num_children;
+    vec_t(query_step_t*) children;  // For GRAPH_STEP_INTERSECT, GRAPH_STEP_UNION, GRAPH_STEP_DIFFERENCE
     query_step_t* next;             // Linked list
 };
 
 /* ── Operator execution ── */
 
 // Execute a chain of steps starting from an empty seed set.
-int graph_execute_chain(database_t* db, query_step_t* steps, vertex_set_t* output);
+int graph_execute_chain(graph_layer_t* layer, query_step_t* steps, vertex_set_t* output);
 
 // Single-step execution on an input set.
 int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* output);
@@ -103,9 +102,7 @@ int graph_optimize(query_step_t** steps);
 struct graph_layer_t {
     database_t* db;
     graph_schema_t* schema;
-    morphism_entry_t* morphisms;
-    size_t morphism_count;
-    size_t morphism_capacity;
+    vec_t(morphism_entry_t) morphisms;
 };
 
 struct graph_query_t {
@@ -116,6 +113,7 @@ struct graph_query_t {
 
 /* ── Parser internals (implemented in graph_parser.c) ── */
 
+query_step_t* copy_steps(query_step_t* steps);
 graph_query_t* graph_parse_query(const char* input, size_t len, graph_layer_t* layer, graph_parse_error_t* error);
 int graph_morphism_parse_and_store(graph_layer_t* layer, const char* name,
                                     const char* input, size_t len,

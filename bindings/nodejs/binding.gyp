@@ -124,7 +124,8 @@
     "target_name": "graph",
     "sources": [
       "src/graph_layer.cc",
-      "src/graph_result_js.cc"
+      "src/graph_result_js.cc",
+      "src/async_bridge.cc"
     ],
     "include_dirs": [
       "<!@(node -p \"require('node-addon-api').include\")",

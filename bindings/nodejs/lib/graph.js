@@ -16,7 +16,11 @@ class Query {
   Has(pred, val) { this._steps.push(`Has("${pred}","${val}")`); return this; }
   And(sub)       { this._steps.push(`And(${sub._toDSL()})`); return this; }
   Or(sub)        { this._steps.push(`Or(${sub._toDSL()})`); return this; }
+  Not(sub)       { this._steps.push(`Not(${sub._toDSL()})`); return this; }
+  Difference(sub) { this._steps.push(`Difference(${sub._toDSL()})`); return this; }
+  Follow(name)   { this._steps.push(`Follow("${name}")`); return this; }
   Limit(n)       { this._steps.push(`Limit(${n})`); return this; }
+  /** Appends Count() — use with graph.count(), not .All() */
   Count()        { this._steps.push(`Count()`); return this; }
 
   _toDSL() {
@@ -39,7 +43,7 @@ class Query {
 // g is a traversal source object (Gremlin-style).
 // g.V(), g.Has() etc. create new Query objects bound to the default graph.
 const QUERY_METHODS = new Set([
-  'V', 'Out', 'In', 'Has', 'And', 'Or', 'Limit', 'Count', 'All', 'toString'
+  'V', 'Out', 'In', 'Has', 'And', 'Or', 'Not', 'Difference', 'Follow', 'Limit', 'Count', 'All', 'toString'
 ]);
 const g = new Proxy({}, {
   get(_target, prop) {
@@ -65,6 +69,25 @@ class GraphLayer {
     if (!_defaultGraph) setDefaultGraph(this);
   }
 
+  // Async triple operations (return Promises)
+  insert(s, p, o) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    return this._layer.insert(s, p, o);
+  }
+
+  del(s, p, o) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    return this._layer.del(s, p, o);
+  }
+
+  // Async query (returns Promise<string[]>)
+  query(dsl) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    if (dsl instanceof Query) dsl = dsl._toDSL();
+    return this._layer.query(dsl);
+  }
+
+  // Sync operations
   exec(dsl) {
     if (this._closed) throw new Error('GraphLayer is closed');
     if (dsl instanceof Query) dsl = dsl._toDSL();
@@ -85,6 +108,16 @@ class GraphLayer {
   deleteSync(s, p, o) {
     if (this._closed) throw new Error('GraphLayer is closed');
     this._layer.deleteSync(s, p, o);
+  }
+
+  parseSchema(sdl) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    this._layer.parseSchema(sdl);
+  }
+
+  defineMorphism(name, dsl) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    this._layer.defineMorphism(name, dsl);
   }
 
   close() {

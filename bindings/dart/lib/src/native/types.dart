@@ -33,6 +33,10 @@ base class graph_layer_t extends Opaque {}
 /// Maps to graph_result_t in C
 base class graph_result_t extends Opaque {}
 
+/// Opaque handle to a Graph parse error
+/// Maps to graph_parse_error_t in C
+base class graph_parse_error_t extends Opaque {}
+
 /// WAL sync mode enumeration
 /// Maps to wal_sync_mode_e in C
 enum WalSyncMode {

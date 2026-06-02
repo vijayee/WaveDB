@@ -27,65 +27,81 @@ graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
     int error_code = 0;
     if (config) {
         layer->db = database_create_with_config(path, config, &error_code);
+    } else if (path) {
+        database_config_t* default_config = database_config_default();
+        if (!default_config) { free(layer); return NULL; }
+        default_config->enable_persist = 1;
+        // Use a small number of worker threads for persistence background ops
+        default_config->worker_threads = 1;
+        layer->db = database_create_with_config(path, default_config, &error_code);
+        database_config_destroy(default_config);
     } else {
-        layer->db = database_create(path, 0, NULL, 0, 0, 0, NULL, NULL, &error_code);
+        layer->db = database_create(NULL, 0, NULL, 0, 0, 0, NULL, NULL, &error_code);
     }
     if (!layer->db) {
         free(layer);
         return NULL;
     }
     layer->schema = NULL;
-    layer->morphisms = NULL;
-    layer->morphism_count = 0;
-    layer->morphism_capacity = 0;
+    vec_init(&layer->morphisms);
+
+    // Load persisted schema if reopening an existing database
+    if (layer->db) {
+        graph_schema_load(layer);
+    }
+
     return layer;
 }
 
 void graph_layer_destroy(graph_layer_t* layer) {
     if (!layer) return;
     if (layer->db) {
+        // Flush any pending writes (schema metadata etc.) before closing
+        database_snapshot(layer->db);
         database_destroy(layer->db);
     }
-    for (size_t i = 0; i < layer->morphism_count; i++) {
-        free(layer->morphisms[i].name);
-        query_step_t* s = layer->morphisms[i].steps;
+    for (size_t i = 0; i < (size_t)layer->morphisms.length; i++) {
+        free(layer->morphisms.data[i].name);
+        query_step_t* s = layer->morphisms.data[i].steps;
         while (s) {
             query_step_t* next = s->next;
             free(s->vertex_id);
             free(s->predicate);
             free(s->has_predicate);
             free(s->has_value);
-            for (size_t j = 0; j < s->num_children; j++) {
-                query_step_t* cs = s->children[j];
+            free(s->morphism_name);
+            for (size_t j = 0; j < (size_t)s->children.length; j++) {
+                query_step_t* cs = s->children.data[j];
                 while (cs) {
                     query_step_t* cn = cs->next;
                     free(cs->vertex_id);
                     free(cs->predicate);
                     free(cs->has_predicate);
                     free(cs->has_value);
-                    free(cs->children);
+                    free(cs->morphism_name);
+                    vec_deinit(&cs->children);
                     free(cs);
                     cs = cn;
                 }
             }
-            free(s->children);
+            vec_deinit(&s->children);
             free(s);
             s = next;
         }
     }
     if (layer->schema) {
-        for (size_t i = 0; i < layer->schema->type_count; i++) {
-            free(layer->schema->types[i].name);
-            for (size_t j = 0; j < layer->schema->types[i].field_count; j++) {
-                free(layer->schema->types[i].fields[j].name);
-                free(layer->schema->types[i].fields[j].type);
+        for (size_t i = 0; i < (size_t)layer->schema->types.length; i++) {
+            free(layer->schema->types.data[i].name);
+            for (size_t j = 0; j < (size_t)layer->schema->types.data[i].fields.length; j++) {
+                free(layer->schema->types.data[i].fields.data[j].name);
+                free(layer->schema->types.data[i].fields.data[j].type);
             }
-            free(layer->schema->types[i].fields);
+            vec_deinit(&layer->schema->types.data[i].fields);
         }
-        free(layer->schema->types);
+        vec_deinit(&layer->schema->types);
         free(layer->schema);
     }
-    free(layer->morphisms);
+    vec_deinit(&layer->morphisms);
     free(layer);
 }
 
@@ -209,10 +225,12 @@ static void triple_work_abort(void* ctx) {
 }
 
 void graph_insert(graph_layer_t* layer, const char* s, const char* p, const char* o, promise_t* promise) {
-    if (!layer || !s || !p || !o) {
-        async_error_t* err = ERROR("NULL argument");
-        promise_reject(promise, err);
-        error_destroy(err);
+    if (!layer || !s || !p || !o || !promise) {
+        if (promise) {
+            async_error_t* err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
         return;
     }
     triple_work_ctx_t* tc = (triple_work_ctx_t*)get_clear_memory(sizeof(triple_work_ctx_t));
@@ -234,10 +252,12 @@ void graph_insert(graph_layer_t* layer, const char* s, const char* p, const char
 }
 
 void graph_delete(graph_layer_t* layer, const char* s, const char* p, const char* o, promise_t* promise) {
-    if (!layer || !s || !p || !o) {
-        async_error_t* err = ERROR("NULL argument");
-        promise_reject(promise, err);
-        error_destroy(err);
+    if (!layer || !s || !p || !o || !promise) {
+        if (promise) {
+            async_error_t* err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
         return;
     }
     triple_work_ctx_t* tc = (triple_work_ctx_t*)get_clear_memory(sizeof(triple_work_ctx_t));
@@ -276,20 +296,22 @@ void graph_query_destroy(graph_query_t* q) {
         free(s->predicate);
         free(s->has_predicate);
         free(s->has_value);
-        for (size_t i = 0; i < s->num_children; i++) {
-            query_step_t* cs = s->children[i];
+        free(s->morphism_name);
+        for (size_t i = 0; i < (size_t)s->children.length; i++) {
+            query_step_t* cs = s->children.data[i];
             while (cs) {
                 query_step_t* cn = cs->next;
                 free(cs->vertex_id);
                 free(cs->predicate);
                 free(cs->has_predicate);
                 free(cs->has_value);
-                free(cs->children);
+                free(cs->morphism_name);
+                vec_deinit(&cs->children);
                 free(cs);
                 cs = cn;
             }
         }
-        free(s->children);
+        vec_deinit(&s->children);
         free(s);
         s = next;
     }
@@ -341,10 +363,9 @@ int graph_query_intersect(graph_query_t* q, graph_query_t* left, graph_query_t* 
     if (!q || !left || !right) return -1;
     query_step_t* s = alloc_step(GRAPH_STEP_INTERSECT);
     if (!s) return -1;
-    s->num_children = 2;
-    s->children = (query_step_t**)get_clear_memory(2 * sizeof(query_step_t*));
-    s->children[0] = left->head;
-    s->children[1] = right->head;
+    vec_init(&s->children);
+    vec_push(&s->children, left->head);
+    vec_push(&s->children, right->head);
     left->head = NULL; left->tail = NULL;
     right->head = NULL; right->tail = NULL;
     return append_step(q, s);
@@ -354,12 +375,31 @@ int graph_query_union(graph_query_t* q, graph_query_t* left, graph_query_t* righ
     if (!q || !left || !right) return -1;
     query_step_t* s = alloc_step(GRAPH_STEP_UNION);
     if (!s) return -1;
-    s->num_children = 2;
-    s->children = (query_step_t**)get_clear_memory(2 * sizeof(query_step_t*));
-    s->children[0] = left->head;
-    s->children[1] = right->head;
+    vec_init(&s->children);
+    vec_push(&s->children, left->head);
+    vec_push(&s->children, right->head);
     left->head = NULL; left->tail = NULL;
     right->head = NULL; right->tail = NULL;
+    return append_step(q, s);
+}
+
+int graph_query_difference(graph_query_t* q, graph_query_t* left, graph_query_t* right) {
+    if (!q || !left || !right) return -1;
+    query_step_t* s = alloc_step(GRAPH_STEP_DIFFERENCE);
+    if (!s) return -1;
+    vec_init(&s->children);
+    vec_push(&s->children, left->head);
+    vec_push(&s->children, right->head);
+    left->head = NULL; left->tail = NULL;
+    right->head = NULL; right->tail = NULL;
+    return append_step(q, s);
+}
+
+int graph_query_follow(graph_query_t* q, const char* name) {
+    if (!q || !name) return -1;
+    query_step_t* s = alloc_step(GRAPH_STEP_MORPHISM);
+    if (!s) return -1;
+    s->morphism_name = strdup(name);
     return append_step(q, s);
 }
 
@@ -387,7 +427,7 @@ graph_result_t* graph_query_execute_sync(graph_query_t* q) {
 
     graph_optimize(&q->head);
 
-    int rc = graph_execute_chain(q->layer->db, q->head, &r->set);
+    int rc = graph_execute_chain(q->layer, q->head, &r->set);
     if (rc != 0) {
         vertex_set_destroy(&r->set);
         free(r);
@@ -407,6 +447,7 @@ typedef struct {
 static void query_work_execute(void* ctx) {
     query_work_ctx_t* qc = (query_work_ctx_t*)ctx;
     graph_result_t* result = graph_query_execute_sync(qc->q);
+    graph_query_destroy(qc->q);
     if (result) {
         promise_resolve(qc->promise, result);
     } else {
@@ -420,6 +461,7 @@ static void query_work_execute(void* ctx) {
 
 static void query_work_abort(void* ctx) {
     query_work_ctx_t* qc = (query_work_ctx_t*)ctx;
+    graph_query_destroy(qc->q);
     async_error_t* err = ERROR("Query aborted");
     promise_reject(qc->promise, err);
     error_destroy(err);
@@ -428,7 +470,11 @@ static void query_work_abort(void* ctx) {
 }
 
 void graph_query_execute(graph_query_t* q, promise_t* promise) {
-    if (!q || !promise) return;
+    if (!q) return;
+    if (!promise) {
+        graph_query_destroy(q);
+        return;
+    }
     query_work_ctx_t* qc = (query_work_ctx_t*)get_clear_memory(sizeof(query_work_ctx_t));
     qc->q = q;
     qc->promise = REFERENCE(promise, promise_t);
@@ -508,9 +554,9 @@ int graph_schema_needs_index(graph_layer_t* layer, const char* predicate, graph_
     if (!layer || !predicate) return 1;
     if (!layer->schema) return 1;
 
-    for (size_t i = 0; i < layer->schema->type_count; i++) {
-        for (size_t j = 0; j < layer->schema->types[i].field_count; j++) {
-            graph_schema_field_t* f = &layer->schema->types[i].fields[j];
+    for (size_t i = 0; i < (size_t)layer->schema->types.length; i++) {
+        for (size_t j = 0; j < (size_t)layer->schema->types.data[i].fields.length; j++) {
+            graph_schema_field_t* f = &layer->schema->types.data[i].fields.data[j];
             if (strcmp(f->name, predicate) == 0) {
                 return (f->indices & index) != 0;
             }

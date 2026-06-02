@@ -180,7 +180,10 @@ void AsyncBridge::CallJs(napi_env env, napi_value jsCallback, void* context, voi
   // Clean up C-side allocations
   // Free int* result from batch/put/delete resolve callbacks
   if (opCtx->result && opCtx->type != AsyncOpType::Get &&
-      opCtx->type != AsyncOpType::Query && opCtx->type != AsyncOpType::Mutate) {
+      opCtx->type != AsyncOpType::Query && opCtx->type != AsyncOpType::Mutate &&
+      opCtx->type != AsyncOpType::GraphQuery &&
+      opCtx->type != AsyncOpType::GraphInsert &&
+      opCtx->type != AsyncOpType::GraphDelete) {
     free(opCtx->result);
   }
 
@@ -230,7 +233,24 @@ Napi::Value AsyncBridge::ConvertResult(Napi::Env env, AsyncOpContext* ctx) {
     case AsyncOpType::Put:
     case AsyncOpType::Delete:
     case AsyncOpType::Batch:
+    case AsyncOpType::GraphInsert:
+    case AsyncOpType::GraphDelete:
     default:
       return env.Undefined();
+
+    case AsyncOpType::GraphQuery: {
+      graph_result_t* result = static_cast<graph_result_t*>(ctx->result);
+      if (!result) {
+        return Napi::Array::New(env);
+      }
+      size_t count = graph_result_count(result);
+      const char* const* verts = graph_result_vertices(result);
+      Napi::Array arr = Napi::Array::New(env, count);
+      for (size_t i = 0; i < count; i++) {
+        arr.Set(i, Napi::String::New(env, verts[i]));
+      }
+      graph_result_destroy(result);
+      return arr;
+    }
   }
 }

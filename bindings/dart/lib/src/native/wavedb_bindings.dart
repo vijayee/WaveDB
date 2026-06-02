@@ -925,6 +925,34 @@ typedef GraphResultCount = int Function(Pointer<graph_result_t> result);
 typedef GraphResultVerticesC = Pointer<Pointer<Utf8>> Function(Pointer<graph_result_t> result);
 typedef GraphResultVertices = Pointer<Pointer<Utf8>> Function(Pointer<graph_result_t> result);
 
+typedef GraphSchemaParseC = Int32 Function(
+    Pointer<graph_layer_t> layer, Pointer<Utf8> sdl, Pointer<Pointer<Utf8>> errorOut);
+typedef GraphSchemaParse = int Function(
+    Pointer<graph_layer_t> layer, Pointer<Utf8> sdl, Pointer<Pointer<Utf8>> errorOut);
+
+typedef GraphMorphismDefineC = Int32 Function(
+    Pointer<graph_layer_t> layer, Pointer<Utf8> name, Pointer<Utf8> dsl,
+    Pointer<graph_parse_error_t> error);
+typedef GraphMorphismDefine = int Function(
+    Pointer<graph_layer_t> layer, Pointer<Utf8> name, Pointer<Utf8> dsl,
+    Pointer<graph_parse_error_t> error);
+
+// ============================================================
+// C TYPEDEFS - Graph Async Operations
+// ============================================================
+
+/// C signature: void graph_insert(graph_layer_t*, const char* s, const char* p, const char* o, promise_t*)
+typedef GraphInsertAsyncC = Void Function(
+  Pointer<graph_layer_t>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<promise_t>);
+typedef GraphInsertAsync = void Function(
+  Pointer<graph_layer_t>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<promise_t>);
+
+/// C signature: void graph_delete(graph_layer_t*, const char* s, const char* p, const char* o, promise_t*)
+typedef GraphDeleteAsyncC = Void Function(
+  Pointer<graph_layer_t>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<promise_t>);
+typedef GraphDeleteAsync = void Function(
+  Pointer<graph_layer_t>, Pointer<Utf8>, Pointer<Utf8>, Pointer<Utf8>, Pointer<promise_t>);
+
 // ============================================================
 // C TYPEDEFS - Promise
 // ============================================================
@@ -1250,6 +1278,18 @@ class WaveDBNative {
 
   static late final GraphResultVertices _graphResultVertices = WaveDBLibrary.load()
       .lookupFunction<GraphResultVerticesC, GraphResultVertices>('graph_result_vertices');
+
+  static late final GraphSchemaParse _graphSchemaParse = WaveDBLibrary.load()
+      .lookupFunction<GraphSchemaParseC, GraphSchemaParse>('graph_schema_parse');
+
+  static late final GraphMorphismDefine _graphMorphismDefine = WaveDBLibrary.load()
+      .lookupFunction<GraphMorphismDefineC, GraphMorphismDefine>('graph_morphism_define');
+
+  static late final GraphInsertAsync _graphInsertAsync = WaveDBLibrary.load()
+      .lookupFunction<GraphInsertAsyncC, GraphInsertAsync>('graph_insert');
+
+  static late final GraphDeleteAsync _graphDeleteAsync = WaveDBLibrary.load()
+      .lookupFunction<GraphDeleteAsyncC, GraphDeleteAsync>('graph_delete');
 
   // Promise operations
   static late final PromiseCreate _promiseCreate = WaveDBLibrary.load()
@@ -2193,6 +2233,76 @@ class WaveDBNative {
   /// Get the vertices array from a result
   static Pointer<Pointer<Utf8>> graphResultVertices(Pointer<graph_result_t> result) {
     return _graphResultVertices(result);
+  }
+
+  /// Parse a graph schema definition
+  static int graphSchemaParse(Pointer<graph_layer_t> layer, String sdl) {
+    final sdlPtr = sdl.toNativeUtf8();
+    final errorOut = calloc<Pointer<Utf8>>();
+    try {
+      final rc = _graphSchemaParse(layer, sdlPtr.cast(), errorOut);
+      if (rc != 0 && errorOut.value != nullptr) {
+        final errMsg = errorOut.value.toDartString();
+        malloc.free(errorOut.value);
+        throw WaveDBException.invalidArgument('Schema parse error: $errMsg');
+      }
+      return rc;
+    } finally {
+      calloc.free(sdlPtr);
+      calloc.free(errorOut);
+    }
+  }
+
+  /// Define a named morphism
+  static int graphMorphismDefine(
+      Pointer<graph_layer_t> layer, String name, String dsl) {
+    final namePtr = name.toNativeUtf8();
+    final dslPtr = dsl.toNativeUtf8();
+    try {
+      // Pass nullptr for error — we'll just check the return code
+      final rc = _graphMorphismDefine(layer, namePtr.cast(), dslPtr.cast(), nullptr);
+      if (rc != 0) {
+        throw WaveDBException.invalidArgument('Morphism define failed');
+      }
+      return rc;
+    } finally {
+      calloc.free(namePtr);
+      calloc.free(dslPtr);
+    }
+  }
+
+  /// Insert a triple asynchronously (dispatches to C worker pool)
+  static void graphInsertAsync(
+    Pointer<graph_layer_t> layer, String s, String p, String o,
+    Pointer<promise_t> promise,
+  ) {
+    final sPtr = s.toNativeUtf8();
+    final pPtr = p.toNativeUtf8();
+    final oPtr = o.toNativeUtf8();
+    try {
+      _graphInsertAsync(layer, sPtr.cast(), pPtr.cast(), oPtr.cast(), promise);
+    } finally {
+      calloc.free(sPtr);
+      calloc.free(pPtr);
+      calloc.free(oPtr);
+    }
+  }
+
+  /// Delete a triple asynchronously (dispatches to C worker pool)
+  static void graphDeleteAsync(
+    Pointer<graph_layer_t> layer, String s, String p, String o,
+    Pointer<promise_t> promise,
+  ) {
+    final sPtr = s.toNativeUtf8();
+    final pPtr = p.toNativeUtf8();
+    final oPtr = o.toNativeUtf8();
+    try {
+      _graphDeleteAsync(layer, sPtr.cast(), pPtr.cast(), oPtr.cast(), promise);
+    } finally {
+      calloc.free(sPtr);
+      calloc.free(pPtr);
+      calloc.free(oPtr);
+    }
   }
 
   // ============================================================
