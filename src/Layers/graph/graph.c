@@ -506,6 +506,7 @@ graph_result_t* graph_query_execute_sync(graph_query_t* q) {
 
     graph_optimize(&q->head);
     graph_optimize_reorder_has(&q->head, q->layer);
+    graph_optimize_reorder_intersect_children(&q->head, q->layer);
 
     int rc = graph_execute_chain(q->layer, q->head, &r->set);
     if (rc != 0) {

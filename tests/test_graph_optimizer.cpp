@@ -244,3 +244,82 @@ TEST_F(GraphOptimizerTest, FoldSingleChildUnion) {
 
     graph_query_destroy(q);
 }
+
+TEST_F(GraphOptimizerTest, ReorderIntersectChildren) {
+    // Create a graph where one predicate is very common and another is rare
+    for (int i = 0; i < 20; i++) {
+        std::string subj = "v" + std::to_string(i);
+        graph_insert_sync(layer, subj.c_str(), "common", "yes");
+    }
+    graph_insert_sync(layer, "v0", "rare", "yes");
+    graph_insert_sync(layer, "v1", "rare", "yes");
+
+    // Build INTERSECT with two children of different selectivities
+    graph_query_t* left = graph_query_create(layer);
+    graph_query_has(left, "common", "yes");
+
+    graph_query_t* right = graph_query_create(layer);
+    graph_query_has(right, "rare", "yes");
+
+    graph_query_t* q = graph_query_create(layer);
+    graph_query_intersect(q, left, right);
+
+    // Verify the query still produces correct results after reorder
+    graph_result_t* r = graph_query_execute_sync(q);
+    ASSERT_NE(r, nullptr);
+    ASSERT_GE(graph_result_count(r), (size_t)2);
+
+    graph_result_destroy(r);
+    graph_query_destroy(q);
+    graph_query_destroy(left);
+    graph_query_destroy(right);
+}
+
+TEST_F(GraphOptimizerTest, EstimateChainReturnsReasonableValues) {
+    graph_insert_sync(layer, "v0", "edge", "x");
+    graph_insert_sync(layer, "v1", "edge", "y");
+    graph_insert_sync(layer, "v0", "status", "active");
+    graph_insert_sync(layer, "v1", "status", "inactive");
+
+    graph_stats_compute(layer);
+    ASSERT_NE(layer->stats, nullptr);
+
+    // Build: VERTEX("v0") -> OUT("edge")
+    query_step_t* v = make_step(GRAPH_STEP_VERTEX);
+    v->vertex_id = strdup("v0");
+
+    query_step_t* out = make_step(GRAPH_STEP_OUT);
+    out->predicate = strdup("edge");
+
+    v->next = out;
+
+    size_t est = graph_stats_estimate_chain(layer->stats, v);
+    EXPECT_GT(est, (size_t)0);
+
+    v->vertex_id = NULL;
+    out->predicate = NULL;
+    free(v);
+    free(out);
+}
+
+TEST_F(GraphOptimizerTest, ReorderHasSteps) {
+    for (int i = 0; i < 20; i++) {
+        std::string subj = "v" + std::to_string(i);
+        graph_insert_sync(layer, subj.c_str(), "common_pred", "val");
+    }
+    graph_insert_sync(layer, "v0", "rare_pred", "val");
+    graph_insert_sync(layer, "v1", "rare_pred", "val");
+
+    // Build: Has("common_pred","val").Has("rare_pred","val")
+    // After reorder, rare should come first (more selective)
+    graph_query_t* q = graph_query_create(layer);
+    graph_query_has(q, "common_pred", "val");
+    graph_query_has(q, "rare_pred", "val");
+
+    graph_result_t* r = graph_query_execute_sync(q);
+    ASSERT_NE(r, nullptr);
+    ASSERT_GE(graph_result_count(r), (size_t)2);
+
+    graph_result_destroy(r);
+    graph_query_destroy(q);
+}

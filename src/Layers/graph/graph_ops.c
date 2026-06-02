@@ -3,7 +3,6 @@
 //
 
 #include "graph_internal.h"
-#include "../../Util/allocator.h"
 #include "../../Util/vec.h"
 #include <string.h>
 #include <stdio.h>
@@ -77,33 +76,20 @@ const char* key_nth_component(const char* key, size_t key_len, int n,
     return buf;
 }
 
-/* ── Check if a reconstructed key starts with a full prefix ──
+/* ── Append successor byte to prefix for range scan end bound ──
  *
- * Database scans return all keys from the prefix onward (no upper bound),
- * so we must filter results ourselves. This checks a multi-component
- * prefix such as "/spo/clip_abc/tagged_with/".
- *
- * The prefix should include the leading '/' (e.g. "/spo/clip_abc/tagged_with/").
- * Reconstructed keys do NOT have a leading '/', so we skip prefix[0].
- *
- * Null-padding bytes in the key are skipped during comparison.
+ * Strips the trailing '/' delimiter, then appends '0' (0x30) to the
+ * last identifier. This creates an exclusive upper bound that is
+ * greater than all keys sharing the prefix because '0' falls into
+ * the zero-padding bytes of the last chunk, making the last
+ * identifier compare greater than any unpadded version.
+ * buf must have room for one extra byte beyond prefix_len.
  */
-static int key_starts_with_prefix(const char* key, size_t key_len,
-                                   const char* prefix) {
-    if (!key || !prefix) return 0;
-    size_t prefix_len = strlen(prefix);
-    if (prefix_len < 2) return 0;   /* need at least '/' + char */
-
-    size_t ki = 0;
-    /* Skip leading '/' in prefix (key has no leading '/') */
-    for (size_t pi = 1; pi < prefix_len; pi++) {
-        /* Skip padding nulls in the key */
-        while (ki < key_len && key[ki] == '\0') ki++;
-        if (ki >= key_len) return 0;
-        if (key[ki] != prefix[pi]) return 0;
-        ki++;
-    }
-    return 1;
+size_t append_successor(char* buf, size_t prefix_len) {
+    if (prefix_len > 0 && buf[prefix_len - 1] == '/') prefix_len--;
+    buf[prefix_len] = '0';
+    buf[prefix_len + 1] = '\0';
+    return prefix_len + 1;
 }
 
 /* ── SPO scan: /spo/<subject>/<predicate>/ → collect objects ── */
@@ -118,9 +104,16 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
         vec_init(&prefix);
         build_prefix_vec(&prefix, "spo", input->vertices[i], predicate);
 
+        char end_buf[4096];
+        size_t prefix_len = prefix.length - 1;  /* exclude null terminator */
+        memcpy(end_buf, prefix.data, prefix_len);
+        size_t end_len = append_successor(end_buf, prefix_len);
+
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                               end_buf, end_len, '/',
+                                               &results, &count);
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -128,10 +121,6 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
         }
 
         for (size_t j = 0; j < count; j++) {
-            /* Filter: key must start with expected prefix */
-            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-                continue;
-
             char buf[4096];
             const char* obj = key_last_component(results[j].key, results[j].key_len,
                                                   buf, sizeof(buf));
@@ -155,9 +144,16 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
         vec_init(&prefix);
         build_prefix_vec(&prefix, "pos", predicate, input->vertices[i]);
 
+        char end_buf[4096];
+        size_t prefix_len = prefix.length - 1;
+        memcpy(end_buf, prefix.data, prefix_len);
+        size_t end_len = append_successor(end_buf, prefix_len);
+
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                               end_buf, end_len, '/',
+                                               &results, &count);
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -165,10 +161,6 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
         }
 
         for (size_t j = 0; j < count; j++) {
-            /* Filter: key must start with expected prefix */
-            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-                continue;
-
             char buf[4096];
             const char* subj = key_last_component(results[j].key, results[j].key_len,
                                                    buf, sizeof(buf));
@@ -207,17 +199,22 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
         vec_init(&prefix);
         build_prefix_vec(&prefix, "pos", predicate, value);
 
+        char end_buf[4096];
+        size_t prefix_len = prefix.length - 1;
+        memcpy(end_buf, prefix.data, prefix_len);
+        size_t end_len = append_successor(end_buf, prefix_len);
+
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                               end_buf, end_len, '/',
+                                               &results, &count);
         if (rc != 0) {
             vec_deinit(&prefix);
             return rc;
         }
 
         for (size_t j = 0; j < count; j++) {
-            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-                continue;
             char buf[4096];
             const char* subj = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
             if (!subj) continue;
@@ -228,7 +225,7 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
         database_raw_results_free(results, count);
         vec_deinit(&prefix);
     } else {
-        /* Range: scan all /pos/<predicate>/ entries, filter by object component */
+        /* Range: scan /pos/<predicate>/ entries, filter by object component */
         vec_char_t prefix;
         vec_init(&prefix);
         vec_pusharr(&prefix, "/pos/", 5);
@@ -236,17 +233,47 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
         vec_pusharr(&prefix, "/", 1);
         vec_push(&prefix, '\0');
 
+        size_t prefix_len = prefix.length - 1;
+
+        /* Build end bound for range predicates that have an upper bound */
+        char end_buf[4096];
+        const char* end_prefix = NULL;
+        size_t end_prefix_len = 0;
+
+        if (cmp == GRAPH_CMP_LT) {
+            /* LT: scan up to /pos/<predicate>/<value>/ (exclusive) */
+            memcpy(end_buf, prefix.data, prefix_len);
+            memcpy(end_buf + prefix_len, value, strlen(value));
+            end_buf[prefix_len + strlen(value)] = '/';
+            end_buf[prefix_len + strlen(value) + 1] = '\0';
+            end_prefix = end_buf;
+            end_prefix_len = prefix_len + strlen(value) + 1;
+        } else if (cmp == GRAPH_CMP_LTE) {
+            /* LTE: scan up to /pos/<predicate>/<value>0 (exclusive) */
+            memcpy(end_buf, prefix.data, prefix_len);
+            memcpy(end_buf + prefix_len, value, strlen(value));
+            end_prefix_len = prefix_len + strlen(value);
+            end_prefix_len = append_successor(end_buf, end_prefix_len);
+            end_prefix = end_buf;
+        }
+        /* GT/GTE: scan full /pos/<predicate>/ with successor end bound */
+        if (!end_prefix) {
+            memcpy(end_buf, prefix.data, prefix_len);
+            end_prefix_len = append_successor(end_buf, prefix_len);
+            end_prefix = end_buf;
+        }
+
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                               end_prefix, end_prefix_len, '/',
+                                               &results, &count);
         if (rc != 0) {
             vec_deinit(&prefix);
             return rc;
         }
 
         for (size_t j = 0; j < count; j++) {
-            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-                continue;
             char obj_buf[4096];
             const char* obj = key_nth_component(results[j].key, results[j].key_len, 2, obj_buf, sizeof(obj_buf));
             if (!obj) continue;
@@ -351,9 +378,16 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
         vec_init(&prefix);
         build_prefix_vec(&prefix, "osp", object, input->vertices[i]);
 
+        char end_buf[4096];
+        size_t prefix_len = prefix.length - 1;
+        memcpy(end_buf, prefix.data, prefix_len);
+        size_t end_len = append_successor(end_buf, prefix_len);
+
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                               end_buf, end_len, '/',
+                                               &results, &count);
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -361,8 +395,6 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
         }
 
         for (size_t j = 0; j < count; j++) {
-            if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-                continue;
             char buf[4096];
             const char* pred = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
             if (pred) vertex_set_add(output, pred);
@@ -385,17 +417,23 @@ int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* outpu
     vec_pusharr(&prefix, "/", 1);
     vec_push(&prefix, '\0');
 
+    size_t prefix_len = prefix.length - 1;
+
+    char end_buf[4096];
+    memcpy(end_buf, prefix.data, prefix_len);
+    size_t end_len = append_successor(end_buf, prefix_len);
+
     raw_result_t* results = NULL;
     size_t count = 0;
-    int rc = database_scan_sync_raw(db, prefix.data, prefix.length - 1, '/', &results, &count);
+    int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+                                           end_buf, end_len, '/',
+                                           &results, &count);
     if (rc != 0) {
         vec_deinit(&prefix);
         return rc;
     }
 
     for (size_t j = 0; j < count; j++) {
-        if (!key_starts_with_prefix(results[j].key, results[j].key_len, prefix.data))
-            continue;
         char buf[4096];
         const char* subj = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
         if (subj) vertex_set_add(output, subj);

@@ -14,6 +14,10 @@ class Query {
   Out(pred)      { this._steps.push(`Out("${pred}")`); return this; }
   In(pred)       { this._steps.push(`In("${pred}")`); return this; }
   Has(pred, val) { this._steps.push(`Has("${pred}","${val}")`); return this; }
+  HasGt(pred, val)  { this._steps.push(`Has("${pred}",>, "${val}")`); return this; }
+  HasGte(pred, val) { this._steps.push(`Has("${pred}",>=, "${val}")`); return this; }
+  HasLt(pred, val)  { this._steps.push(`Has("${pred}",<, "${val}")`); return this; }
+  HasLte(pred, val) { this._steps.push(`Has("${pred}",<=, "${val}")`); return this; }
   And(sub)       { this._steps.push(`And(${sub._toDSL()})`); return this; }
   Or(sub)        { this._steps.push(`Or(${sub._toDSL()})`); return this; }
   Not(sub)       { this._steps.push(`Not(${sub._toDSL()})`); return this; }
@@ -43,7 +47,8 @@ class Query {
 // g is a traversal source object (Gremlin-style).
 // g.V(), g.Has() etc. create new Query objects bound to the default graph.
 const QUERY_METHODS = new Set([
-  'V', 'Out', 'In', 'Has', 'And', 'Or', 'Not', 'Difference', 'Follow', 'Limit', 'Count', 'All', 'toString'
+  'V', 'Out', 'In', 'Has', 'HasGt', 'HasGte', 'HasLt', 'HasLte',
+  'And', 'Or', 'Not', 'Difference', 'Follow', 'Limit', 'Count', 'All', 'toString'
 ]);
 const g = new Proxy({}, {
   get(_target, prop) {

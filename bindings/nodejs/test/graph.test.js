@@ -166,6 +166,60 @@ describe('GraphLayer', function() {
     assert.strictEqual(result[0], 'gaming');
   });
 
+  it('should support HasGt filter', function() {
+    graph.insertSync('alice', 'age', '25');
+    graph.insertSync('bob', 'age', '30');
+    graph.insertSync('carol', 'age', '20');
+
+    const result = g.HasGt('age', '25').All();
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'bob');
+  });
+
+  it('should support HasGte filter', function() {
+    graph.insertSync('alice', 'age', '25');
+    graph.insertSync('bob', 'age', '30');
+    graph.insertSync('carol', 'age', '20');
+
+    const result = g.HasGte('age', '25').All();
+    assert.strictEqual(result.length, 2);
+    assert.ok(result.includes('alice'));
+    assert.ok(result.includes('bob'));
+  });
+
+  it('should support HasLt filter', function() {
+    graph.insertSync('alice', 'age', '25');
+    graph.insertSync('bob', 'age', '30');
+    graph.insertSync('carol', 'age', '20');
+
+    const result = g.HasLt('age', '25').All();
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'carol');
+  });
+
+  it('should support HasLte filter', function() {
+    graph.insertSync('alice', 'age', '25');
+    graph.insertSync('bob', 'age', '30');
+    graph.insertSync('carol', 'age', '20');
+
+    const result = g.HasLte('age', '25').All();
+    assert.strictEqual(result.length, 2);
+    assert.ok(result.includes('alice'));
+    assert.ok(result.includes('carol'));
+  });
+
+  it('should chain HasGte with Out traversal', function() {
+    graph.insertSync('alice', 'age', '25');
+    graph.insertSync('alice', 'follows', 'carol');
+    graph.insertSync('bob', 'age', '30');
+    graph.insertSync('bob', 'follows', 'dave');
+    graph.insertSync('carol', 'age', '20');
+
+    const result = g.V('alice').HasGte('age', '25').Out('follows').All();
+    assert.strictEqual(result.length, 1);
+    assert.strictEqual(result[0], 'carol');
+  });
+
   // Async operations
 
   describe('async operations', function() {

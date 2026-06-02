@@ -362,6 +362,12 @@ int database_scan_sync_raw(database_t* db,
     const char* prefix, size_t prefix_len, char delimiter,
     raw_result_t** results, size_t* count);
 
+int database_scan_range_sync_raw(database_t* db,
+    const char* start_prefix, size_t start_prefix_len,
+    const char* end_prefix, size_t end_prefix_len,
+    char delimiter,
+    raw_result_t** results, size_t* count);
+
 void database_raw_results_free(raw_result_t* results, size_t count);
 
 /**

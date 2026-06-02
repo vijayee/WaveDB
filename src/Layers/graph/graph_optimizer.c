@@ -203,3 +203,78 @@ int graph_optimize_reorder_has(query_step_t** steps, graph_layer_t* layer) {
 
     return 0;
 }
+
+/* ── Pass 4: Reorder INTERSECT children by cardinality ──
+ *
+ * For INTERSECT steps with multiple children, sort the children
+ * array by estimated cardinality (ascending = most selective first).
+ * This is safe because intersection is commutative and associative.
+ * Executing the most selective child first produces a smaller
+ * accumulator, reducing the cost of subsequent intersections.
+ */
+static void reorder_intersect_children_in_step(query_step_t* s, graph_layer_t* layer) {
+    if (!s || s->type != GRAPH_STEP_INTERSECT) return;
+    if (s->children.length < 2) return;
+    if (!layer->stats) return;
+
+    typedef struct {
+        size_t index;
+        size_t estimate;
+    } child_est_t;
+
+    child_est_t* estimates = (child_est_t*)get_memory(s->children.length * sizeof(child_est_t));
+    for (size_t ci = 0; ci < (size_t)s->children.length; ci++) {
+        estimates[ci].index = ci;
+        estimates[ci].estimate = graph_stats_estimate_chain(layer->stats, s->children.data[ci]);
+    }
+
+    // Sort by estimate (ascending = most selective first)
+    for (size_t i = 0; i < (size_t)s->children.length - 1; i++) {
+        for (size_t j = i + 1; j < (size_t)s->children.length; j++) {
+            if (estimates[j].estimate < estimates[i].estimate) {
+                child_est_t tmp = estimates[i];
+                estimates[i] = estimates[j];
+                estimates[j] = tmp;
+            }
+        }
+    }
+
+    // Reorder children.data[] pointers in place
+    query_step_t** new_order = (query_step_t**)get_memory(s->children.length * sizeof(query_step_t*));
+    for (size_t i = 0; i < (size_t)s->children.length; i++) {
+        new_order[i] = s->children.data[estimates[i].index];
+    }
+    memcpy(s->children.data, new_order, s->children.length * sizeof(query_step_t*));
+    free(new_order);
+    free(estimates);
+}
+
+int graph_optimize_reorder_intersect_children(query_step_t** steps, graph_layer_t* layer) {
+    if (!steps || !*steps || !layer) return 0;
+    if (!layer->stats || !layer->stats_computed) {
+        graph_stats_compute(layer);
+    }
+    if (!layer->stats) return 0;
+
+    // Walk the main chain and child sub-chains looking for INTERSECT steps
+    query_step_t* s = *steps;
+    while (s) {
+        if (s->type == GRAPH_STEP_INTERSECT) {
+            reorder_intersect_children_in_step(s, layer);
+
+            // Also recurse into children to find nested INTERSECTs
+            for (size_t ci = 0; ci < (size_t)s->children.length; ci++) {
+                query_step_t* child = s->children.data[ci];
+                while (child) {
+                    if (child->type == GRAPH_STEP_INTERSECT) {
+                        reorder_intersect_children_in_step(child, layer);
+                    }
+                    child = child->next;
+                }
+            }
+        }
+        s = s->next;
+    }
+
+    return 0;
+}

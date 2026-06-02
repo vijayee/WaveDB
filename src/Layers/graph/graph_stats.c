@@ -50,9 +50,16 @@ int graph_stats_compute(graph_layer_t* layer) {
                 vec_pusharr(&prefix, "/", 1);
                 vec_push(&prefix, '\0');
 
+                size_t prefix_len = prefix.length - 1;
+                char end_buf[4096];
+                if (prefix_len >= sizeof(end_buf)) { vec_deinit(&prefix); continue; }
+                memcpy(end_buf, prefix.data, prefix_len);
+                size_t end_len = append_successor(end_buf, prefix_len);
+
                 raw_result_t* results = NULL;
                 size_t count = 0;
-                int rc = database_scan_sync_raw(layer->db, prefix.data, prefix.length - 1, '/', &results, &count);
+                int rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix.length - 1,
+                                                       end_buf, end_len, '/', &results, &count);
                 vec_deinit(&prefix);
 
                 graph_pred_stats_t ps;
@@ -61,39 +68,14 @@ int graph_stats_compute(graph_layer_t* layer) {
                 ps.distinct_subjects = 0;
 
                 if (rc == 0 && results) {
-                    // Count distinct subjects from PSO results
-                    // Key format: /pso/<predicate>/<subject>/<object>/
-                    // We need to count unique subjects (3rd component)
                     vertex_set_t subjects;
                     vertex_set_init(&subjects, count > 0 ? count : 8);
 
-                    // Build prefix for filtering: /pso/<predicate>/
-                    vec_char_t pfx;
-                    vec_init(&pfx);
-                    vec_pusharr(&pfx, "/pso/", 5);
-                    vec_pusharr(&pfx, field->name, strlen(field->name));
-                    vec_pusharr(&pfx, "/", 1);
-                    vec_push(&pfx, '\0');
-
                     for (size_t k = 0; k < count; k++) {
-                        // Filter out results that don't match our prefix
-                        size_t pi = 0;
-                        size_t ki = 0;
-                        size_t pfx_len = pfx.length > 0 ? (size_t)(pfx.length - 1) : 0;
-                        int prefix_match = 1;
-                        while (pi < pfx_len && ki < results[k].key_len) {
-                            if (results[k].key[ki] == '\0') { ki++; continue; }
-                            if (pfx.data[pi] != results[k].key[ki]) { prefix_match = 0; break; }
-                            pi++; ki++;
-                        }
-                        if (!prefix_match) continue;
-
                         char buf[4096];
                         const char* subj = key_nth_component(results[k].key, results[k].key_len, 2, buf, sizeof(buf));
                         if (subj) vertex_set_add(&subjects, subj);
                     }
-
-                    vec_deinit(&pfx);
 
                     ps.triple_count = count;
                     ps.distinct_subjects = subjects.count;
@@ -152,8 +134,9 @@ size_t graph_stats_estimate_out(graph_stats_t* stats, const char* predicate, siz
             size_t triples = stats->predicates.data[i].triple_count;
             size_t subjects = stats->predicates.data[i].distinct_subjects;
             if (subjects == 0) return input_size;
-            // Average fanout = triples / subjects
-            return input_size * (triples / subjects);
+            // Average fanout = triples / subjects (minimum 1)
+            size_t fanout = subjects > 0 ? (triples + subjects - 1) / subjects : 1;
+            return input_size > 0 && fanout > 0 ? input_size * fanout : input_size;
         }
     }
 
@@ -163,4 +146,78 @@ size_t graph_stats_estimate_out(graph_stats_t* stats, const char* predicate, siz
 size_t graph_stats_estimate_in(graph_stats_t* stats, const char* predicate, size_t input_size) {
     // In has the same cardinality as Out for symmetric predicates
     return graph_stats_estimate_out(stats, predicate, input_size);
+}
+
+/* ── Estimate cardinality of an entire step chain ── */
+
+size_t graph_stats_estimate_chain(graph_stats_t* stats, query_step_t* head) {
+    if (!head) return 0;
+
+    size_t current_size = 0;
+    query_step_t* s = head;
+
+    while (s) {
+        switch (s->type) {
+            case GRAPH_STEP_VERTEX:
+                current_size = 1;
+                break;
+            case GRAPH_STEP_HAS:
+                if (current_size == 0) {
+                    // Has at the start seeds from the full POS scan
+                    current_size = graph_stats_estimate_has(stats, s->has_predicate,
+                                                            s->has_value, s->has_cmp);
+                } else {
+                    // Has as a filter reduces the set
+                    size_t has_est = graph_stats_estimate_has(stats, s->has_predicate,
+                                                              s->has_value, s->has_cmp);
+                    // Conservative: estimate selectivity as min(current, has_matches)
+                    if (has_est < current_size) current_size = has_est;
+                }
+                break;
+            case GRAPH_STEP_OUT:
+                current_size = graph_stats_estimate_out(stats, s->predicate, current_size);
+                break;
+            case GRAPH_STEP_IN:
+                current_size = graph_stats_estimate_in(stats, s->predicate, current_size);
+                break;
+            case GRAPH_STEP_LIMIT:
+                if (s->limit < current_size) current_size = s->limit;
+                break;
+            case GRAPH_STEP_INTERSECT: {
+                // Estimate: min across all children
+                size_t min_est = 0;
+                int first = 1;
+                for (size_t ci = 0; ci < (size_t)s->children.length; ci++) {
+                    size_t child_est = graph_stats_estimate_chain(stats, s->children.data[ci]);
+                    if (first || child_est < min_est) {
+                        min_est = child_est;
+                        first = 0;
+                    }
+                }
+                current_size = min_est;
+                break;
+            }
+            case GRAPH_STEP_UNION: {
+                // Estimate: sum across all children (upper bound)
+                size_t sum = 0;
+                for (size_t ci = 0; ci < (size_t)s->children.length; ci++) {
+                    sum += graph_stats_estimate_chain(stats, s->children.data[ci]);
+                }
+                current_size = sum;
+                break;
+            }
+            case GRAPH_STEP_DIFFERENCE:
+                // Estimate: size of first child (conservative upper bound)
+                if (s->children.length > 0) {
+                    current_size = graph_stats_estimate_chain(stats, s->children.data[0]);
+                }
+                break;
+            case GRAPH_STEP_MORPHISM:
+                // Cannot estimate without resolving the morphism — keep current
+                break;
+        }
+        s = s->next;
+    }
+
+    return current_size > 0 ? current_size : 1;
 }

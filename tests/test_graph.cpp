@@ -675,7 +675,31 @@ TEST_F(GraphLayerTest, HasOutFusionSameResultsAsUnfused) {
     graph_result_destroy(r);
     graph_query_destroy(q);
 }
-// This test was replaced - see above for the corrected version
+
+TEST_F(GraphLayerTest, HasOutFusionWithRange) {
+    // Verify fused Has(range)+Out produces correct results
+    graph_insert_sync(layer, "alice", "age", "25");
+    graph_insert_sync(layer, "alice", "follows", "carol");
+    graph_insert_sync(layer, "bob", "age", "30");
+    graph_insert_sync(layer, "bob", "follows", "dave");
+    graph_insert_sync(layer, "carol", "age", "20");
+    graph_insert_sync(layer, "carol", "follows", "eve");
+
+    // g.V("alice").Has("age", ">=", "25").Out("follows")
+    // alice has age 25 (>= 25), so Has matches, then Out("follows") -> carol
+    graph_query_t* q = graph_query_create(layer);
+    graph_query_vertex(q, "alice");
+    graph_query_has_cmp(q, "age", "25", GRAPH_CMP_GTE);
+    graph_query_out(q, "follows");
+
+    graph_result_t* r = graph_query_execute_sync(q);
+    ASSERT_NE(r, nullptr);
+    ASSERT_EQ(graph_result_count(r), (size_t)1);
+    EXPECT_STREQ(graph_result_vertices(r)[0], "carol");
+
+    graph_result_destroy(r);
+    graph_query_destroy(q);
+}
 
 TEST_F(GraphLayerTest, HasReorderMostSelectiveFirst) {
     // Insert data where "name" is very selective and "type" is very common

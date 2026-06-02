@@ -367,6 +367,10 @@ class GraphQuery {
   GraphQuery Out(String pred) { _steps.add('Out("$pred")'); return this; }
   GraphQuery In(String pred) { _steps.add('In("$pred")'); return this; }
   GraphQuery Has(String pred, String val) { _steps.add('Has("$pred","$val")'); return this; }
+  GraphQuery HasGt(String pred, String val) { _steps.add('Has("$pred",>, "$val")'); return this; }
+  GraphQuery HasGte(String pred, String val) { _steps.add('Has("$pred",>=, "$val")'); return this; }
+  GraphQuery HasLt(String pred, String val) { _steps.add('Has("$pred",<, "$val")'); return this; }
+  GraphQuery HasLte(String pred, String val) { _steps.add('Has("$pred",<=, "$val")'); return this; }
   GraphQuery And(GraphQuery sub) { _steps.add('And(${sub._toDSL()})'); return this; }
   GraphQuery Or(GraphQuery sub) { _steps.add('Or(${sub._toDSL()})'); return this; }
   GraphQuery Not(GraphQuery sub) { _steps.add('Not(${sub._toDSL()})'); return this; }

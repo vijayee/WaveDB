@@ -62,7 +62,6 @@ typedef struct {
 } graph_pred_stats_t;
 
 typedef struct {
-    size_t total_vertices;
     vec_t(graph_pred_stats_t) predicates;
 } graph_stats_t;
 
@@ -111,6 +110,7 @@ int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* outpu
 
 int graph_optimize(query_step_t** steps);
 int graph_optimize_reorder_has(query_step_t** steps, graph_layer_t* layer);
+int graph_optimize_reorder_intersect_children(query_step_t** steps, graph_layer_t* layer);
 
 /* ── Layer + Query struct (shared by graph.c and graph_parser.c) ── */
 
@@ -139,6 +139,7 @@ void build_prefix_vec(vec_char_t* v, const char* index_name,
 
 const char* key_nth_component(const char* key, size_t key_len, int n,
                               char* buf, size_t buf_size);
+size_t append_successor(char* buf, size_t prefix_len);
 
 /* ── Parser internals (implemented in graph_parser.c) ── */
 
@@ -155,6 +156,7 @@ size_t graph_stats_estimate_has(graph_stats_t* stats, const char* predicate,
                                  const char* value, graph_cmp_op_t cmp);
 size_t graph_stats_estimate_out(graph_stats_t* stats, const char* predicate, size_t input_size);
 size_t graph_stats_estimate_in(graph_stats_t* stats, const char* predicate, size_t input_size);
+size_t graph_stats_estimate_chain(graph_stats_t* stats, query_step_t* head);
 
 /* ── Schema parser internals (implemented in graph_schema_parser.c) ── */
 
