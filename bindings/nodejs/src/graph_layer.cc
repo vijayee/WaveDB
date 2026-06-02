@@ -5,7 +5,7 @@
 #include <napi.h>
 #include <cstdlib>
 #include <string>
-#include "../../../src/Layers/graph/graph.h"
+#include "Layers/graph/graph.h"
 #include "async_bridge.h"
 #include "graph_result_js.h"
 

@@ -3,7 +3,7 @@
 #include <atomic>
 
 #include <napi.h>
-#include "../../../src/Layers/graph/graph.h"
+#include "Layers/graph/graph.h"
 
 #ifndef WAVEDB_BINDINGS_GRAPH_RESULT_JS_H
 #define WAVEDB_BINDINGS_GRAPH_RESULT_JS_H

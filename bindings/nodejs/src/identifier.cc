@@ -3,8 +3,8 @@
 #include <atomic>
 
 #include "identifier.h"
-#include "../../../src/HBTrie/chunk.h"
-#include "../../../src/Buffer/buffer.h"
+#include "HBTrie/chunk.h"
+#include "Buffer/buffer.h"
 #include <cctype>
 #include <node_api.h>
 

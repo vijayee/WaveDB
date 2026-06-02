@@ -3,8 +3,8 @@
 #include <atomic>
 
 #include "path.h"
-#include "../../../src/HBTrie/identifier.h"
-#include "../../../src/Buffer/buffer.h"
+#include "HBTrie/identifier.h"
+#include "Buffer/buffer.h"
 #include <cctype>
 #include <node_api.h>
 

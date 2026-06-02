@@ -5,12 +5,12 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
-#include "../../../src/Workers/promise.h"
-#include "../../../src/Workers/error.h"
-#include "../../../src/Database/database.h"
-#include "../../../src/Database/batch.h"
-#include "../../../src/Layers/graphql/graphql.h"
-#include "../../../src/Layers/graph/graph.h"
+#include "Workers/promise.h"
+#include "Workers/error.h"
+#include "Database/database.h"
+#include "Database/batch.h"
+#include "Layers/graphql/graphql.h"
+#include "Layers/graph/graph.h"
 
 // Type of async operation
 enum class AsyncOpType {
