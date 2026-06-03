@@ -5,9 +5,9 @@
 // C++ uses std::atomic<T> and #include <atomic>.
 // This header provides a unified ATOMIC_TYPE(T) macro.
 //
-// MSVC C mode: <stdatomic.h> requires /std:c11, but node-gyp adds /std:c++20
-// which conflicts with /std:c11 in AdditionalOptions. We provide Interlocked-
-// based fallbacks for MSVC C mode so /std:c11 is not needed.
+// MSVC C mode: <stdatomic.h> requires /std:c11 with /experimental:c11atomics.
+// When available, we use it. Otherwise, we fall back to Interlocked-based
+// emulation so that /std:c11 is not needed.
 //
 
 #ifndef WAVEDB_ATOMIC_COMPAT_H
@@ -19,9 +19,9 @@
   #define ATOMIC_TYPE(T) ::std::atomic<T>
   #define ATOMIC_VAR_INIT_COMPAT(v) (v)
 
-#elif defined(_MSC_VER)
-  // MSVC C mode: /std:c11 conflicts with /std:c++20 from node-gyp,
-  // so <stdatomic.h> is unavailable. Use Interlocked functions instead.
+#elif defined(_MSC_VER) && defined(__STDC_NO_ATOMICS__)
+  // MSVC C mode without C11 atomics support.
+  // Use Interlocked functions as a fallback.
   #include <windows.h>
 
   // ATOMIC_TYPE(T) just declares a raw value — atomicity comes from the
@@ -116,7 +116,7 @@
   #define ATOMIC_VAR_INIT_COMPAT(v) (v)
 
 #else
-  // Non-MSVC C mode (GCC/Clang): use C11 stdatomic.h
+  // C mode with C11 atomics support (GCC/Clang, or MSVC with /std:c11 /experimental:c11atomics)
   #include <stdatomic.h>
   #define ATOMIC_TYPE(T) _Atomic(T)
 

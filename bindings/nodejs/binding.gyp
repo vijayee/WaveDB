@@ -58,6 +58,10 @@
         ]
       }],
       ["OS=='win'", {
+        "defines": [
+          "WIN32_LEAN_AND_MEAN",
+          "_WINSOCKAPI_"
+        ],
         "libraries": [
           "wavedb_core.lib",
           "wavedb_cbor.lib",
@@ -128,6 +132,10 @@
         ]
       }],
       ["OS=='win'", {
+        "defines": [
+          "WIN32_LEAN_AND_MEAN",
+          "_WINSOCKAPI_"
+        ],
         "libraries": [
           "wavedb_core.lib",
           "wavedb_cbor.lib",
@@ -196,6 +204,10 @@
         ]
       }],
       ["OS=='win'", {
+        "defines": [
+          "WIN32_LEAN_AND_MEAN",
+          "_WINSOCKAPI_"
+        ],
         "libraries": [
           "wavedb_core.lib",
           "wavedb_cbor.lib",
