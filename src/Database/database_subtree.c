@@ -18,8 +18,15 @@
 static void subtree_destroy(database_subtree_t* st) {
     if (st == NULL) return;
 
+    database_t* db = st->db;
     free(st->prefix);
     free(st);
+
+    // Release the reference we took on the database in database_subtree_open.
+    // database_destroy will only tear down when no references remain.
+    if (db) {
+        database_destroy(db);
+    }
 }
 
 database_subtree_t* database_subtree_open(database_t* db,
@@ -42,6 +49,8 @@ database_subtree_t* database_subtree_open(database_t* db,
     st->delimiter = delimiter;
     st->chunk_size = db->chunk_size;
 
+    // Keep the database alive for as long as any subtree references it.
+    refcounter_reference((refcounter_t*) db);
     refcounter_init((refcounter_t*) st);
     return st;
 }

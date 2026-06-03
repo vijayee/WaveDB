@@ -297,11 +297,13 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
 
 WaveDB::~WaveDB() {
   if (db_) {
-    // Shutdown the async bridge before destroying the database
-    // to ensure pending operations complete before teardown
     if (!syncOnly_) {
       bridge_.Shutdown();
     }
+    // database_destroy is refcount-aware: if subtrees hold references,
+    // the database struct is kept alive. Subtrees have their own async
+    // bridges. When the last reference is released (via subtree close),
+    // database_destroy will tear down the database.
     database_destroy(db_);
     db_ = nullptr;
   }
@@ -1491,8 +1493,21 @@ Napi::Value WaveDB::DeleteSubtree(const Napi::CallbackInfo& info) {
 
 Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
   if (db_) {
-    // Shutdown the async bridge — waits for pending operations
-    bridge_.Shutdown();
+    // Check if subtrees are still holding references to the database.
+    // The initial refcount is 1 (from creation). Each open subtree adds 1.
+    // If refcount > 1, subtrees are still open and we must refuse to close.
+    uint_fast32_t count = refcounter_count((refcounter_t*)db_);
+    if (count > 1) {
+      Napi::Error::New(info.Env(),
+        "DATABASE_BUSY: Cannot close database while subtrees are still open. "
+        "Close all subtrees before closing the database.")
+        .ThrowAsJavaScriptException();
+      return info.Env().Undefined();
+    }
+
+    if (!syncOnly_) {
+      bridge_.Shutdown();
+    }
 
     database_t* db = db_;
     db_ = nullptr;

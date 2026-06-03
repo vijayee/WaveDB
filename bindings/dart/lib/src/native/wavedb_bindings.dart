@@ -779,6 +779,12 @@ typedef RefcounterReferenceC = Pointer<Void> Function(Pointer<refcounter_t> refc
 /// Dart signature for refcounter_reference
 typedef RefcounterReference = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
 
+/// C signature: uint16_t refcounter_count(refcounter_t* refcounter)
+typedef RefcounterCountC = Uint16 Function(Pointer<refcounter_t> refcounter);
+
+/// Dart signature for refcounter_count
+typedef RefcounterCount = int Function(Pointer<refcounter_t> refcounter);
+
 /// C signature: buffer_t* identifier_to_buffer(identifier_t* id)
 typedef IdentifierToBufferC = Pointer<buffer_t> Function(
   Pointer<identifier_t> id,
@@ -1410,6 +1416,9 @@ class WaveDBNative {
 
   static late final RefcounterReference _refcounterReference = WaveDBLibrary.load()
       .lookupFunction<RefcounterReferenceC, RefcounterReference>('refcounter_reference');
+
+  static late final RefcounterCount _refcounterCount = WaveDBLibrary.load()
+      .lookupFunction<RefcounterCountC, RefcounterCount>('refcounter_count');
 
   static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
       .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
@@ -2262,6 +2271,14 @@ class WaveDBNative {
   /// if yield>0, it consumes the yield; otherwise it increments count.
   static void identifierReference(Pointer<identifier_t> id) {
     _refcounterReference(id.cast<refcounter_t>());
+  }
+
+  /// Get the reference count of a database.
+  ///
+  /// Since refcounter_t is the first member of database_t, we can
+  /// safely cast the pointer.
+  static int databaseRefCount(Pointer<database_t> db) {
+    return _refcounterCount(db.cast<refcounter_t>());
   }
 
   /// Convert an identifier to a buffer containing the original data

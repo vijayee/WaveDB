@@ -586,8 +586,15 @@ class WaveDB {
    */
   close() {
     if (this._db && !this._closed) {
-      this._db.close();
-      this._closed = true;
+      try {
+        this._db.close();
+        this._closed = true;
+      } catch (err) {
+        if (err.message && err.message.startsWith('DATABASE_BUSY')) {
+          throw err;
+        }
+        throw convertError(err);
+      }
     }
   }
 
