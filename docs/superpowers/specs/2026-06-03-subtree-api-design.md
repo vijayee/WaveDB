@@ -252,10 +252,10 @@ graphql_layer_t* standalone = graphql_layer_create("/path/to/db", &config, NULL)
 - `bindings/dart/test/subtree_test.dart` — Dart Subtree API tests
 
 **Modified files:**
-- `src/Layers/graphql/graphql_types.h` — add `database_subtree_t*` field to `graphql_layer_config_t` and `graphql_layer_t`
-- `src/Layers/graphql/graphql_schema.h` — update `graphql_layer_create` signature to accept subtree from config
-- `src/Layers/graphql/graphql_schema.c` — when config has a subtree, use it instead of creating a database
-- `src/Layers/graph/graph.h` — create `graph_layer_config_t` struct with `database_subtree_t*` field; update `graph_layer_create` signature
+- `src/Layers/graphql/graphql_types.h` — add `database_subtree_t* subtree` field to `graphql_layer_t`
+- `src/Layers/graphql/graphql_schema.h` — update `graphql_layer_create` signature to add optional `database_subtree_t* subtree` parameter
+- `src/Layers/graphql/graphql_schema.c` — when subtree is provided, use it instead of creating a database
+- `src/Layers/graph/graph.h` — create `graph_layer_config_t` struct; update `graph_layer_create` signature to add optional `database_subtree_t* subtree` parameter
 - `src/Layers/graph/graph_internal.h` — add `database_subtree_t*` field to `graph_layer_t`
 - `src/Layers/graph/graph.c` — when config has a subtree, use it instead of creating a database
 - `bindings/nodejs/src/graph_layer.cc` — accept optional `subtree` in constructor options
