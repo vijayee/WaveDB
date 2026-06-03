@@ -25,16 +25,12 @@ database_subtree_t* database_subtree_open(database_t* db,
     if (db == NULL || prefix == NULL) return NULL;
 
     database_subtree_t* st = get_clear_memory(sizeof(database_subtree_t));
-    if (st == NULL) return NULL;
 
-    st->prefix = strdup(prefix);
-    if (st->prefix == NULL) {
-        free(st);
-        return NULL;
-    }
+    st->prefix_len = strlen(prefix);
+    st->prefix = get_clear_memory(st->prefix_len + 1);
+    memcpy(st->prefix, prefix, st->prefix_len + 1);
 
     st->db = db;
-    st->prefix_len = strlen(prefix);
     st->delimiter = delimiter;
     st->chunk_size = db->chunk_size;
 
@@ -60,7 +56,6 @@ int database_subtree_delete(database_t* db,
     size_t prefix_len = strlen(prefix);
     size_t scan_len = prefix_len + 1; /* prefix + delimiter */
     char* scan_prefix = get_memory(scan_len + 1); /* +1 for null terminator */
-    if (scan_prefix == NULL) return -1;
 
     memcpy(scan_prefix, prefix, prefix_len);
     scan_prefix[prefix_len] = delimiter;
@@ -111,16 +106,11 @@ path_t* database_subtree_prepend_path(database_subtree_t* st, path_t* path) {
             path_destroy(prefix_path);
             return NULL;
         }
-        /* path_append takes a reference, so we reference the identifier */
-        identifier_t* id_ref = (identifier_t*) refcounter_reference(
-            (refcounter_t*) id);
-        int rc = path_append(prefix_path, id_ref);
+        int rc = path_append(prefix_path, id);
         if (rc != 0) {
-            identifier_destroy(id_ref);
             path_destroy(prefix_path);
             return NULL;
         }
-        /* path_append consumed the reference, no need to destroy id_ref */
     }
 
     return prefix_path;
@@ -134,7 +124,6 @@ char* database_subtree_prepend_key(database_subtree_t* st,
     /* Allocate: prefix + delimiter + key + null terminator */
     size_t total_len = st->prefix_len + 1 + key_len;
     char* result = get_memory(total_len + 1);
-    if (result == NULL) return NULL;
 
     memcpy(result, st->prefix, st->prefix_len);
     result[st->prefix_len] = st->delimiter;
