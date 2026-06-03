@@ -100,15 +100,15 @@ struct query_step_t {
 int graph_execute_chain(graph_layer_t* layer, query_step_t* steps, vertex_set_t* output);
 
 // Single-step execution on an input set.
-int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* output);
-int graph_execute_out(database_t* db, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
-int graph_execute_in(database_t* db, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
-int graph_execute_has(database_t* db, const vertex_set_t* input,
+int graph_execute_vertex(graph_layer_t* layer, query_step_t* step, vertex_set_t* output);
+int graph_execute_out(graph_layer_t* layer, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
+int graph_execute_in(graph_layer_t* layer, const vertex_set_t* input, const char* predicate, vertex_set_t* output);
+int graph_execute_has(graph_layer_t* layer, const vertex_set_t* input,
                        const char* predicate, const char* value,
                        graph_cmp_op_t cmp, vertex_set_t* output);
-int graph_execute_osp(database_t* db, const vertex_set_t* input,
+int graph_execute_osp(graph_layer_t* layer, const vertex_set_t* input,
                        const char* object, vertex_set_t* output);
-int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output);
+int graph_execute_pso(graph_layer_t* layer, const char* predicate, vertex_set_t* output);
 
 int graph_optimize(query_step_t** steps);
 int graph_optimize_reorder_has(query_step_t** steps, graph_layer_t* layer);

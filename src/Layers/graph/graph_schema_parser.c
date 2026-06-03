@@ -302,13 +302,16 @@ int graph_schema_parse_dsl(graph_layer_t* layer, const char* input, size_t len, 
 int graph_schema_store_type(graph_layer_t* layer, graph_schema_type_t* type) {
     if (!layer->db || !type) return -1;
 
-    database_t* db = layer->db;
-
     // Store type name in the master list: __gschema/types
     // This is a read-modify-write so it must happen before the batch
     uint8_t* existing = NULL;
     size_t existing_len = 0;
-    int grc = database_get_sync_raw(db, "__gschema/types", 15, '/', &existing, &existing_len);
+    int grc;
+    if (layer->subtree) {
+        grc = database_subtree_get_sync_raw(layer->subtree, "__gschema/types", 15, '/', &existing, &existing_len);
+    } else {
+        grc = database_get_sync_raw(layer->db, "__gschema/types", 15, '/', &existing, &existing_len);
+    }
     vec_char_t types_buf;
     vec_init(&types_buf);
     if (grc == 0 && existing != NULL) {
@@ -487,7 +490,11 @@ int graph_schema_store_type(graph_layer_t* layer, graph_schema_type_t* type) {
     // Write all entries atomically
     int rc = 0;
     if (count > 0) {
-        rc = database_batch_sync_raw(db, '/', ops, count);
+        if (layer->subtree) {
+            rc = database_subtree_batch_sync_raw(layer->subtree, '/', ops, count);
+        } else {
+            rc = database_batch_sync_raw(layer->db, '/', ops, count);
+        }
     }
 
     // Cleanup
@@ -527,12 +534,16 @@ static graph_index_flags_t parse_indices_str(const char* str) {
 int graph_schema_load(graph_layer_t* layer) {
     if (!layer || !layer->db) return 0;
 
-    database_t* db = layer->db;
+    // Helper: get raw value from database, routing through subtree if set
+    #define LAYER_GET_RAW(key, key_len, value_out, value_len_out) \
+        (layer->subtree \
+            ? database_subtree_get_sync_raw(layer->subtree, key, key_len, '/', value_out, value_len_out) \
+            : database_get_sync_raw(layer->db, key, key_len, '/', value_out, value_len_out))
 
     // Read the master type list: __gschema/types (comma-separated)
     uint8_t* types_val = NULL;
     size_t types_val_len = 0;
-    int rc = database_get_sync_raw(db, "__gschema/types", 15, '/', &types_val, &types_val_len);
+    int rc = LAYER_GET_RAW("__gschema/types", 15, &types_val, &types_val_len);
     if (rc != 0 || !types_val || types_val_len == 0) {
         if (types_val) database_raw_value_free(types_val);
         return 0;
@@ -589,7 +600,7 @@ int graph_schema_load(graph_layer_t* layer) {
 
         uint8_t* val = NULL;
         size_t val_len = 0;
-        int grc = database_get_sync_raw(db, path.data, path.length - 1, '/', &val, &val_len);
+        int grc = LAYER_GET_RAW(path.data, path.length - 1, &val, &val_len);
         if (grc == 0 && val != NULL) {
             char idx_str[64];
             size_t cl = val_len < sizeof(idx_str) - 1 ? val_len : sizeof(idx_str) - 1;
@@ -613,7 +624,7 @@ int graph_schema_load(graph_layer_t* layer) {
 
         uint8_t* fl_val = NULL;
         size_t fl_len = 0;
-        int flrc = database_get_sync_raw(db, path.data, path.length - 1, '/', &fl_val, &fl_len);
+        int flrc = LAYER_GET_RAW(path.data, path.length - 1, &fl_val, &fl_len);
         if (flrc == 0 && fl_val != NULL && fl_len > 0) {
             // Manual tokenizing (replaces strtok to avoid non-reentrant issues)
             vec_char_t fl_buf;
@@ -657,7 +668,7 @@ int graph_schema_load(graph_layer_t* layer) {
                 vec_pusharr(&path, "/type", 5);
                 vec_push(&path, '\0');
                 val = NULL; val_len = 0;
-                grc = database_get_sync_raw(db, path.data, path.length - 1, '/', &val, &val_len);
+                grc = LAYER_GET_RAW(path.data, path.length - 1, &val, &val_len);
                 if (grc == 0 && val != NULL) {
                     f.type = (char*)get_memory(val_len + 1);
                     memcpy(f.type, val, val_len);
@@ -676,7 +687,7 @@ int graph_schema_load(graph_layer_t* layer) {
                 vec_pusharr(&path, "/array", 6);
                 vec_push(&path, '\0');
                 val = NULL; val_len = 0;
-                grc = database_get_sync_raw(db, path.data, path.length - 1, '/', &val, &val_len);
+                grc = LAYER_GET_RAW(path.data, path.length - 1, &val, &val_len);
                 if (grc == 0 && val != NULL && val_len > 0) {
                     f.is_array = (val[0] == '1');
                     database_raw_value_free(val);
@@ -691,7 +702,7 @@ int graph_schema_load(graph_layer_t* layer) {
                 vec_pusharr(&path, "/indices", 9);
                 vec_push(&path, '\0');
                 val = NULL; val_len = 0;
-                grc = database_get_sync_raw(db, path.data, path.length - 1, '/', &val, &val_len);
+                grc = LAYER_GET_RAW(path.data, path.length - 1, &val, &val_len);
                 if (grc == 0 && val != NULL) {
                     char idx_str[64];
                     size_t cl = val_len < sizeof(idx_str) - 1 ? val_len : sizeof(idx_str) - 1;
@@ -718,5 +729,7 @@ int graph_schema_load(graph_layer_t* layer) {
     vec_deinit(&path);
     vec_deinit(&types_buf);
     layer->schema = schema;
+
+    #undef LAYER_GET_RAW
     return 0;
 }

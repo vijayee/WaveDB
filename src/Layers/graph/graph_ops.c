@@ -94,9 +94,9 @@ size_t append_successor(char* buf, size_t prefix_len) {
 
 /* ── SPO scan: /spo/<subject>/<predicate>/ → collect objects ── */
 
-int graph_execute_out(database_t* db, const vertex_set_t* input,
+int graph_execute_out(graph_layer_t* layer, const vertex_set_t* input,
                        const char* predicate, vertex_set_t* output) {
-    if (!db || !input || !predicate || !output) return -1;
+    if (!layer || !layer->db || !input || !predicate || !output) return -1;
 
     int had_error = 0;
     for (size_t i = 0; i < input->count; i++) {
@@ -112,9 +112,16 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
 
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+        int rc;
+        if (layer->subtree) {
+            rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                       end_buf, end_len, '/',
+                                                       &results, &count);
+        } else {
+            rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                                end_buf, end_len, '/',
                                                &results, &count);
+        }
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -135,9 +142,9 @@ int graph_execute_out(database_t* db, const vertex_set_t* input,
 
 /* ── POS scan: /pos/<predicate>/<object>/ → collect subjects ── */
 
-int graph_execute_in(database_t* db, const vertex_set_t* input,
+int graph_execute_in(graph_layer_t* layer, const vertex_set_t* input,
                       const char* predicate, vertex_set_t* output) {
-    if (!db || !input || !predicate || !output) return -1;
+    if (!layer || !layer->db || !input || !predicate || !output) return -1;
 
     int had_error = 0;
     for (size_t i = 0; i < input->count; i++) {
@@ -153,9 +160,16 @@ int graph_execute_in(database_t* db, const vertex_set_t* input,
 
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+        int rc;
+        if (layer->subtree) {
+            rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                       end_buf, end_len, '/',
+                                                       &results, &count);
+        } else {
+            rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                                end_buf, end_len, '/',
                                                &results, &count);
+        }
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -190,10 +204,10 @@ static int cmp_strings(const char* a, const char* b, graph_cmp_op_t cmp) {
 
 /* ── Has scan: POS scan for (predicate, value [cmp]), intersect with input ── */
 
-int graph_execute_has(database_t* db, const vertex_set_t* input,
+int graph_execute_has(graph_layer_t* layer, const vertex_set_t* input,
                        const char* predicate, const char* value,
                        graph_cmp_op_t cmp, vertex_set_t* output) {
-    if (!db || !input || !predicate || !value || !output) return -1;
+    if (!layer || !layer->db || !input || !predicate || !value || !output) return -1;
 
     if (cmp == GRAPH_CMP_EQ) {
         /* Equality: exact prefix scan /pos/<predicate>/<value>/ */
@@ -209,9 +223,16 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
 
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+        int rc;
+        if (layer->subtree) {
+            rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                       end_buf, end_len, '/',
+                                                       &results, &count);
+        } else {
+            rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                                end_buf, end_len, '/',
                                                &results, &count);
+        }
         if (rc != 0) {
             vec_deinit(&prefix);
             return rc;
@@ -274,9 +295,16 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
 
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+        int rc;
+        if (layer->subtree) {
+            rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                       end_prefix, end_prefix_len, '/',
+                                                       &results, &count);
+        } else {
+            rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                                end_prefix, end_prefix_len, '/',
                                                &results, &count);
+        }
         if (rc != 0) {
             vec_deinit(&prefix);
             return rc;
@@ -304,16 +332,16 @@ int graph_execute_has(database_t* db, const vertex_set_t* input,
 
 /* ── Fused Has+Out: POS scan for (predicate, value) filter, then SPO expansion ── */
 
-static int graph_execute_has_out(database_t* db, const vertex_set_t* input,
+static int graph_execute_has_out(graph_layer_t* layer, const vertex_set_t* input,
                                 const char* has_predicate, const char* has_value,
                                 graph_cmp_op_t has_cmp,
                                 const char* out_predicate, vertex_set_t* output) {
-    if (!db || !out_predicate || !output) return -1;
+    if (!layer || !layer->db || !out_predicate || !output) return -1;
 
     /* Phase 1: collect vertices matching Has filter */
     vertex_set_t has_results;
     vertex_set_init(&has_results, 16);
-    int rc = graph_execute_has(db, input, has_predicate, has_value, has_cmp, &has_results);
+    int rc = graph_execute_has(layer, input, has_predicate, has_value, has_cmp, &has_results);
     if (rc != 0) {
         vertex_set_destroy(&has_results);
         return rc;
@@ -326,7 +354,7 @@ static int graph_execute_has_out(database_t* db, const vertex_set_t* input,
         vertex_set_add(&one, has_results.vertices[i]);
         vertex_set_t next;
         vertex_set_init(&next, 8);
-        int r = graph_execute_out(db, &one, out_predicate, &next);
+        int r = graph_execute_out(layer, &one, out_predicate, &next);
         if (r != 0) rc = r;
         /* Merge next into output */
         for (size_t j = 0; j < next.count; j++) {
@@ -341,16 +369,16 @@ static int graph_execute_has_out(database_t* db, const vertex_set_t* input,
 
 /* ── Fused Has+In: POS scan for (predicate, value) filter, then POS expansion ── */
 
-static int graph_execute_has_in(database_t* db, const vertex_set_t* input,
+static int graph_execute_has_in(graph_layer_t* layer, const vertex_set_t* input,
                                const char* has_predicate, const char* has_value,
                                graph_cmp_op_t has_cmp,
                                const char* in_predicate, vertex_set_t* output) {
-    if (!db || !in_predicate || !output) return -1;
+    if (!layer || !layer->db || !in_predicate || !output) return -1;
 
     /* Phase 1: collect vertices matching Has filter */
     vertex_set_t has_results;
     vertex_set_init(&has_results, 16);
-    int rc = graph_execute_has(db, input, has_predicate, has_value, has_cmp, &has_results);
+    int rc = graph_execute_has(layer, input, has_predicate, has_value, has_cmp, &has_results);
     if (rc != 0) {
         vertex_set_destroy(&has_results);
         return rc;
@@ -363,7 +391,7 @@ static int graph_execute_has_in(database_t* db, const vertex_set_t* input,
         vertex_set_add(&one, has_results.vertices[i]);
         vertex_set_t next;
         vertex_set_init(&next, 8);
-        int r = graph_execute_in(db, &one, in_predicate, &next);
+        int r = graph_execute_in(layer, &one, in_predicate, &next);
         if (r != 0) rc = r;
         for (size_t j = 0; j < next.count; j++) {
             vertex_set_add(output, next.vertices[j]);
@@ -377,9 +405,9 @@ static int graph_execute_has_in(database_t* db, const vertex_set_t* input,
 
 /* ── OSP scan: /osp/<object>/<subject>/ → collect predicates ── */
 
-int graph_execute_osp(database_t* db, const vertex_set_t* input,
+int graph_execute_osp(graph_layer_t* layer, const vertex_set_t* input,
                        const char* object, vertex_set_t* output) {
-    if (!db || !input || !object || !output) return -1;
+    if (!layer || !layer->db || !input || !object || !output) return -1;
 
     int had_error = 0;
     for (size_t i = 0; i < input->count; i++) {
@@ -395,9 +423,16 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
 
         raw_result_t* results = NULL;
         size_t count = 0;
-        int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+        int rc;
+        if (layer->subtree) {
+            rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                       end_buf, end_len, '/',
+                                                       &results, &count);
+        } else {
+            rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                                end_buf, end_len, '/',
                                                &results, &count);
+        }
         if (rc != 0) {
             had_error = rc;
             vec_deinit(&prefix);
@@ -417,8 +452,8 @@ int graph_execute_osp(database_t* db, const vertex_set_t* input,
 
 /* ── PSO scan: /pso/<predicate>/ → collect subjects ── */
 
-int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* output) {
-    if (!db || !predicate || !output) return -1;
+int graph_execute_pso(graph_layer_t* layer, const char* predicate, vertex_set_t* output) {
+    if (!layer || !layer->db || !predicate || !output) return -1;
 
     vec_char_t prefix;
     vec_init(&prefix);
@@ -436,9 +471,16 @@ int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* outpu
 
     raw_result_t* results = NULL;
     size_t count = 0;
-    int rc = database_scan_range_sync_raw(db, prefix.data, prefix_len,
+    int rc;
+    if (layer->subtree) {
+        rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix_len,
+                                                   end_buf, end_len, '/',
+                                                   &results, &count);
+    } else {
+        rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix_len,
                                            end_buf, end_len, '/',
                                            &results, &count);
+    }
     if (rc != 0) {
         vec_deinit(&prefix);
         return rc;
@@ -456,8 +498,8 @@ int graph_execute_pso(database_t* db, const char* predicate, vertex_set_t* outpu
 
 /* ── Vertex step: produce a singleton set ── */
 
-int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* output) {
-    (void)db;
+int graph_execute_vertex(graph_layer_t* layer, query_step_t* step, vertex_set_t* output) {
+    (void)layer;
     if (!step || !step->vertex_id || !output) return -1;
     vertex_set_add(output, step->vertex_id);
     return 0;
@@ -469,7 +511,6 @@ int graph_execute_vertex(database_t* db, query_step_t* step, vertex_set_t* outpu
 // Each child list starts from nothing (Vertex step typically).
 static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex_set_t* output) {
     if (!layer || !layer->db || !steps || !output) return -1;
-    database_t* db = layer->db;
     vertex_set_t current;
     vertex_set_init(&current, 8);
     int first = 1;
@@ -481,22 +522,22 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
         vertex_set_init(&next, 8);
 
         if (s->type == GRAPH_STEP_VERTEX && first) {
-            int rc = graph_execute_vertex(db, s, &next);
+            int rc = graph_execute_vertex(layer, s, &next);
             if (rc != 0) error = rc;
         } else if (s->type == GRAPH_STEP_OUT) {
             int rc;
             if (s->has_predicate) {
-                rc = graph_execute_has_out(db, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
+                rc = graph_execute_has_out(layer, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
             } else {
-                rc = graph_execute_out(db, &current, s->predicate, &next);
+                rc = graph_execute_out(layer, &current, s->predicate, &next);
             }
             if (rc != 0) error = rc;
         } else if (s->type == GRAPH_STEP_IN) {
             int rc;
             if (s->has_predicate) {
-                rc = graph_execute_has_in(db, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
+                rc = graph_execute_has_in(layer, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
             } else {
-                rc = graph_execute_in(db, &current, s->predicate, &next);
+                rc = graph_execute_in(layer, &current, s->predicate, &next);
             }
             if (rc != 0) error = rc;
         } else if (s->type == GRAPH_STEP_LIMIT) {
@@ -511,10 +552,10 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
             if (first) {
                 vertex_set_t empty;
                 vertex_set_init(&empty, 0);
-                rc = graph_execute_has(db, &empty, s->has_predicate, s->has_value, s->has_cmp, &next);
+                rc = graph_execute_has(layer, &empty, s->has_predicate, s->has_value, s->has_cmp, &next);
                 vertex_set_destroy(&empty);
             } else {
-                rc = graph_execute_has(db, &current, s->has_predicate, s->has_value, s->has_cmp, &next);
+                rc = graph_execute_has(layer, &current, s->has_predicate, s->has_value, s->has_cmp, &next);
             }
             if (rc != 0) error = rc;
         } else if (s->type == GRAPH_STEP_MORPHISM) {
@@ -543,19 +584,19 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
                     vertex_set_init(&mnext, 8);
 
                     if (ms->type == GRAPH_STEP_VERTEX) {
-                        graph_execute_vertex(db, ms, &mnext);
+                        graph_execute_vertex(layer, ms, &mnext);
                     } else if (ms->type == GRAPH_STEP_OUT) {
-                        graph_execute_out(db, &mcurrent, ms->predicate, &mnext);
+                        graph_execute_out(layer, &mcurrent, ms->predicate, &mnext);
                     } else if (ms->type == GRAPH_STEP_IN) {
-                        graph_execute_in(db, &mcurrent, ms->predicate, &mnext);
+                        graph_execute_in(layer, &mcurrent, ms->predicate, &mnext);
                     } else if (ms->type == GRAPH_STEP_HAS) {
                         if (mcurrent.count == 0) {
                             vertex_set_t empty;
                             vertex_set_init(&empty, 0);
-                            graph_execute_has(db, &empty, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
+                            graph_execute_has(layer, &empty, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
                             vertex_set_destroy(&empty);
                         } else {
-                            graph_execute_has(db, &mcurrent, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
+                            graph_execute_has(layer, &mcurrent, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
                         }
                     } else if (ms->type == GRAPH_STEP_LIMIT) {
                         vertex_set_destroy(&mnext);

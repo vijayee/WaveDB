@@ -59,8 +59,14 @@ int graph_stats_compute(graph_layer_t* layer) {
 
                 raw_result_t* results = NULL;
                 size_t count = 0;
-                int rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix.length - 1,
-                                                       end_buf, end_len, '/', &results, &count);
+                int rc;
+                if (layer->subtree) {
+                    rc = database_subtree_scan_range_sync_raw(layer->subtree, prefix.data, prefix.length - 1,
+                                                              end_buf, end_len, '/', &results, &count);
+                } else {
+                    rc = database_scan_range_sync_raw(layer->db, prefix.data, prefix.length - 1,
+                                                      end_buf, end_len, '/', &results, &count);
+                }
                 vec_deinit(&prefix);
 
                 graph_pred_stats_t ps;

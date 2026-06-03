@@ -88,8 +88,14 @@ graph_layer_t* graph_layer_create(const char* path,
         if (!subtree) {
             uint8_t* existing = NULL;
             size_t existing_len = 0;
-            int rc = database_get_sync_raw(layer->db, "__gschema/types", 15, '/',
+            int rc;
+            if (layer->subtree) {
+                rc = database_subtree_get_sync_raw(layer->subtree, "__gschema/types", 15, '/',
+                                                   &existing, &existing_len);
+            } else {
+                rc = database_get_sync_raw(layer->db, "__gschema/types", 15, '/',
                                            &existing, &existing_len);
+            }
             if (rc == 0 && existing) {
                 /* Found existing schema data — this is a graph layer, which is fine.
                  * We just wanted to check if the key exists. */
@@ -123,7 +129,11 @@ void graph_layer_destroy(graph_layer_t* layer) {
     platform_rw_lock_w(&layer->lock);
     if (layer->db) {
         // Flush any pending writes (schema metadata etc.) before closing
-        database_snapshot(layer->db);
+        if (layer->subtree) {
+            database_subtree_snapshot(layer->subtree);
+        } else {
+            database_snapshot(layer->db);
+        }
     }
     if (layer->subtree) {
         /* Subtree mode: close the subtree, but do NOT destroy the shared database */
@@ -249,7 +259,12 @@ int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const 
 
     if (count == 0) { platform_rw_unlock_r(&layer->lock); return 0; }
 
-    int rc = database_batch_sync_raw(layer->db, '/', ops, count);
+    int rc;
+    if (layer->subtree) {
+        rc = database_subtree_batch_sync_raw(layer->subtree, '/', ops, count);
+    } else {
+        rc = database_batch_sync_raw(layer->db, '/', ops, count);
+    }
 
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) vec_deinit(&path_spo);
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_POS)) vec_deinit(&path_pos);
@@ -314,7 +329,11 @@ int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const 
 
     int rc = 0;
     if (count > 0) {
-        rc = database_batch_sync_raw(layer->db, '/', ops, count);
+        if (layer->subtree) {
+            rc = database_subtree_batch_sync_raw(layer->subtree, '/', ops, count);
+        } else {
+            rc = database_batch_sync_raw(layer->db, '/', ops, count);
+        }
     }
 
     if (graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO)) vec_deinit(&path_spo);
@@ -387,7 +406,7 @@ void graph_insert(graph_layer_t* layer, const char* s, const char* p, const char
 
     work_t* work = work_create(triple_work_execute, triple_work_abort, tc);
 
-    work_pool_t* pool = layer->db->pool;
+    work_pool_t* pool = layer->subtree ? database_subtree_get_pool(layer->subtree) : layer->db->pool;
     if (pool) {
         refcounter_yield((refcounter_t*)work);
         work_pool_enqueue(pool, work);
@@ -420,7 +439,7 @@ void graph_delete(graph_layer_t* layer, const char* s, const char* p, const char
 
     work_t* work = work_create(triple_work_execute, triple_work_abort, tc);
 
-    work_pool_t* pool = layer->db->pool;
+    work_pool_t* pool = layer->subtree ? database_subtree_get_pool(layer->subtree) : layer->db->pool;
     if (pool) {
         refcounter_yield((refcounter_t*)work);
         work_pool_enqueue(pool, work);
@@ -667,7 +686,7 @@ void graph_query_execute(graph_query_t* q, promise_t* promise) {
 
     work_t* work = work_create(query_work_execute, query_work_abort, qc);
 
-    work_pool_t* pool = q->layer->db->pool;
+    work_pool_t* pool = q->layer->subtree ? database_subtree_get_pool(q->layer->subtree) : q->layer->db->pool;
     if (pool) {
         refcounter_yield((refcounter_t*)work);
         work_pool_enqueue(pool, work);
