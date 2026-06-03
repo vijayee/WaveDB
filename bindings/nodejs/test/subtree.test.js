@@ -207,10 +207,10 @@ describe('Subtree with Graph/GraphQL layers', () => {
     const testPath = `/tmp/wavedb-subtree-ptr-test-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const db2 = new WaveDB(testPath);
     const st = db2.openSubtree('ptrtest');
-    // _getPtr returns a number (the raw C pointer value)
-    const ptr = st._st._getPtr();
-    assert.strictEqual(typeof ptr, 'number');
-    assert.ok(ptr > 0, 'Pointer should be a non-zero number');
+    // _getPtr returns a BigInt (the raw C pointer value) for 64-bit safety
+    const ptr = st._getPtr();
+    assert.strictEqual(typeof ptr, 'bigint');
+    assert.ok(ptr > 0n, 'Pointer should be a non-zero BigInt');
     st.close();
     db2.close();
     if (fs.existsSync(testPath)) {
