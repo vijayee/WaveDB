@@ -15,6 +15,7 @@ class WaveDBException implements Exception {
   static const String invalidPathCode = 'INVALID_PATH';
   static const String ioErrorCode = 'IO_ERROR';
   static const String databaseClosedCode = 'DATABASE_CLOSED';
+  static const String databaseBusyCode = 'DATABASE_BUSY';
   static const String invalidArgumentCode = 'INVALID_ARGUMENT';
   static const String notSupportedCode = 'NOT_SUPPORTED';
   static const String corruptionCode = 'CORRUPTION';

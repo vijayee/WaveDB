@@ -663,6 +663,67 @@ typedef DatabaseSubtreeBatchSyncRaw = int Function(
   int count,
 );
 
+/// C signature: int32_t database_subtree_put_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter,
+///   const uint8_t* value, size_t value_len, promise_t* promise
+/// )
+typedef DatabaseSubtreePutRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Uint8> value,
+  Size valueLen,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseSubtreePutRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Uint8> value,
+  int valueLen,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: int32_t database_subtree_get_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter,
+///   promise_t* promise
+/// )
+typedef DatabaseSubtreeGetRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseSubtreeGetRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: int32_t database_subtree_delete_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter,
+///   promise_t* promise
+/// )
+typedef DatabaseSubtreeDeleteRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<promise_t> promise,
+);
+typedef DatabaseSubtreeDeleteRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<promise_t> promise,
+);
+
 /// C signature: int database_subtree_scan_sync_raw(
 ///   database_subtree_t* st, const char* prefix, size_t prefix_len, char delimiter,
 ///   raw_result_t** results, size_t* count
@@ -778,6 +839,12 @@ typedef RefcounterReferenceC = Pointer<Void> Function(Pointer<refcounter_t> refc
 
 /// Dart signature for refcounter_reference
 typedef RefcounterReference = Pointer<Void> Function(Pointer<refcounter_t> refcounter);
+
+/// C signature: uint16_t refcounter_count(refcounter_t* refcounter)
+typedef RefcounterCountC = Uint16 Function(Pointer<refcounter_t> refcounter);
+
+/// Dart signature for refcounter_count
+typedef RefcounterCount = int Function(Pointer<refcounter_t> refcounter);
 
 /// C signature: buffer_t* identifier_to_buffer(identifier_t* id)
 typedef IdentifierToBufferC = Pointer<buffer_t> Function(
@@ -1364,6 +1431,15 @@ class WaveDBNative {
   static late final DatabaseSubtreeDeleteSyncRaw _databaseSubtreeDeleteSyncRaw = WaveDBLibrary.load()
       .lookupFunction<DatabaseSubtreeDeleteSyncRawC, DatabaseSubtreeDeleteSyncRaw>('database_subtree_delete_sync_raw');
 
+  static late final DatabaseSubtreePutRaw _databaseSubtreePutRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreePutRawC, DatabaseSubtreePutRaw>('database_subtree_put_raw');
+
+  static late final DatabaseSubtreeGetRaw _databaseSubtreeGetRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeGetRawC, DatabaseSubtreeGetRaw>('database_subtree_get_raw');
+
+  static late final DatabaseSubtreeDeleteRaw _databaseSubtreeDeleteRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeDeleteRawC, DatabaseSubtreeDeleteRaw>('database_subtree_delete_raw');
+
   static late final DatabaseSubtreeCount _databaseSubtreeCount = WaveDBLibrary.load()
       .lookupFunction<DatabaseSubtreeCountC, DatabaseSubtreeCount>('database_subtree_count');
 
@@ -1410,6 +1486,9 @@ class WaveDBNative {
 
   static late final RefcounterReference _refcounterReference = WaveDBLibrary.load()
       .lookupFunction<RefcounterReferenceC, RefcounterReference>('refcounter_reference');
+
+  static late final RefcounterCount _refcounterCount = WaveDBLibrary.load()
+      .lookupFunction<RefcounterCountC, RefcounterCount>('refcounter_count');
 
   static late final IdentifierToBuffer _identifierToBuffer = WaveDBLibrary.load()
       .lookupFunction<IdentifierToBufferC, IdentifierToBuffer>('identifier_to_buffer');
@@ -2105,6 +2184,41 @@ class WaveDBNative {
     return _databaseSubtreeDeleteSyncRaw(st, key, keyLen, delimiter);
   }
 
+  /// Asynchronously put a raw key-value pair into the subtree
+  static int databaseSubtreePutRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Uint8> value,
+    int valueLen,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseSubtreePutRaw(st, key, keyLen, delimiter, value, valueLen, promise);
+  }
+
+  /// Asynchronously get a raw value from the subtree
+  static int databaseSubtreeGetRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseSubtreeGetRaw(st, key, keyLen, delimiter, promise);
+  }
+
+  /// Asynchronously delete a raw key from the subtree
+  static int databaseSubtreeDeleteRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<promise_t> promise,
+  ) {
+    return _databaseSubtreeDeleteRaw(st, key, keyLen, delimiter, promise);
+  }
+
   /// Count entries under the subtree prefix
   static int databaseSubtreeCount(Pointer<database_subtree_t> st) {
     return _databaseSubtreeCount(st);
@@ -2262,6 +2376,14 @@ class WaveDBNative {
   /// if yield>0, it consumes the yield; otherwise it increments count.
   static void identifierReference(Pointer<identifier_t> id) {
     _refcounterReference(id.cast<refcounter_t>());
+  }
+
+  /// Get the reference count of a database.
+  ///
+  /// Since refcounter_t is the first member of database_t, we can
+  /// safely cast the pointer.
+  static int databaseRefCount(Pointer<database_t> db) {
+    return _refcounterCount(db.cast<refcounter_t>());
   }
 
   /// Convert an identifier to a buffer containing the original data

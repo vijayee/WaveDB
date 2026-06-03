@@ -432,7 +432,8 @@ graphql_layer_t* graphql_layer_create(const char* path,
         if (existing_layer != NULL) {
             if (strcmp(existing_layer, "graphql") != 0) {
                 free(existing_layer);
-                // Layer type mismatch — don't destroy the subtree or its db
+                // Layer type mismatch — release the subtree reference we took
+                database_subtree_close(subtree);
                 layer->db = NULL;
                 layer->subtree = NULL;
                 layer->pool = NULL;

@@ -878,11 +878,25 @@ class WaveDB implements Finalizable {
 
   /// Close the database
   ///
-  /// Destroys the database. The C database_destroy internally stops the
-  /// timing wheel, shuts down the worker pool, and joins all worker threads,
-  /// so pending async operations will complete or abort before teardown.
+  /// Destroys the database. If subtrees are still open, this throws
+  /// a [WaveDBException] — close all subtrees first.
+  ///
+  /// The C database_destroy internally stops the timing wheel, shuts
+  /// down the worker pool, and joins all worker threads, so pending
+  /// async operations will complete or abort before teardown.
   void close() {
     if (_db != null && !_isClosed) {
+      // Check if subtrees are still holding references.
+      // Initial refcount is 1 (from creation). Each open subtree adds 1.
+      final count = WaveDBNative.databaseRefCount(_db!);
+      if (count > 1) {
+        throw WaveDBException(
+          WaveDBException.databaseBusyCode,
+          'Cannot close database while subtrees are still open. '
+          'Close all subtrees before closing the database.',
+        );
+      }
+
       _finalizer.detach(this);
 
       // Cancel only this instance's pending async operations

@@ -24,24 +24,27 @@ extern "C" {
  * database_subtree_t - A scoped view into a database with prefix isolation.
  *
  * All operations on a subtree automatically prepend the prefix to keys,
- * providing namespace isolation. The subtree does NOT own the database;
- * closing a subtree does not destroy the underlying database.
+ * providing namespace isolation. The subtree holds a reference on the
+ * database, preventing it from being destroyed while any subtree is open.
+ * Closing a subtree releases that reference; the database is only torn
+ * down when its reference count reaches zero.
  */
 typedef struct {
     refcounter_t refcounter;     // MUST be first member
-    database_t* db;              // Borrowed reference to the database
+    database_t* db;              // Referenced — subtree keeps db alive
     char* prefix;                // Key prefix (owned copy)
     size_t prefix_len;           // Length of prefix string
     char delimiter;              // Path delimiter character
     uint8_t chunk_size;          // Chunk size copied from db
+    bool destroying;             // True once destruction begins
 } database_subtree_t;
 
 /**
  * Open a subtree view on a database.
  *
  * Creates a subtree that prepends the given prefix to all keys.
- * The database is NOT referenced — the caller must ensure db outlives
- * the subtree.
+ * The subtree holds a reference on the database, keeping it alive
+ * until all subtrees and other references are released.
  *
  * @param db        Database to operate on
  * @param prefix    Key prefix string (e.g. "layer/graphql")
@@ -55,8 +58,9 @@ database_subtree_t* database_subtree_open(database_t* db,
 /**
  * Close a subtree view.
  *
- * Decrements the reference count. When count reaches 0, frees the prefix
- * and the subtree struct. Does NOT destroy or dereference the database.
+ * Decrements the reference count. When count reaches 0, frees the prefix,
+ * the subtree struct, and releases the reference held on the database.
+ * The database is only destroyed when its own reference count reaches zero.
  *
  * @param subtree  Subtree to close
  */
