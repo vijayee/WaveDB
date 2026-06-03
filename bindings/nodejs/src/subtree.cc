@@ -449,17 +449,9 @@ Napi::Value Subtree::Put(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  int rc = database_subtree_put_raw(st_, key_str.c_str(), key_str.size(), delimiter_,
-                                     reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(),
-                                     promise_c);
-  if (rc != 0) {
-    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch subtree put").Value();
-    napi_value promise_val = ctx->promise;
-    napi_reject_deferred(env, ctx->deferred, error_val);
-    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
-    delete ctx;
-    return Napi::Value(env, promise_val);
-  }
+  database_subtree_put_raw(st_, key_str.c_str(), key_str.size(), delimiter_,
+                           reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(),
+                           promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -494,15 +486,7 @@ Napi::Value Subtree::Get(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  int rc = database_subtree_get_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
-  if (rc != 0) {
-    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch subtree get").Value();
-    napi_value promise_val = ctx->promise;
-    napi_reject_deferred(env, ctx->deferred, error_val);
-    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
-    delete ctx;
-    return Napi::Value(env, promise_val);
-  }
+  database_subtree_get_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
@@ -537,15 +521,7 @@ Napi::Value Subtree::Del(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  int rc = database_subtree_delete_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
-  if (rc != 0) {
-    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch subtree delete").Value();
-    napi_value promise_val = ctx->promise;
-    napi_reject_deferred(env, ctx->deferred, error_val);
-    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
-    delete ctx;
-    return Napi::Value(env, promise_val);
-  }
+  database_subtree_delete_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
 
   return Napi::Value(env, ctx->promise);
 }
