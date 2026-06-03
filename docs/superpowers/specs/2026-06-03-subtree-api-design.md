@@ -270,6 +270,32 @@ database_subtree_delete(db, "layer/graphql", '/');
 - `bindings/nodejs/test/graph.test.js` — add subtree-based creation tests
 - `bindings/dart/test/graph_layer_test.dart` — add subtree-based creation tests
 
+### README Updates
+
+Three READMEs document the layer creation API and must be updated to cover the new subtree feature:
+
+**Root `README.md`:**
+- Add a "Subtree API" section documenting `database_subtree_open`, `database_subtree_close`, and `database_subtree_delete` with C code examples
+- Update the Graph Schema Layer section to show `graph_layer_config_t` usage (new struct) and the `subtree` field
+- Update the GraphQL Schema Layer section to show the new `subtree` field in `graphql_layer_config_t`
+- Add an example showing how to create a database, open two subtrees, and pass them to layer constructors
+
+**`bindings/nodejs/README.md`:**
+- Add `WaveDB.openSubtree(prefix, delimiter)` method documentation
+- Add `WaveDB.deleteSubtree(prefix, delimiter)` method documentation
+- Document the Subtree class and its methods (put, get, del, batch, scan, etc.)
+- Update `new GraphLayer(options)` to document the `subtree` option
+- Update `new GraphQLLayer(path, options)` to document the `subtree` option
+- Add an example showing shared database with subtrees for both layers
+
+**`bindings/dart/README.md`:**
+- Add `WaveDB.openSubtree(prefix, delimiter)` method documentation
+- Add `WaveDB.deleteSubtree(prefix, delimiter)` method documentation
+- Document the Subtree class and its methods
+- Update `GraphQLLayerConfig` to document the `subtree` field
+- Document the new `GraphLayerConfig` class (doesn't exist today in Dart)
+- Add an example showing shared database with subtrees for both layers
+
 ### Error Handling
 
 - `database_subtree_open` returns `NULL` on allocation failure
