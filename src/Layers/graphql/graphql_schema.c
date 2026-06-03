@@ -422,6 +422,7 @@ graphql_layer_t* graphql_layer_create(const char* path,
         // Subtree mode: use the subtree's database and pool
         layer->db = database_subtree_get_db(subtree);
         layer->subtree = subtree;
+        refcounter_reference((refcounter_t*) subtree);
         layer->pool = database_subtree_get_pool(subtree);
         layer->db_path = NULL;
         layer->owns_db_path = false;
@@ -798,8 +799,8 @@ int graphql_schema_load(graphql_layer_t* layer) {
     buffer_destroy(buf2);
 
     // Iterate over all types
+    /* layer_scan_start takes ownership of start_path */
     database_iterator_t* iter = layer_scan_start(layer, start_path, NULL);
-    path_destroy(start_path);
 
     if (iter == NULL) return -1;
 
@@ -885,7 +886,7 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
         return NULL;
     }
 
-    type->plural_name = plural_name ? plural_name : make_plural(type_name);
+    type->plural_name = (char*)plural;  /* Reuse the plural we already computed */
 
     // Load fields by scanning __schema/fields/* paths
     // Build scan path: {PluralType}/__schema/fields/

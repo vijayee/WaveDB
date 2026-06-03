@@ -1490,8 +1490,10 @@ static void test_subtree_schema_collision(void) {
 
     if (graph_layer_sub != NULL) {
         graph_layer_destroy(graph_layer_sub);
-        /* graph_layer_destroy closes the subtree internally, so do NOT close it again */
     }
+    /* graph_layer_destroy decrements its reference to the subtree, but the caller
+       still holds the original reference from database_subtree_open */
+    database_subtree_close(st);
 
     database_destroy(db);
     cleanup_tmpdir(tmpdir2);

@@ -54,6 +54,7 @@ graph_layer_t* graph_layer_create(const char* path,
         /* Subtree mode: use the database from the subtree, don't create one */
         layer->db = database_subtree_get_db(subtree);
         layer->subtree = subtree;
+        refcounter_reference((refcounter_t*) subtree);
     } else {
         /* Own-database mode: create or open a database */
         const char* effective_path = path;

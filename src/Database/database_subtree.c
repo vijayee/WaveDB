@@ -28,9 +28,14 @@ database_subtree_t* database_subtree_open(database_t* db,
     if (db == NULL || prefix == NULL) return NULL;
 
     database_subtree_t* st = get_clear_memory(sizeof(database_subtree_t));
+    if (st == NULL) return NULL;
 
     st->prefix_len = strlen(prefix);
     st->prefix = get_clear_memory(st->prefix_len + 1);
+    if (st->prefix == NULL) {
+        free(st);
+        return NULL;
+    }
     memcpy(st->prefix, prefix, st->prefix_len + 1);
 
     st->db = db;
@@ -1035,8 +1040,8 @@ int database_subtree_scan_sync_raw(database_subtree_t* st,
         if (start_path == NULL) return -1;
     }
 
+    /* database_scan_start takes ownership of start_path */
     database_iterator_t* iter = database_scan_start(st->db, start_path, NULL);
-    path_destroy(start_path);
     if (iter == NULL) return 0;
 
     size_t prefix_count = subtree_prefix_component_count(st);
@@ -1143,9 +1148,8 @@ int database_subtree_scan_range_sync_raw(database_subtree_t* st,
         }
     }
 
+    /* database_scan_start takes ownership of start_path and end_path */
     database_iterator_t* iter = database_scan_start(st->db, start_path, end_path);
-    if (start_path) path_destroy(start_path);
-    if (end_path) path_destroy(end_path);
     if (iter == NULL) return 0;
 
     size_t prefix_count = subtree_prefix_component_count(st);
