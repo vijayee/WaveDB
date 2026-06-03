@@ -8,7 +8,6 @@
 #include "../Util/allocator.h"
 #include "../HBTrie/identifier.h"
 #include "../Workers/work.h"
-#include "../Workers/error.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -147,7 +146,11 @@ int database_subtree_put_sync(database_subtree_t* st, path_t* path, identifier_t
     if (st == NULL || path == NULL || value == NULL) return -1;
 
     path_t* full_path = database_subtree_prepend_path(st, path);
-    if (full_path == NULL) return -1;
+    path_destroy(path);
+    if (full_path == NULL) {
+        identifier_destroy(value);
+        return -1;
+    }
 
     /* database_put_sync consumes full_path and value */
     return database_put_sync(st->db, full_path, value);
@@ -157,6 +160,7 @@ int database_subtree_get_sync(database_subtree_t* st, path_t* path, identifier_t
     if (st == NULL || path == NULL || result == NULL) return -1;
 
     path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
     if (full_path == NULL) return -1;
 
     /* database_get_sync consumes full_path */
@@ -167,6 +171,7 @@ int database_subtree_delete_sync(database_subtree_t* st, path_t* path) {
     if (st == NULL || path == NULL) return -1;
 
     path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
     if (full_path == NULL) return -1;
 
     /* database_delete_sync consumes full_path */
@@ -177,6 +182,7 @@ int64_t database_subtree_increment_sync(database_subtree_t* st, path_t* path, in
     if (st == NULL || path == NULL) return -1;
 
     path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
     if (full_path == NULL) return -1;
 
     /* database_increment_sync consumes full_path */
@@ -823,18 +829,27 @@ size_t database_subtree_count(database_subtree_t* st) {
 database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
                                                   path_t* start_path,
                                                   path_t* end_path) {
-    if (st == NULL) return NULL;
+    if (st == NULL) {
+        if (start_path) path_destroy(start_path);
+        if (end_path) path_destroy(end_path);
+        return NULL;
+    }
 
     path_t* prefixed_start = NULL;
     path_t* prefixed_end = NULL;
 
     if (start_path != NULL) {
         prefixed_start = database_subtree_prepend_path(st, start_path);
-        if (prefixed_start == NULL) return NULL;
+        path_destroy(start_path);
+        if (prefixed_start == NULL) {
+            if (end_path) path_destroy(end_path);
+            return NULL;
+        }
     }
 
     if (end_path != NULL) {
         prefixed_end = database_subtree_prepend_path(st, end_path);
+        path_destroy(end_path);
         if (prefixed_end == NULL) {
             if (prefixed_start) path_destroy(prefixed_start);
             return NULL;
