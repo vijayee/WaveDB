@@ -153,10 +153,11 @@ This is a synchronous operation. For large subtrees, a future optimization could
 
 ### Layer Config Changes
 
-The subtree field goes in each layer's config struct, not in `database_config_t`. A subtree is a layer concern (which namespace the layer operates in), not a database concern (how the database is configured).
+The subtree is passed as an **optional parameter** to the existing layer create functions, not in the config. Configs contain configuration values only. If the subtree parameter is provided, the layer uses it (the subtree already has a reference to its underlying database). If not, business as usual — the layer creates its own database.
 
-**GraphQL layer** — extend existing `graphql_layer_config_t`:
+**GraphQL layer** — config stays unchanged. New optional parameter added to create:
 ```c
+// graphql_layer_config_t — UNCHANGED, no subtree fields
 typedef struct graphql_layer_config_t {
     const char* path;
     uint8_t chunk_size;
@@ -167,34 +168,35 @@ typedef struct graphql_layer_config_t {
     uint8_t enable_persist;
     wal_config_t wal_config;
     char delimiter;
-    database_subtree_t* subtree;    // NEW: if set, layer uses this subtree instead of creating a database
 } graphql_layer_config_t;
-```
 
-When `subtree` is non-NULL, `graphql_layer_create` uses the subtree for all database operations and ignores `path`, `chunk_size`, `btree_node_size`, `lru_memory_mb`, `lru_shards`, `worker_threads`, `enable_persist`, and `wal_config` (these are managed by the shared database). The `delimiter` is still read from the config since it's a layer-level concern.
-
-**Graph layer** — create a new `graph_layer_config_t` (doesn't exist today):
-```c
-typedef struct graph_layer_config_t {
-    const char* path;               // Database storage path (NULL = in-memory), ignored if subtree is set
-    database_config_t* db_config;   // Database configuration, ignored if subtree is set
-    database_subtree_t* subtree;    // NEW: if set, layer uses this subtree instead of creating a database
-} graph_layer_config_t;
-```
-
-The graph layer currently takes `database_config_t*` directly in `graph_layer_create`. The new config struct wraps this and adds the subtree field. When `subtree` is non-NULL, `graph_layer_create` uses the subtree and ignores `path` and `db_config`.
-
-**Updated create signatures:**
-```c
-// GraphQL — signature unchanged, config now has optional subtree field
+// Updated create signature — subtree is optional, NULL means create own database
 graphql_layer_t* graphql_layer_create(const char* path,
-                                       const graphql_layer_config_t* config);
-
-// Graph — signature changes to accept new config struct
-graph_layer_t* graph_layer_create(const char* path, graph_layer_config_t* config);
+                                       const graphql_layer_config_t* config,
+                                       database_subtree_t* subtree);  // NEW optional param
 ```
 
-**Layer internals:** When a layer is created with a subtree, it stores the subtree handle and uses `database_subtree_*` functions for all operations instead of `database_*` functions. The `database_subtree_get_pool()` accessor replaces direct `db->pool` access.
+When `subtree` is non-NULL, the layer uses it for all database operations and ignores `path`, `chunk_size`, `btree_node_size`, `lru_memory_mb`, `lru_shards`, `worker_threads`, `enable_persist`, and `wal_config` (managed by the shared database). The `delimiter` is still read from config.
+
+**Graph layer** — new config struct (needed regardless of subtree — currently takes raw `database_config_t*`). Create signature gets optional subtree parameter:
+```c
+// NEW — graph_layer_config_t (replaces direct database_config_t* param)
+typedef struct graph_layer_config_t {
+    const char* path;               // Database storage path (NULL = in-memory)
+    database_config_t* db_config;  // Database configuration
+} graph_layer_config_t;
+
+// Updated create signature — subtree is optional, NULL means create own database
+graph_layer_t* graph_layer_create(const char* path,
+                                   graph_layer_config_t* config,
+                                   database_subtree_t* subtree);  // NEW optional param
+```
+
+When `subtree` is non-NULL, the layer uses it and ignores `path` and `db_config`.
+
+**Backward compatibility:** Since both `subtree` parameters are optional (NULL = old behavior), existing code that calls these functions without the subtree argument continues to work. In languages with default arguments or optional parameters (JavaScript, Dart), the subtree can be omitted. In C, callers pass `NULL`.
+
+**Layer internals:** When a layer is created with a subtree, it stores the subtree handle and uses `database_subtree_*` functions for all operations instead of `database_*` functions. The `database_subtree_get_pool()` accessor replaces direct `db->pool` access. On `*_layer_destroy`, the layer calls `database_subtree_close` to release the subtree handle (but does NOT destroy the underlying database — that's the application's responsibility).
 
 ### Layer Integration Pattern
 
@@ -206,38 +208,36 @@ layer->db = db;
 // ... use database_put_sync(db, path, value)
 ```
 
-**After** (subtree passed through layer config):
+**After** (subtree as optional parameter — simple and backward compatible):
 ```c
-// Application code creates one database and opens subtrees with arbitrary paths:
+// Application code creates one database, then opens subtrees for each layer
 database_t* db = database_create_with_config(db_path, db_config, &error_code);
-database_subtree_t* graphql_subtree = database_subtree_open(db, "layer/graphql", '/');
+database_subtree_t* gql_subtree = database_subtree_open(db, "layer/graphql", '/');
 database_subtree_t* graph_subtree = database_subtree_open(db, "layer/graphs/graph1", '/');
 
-// GraphQL layer — subtree goes in config
-graphql_layer_config_t gql_config = {0};
-gql_config.subtree = graphql_subtree;
-gql_config.delimiter = '/';
-graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config);
-// path is NULL because the subtree already has a database; config path is ignored
+// GraphQL layer — pass subtree as optional parameter, NULL for old behavior
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree);
 
-// Graph layer — new config struct with subtree
+// Graph layer — same pattern, new config struct
 graph_layer_config_t graph_config = {0};
-graph_config.subtree = graph_subtree;
-graph_layer_t* graph = graph_layer_create(NULL, &graph_config);
+graph_config.path = NULL;
+graph_config.db_config = NULL;
+graph_layer_t* graph = graph_layer_create(NULL, &graph_config, graph_subtree);
 
 // Inside each layer, all database operations use the subtree API:
-database_subtree_put_sync(layer->subtree, path, value);
 // Path "Users/1/name" is automatically prefixed to "layer/graphql/Users/1/name"
 
-// On reopen:
+// On reopen — recreate database, reopen subtrees, pass to layers
 database_t* db = database_create_with_config(db_path, config, &error_code);
-database_subtree_t* subtree = database_subtree_open(db, "layer/graphql", '/');
-gql_config.subtree = subtree;
-graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config);
+database_subtree_t* gql_subtree = database_subtree_open(db, "layer/graphql", '/');
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree);
 // graphql_schema_load works unchanged — sees __meta/layer at its own root
 
 // Delete a layer's data:
 database_subtree_delete(db, "layer/graphql", '/');
+
+// Business as usual — no subtree, layer creates its own database
+graphql_layer_t* standalone = graphql_layer_create("/path/to/db", &config, NULL);
 ```
 
 ### Files to Create/Modify
@@ -313,7 +313,8 @@ The Node.js and Dart bindings must be updated to expose the subtree config and n
 |--------|--------|
 | New `database_subtree_t` type and all `database_subtree_*` functions | New FFI bindings needed |
 | New `graph_layer_config_t` struct (replaces direct `database_config_t*` param) | Changes `graph_layer_create` signature |
-| `graphql_layer_config_t` gains `database_subtree_t* subtree` field | New field in existing struct |
+| `graphql_layer_create` gains optional `database_subtree_t* subtree` param | New optional parameter |
+| `graph_layer_create` gains optional `database_subtree_t* subtree` param | New optional parameter |
 | `database_subtree_open(db, prefix, delimiter)` | New function |
 | `database_subtree_close(subtree)` | New function |
 | `database_subtree_delete(db, prefix, delimiter)` | New function |
@@ -321,9 +322,9 @@ The Node.js and Dart bindings must be updated to expose the subtree config and n
 #### Node.js Binding Updates
 
 **Files to modify:**
-- `bindings/nodejs/src/graph_layer.cc` — Update `GraphLayer` constructor to accept optional `subtree` option. When provided, create a `database_subtree_t` and pass it via `graph_layer_config_t`. If not provided, behave as before (backward compatible).
-- `bindings/nodejs/src/graphql_layer.cc` — Update `GraphQLLayer` constructor to accept optional `subtree` option. Pass it in `graphql_layer_config_t.subtree`.
-- `bindings/nodejs/src/database.cc` — Add `WaveDB.openSubtree(prefix, delimiter)` method that returns a `Subtree` wrapper object wrapping a `database_subtree_t*`.
+- `bindings/nodejs/src/graph_layer.cc` — Update `GraphLayer` constructor to accept optional `subtree` parameter. When provided, pass it to `graph_layer_create`. If not provided, behave as before (backward compatible).
+- `bindings/nodejs/src/graphql_layer.cc` — Update `GraphQLLayer` constructor to accept optional `subtree` parameter.
+- `bindings/nodejs/src/database.cc` — Add `WaveDB.openSubtree(prefix, delimiter)` method that returns a `Subtree` wrapper object. Add `WaveDB.deleteSubtree(prefix, delimiter)` method.
 - New `bindings/nodejs/src/subtree.cc` and `subtree.h` — `Subtree` class wrapping `database_subtree_t*`. Exposes all `database_subtree_*` CRUD, batch, scan, and snapshot methods.
 - `bindings/nodejs/test/graph.test.js` — Add tests for subtree-based GraphLayer creation
 - `bindings/nodejs/test/subtree.test.js` — New test file for Subtree API
@@ -334,9 +335,12 @@ The Node.js and Dart bindings must be updated to expose the subtree config and n
 // Create a subtree from an existing database
 const subtree = db.openSubtree('layer/graphql', '/');
 
-// Pass subtree to layer via config
+// Pass subtree to layer as optional parameter (NULL = old behavior)
 const graph = new GraphLayer(null, { subtree });
 const gql = new GraphQLLayer(null, { subtree });
+
+// Business as usual — no subtree, layer creates its own database
+const standalone = new GraphLayer('/path/to/db');
 
 // Subtree CRUD (mirrors database API)
 await subtree.put(path, value);
@@ -355,8 +359,8 @@ db.deleteSubtree('layer/graphql', '/');
 - `bindings/dart/lib/src/native/wavedb_bindings.dart` — Add FFI typedefs for `database_subtree_open`, `database_subtree_close`, `database_subtree_delete`, and all `database_subtree_*` CRUD/scan functions. Update `GraphLayerCreate` typedef to use `graph_layer_config_t*` instead of `database_config_t*`.
 - `bindings/dart/lib/src/native/types.dart` — Add `database_subtree_t` opaque type. Add `graph_layer_config_t` struct definition for FFI.
 - `bindings/dart/lib/src/database.dart` — Add `openSubtree(String prefix, String delimiter)` method to `WaveDB` class. Add `deleteSubtree(String prefix, String delimiter)` method.
-- `bindings/dart/lib/src/graph_layer.dart` — Update `GraphLayer` constructor to accept optional `GraphLayerConfig` with `subtree` field.
-- `bindings/dart/lib/src/graphql_layer.dart` — Update `GraphQLLayerConfig` to include `subtree` field.
+- `bindings/dart/lib/src/graph_layer.dart` — Add `subtree` optional parameter to `GraphLayer` constructor. Add `GraphLayerConfig` class.
+- `bindings/dart/lib/src/graphql_layer.dart` — Add `subtree` optional parameter to `GraphQLLayer.create()`.
 - New `bindings/dart/lib/src/subtree.dart` — `Subtree` class wrapping `database_subtree_t*`. Exposes CRUD, batch, scan, and snapshot methods.
 - `bindings/dart/lib/wavedb.dart` — Export new `Subtree` class and `GraphLayerConfig`.
 - `bindings/dart/test/graph_layer_test.dart` — Add tests for subtree-based creation
@@ -375,15 +379,18 @@ subtree.close();
 // Delete all data under a subtree prefix
 db.deleteSubtree('layer/graphql', '/');
 
-// Pass subtree to layer via config
-final graph = GraphLayer(config: GraphLayerConfig(subtree: subtree));
-final gql = GraphQLLayer(config: GraphQLLayerConfig(subtree: subtree));
+// Pass subtree to layer as optional parameter
+final graph = GraphLayer(config: GraphLayerConfig(), subtree: subtree);
+final gql = GraphQLLayer(config: GraphQLLayerConfig(), subtree: subtree);
+
+// Business as usual — no subtree, layer creates its own database
+final standalone = GraphLayer('/path/to/db');
 ```
 
 #### Backward Compatibility
 
 Both bindings must remain backward compatible:
-- If `subtree` is not provided in config, layers create their own `database_t` as before
+- If `subtree` is not provided (NULL/undefined/null), layers create their own `database_t` as before
 - `graph_layer_create` with `database_config_t*` must still work (we'll add a compatibility wrapper or update the binding to construct a `graph_layer_config_t` internally)
 - The `Subtree` class is additive — no existing API changes required
 
