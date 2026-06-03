@@ -309,5 +309,62 @@ void main() {
         }
       });
     });
+
+    group('async operations', () {
+      test('should put and get a value asynchronously', () async {
+        final subtree = fixture.db!.openSubtree('async_test');
+        await subtree.put('key1', 'value1');
+        final result = await subtree.get('key1');
+        expect(result, equals('value1'));
+        subtree.close();
+      });
+
+      test('should return null for missing key asynchronously', () async {
+        final subtree = fixture.db!.openSubtree('async_test');
+        final result = await subtree.get('nonexistent');
+        expect(result, isNull);
+        subtree.close();
+      });
+
+      test('should delete a value asynchronously', () async {
+        final subtree = fixture.db!.openSubtree('async_test');
+        await subtree.put('key1', 'value1');
+        final result = await subtree.get('key1');
+        expect(result, equals('value1'));
+
+        await subtree.del('key1');
+        final resultAfterDelete = await subtree.get('key1');
+        expect(resultAfterDelete, isNull);
+        subtree.close();
+      });
+
+      test('should handle multiple async operations concurrently', () async {
+        final subtree = fixture.db!.openSubtree('async_concurrent');
+
+        // Fire multiple puts concurrently
+        await Future.wait([
+          subtree.put('key1', 'value1'),
+          subtree.put('key2', 'value2'),
+          subtree.put('key3', 'value3'),
+        ]);
+
+        // Verify all values
+        expect(await subtree.get('key1'), equals('value1'));
+        expect(await subtree.get('key2'), equals('value2'));
+        expect(await subtree.get('key3'), equals('value3'));
+        subtree.close();
+      });
+
+      test('should reject operations on closed subtree', () async {
+        final subtree = fixture.db!.openSubtree('async_closed');
+        await subtree.put('key1', 'value1');
+        subtree.close();
+
+        expect(
+          () => subtree.put('key2', 'value2'),
+          throwsA(isA<WaveDBException>()),
+        );
+      });
+    });
   });
 }

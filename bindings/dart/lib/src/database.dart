@@ -891,7 +891,7 @@ class WaveDB implements Finalizable {
       final count = WaveDBNative.databaseRefCount(_db!);
       if (count > 1) {
         throw WaveDBException(
-          databaseBusyCode,
+          WaveDBException.databaseBusyCode,
           'Cannot close database while subtrees are still open. '
           'Close all subtrees before closing the database.',
         );
