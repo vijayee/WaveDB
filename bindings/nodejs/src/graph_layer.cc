@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include "Layers/graph/graph.h"
+#include "Database/database_subtree.h"
 #include "async_bridge.h"
 #include "graph_result_js.h"
 
@@ -123,6 +124,16 @@ GraphLayer::GraphLayer(const Napi::CallbackInfo& info)
     }
   }
 
+  // Extract subtree pointer if provided (cross-addon via number)
+  database_subtree_t* subtree_ptr = nullptr;
+  if (info.Length() > 1 && info[1].IsObject()) {
+    Napi::Object options = info[1].As<Napi::Object>();
+    if (options.Has("_subtreePtr")) {
+      double ptrVal = options.Get("_subtreePtr").As<Napi::Number>().DoubleValue();
+      subtree_ptr = reinterpret_cast<database_subtree_t*>(static_cast<uintptr_t>(ptrVal));
+    }
+  }
+
   free(defaults);
 
   // Wrap the database_config_t in a graph_layer_config_t for the new API
@@ -131,15 +142,26 @@ GraphLayer::GraphLayer(const Napi::CallbackInfo& info)
   layer_config.db_config = &config;
 
   if (db_path) {
-    layer_ = graph_layer_create(db_path, &layer_config, NULL, NULL);
+    int error_code = 0;
+    layer_ = graph_layer_create(db_path, &layer_config, subtree_ptr, &error_code);
+    if (!layer_) {
+      std::string msg;
+      switch (error_code) {
+        case -3: msg = "Failed to create GraphLayer: database already contains schema from a different layer type. Use a subtree to isolate this layer."; break;
+        case -2: msg = "Failed to create GraphLayer: database open failed"; break;
+        default: msg = "Failed to create GraphLayer"; break;
+      }
+      Napi::Error::New(env, msg).ThrowAsJavaScriptException();
+      return;
+    }
   } else {
     // In-memory: pass NULL path, use config for settings
-    layer_ = graph_layer_create(NULL, &layer_config, NULL, NULL);
-  }
-
-  if (!layer_) {
-    Napi::Error::New(env, "Failed to create GraphLayer").ThrowAsJavaScriptException();
-    return;
+    int error_code = 0;
+    layer_ = graph_layer_create(NULL, &layer_config, subtree_ptr, &error_code);
+    if (!layer_) {
+      Napi::Error::New(env, "Failed to create GraphLayer").ThrowAsJavaScriptException();
+      return;
+    }
   }
 
   // Initialize async bridge (skip in sync_only mode)

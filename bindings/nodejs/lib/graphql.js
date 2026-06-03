@@ -19,12 +19,19 @@ class GraphQLLayer {
    * @param {number} [options.workerThreads] - Number of worker threads
    */
   constructor(path, options = {}) {
+    // Pass subtree pointer through to native if provided
+    const nativeOptions = { ...options };
+    if (options.subtree && options.subtree._st) {
+      nativeOptions._subtreePtr = options.subtree._st._getPtr();
+    }
+    delete nativeOptions.subtree;
+
     if (path === undefined || path === null) {
-      this._layer = new GraphQLLayerNative(null, options);
+      this._layer = new GraphQLLayerNative(null, nativeOptions);
     } else if (typeof path !== 'string') {
       throw new TypeError('Path must be a string or null');
     } else {
-      this._layer = new GraphQLLayerNative(path, options);
+      this._layer = new GraphQLLayerNative(path, nativeOptions);
     }
     this._closed = false;
   }

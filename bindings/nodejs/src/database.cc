@@ -10,12 +10,14 @@
 #endif
 #include "Database/database.h"
 #include "Database/database_config.h"
+#include "Database/database_subtree.h"
 #include "Database/database_iterator.h"
 #include "Storage/encryption.h"
 #include "path.h"
 #include "identifier.h"
 #include "async_bridge.h"
 #include "iterator.h"
+#include "subtree.h"
 #include "database.h"
 
 Napi::FunctionReference WaveDB::constructor_;
@@ -45,6 +47,8 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("getObjectSync", &WaveDB::GetObjectSync),
     InstanceMethod("createReadStream", &WaveDB::CreateReadStream),
     InstanceMethod("close", &WaveDB::Close),
+    InstanceMethod("openSubtree", &WaveDB::OpenSubtree),
+    InstanceMethod("deleteSubtree", &WaveDB::DeleteSubtree),
   });
 
   constructor_ = Napi::Persistent(func);
@@ -1404,6 +1408,83 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
   Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, info.This() });
 
   return iterObj;
+}
+
+// --- Subtree operations ---
+
+Napi::Value WaveDB::OpenSubtree(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Prefix string required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string prefix = info[0].As<Napi::String>().Utf8Value();
+  char delim = delimiter_;
+
+  if (info.Length() > 1 && info[1].IsString()) {
+    std::string delimStr = info[1].As<Napi::String>().Utf8Value();
+    if (delimStr.length() != 1) {
+      Napi::TypeError::New(env, "Delimiter must be a single character").ThrowAsJavaScriptException();
+      return env.Null();
+    }
+    delim = delimStr[0];
+  }
+
+  database_subtree_t* st = database_subtree_open(db_, prefix.c_str(), delim);
+  if (!st) {
+    Napi::Error::New(env, "Failed to open subtree").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  // Create the Subtree native object by calling its constructor with External pointer
+  napi_value ext = Napi::External<database_subtree_t>::New(env, st);
+  Napi::Object subtreeObj = Subtree::constructor_.New({
+    Napi::Value(env, ext),
+    Napi::String::New(env, std::string(1, delim)),
+    Napi::Boolean::New(env, syncOnly_)
+  });
+
+  return subtreeObj;
+}
+
+Napi::Value WaveDB::DeleteSubtree(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Prefix string required").ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  std::string prefix = info[0].As<Napi::String>().Utf8Value();
+  char delim = delimiter_;
+
+  if (info.Length() > 1 && info[1].IsString()) {
+    std::string delimStr = info[1].As<Napi::String>().Utf8Value();
+    if (delimStr.length() != 1) {
+      Napi::TypeError::New(env, "Delimiter must be a single character").ThrowAsJavaScriptException();
+      return env.Undefined();
+    }
+    delim = delimStr[0];
+  }
+
+  int rc = database_subtree_delete_prefix(db_, prefix.c_str(), delim);
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Failed to delete subtree prefix").ThrowAsJavaScriptException();
+  }
+
+  return env.Undefined();
 }
 
 // --- Lifecycle ---

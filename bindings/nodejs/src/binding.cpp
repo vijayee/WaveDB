@@ -5,10 +5,12 @@
 #include <napi.h>
 #include "database.h"
 #include "iterator.h"
+#include "subtree.h"
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   WaveDB::Init(env, exports);
   Iterator::Init(env, exports);
+  Subtree::Init(env, exports);
   return exports;
 }
 

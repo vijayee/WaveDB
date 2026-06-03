@@ -69,7 +69,13 @@ function setDefaultGraph(layer) {
 
 class GraphLayer {
   constructor(path, options = {}) {
-    this._layer = new GraphLayerNative(path, options);
+    // Pass subtree pointer through to native if provided
+    const nativeOptions = { ...options };
+    if (options.subtree && options.subtree._st) {
+      nativeOptions._subtreePtr = options.subtree._st._getPtr();
+    }
+    delete nativeOptions.subtree;
+    this._layer = new GraphLayerNative(path, nativeOptions);
     this._closed = false;
     if (!_defaultGraph) setDefaultGraph(this);
   }

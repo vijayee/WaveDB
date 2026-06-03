@@ -590,6 +590,39 @@ class WaveDB {
       this._closed = true;
     }
   }
+
+  /**
+   * Open a subtree view on this database.
+   *
+   * A subtree provides a scoped view with automatic prefix isolation.
+   * All operations on the subtree prepend the prefix to keys.
+   *
+   * @param {string} prefix - Key prefix (e.g. 'layer/graphql')
+   * @param {string} [delimiter='/'] - Path delimiter character
+   * @returns {Subtree} Subtree instance
+   * @throws {WaveDBError} If database is closed or arguments are invalid
+   */
+  openSubtree(prefix, delimiter = '/') {
+    if (this._closed) throw new IOError('Database is closed');
+    if (typeof prefix !== 'string' || !prefix) throw new TypeError('Prefix is required');
+    if (typeof delimiter !== 'string' || delimiter.length !== 1) throw new TypeError('Delimiter must be a single character');
+    const { Subtree } = require('./subtree.js');
+    const nativeSubtree = this._db.openSubtree(prefix, delimiter);
+    return new Subtree(nativeSubtree, delimiter);
+  }
+
+  /**
+   * Delete all keys under a prefix from the database.
+   *
+   * @param {string} prefix - Key prefix to delete under
+   * @param {string} [delimiter='/'] - Path delimiter character
+   * @throws {WaveDBError} If database is closed or operation fails
+   */
+  deleteSubtree(prefix, delimiter = '/') {
+    if (this._closed) throw new IOError('Database is closed');
+    if (typeof prefix !== 'string' || !prefix) throw new TypeError('Prefix is required');
+    this._db.deleteSubtree(prefix, delimiter);
+  }
 }
 
 module.exports = {

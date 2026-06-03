@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include "Layers/graphql/graphql.h"
+#include "Database/database_subtree.h"
 #include "async_bridge.h"
 #include "graphql_result_js.h"
 
@@ -96,11 +97,28 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
     }
   }
 
-  layer_ = graphql_layer_create(config->path, config, nullptr, nullptr);
+  // Extract subtree pointer if provided (cross-addon via number)
+  database_subtree_t* subtree_ptr = nullptr;
+  if (info.Length() > 1 && info[1].IsObject()) {
+    Napi::Object options = info[1].As<Napi::Object>();
+    if (options.Has("_subtreePtr")) {
+      double ptrVal = options.Get("_subtreePtr").As<Napi::Number>().DoubleValue();
+      subtree_ptr = reinterpret_cast<database_subtree_t*>(static_cast<uintptr_t>(ptrVal));
+    }
+  }
+
+  int error_code = 0;
+  layer_ = graphql_layer_create(config->path, config, subtree_ptr, &error_code);
   if (!layer_) {
     if (config->path) std::free(const_cast<char*>(config->path));
     graphql_layer_config_destroy(config);
-    Napi::Error::New(env, "Failed to create GraphQL layer").ThrowAsJavaScriptException();
+    std::string msg;
+    switch (error_code) {
+      case -3: msg = "Failed to create GraphQLLayer: database already contains schema from a different layer type. Use a subtree to isolate this layer."; break;
+      case -2: msg = "Failed to create GraphQLLayer: database open failed"; break;
+      default: msg = "Failed to create GraphQLLayer"; break;
+    }
+    Napi::Error::New(env, msg).ThrowAsJavaScriptException();
     return;
   }
 

@@ -29,6 +29,7 @@
       "c_src/src/Buffer/buffer.c",
       "c_src/src/Database/batch.c",
       "c_src/src/Database/database.c",
+      "c_src/src/Database/database_subtree.c",
       "c_src/src/Database/database_config.c",
       "c_src/src/Database/database_iterator.c",
       "c_src/src/Database/database_lru.c",
@@ -117,6 +118,7 @@
     "sources": [
       "src/binding.cpp",
       "src/database.cc",
+      "src/subtree.cc",
       "src/path.cc",
       "src/identifier.cc",
       "src/async_bridge.cc",
