@@ -171,9 +171,11 @@ typedef struct graphql_layer_config_t {
 } graphql_layer_config_t;
 
 // Updated create signature — subtree is optional, NULL means create own database
+// error_code receives collision detection results (0=success, -3=schema collision)
 graphql_layer_t* graphql_layer_create(const char* path,
                                        const graphql_layer_config_t* config,
-                                       database_subtree_t* subtree);  // NEW optional param
+                                       database_subtree_t* subtree,
+                                       int* error_code);  // NEW optional param
 ```
 
 When `subtree` is non-NULL, the layer uses it for all database operations and ignores `path`, `chunk_size`, `btree_node_size`, `lru_memory_mb`, `lru_shards`, `worker_threads`, `enable_persist`, and `wal_config` (managed by the shared database). The `delimiter` is still read from config.
@@ -187,9 +189,11 @@ typedef struct graph_layer_config_t {
 } graph_layer_config_t;
 
 // Updated create signature — subtree is optional, NULL means create own database
+// error_code receives collision detection results (0=success, -3=schema collision)
 graph_layer_t* graph_layer_create(const char* path,
                                    graph_layer_config_t* config,
-                                   database_subtree_t* subtree);  // NEW optional param
+                                   database_subtree_t* subtree,
+                                   int* error_code);  // NEW optional param
 ```
 
 When `subtree` is non-NULL, the layer uses it and ignores `path` and `db_config`.
@@ -216,13 +220,17 @@ database_subtree_t* gql_subtree = database_subtree_open(db, "layer/graphql", '/'
 database_subtree_t* graph_subtree = database_subtree_open(db, "layer/graphs/graph1", '/');
 
 // GraphQL layer — pass subtree as optional parameter, NULL for old behavior
-graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree);
+int gql_error = 0;
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree, &gql_error);
+if (!gql) { /* handle error: gql_error tells you why */ }
 
 // Graph layer — same pattern, new config struct
 graph_layer_config_t graph_config = {0};
 graph_config.path = NULL;
 graph_config.db_config = NULL;
-graph_layer_t* graph = graph_layer_create(NULL, &graph_config, graph_subtree);
+int graph_error = 0;
+graph_layer_t* graph = graph_layer_create(NULL, &graph_config, graph_subtree, &graph_error);
+if (!graph) { /* handle error */ }
 
 // Inside each layer, all database operations use the subtree API:
 // Path "Users/1/name" is automatically prefixed to "layer/graphql/Users/1/name"
@@ -230,14 +238,21 @@ graph_layer_t* graph = graph_layer_create(NULL, &graph_config, graph_subtree);
 // On reopen — recreate database, reopen subtrees, pass to layers
 database_t* db = database_create_with_config(db_path, config, &error_code);
 database_subtree_t* gql_subtree = database_subtree_open(db, "layer/graphql", '/');
-graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree);
+int gql_error = 0;
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree, &gql_error);
 // graphql_schema_load works unchanged — sees __meta/layer at its own root
 
 // Delete a layer's data:
 database_subtree_delete(db, "layer/graphql", '/');
 
 // Business as usual — no subtree, layer creates its own database
-graphql_layer_t* standalone = graphql_layer_create("/path/to/db", &config, NULL);
+// Schema collision detection protects against overwriting a different layer's data
+int error = 0;
+graphql_layer_t* standalone = graphql_layer_create("/path/to/db", &config, NULL, &error);
+if (!standalone && error == -3) {
+    // Schema collision: database contains data from a different layer type
+    // Use a subtree to isolate, or choose a different database
+}
 ```
 
 ### Files to Create/Modify
@@ -303,6 +318,48 @@ Three READMEs document the layer creation API and must be updated to cover the n
 - All CRUD operations return the same error codes as their `database_t` counterparts
 - Scan operations return `NULL` iterators or negative counts on failure
 
+### Schema Collision Protection
+
+When a layer is created **without a subtree** on an existing database that already contains schema metadata from a **different layer type**, the layer create function must detect the conflict and fail with an error. This prevents one layer from overwriting or corrupting another layer's metadata at the root level.
+
+**Detection logic:**
+
+- **GraphQL layer** (`graphql_layer_create`): On opening an existing database, check `__meta/layer`. If it exists and is not `"graphql"`, fail with an error. The layer type string stored in `__meta/layer` identifies which layer owns the database.
+- **Graph layer** (`graph_layer_create`): On opening an existing database, check `__gschema/types`. If it exists, the database has graph schema data. If the graph layer was not the one that created it, fail with an error.
+
+**Error behavior:**
+
+- Both functions return `NULL` when a collision is detected
+- An optional `int* error_code` output parameter (added to both create functions) receives a specific error code indicating the collision type
+- The error code distinguishes between: allocation failure, database open failure, and schema collision
+
+**Collision detection is skipped when a subtree is provided** — the subtree provides namespace isolation, so two different layer types can safely coexist in the same database under different subtrees.
+
+**Updated create signatures with error codes:**
+
+```c
+// graphql_layer_create — returns NULL on error, sets *error_code
+graphql_layer_t* graphql_layer_create(const char* path,
+                                       const graphql_layer_config_t* config,
+                                       database_subtree_t* subtree,
+                                       int* error_code);
+
+// graph_layer_create — returns NULL on error, sets *error_code
+graph_layer_t* graph_layer_create(const char* path,
+                                   graph_layer_config_t* config,
+                                   database_subtree_t* subtree,
+                                   int* error_code);
+```
+
+**Error codes:**
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| -1 | General error (allocation failure, etc.) |
+| -2 | Database open failure |
+| -3 | Schema collision — database contains schema from a different layer type |
+
 ### Binding Updates
 
 The Node.js and Dart bindings must be updated to expose the subtree config and new API.
@@ -313,8 +370,8 @@ The Node.js and Dart bindings must be updated to expose the subtree config and n
 |--------|--------|
 | New `database_subtree_t` type and all `database_subtree_*` functions | New FFI bindings needed |
 | New `graph_layer_config_t` struct (replaces direct `database_config_t*` param) | Changes `graph_layer_create` signature |
-| `graphql_layer_create` gains optional `database_subtree_t* subtree` param | New optional parameter |
-| `graph_layer_create` gains optional `database_subtree_t* subtree` param | New optional parameter |
+| `graphql_layer_create` gains optional `database_subtree_t* subtree` and `int* error_code` params | New optional parameters |
+| `graph_layer_create` gains optional `database_subtree_t* subtree` and `int* error_code` params | New optional parameters |
 | `database_subtree_open(db, prefix, delimiter)` | New function |
 | `database_subtree_close(subtree)` | New function |
 | `database_subtree_delete(db, prefix, delimiter)` | New function |

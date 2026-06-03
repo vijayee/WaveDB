@@ -443,7 +443,8 @@ Update `graph_layer_create` signature to accept the new config and optional subt
 ```c
 graph_layer_t* graph_layer_create(const char* path,
                                    graph_layer_config_t* config,
-                                   database_subtree_t* subtree);
+                                   database_subtree_t* subtree,
+                                   int* error_code);
 ```
 
 Add `#include "Database/database_subtree.h"` to the includes.
@@ -471,6 +472,8 @@ In `src/Layers/graph/graph.c`, update `graph_layer_create`:
 When `subtree` is non-NULL: set `layer->db = database_subtree_get_db(subtree)` and `layer->subtree = subtree`. Skip database creation. When `subtree` is NULL: use `config->db_config` (or `config->path`) to create the database, same as before.
 
 When `config` is NULL: create a `graph_layer_config_t` with defaults (equivalent to current NULL config behavior).
+
+**Schema collision detection:** When `subtree` is NULL and the database already contains schema data from a different layer type (e.g., the database has `__gschema/types` data and a graphql layer is being created), set `*error_code = -3` and return `NULL`. When `subtree` is provided, skip collision detection since subtrees provide isolation.
 
 - [ ] **Step 4: Update all callers of graph_layer_create**
 
@@ -534,7 +537,8 @@ In `src/Layers/graphql/graphql_schema.h`, update:
 ```c
 graphql_layer_t* graphql_layer_create(const char* path,
                                        const graphql_layer_config_t* config,
-                                       database_subtree_t* subtree);
+                                       database_subtree_t* subtree,
+                                       int* error_code);
 ```
 
 Add `#include "Database/database_subtree.h"`.
@@ -551,6 +555,8 @@ When `subtree` is non-NULL:
 - Set `layer->db_path = NULL` and `layer->owns_db_path = false`
 
 When `subtree` is NULL: existing behavior unchanged (create database from config).
+
+**Schema collision detection:** When `subtree` is NULL and the database already contains schema data from a different layer type (e.g., the database has `__meta/layer = "graphql"` and a graph layer is being created, or vice versa), set `*error_code = -3` and return `NULL`. The existing `graphql_layer_create` already checks `__meta/layer` on reopen — extend this check to detect when a different layer type owns the database. When `subtree` is provided, skip collision detection since subtrees provide isolation.
 
 Then update all internal database operations to use `database_subtree_*` when `layer->subtree` is non-NULL. This includes:
 - `db_put_string` / `db_get_string` — these use `database_put_sync` / `database_get_sync`. Add a wrapper that checks `layer->subtree` and delegates to the subtree variant.
@@ -666,6 +672,15 @@ Test that creates a GraphQL layer with a subtree:
 2. Parse a schema, verify it stores data under the subtree prefix
 3. Destroy the layer (should close subtree but not destroy database)
 4. Reopen with same subtree, verify schema data persists
+
+- [ ] **Step 4b: Add schema collision detection test**
+
+Tests that verify layer creation fails when a different layer type already owns the database:
+1. Create a database, create a GraphQL layer on it (no subtree), put schema data
+2. Destroy the GraphQL layer (database persists on disk)
+3. Try to create a Graph layer on the same database (no subtree) — should return NULL with error_code = -3
+4. Verify that creating a Graph layer WITH a subtree succeeds (collision detection is skipped)
+5. Also test the reverse: Graph layer first, then GraphQL layer without subtree should fail
 
 - [ ] **Step 5: Run all tests**
 
