@@ -766,6 +766,162 @@ static void test_subtree_async_sync_only(void) {
     printf("=== test_subtree_async_sync_only DONE ===\n");
 }
 
+/* ---- Test 10: Batch sync raw ---- */
+
+static void test_subtree_batch_sync_raw(void) {
+    printf("\n=== test_subtree_batch_sync_raw ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_batch");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "batch_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'batch_ns'");
+
+    /* Write 5 key-value pairs via batch_sync_raw */
+    raw_op_t ops[5];
+    const char* keys[] = {"key1", "key2", "key3", "key4", "key5"};
+    const char* values[] = {"val1", "val2", "val3", "val4", "val5"};
+
+    for (int i = 0; i < 5; i++) {
+        ops[i].key = keys[i];
+        ops[i].key_len = strlen(keys[i]);
+        ops[i].value = (const uint8_t*)values[i];
+        ops[i].value_len = strlen(values[i]);
+        ops[i].type = 0; /* PUT */
+    }
+
+    int rc = database_subtree_batch_sync_raw(st, '/', ops, 5);
+    ASSERT(rc == 0, "Batch sync raw put succeeds");
+
+    /* Verify all 5 values exist via get_sync_raw */
+    for (int i = 0; i < 5; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int grc = database_subtree_get_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                                &val, &val_len);
+        ASSERT(grc == 0, "Get after batch returns success");
+        if (grc == 0 && val != NULL) {
+            ASSERT(val_len == strlen(values[i]), "Value length matches");
+            ASSERT(memcmp(val, values[i], val_len) == 0, "Value content matches");
+            database_raw_value_free(val);
+        }
+    }
+
+    /* Verify that raw database sees the prefixed keys */
+    {
+        uint8_t* raw_val = NULL;
+        size_t raw_val_len = 0;
+        int raw_rc = database_get_sync_raw(db, "batch_ns/key3",
+                                           strlen("batch_ns/key3"), '/',
+                                           &raw_val, &raw_val_len);
+        ASSERT(raw_rc == 0, "Raw get on prefixed key succeeds");
+        if (raw_rc == 0 && raw_val != NULL) {
+            ASSERT(memcmp(raw_val, "val3", raw_val_len) == 0,
+                   "Raw value matches 'val3'");
+            database_raw_value_free(raw_val);
+        }
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_batch_sync_raw DONE ===\n");
+}
+
+/* ---- Test 11: Scan sync raw ---- */
+
+static void test_subtree_scan_sync_raw(void) {
+    printf("\n=== test_subtree_scan_sync_raw ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_scan");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "scan_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'scan_ns'");
+
+    /* Put values under the subtree */
+    const char* keys[] = {"users/1/name", "users/1/age", "users/2/name", "posts/1/title"};
+    const char* values[] = {"Alice", "30", "Bob", "Hello World"};
+
+    for (int i = 0; i < 4; i++) {
+        int rc = database_subtree_put_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                                (const uint8_t*)values[i], strlen(values[i]));
+        ASSERT(rc == 0, "Put succeeds for scan test data");
+    }
+
+    /* Also put a value directly in the database (outside the subtree) */
+    {
+        int rc = database_put_sync_raw(db, "other_ns/data", strlen("other_ns/data"), '/',
+                                       (const uint8_t*)"outside", strlen("outside"));
+        ASSERT(rc == 0, "Put outside subtree succeeds");
+    }
+
+    /* Scan with prefix "users" — should get 3 results (users/1/name, users/1/age, users/2/name) */
+    {
+        raw_result_t* results = NULL;
+        size_t count = 0;
+        int rc = database_subtree_scan_sync_raw(st, "users", strlen("users"), '/',
+                                                &results, &count);
+        ASSERT(rc == 0, "Scan sync raw succeeds");
+        ASSERT(count == 3, "Scan returns 3 results for 'users' prefix");
+
+        /* Verify that results have prefix stripped (keys should start with "users/", not "scan_ns/users/") */
+        for (size_t i = 0; i < count; i++) {
+            /* Key should NOT start with "scan_ns/" */
+            ASSERT(results[i].key_len > 0, "Result key is non-empty");
+            if (results[i].key_len >= strlen("scan_ns/")) {
+                ASSERT(memcmp(results[i].key, "scan_ns/", strlen("scan_ns/")) != 0,
+                       "Result key does not contain subtree prefix");
+            }
+        }
+
+        database_raw_results_free(results, count);
+    }
+
+    /* Scan with empty prefix — should get all 4 subtree entries */
+    {
+        raw_result_t* results = NULL;
+        size_t count = 0;
+        int rc = database_subtree_scan_sync_raw(st, "", 0, '/',
+                                                &results, &count);
+        ASSERT(rc == 0, "Scan with empty prefix succeeds");
+        ASSERT(count == 4, "Scan with empty prefix returns 4 results");
+
+        database_raw_results_free(results, count);
+    }
+
+    /* Verify scan does NOT include the value from outside the subtree */
+    {
+        raw_result_t* results = NULL;
+        size_t count = 0;
+        int rc = database_subtree_scan_sync_raw(st, "", 0, '/',
+                                                &results, &count);
+        ASSERT(rc == 0, "Scan with empty prefix for isolation check succeeds");
+        ASSERT(count == 4, "Scan excludes values outside subtree prefix");
+
+        /* Check that no key starts with "other_ns" */
+        int found_outside = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (results[i].key_len >= strlen("other_ns") &&
+                memcmp(results[i].key, "other_ns", strlen("other_ns")) == 0) {
+                found_outside = 1;
+            }
+        }
+        ASSERT(!found_outside, "No results from outside subtree");
+
+        database_raw_results_free(results, count);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_scan_sync_raw DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -780,6 +936,8 @@ int main(void) {
     test_subtree_async_crud();
     test_subtree_async_crud_raw();
     test_subtree_async_sync_only();
+    test_subtree_batch_sync_raw();
+    test_subtree_scan_sync_raw();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

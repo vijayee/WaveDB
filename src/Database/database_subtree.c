@@ -3,6 +3,8 @@
 //
 
 #include "database_subtree.h"
+#include "database_iterator.h"
+#include "batch.h"
 #include "../Util/allocator.h"
 #include "../HBTrie/identifier.h"
 #include "../Workers/work.h"
@@ -552,4 +554,607 @@ int database_subtree_delete_raw(database_subtree_t* st,
     int rc = database_delete_raw(st->db, prefixed_key, prefixed_len, delimiter, promise);
     free(prefixed_key);
     return rc;
+}
+
+/* --- Batch operations --- */
+
+int database_subtree_write_batch_sync(database_subtree_t* st, batch_t* batch) {
+    if (st == NULL || batch == NULL) return -1;
+
+    platform_lock(&batch->lock);
+    size_t count = batch->count;
+    uint8_t submitted = batch->submitted;
+    platform_unlock(&batch->lock);
+
+    if (count == 0) return -3;
+    if (submitted) return -6;
+
+    /* Create a new batch with prefixed paths */
+    batch_t* prefixed_batch = batch_create(count);
+    if (prefixed_batch == NULL) return -1;
+
+    for (size_t i = 0; i < count; i++) {
+        path_t* prefixed_path = database_subtree_prepend_path(st, batch->ops[i].path);
+        if (prefixed_path == NULL) {
+            batch_destroy(prefixed_batch);
+            return -1;
+        }
+
+        if (batch->ops[i].type == WAL_PUT) {
+            /* REFERENCE the value so the original batch keeps its copy */
+            identifier_t* value = (identifier_t*)refcounter_reference(
+                (refcounter_t*) batch->ops[i].value);
+            int rc = batch_add_put(prefixed_batch, prefixed_path, value);
+            if (rc != 0) {
+                path_destroy(prefixed_path);
+                identifier_destroy(value);
+                batch_destroy(prefixed_batch);
+                return -1;
+            }
+            /* batch_add_put takes ownership on success, so prefixed_path
+             * and value are now owned by prefixed_batch */
+        } else {
+            /* WAL_DELETE */
+            int rc = batch_add_delete(prefixed_batch, prefixed_path);
+            if (rc != 0) {
+                path_destroy(prefixed_path);
+                batch_destroy(prefixed_batch);
+                return -1;
+            }
+        }
+    }
+
+    int rc = database_write_batch_sync(st->db, prefixed_batch);
+    batch_destroy(prefixed_batch);
+    return rc;
+}
+
+/* --- Async batch context --- */
+
+typedef struct {
+    database_subtree_t* st;
+    batch_t* batch;
+    promise_t* promise;
+} subtree_batch_ctx_t;
+
+static void _subtree_batch_worker(void* ctx_ptr) {
+    subtree_batch_ctx_t* ctx = (subtree_batch_ctx_t*)ctx_ptr;
+    int rc = database_subtree_write_batch_sync(ctx->st, ctx->batch);
+    int* result = malloc(sizeof(int));
+    if (result) *result = rc;
+    promise_resolve(ctx->promise, result);
+    /* batch is NOT owned by this context — it was referenced, so dereference */
+    batch_destroy(ctx->batch);
+    database_subtree_close(ctx->st);
+    free(ctx);
+}
+
+static void abort_subtree_batch(void* ctx_ptr) {
+    subtree_batch_ctx_t* ctx = (subtree_batch_ctx_t*)ctx_ptr;
+    if (ctx->batch) batch_destroy(ctx->batch);
+    if (ctx->st) database_subtree_close(ctx->st);
+    if (ctx->promise) {
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(ctx->promise, error ? error : NULL);
+    }
+    free(ctx);
+}
+
+void database_subtree_write_batch(database_subtree_t* st, batch_t* batch, promise_t* promise) {
+    if (st == NULL || batch == NULL || promise == NULL) {
+        if (promise) {
+            int* error = malloc(sizeof(int));
+            if (error) *error = -1;
+            promise_resolve(promise, error);
+        }
+        return;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        int rc = database_subtree_write_batch_sync(st, batch);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return;
+    }
+
+    /* Reference the batch so it stays alive during async work */
+    refcounter_reference((refcounter_t*) batch);
+    /* Reference the subtree so it stays alive during async work */
+    refcounter_reference((refcounter_t*) st);
+
+    subtree_batch_ctx_t* ctx = get_clear_memory(sizeof(subtree_batch_ctx_t));
+    if (ctx == NULL) {
+        batch_destroy(batch);  /* drops the reference we just took */
+        database_subtree_close(st);  /* drops the reference we just took */
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error ? error : NULL);
+        return;
+    }
+
+    ctx->st = st;
+    ctx->batch = batch;
+    ctx->promise = promise;
+
+    work_t* work = work_create(
+        _subtree_batch_worker,
+        abort_subtree_batch,
+        ctx);
+    if (work == NULL) {
+        batch_destroy(batch);
+        database_subtree_close(st);
+        free(ctx);
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error ? error : NULL);
+        return;
+    }
+
+    refcounter_yield((refcounter_t*) work);
+    work_pool_enqueue(database_subtree_get_pool(st), work);
+}
+
+int database_subtree_batch_sync_raw(database_subtree_t* st, char delimiter,
+                                      const raw_op_t* ops, size_t count) {
+    if (st == NULL || ops == NULL || count == 0) return -1;
+
+    /* Build prefixed raw op array */
+    raw_op_t* prefixed_ops = malloc(count * sizeof(raw_op_t));
+    if (prefixed_ops == NULL) return -1;
+
+    for (size_t i = 0; i < count; i++) {
+        size_t prefixed_len = 0;
+        char* prefixed_key = database_subtree_prepend_key(st, ops[i].key, ops[i].key_len,
+                                                           &prefixed_len);
+        if (prefixed_key == NULL) {
+            /* Clean up already-allocated keys */
+            for (size_t j = 0; j < i; j++) {
+                free((void*)prefixed_ops[j].key);
+            }
+            free(prefixed_ops);
+            return -1;
+        }
+        prefixed_ops[i].key = prefixed_key;
+        prefixed_ops[i].key_len = prefixed_len;
+        prefixed_ops[i].value = ops[i].value;
+        prefixed_ops[i].value_len = ops[i].value_len;
+        prefixed_ops[i].type = ops[i].type;
+    }
+
+    int rc = database_batch_sync_raw(st->db, delimiter, prefixed_ops, count);
+
+    /* Free the prefixed keys */
+    for (size_t i = 0; i < count; i++) {
+        free((void*)prefixed_ops[i].key);
+    }
+    free(prefixed_ops);
+
+    return rc;
+}
+
+int database_subtree_batch_raw(database_subtree_t* st, char delimiter,
+                                const raw_op_t* ops, size_t count,
+                                promise_t* promise) {
+    if (st == NULL || ops == NULL || count == 0 || promise == NULL) return -1;
+
+    /* Build prefixed raw op array */
+    raw_op_t* prefixed_ops = malloc(count * sizeof(raw_op_t));
+    if (prefixed_ops == NULL) {
+        int* error = malloc(sizeof(int));
+        if (error) *error = -1;
+        promise_resolve(promise, error);
+        return -1;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        size_t prefixed_len = 0;
+        char* prefixed_key = database_subtree_prepend_key(st, ops[i].key, ops[i].key_len,
+                                                           &prefixed_len);
+        if (prefixed_key == NULL) {
+            for (size_t j = 0; j < i; j++) {
+                free((void*)prefixed_ops[j].key);
+            }
+            free(prefixed_ops);
+            int* error = malloc(sizeof(int));
+            if (error) *error = -1;
+            promise_resolve(promise, error);
+            return -1;
+        }
+        prefixed_ops[i].key = prefixed_key;
+        prefixed_ops[i].key_len = prefixed_len;
+        prefixed_ops[i].value = ops[i].value;
+        prefixed_ops[i].value_len = ops[i].value_len;
+        prefixed_ops[i].type = ops[i].type;
+    }
+
+    /* Delegate to database_batch_raw which handles its own async work */
+    int rc = database_batch_raw(st->db, delimiter, prefixed_ops, count, promise);
+
+    /* Free the prefixed keys */
+    for (size_t i = 0; i < count; i++) {
+        free((void*)prefixed_ops[i].key);
+    }
+    free(prefixed_ops);
+
+    return rc;
+}
+
+/* --- Scan/Iterator operations --- */
+
+database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
+                                                  path_t* start_path,
+                                                  path_t* end_path) {
+    if (st == NULL) return NULL;
+
+    path_t* prefixed_start = NULL;
+    path_t* prefixed_end = NULL;
+
+    if (start_path != NULL) {
+        prefixed_start = database_subtree_prepend_path(st, start_path);
+        if (prefixed_start == NULL) return NULL;
+    }
+
+    if (end_path != NULL) {
+        prefixed_end = database_subtree_prepend_path(st, end_path);
+        if (prefixed_end == NULL) {
+            if (prefixed_start) path_destroy(prefixed_start);
+            return NULL;
+        }
+    }
+
+    database_iterator_t* iter = database_scan_start(st->db, prefixed_start, prefixed_end);
+    /* database_scan_start takes ownership of prefixed_start and prefixed_end */
+    return iter;
+}
+
+database_iterator_t* database_subtree_scan_range(database_subtree_t* st,
+                                                  const char* start,
+                                                  const char* end) {
+    if (st == NULL) return NULL;
+
+    char* prefixed_start = NULL;
+    char* prefixed_end = NULL;
+    size_t prefixed_start_len = 0;
+    size_t prefixed_end_len = 0;
+
+    if (start != NULL) {
+        prefixed_start = database_subtree_prepend_key(st, start, strlen(start),
+                                                      &prefixed_start_len);
+        if (prefixed_start == NULL) return NULL;
+    }
+
+    if (end != NULL) {
+        prefixed_end = database_subtree_prepend_key(st, end, strlen(end),
+                                                     &prefixed_end_len);
+        if (prefixed_end == NULL) {
+            free(prefixed_start);
+            return NULL;
+        }
+    }
+
+    /* database_scan_range takes C string arguments */
+    database_iterator_t* iter = database_scan_range(st->db, prefixed_start, prefixed_end);
+
+    free(prefixed_start);
+    free(prefixed_end);
+
+    return iter;
+}
+
+/**
+ * Helper: count the number of path components in the subtree prefix.
+ * Splits st->prefix by st->delimiter.
+ */
+static size_t subtree_prefix_component_count(database_subtree_t* st) {
+    if (st->prefix_len == 0) return 0;
+    size_t count = 1;
+    for (size_t i = 0; i < st->prefix_len; i++) {
+        if (st->prefix[i] == st->delimiter) count++;
+    }
+    return count;
+}
+
+/**
+ * Helper: convert a path to a human-readable key string with the given delimiter.
+ * Assembles identifier data with delimiters between components.
+ *
+ * @param path       Path to convert
+ * @param delimiter  Delimiter character
+ * @param out_len    Output: length of resulting string
+ * @return Newly allocated string, or NULL on failure
+ */
+static char* path_to_key_string(path_t* path, char delimiter, size_t* out_len) {
+    size_t len = path_length(path);
+    if (len == 0) {
+        char* empty = malloc(1);
+        if (empty) empty[0] = '\0';
+        if (out_len) *out_len = 0;
+        return empty;
+    }
+
+    /* Calculate total length */
+    size_t total = 0;
+    for (size_t i = 0; i < len; i++) {
+        identifier_t* id = path_get(path, i);
+        total += id->length;
+        if (i > 0) total++;  /* delimiter */
+    }
+
+    char* result = malloc(total + 1);
+    if (result == NULL) return NULL;
+
+    size_t pos = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (i > 0) result[pos++] = delimiter;
+        identifier_t* id = path_get(path, i);
+        size_t id_len = 0;
+        uint8_t* id_data = identifier_get_data_copy(id, &id_len);
+        if (id_data) {
+            memcpy(result + pos, id_data, id_len);
+            pos += id_len;
+            free(id_data);
+        }
+    }
+    result[pos] = '\0';
+
+    if (out_len) *out_len = pos;
+    return result;
+}
+
+/**
+ * Helper: strip prefix identifiers from a path and return the remaining
+ * path as a human-readable key string.
+ *
+ * @param st              Subtree providing the prefix
+ * @param path            Full path (with prefix included)
+ * @param prefix_count    Number of prefix components (from subtree_prefix_component_count)
+ * @param out_len         Output: length of resulting string
+ * @return Newly allocated stripped key string, or NULL on failure
+ */
+static char* subtree_path_to_stripped_key(database_subtree_t* st,
+                                           path_t* path,
+                                           size_t prefix_count,
+                                           size_t* out_len) {
+    size_t total_len = path_length(path);
+    if (total_len < prefix_count) return NULL;
+
+    size_t remaining = total_len - prefix_count;
+    if (remaining == 0) {
+        char* empty = malloc(1);
+        if (empty) empty[0] = '\0';
+        if (out_len) *out_len = 0;
+        return empty;
+    }
+
+    /* Build a path from the remaining identifiers */
+    path_t* stripped_path = path_create();
+    if (stripped_path == NULL) return NULL;
+
+    for (size_t i = prefix_count; i < total_len; i++) {
+        identifier_t* id = path_get(path, i);
+        if (id == NULL) {
+            path_destroy(stripped_path);
+            return NULL;
+        }
+        identifier_t* id_copy = (identifier_t*)refcounter_reference((refcounter_t*)id);
+        int rc = path_append(stripped_path, id_copy);
+        if (rc != 0) {
+            identifier_destroy(id_copy);
+            path_destroy(stripped_path);
+            return NULL;
+        }
+        /* path_append took ownership via REFERENCE, so dereference our ref */
+        refcounter_dereference((refcounter_t*)id_copy);
+    }
+
+    char* key = path_to_key_string(stripped_path, st->delimiter, out_len);
+    path_destroy(stripped_path);
+    return key;
+}
+
+int database_subtree_scan_sync_raw(database_subtree_t* st,
+                                    const char* prefix, size_t prefix_len,
+                                    char delimiter,
+                                    raw_result_t** results, size_t* count) {
+    if (st == NULL || results == NULL || count == NULL) return -1;
+
+    *results = NULL;
+    *count = 0;
+
+    /* Build start path from combined prefix: st->prefix + delimiter + user_prefix */
+    path_t* start_path = NULL;
+    if (prefix_len > 0) {
+        size_t combined_len = st->prefix_len + 1 + prefix_len;
+        char* combined = malloc(combined_len + 1);
+        if (combined == NULL) return -1;
+        memcpy(combined, st->prefix, st->prefix_len);
+        combined[st->prefix_len] = delimiter;
+        memcpy(combined + st->prefix_len + 1, prefix, prefix_len);
+        combined[combined_len] = '\0';
+
+        start_path = path_create_from_raw(combined, combined_len, delimiter, st->chunk_size);
+        free(combined);
+        if (start_path == NULL) return -1;
+    } else {
+        /* Empty prefix: start from the subtree prefix itself */
+        start_path = path_create_from_raw(st->prefix, st->prefix_len, delimiter, st->chunk_size);
+        if (start_path == NULL) return -1;
+    }
+
+    database_iterator_t* iter = database_scan_start(st->db, start_path, NULL);
+    path_destroy(start_path);
+    if (iter == NULL) return 0;
+
+    size_t prefix_count = subtree_prefix_component_count(st);
+
+    size_t capacity = 64;
+    size_t n = 0;
+    raw_result_t* out = malloc(capacity * sizeof(raw_result_t));
+    if (out == NULL) {
+        database_scan_end(iter);
+        return -1;
+    }
+
+    while (true) {
+        path_t* out_path = NULL;
+        identifier_t* out_value = NULL;
+        int rc = database_scan_next(iter, &out_path, &out_value);
+        if (rc != 0) break;
+
+        /* Strip prefix from the path and convert to raw key */
+        size_t stripped_key_len = 0;
+        char* stripped_key = subtree_path_to_stripped_key(st, out_path, prefix_count,
+                                                           &stripped_key_len);
+
+        if (stripped_key != NULL && stripped_key_len > 0) {
+            if (n >= capacity) {
+                capacity *= 2;
+                raw_result_t* new_out = realloc(out, capacity * sizeof(raw_result_t));
+                if (new_out == NULL) {
+                    free(stripped_key);
+                    path_destroy(out_path);
+                    identifier_destroy(out_value);
+                    for (size_t j = 0; j < n; j++) {
+                        free(out[j].key);
+                        free(out[j].value);
+                    }
+                    free(out);
+                    database_scan_end(iter);
+                    return -1;
+                }
+                out = new_out;
+            }
+
+            out[n].key = stripped_key;
+            out[n].key_len = stripped_key_len;
+            size_t value_len = 0;
+            uint8_t* value_data = identifier_get_data_copy(out_value, &value_len);
+            out[n].value = value_data;
+            out[n].value_len = value_len;
+            n++;
+        } else {
+            if (stripped_key) free(stripped_key);
+        }
+
+        path_destroy(out_path);
+        identifier_destroy(out_value);
+    }
+
+    database_scan_end(iter);
+
+    *results = out;
+    *count = n;
+    return 0;
+}
+
+int database_subtree_scan_range_sync_raw(database_subtree_t* st,
+                                          const char* start_prefix, size_t start_len,
+                                          const char* end_prefix, size_t end_len,
+                                          char delimiter,
+                                          raw_result_t** results, size_t* count) {
+    if (st == NULL || results == NULL || count == NULL) return -1;
+
+    *results = NULL;
+    *count = 0;
+
+    /* Build start and end paths with subtree prefix prepended */
+    path_t* start_path = NULL;
+    path_t* end_path = NULL;
+
+    if (start_prefix != NULL && start_len > 0) {
+        size_t prefixed_start_len = 0;
+        char* prefixed_start = database_subtree_prepend_key(st, start_prefix, start_len,
+                                                             &prefixed_start_len);
+        if (prefixed_start == NULL) return -1;
+        start_path = path_create_from_raw(prefixed_start, prefixed_start_len,
+                                          delimiter, st->chunk_size);
+        free(prefixed_start);
+        if (start_path == NULL) return -1;
+    }
+
+    if (end_prefix != NULL && end_len > 0) {
+        size_t prefixed_end_len = 0;
+        char* prefixed_end = database_subtree_prepend_key(st, end_prefix, end_len,
+                                                           &prefixed_end_len);
+        if (prefixed_end == NULL) {
+            if (start_path) path_destroy(start_path);
+            return -1;
+        }
+        end_path = path_create_from_raw(prefixed_end, prefixed_end_len,
+                                        delimiter, st->chunk_size);
+        free(prefixed_end);
+        if (end_path == NULL) {
+            if (start_path) path_destroy(start_path);
+            return -1;
+        }
+    }
+
+    database_iterator_t* iter = database_scan_start(st->db, start_path, end_path);
+    if (start_path) path_destroy(start_path);
+    if (end_path) path_destroy(end_path);
+    if (iter == NULL) return 0;
+
+    size_t prefix_count = subtree_prefix_component_count(st);
+
+    size_t capacity = 64;
+    size_t n = 0;
+    raw_result_t* out = malloc(capacity * sizeof(raw_result_t));
+    if (out == NULL) {
+        database_scan_end(iter);
+        return -1;
+    }
+
+    while (true) {
+        path_t* out_path = NULL;
+        identifier_t* out_value = NULL;
+        int rc = database_scan_next(iter, &out_path, &out_value);
+        if (rc != 0) break;
+
+        /* Strip prefix from the path and convert to raw key */
+        size_t stripped_key_len = 0;
+        char* stripped_key = subtree_path_to_stripped_key(st, out_path, prefix_count,
+                                                           &stripped_key_len);
+
+        if (stripped_key != NULL && stripped_key_len > 0) {
+            if (n >= capacity) {
+                capacity *= 2;
+                raw_result_t* new_out = realloc(out, capacity * sizeof(raw_result_t));
+                if (new_out == NULL) {
+                    free(stripped_key);
+                    path_destroy(out_path);
+                    identifier_destroy(out_value);
+                    for (size_t j = 0; j < n; j++) {
+                        free(out[j].key);
+                        free(out[j].value);
+                    }
+                    free(out);
+                    database_scan_end(iter);
+                    return -1;
+                }
+                out = new_out;
+            }
+
+            out[n].key = stripped_key;
+            out[n].key_len = stripped_key_len;
+            size_t value_len = 0;
+            uint8_t* value_data = identifier_get_data_copy(out_value, &value_len);
+            out[n].value = value_data;
+            out[n].value_len = value_len;
+            n++;
+        } else {
+            if (stripped_key) free(stripped_key);
+        }
+
+        path_destroy(out_path);
+        identifier_destroy(out_value);
+    }
+
+    database_scan_end(iter);
+
+    *results = out;
+    *count = n;
+    return 0;
 }

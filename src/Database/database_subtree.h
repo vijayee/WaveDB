@@ -321,6 +321,142 @@ int database_subtree_delete_raw(database_subtree_t* st,
                                  const char* key, size_t key_len, char delimiter,
                                  promise_t* promise);
 
+/* --- Batch operations --- */
+
+/**
+ * Synchronously submit a batch of write operations to the subtree.
+ *
+ * Each entry's path is prefixed with the subtree prefix before submission.
+ * The original batch is NOT consumed; a new temporary batch is created
+ * with prefixed paths and submitted, then destroyed.
+ *
+ * @param st     Subtree to operate on
+ * @param batch  Batch of operations (not consumed)
+ * @return 0 on success, error code on failure
+ */
+int database_subtree_write_batch_sync(database_subtree_t* st, batch_t* batch);
+
+/**
+ * Asynchronously submit a batch of write operations to the subtree.
+ *
+ * Each entry's path is prefixed with the subtree prefix before submission.
+ * Resolves promise with int* result (0 on success, error code on failure).
+ *
+ * @param st      Subtree to operate on
+ * @param batch   Batch of operations (not consumed)
+ * @param promise Promise to resolve on completion
+ */
+void database_subtree_write_batch(database_subtree_t* st, batch_t* batch, promise_t* promise);
+
+/**
+ * Synchronously submit a batch of raw operations to the subtree.
+ *
+ * Each key is prefixed with "st->prefix{delimiter}key" before submission.
+ *
+ * @param st         Subtree to operate on
+ * @param delimiter  Path delimiter character
+ * @param ops        Array of raw operations
+ * @param count      Number of operations
+ * @return 0 on success, error code on failure
+ */
+int database_subtree_batch_sync_raw(database_subtree_t* st, char delimiter,
+                                     const raw_op_t* ops, size_t count);
+
+/**
+ * Asynchronously submit a batch of raw operations to the subtree.
+ *
+ * Each key is prefixed with "st->prefix{delimiter}key" before submission.
+ *
+ * @param st         Subtree to operate on
+ * @param delimiter  Path delimiter character
+ * @param ops        Array of raw operations
+ * @param count      Number of operations
+ * @param promise    Promise to resolve on completion
+ * @return 0 on success (work enqueued), -1 on error
+ */
+int database_subtree_batch_raw(database_subtree_t* st, char delimiter,
+                                const raw_op_t* ops, size_t count,
+                                promise_t* promise);
+
+/* --- Scan/Iterator operations --- */
+
+/**
+ * Start a scan over the subtree using path bounds.
+ *
+ * Prepends the subtree prefix to start_path and end_path, then
+ * delegates to database_scan_start. The returned iterator walks the
+ * underlying database; result paths include the subtree prefix.
+ *
+ * @param st          Subtree to scan
+ * @param start_path  Optional start bound (NULL = beginning). Ownership transferred.
+ * @param end_path    Optional end bound (NULL = no upper bound). Ownership transferred.
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
+                                                  path_t* start_path,
+                                                  path_t* end_path);
+
+/**
+ * Start a scan over the subtree using string-based path bounds.
+ *
+ * Prepends the subtree prefix to start and end strings, then
+ * delegates to database_scan_range.
+ *
+ * @param st     Subtree to scan
+ * @param start  Start path string (NULL = beginning)
+ * @param end    End path string (NULL = no upper bound)
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_subtree_scan_range(database_subtree_t* st,
+                                                  const char* start,
+                                                  const char* end);
+
+/**
+ * Synchronously scan the subtree for keys matching a prefix.
+ *
+ * Builds the combined prefix (st->prefix + delimiter + user_prefix),
+ * scans the underlying database, then strips the subtree prefix
+ * from each result key.
+ *
+ * Caller must free results with database_raw_results_free.
+ *
+ * @param st           Subtree to scan
+ * @param prefix       Key prefix to match (within subtree namespace)
+ * @param prefix_len   Length of prefix
+ * @param delimiter    Path delimiter character
+ * @param results      Output: array of results (caller must free)
+ * @param count        Output: number of results
+ * @return 0 on success, -1 on error
+ */
+int database_subtree_scan_sync_raw(database_subtree_t* st,
+                                    const char* prefix, size_t prefix_len,
+                                    char delimiter,
+                                    raw_result_t** results, size_t* count);
+
+/**
+ * Synchronously scan the subtree for keys in a range.
+ *
+ * Builds prefixed start and end bounds, scans the underlying database,
+ * then strips the subtree prefix from each result key.
+ *
+ * Caller must free results with database_raw_results_free.
+ *
+ * @param st              Subtree to scan
+ * @param start_prefix    Start prefix (within subtree namespace)
+ * @param start_len       Length of start prefix
+ * @param end_prefix      End prefix (within subtree namespace)
+ * @param end_len         Length of end prefix
+ * @param delimiter       Path delimiter character
+ * @param results         Output: array of results (caller must free)
+ * @param count           Output: number of results
+ * @return 0 on success, -1 on error
+ */
+int database_subtree_scan_range_sync_raw(database_subtree_t* st,
+                                          const char* start_prefix, size_t start_len,
+                                          const char* end_prefix, size_t end_len,
+                                          char delimiter,
+                                          raw_result_t** results, size_t* count);
+
 #ifdef __cplusplus
 }
 #endif
