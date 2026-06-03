@@ -14,7 +14,7 @@
     "build": "node scripts/build.js",
     "test": "npm run build && mocha test/*.test.js",
     "test:valgrind": "valgrind --leak-check=full node test/*.test.js",
-    "prepublishOnly": "npm run copy-sources && ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm run build && ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=suppress_leaks=1 npm test"
+    "prepublishOnly": "npm run copy-sources && npm run build && npm test"
   },
   "dependencies": {
     "node-addon-api": "^7.1.1"
