@@ -11,6 +11,7 @@ import 'identifier.dart';
 import 'exceptions.dart';
 import 'iterator.dart';
 import 'object_ops.dart';
+import 'subtree.dart';
 
 /// Configuration options for WaveDB
 class WaveDBConfig {
@@ -827,6 +828,48 @@ class WaveDB implements Finalizable {
       values: values,
       isClosed: () => _isClosed,
     ).stream;
+  }
+
+  // ============================================================
+  // SUBTREE
+  // ============================================================
+
+  /// Open a subtree view with the given prefix.
+  ///
+  /// A subtree provides a scoped view into the database, automatically
+  /// prepending the prefix to all keys. This enables namespace isolation.
+  /// The subtree does NOT own the database; closing a subtree does not
+  /// destroy the underlying database.
+  Subtree openSubtree(String prefix, {String delimiter = '/'}) {
+    _checkClosed();
+    final prefixPtr = prefix.toNativeUtf8();
+    try {
+      final stPtr = WaveDBNative.databaseSubtreeOpen(_db!, prefixPtr, delimiter.codeUnitAt(0));
+      if (stPtr == nullptr) {
+        throw WaveDBException.ioError('openSubtree', 'Failed to open subtree');
+      }
+      final subtree = Subtree.internal(stPtr, delimiter);
+      subtree.attachFinalizer();
+      return subtree;
+    } finally {
+      calloc.free(prefixPtr);
+    }
+  }
+
+  /// Delete all keys under a prefix from the database.
+  ///
+  /// Scans for all keys matching "prefix{delimiter}*" and deletes each one.
+  void deleteSubtree(String prefix, {String delimiter = '/'}) {
+    _checkClosed();
+    final prefixPtr = prefix.toNativeUtf8();
+    try {
+      final rc = WaveDBNative.databaseSubtreeDeletePrefix(_db!, prefixPtr, delimiter.codeUnitAt(0));
+      if (rc != 0) {
+        throw WaveDBException.ioError('deleteSubtree', 'Failed to delete subtree prefix');
+      }
+    } finally {
+      calloc.free(prefixPtr);
+    }
   }
 
   // ============================================================

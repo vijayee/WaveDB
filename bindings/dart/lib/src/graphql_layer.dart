@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:ffi/ffi.dart';
 import 'native/types.dart';
 import 'native/wavedb_bindings.dart';
+import 'subtree.dart';
 
 /// Configuration options for the GraphQL layer
 class GraphQLLayerConfig {
@@ -96,7 +97,10 @@ class GraphQLLayer implements Finalizable {
   /// Note: only [GraphQLLayerConfig.path] is currently used. Other config
   /// fields (enablePersist, chunkSize, workerThreads) are not yet supported
   /// by the C API's config interface and will be silently ignored.
-  void create(GraphQLLayerConfig config) {
+  ///
+  /// If [subtree] is provided, the layer operates within the subtree's
+  /// namespace, preventing schema collisions with other layer types.
+  void create(GraphQLLayerConfig config, {Subtree? subtree}) {
     if (_layer != null && !_closed) {
       // Cancel pending async ops before destroying the old layer
       final keysToRemove = <int>[];
@@ -118,7 +122,8 @@ class GraphQLLayer implements Finalizable {
 
     final configPtr = WaveDBNative.graphQLLayerConfigDefault();
     try {
-      _layer = WaveDBNative.graphQLLayerCreate(config.path, config: configPtr);
+      final subtreePtr = subtree?.nativePtr;
+      _layer = WaveDBNative.graphQLLayerCreate(config.path, config: configPtr, subtree: subtreePtr);
     } finally {
       WaveDBNative.graphQLLayerConfigDestroy(configPtr);
     }

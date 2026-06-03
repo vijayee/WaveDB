@@ -545,6 +545,145 @@ typedef DatabaseScanSyncRawDart = int Function(
 typedef DatabaseRawResultsFreeC = Void Function(Pointer<RawResult> results, Size count);
 typedef DatabaseRawResultsFreeDart = void Function(Pointer<RawResult> results, int count);
 
+// ============================================================
+// C TYPEDEFS - Subtree Operations
+// ============================================================
+
+/// C signature: database_subtree_t* database_subtree_open(
+///   database_t* db, const char* prefix, char delimiter
+/// )
+typedef DatabaseSubtreeOpenC = Pointer<database_subtree_t> Function(
+  Pointer<database_t> db,
+  Pointer<Utf8> prefix,
+  Int8 delimiter,
+);
+typedef DatabaseSubtreeOpen = Pointer<database_subtree_t> Function(
+  Pointer<database_t> db,
+  Pointer<Utf8> prefix,
+  int delimiter,
+);
+
+/// C signature: void database_subtree_close(database_subtree_t* subtree)
+typedef DatabaseSubtreeCloseC = Void Function(Pointer<database_subtree_t> subtree);
+typedef DatabaseSubtreeClose = void Function(Pointer<database_subtree_t> subtree);
+
+/// C signature: int database_subtree_delete_prefix(
+///   database_t* db, const char* prefix, char delimiter
+/// )
+typedef DatabaseSubtreeDeletePrefixC = Int32 Function(
+  Pointer<database_t> db,
+  Pointer<Utf8> prefix,
+  Int8 delimiter,
+);
+typedef DatabaseSubtreeDeletePrefix = int Function(
+  Pointer<database_t> db,
+  Pointer<Utf8> prefix,
+  int delimiter,
+);
+
+/// C signature: int database_subtree_put_sync_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter,
+///   const uint8_t* value, size_t value_len
+/// )
+typedef DatabaseSubtreePutSyncRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Uint8> value,
+  Size valueLen,
+);
+typedef DatabaseSubtreePutSyncRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Uint8> value,
+  int valueLen,
+);
+
+/// C signature: int database_subtree_get_sync_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter,
+///   uint8_t** value_out, size_t* value_len_out
+/// )
+typedef DatabaseSubtreeGetSyncRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+  Pointer<Pointer<Uint8>> valueOut,
+  Pointer<Size> valueLenOut,
+);
+typedef DatabaseSubtreeGetSyncRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+  Pointer<Pointer<Uint8>> valueOut,
+  Pointer<Size> valueLenOut,
+);
+
+/// C signature: int database_subtree_delete_sync_raw(
+///   database_subtree_t* st, const char* key, size_t key_len, char delimiter
+/// )
+typedef DatabaseSubtreeDeleteSyncRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  Size keyLen,
+  Int8 delimiter,
+);
+typedef DatabaseSubtreeDeleteSyncRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> key,
+  int keyLen,
+  int delimiter,
+);
+
+/// C signature: size_t database_subtree_count(database_subtree_t* st)
+typedef DatabaseSubtreeCountC = UintPtr Function(Pointer<database_subtree_t> st);
+typedef DatabaseSubtreeCount = int Function(Pointer<database_subtree_t> st);
+
+/// C signature: int database_subtree_snapshot(database_subtree_t* st)
+typedef DatabaseSubtreeSnapshotC = Int32 Function(Pointer<database_subtree_t> st);
+typedef DatabaseSubtreeSnapshot = int Function(Pointer<database_subtree_t> st);
+
+/// C signature: int database_subtree_batch_sync_raw(
+///   database_subtree_t* st, char delimiter, const raw_op_t* ops, size_t count
+/// )
+typedef DatabaseSubtreeBatchSyncRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Int8 delimiter,
+  Pointer<RawOp> ops,
+  Size count,
+);
+typedef DatabaseSubtreeBatchSyncRaw = int Function(
+  Pointer<database_subtree_t> st,
+  int delimiter,
+  Pointer<RawOp> ops,
+  int count,
+);
+
+/// C signature: int database_subtree_scan_sync_raw(
+///   database_subtree_t* st, const char* prefix, size_t prefix_len, char delimiter,
+///   raw_result_t** results, size_t* count
+/// )
+typedef DatabaseSubtreeScanSyncRawC = Int32 Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> prefix,
+  Size prefixLen,
+  Int8 delimiter,
+  Pointer<Pointer<RawResult>> results,
+  Pointer<Size> count,
+);
+typedef DatabaseSubtreeScanSyncRaw = int Function(
+  Pointer<database_subtree_t> st,
+  Pointer<Uint8> prefix,
+  int prefixLen,
+  int delimiter,
+  Pointer<Pointer<RawResult>> results,
+  Pointer<Size> count,
+);
+
 /// C signature: path_t* path_create()
 typedef PathCreateC = Pointer<path_t> Function();
 
@@ -1201,6 +1340,41 @@ class WaveDBNative {
 
   static late final DatabaseRawResultsFreeDart _databaseRawResultsFree = WaveDBLibrary.load()
       .lookupFunction<DatabaseRawResultsFreeC, DatabaseRawResultsFreeDart>('database_raw_results_free');
+
+  // Subtree operations
+  static late final DatabaseSubtreeOpen _databaseSubtreeOpen = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeOpenC, DatabaseSubtreeOpen>('database_subtree_open');
+
+  static late final DatabaseSubtreeClose _databaseSubtreeClose = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeCloseC, DatabaseSubtreeClose>('database_subtree_close');
+
+  /// Raw native function pointer for database_subtree_close, used by NativeFinalizer
+  static late final Pointer<NativeFunction<DatabaseSubtreeCloseC>> databaseSubtreeCloseNative =
+      WaveDBLibrary.load().lookup('database_subtree_close');
+
+  static late final DatabaseSubtreeDeletePrefix _databaseSubtreeDeletePrefix = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeDeletePrefixC, DatabaseSubtreeDeletePrefix>('database_subtree_delete_prefix');
+
+  static late final DatabaseSubtreePutSyncRaw _databaseSubtreePutSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreePutSyncRawC, DatabaseSubtreePutSyncRaw>('database_subtree_put_sync_raw');
+
+  static late final DatabaseSubtreeGetSyncRaw _databaseSubtreeGetSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeGetSyncRawC, DatabaseSubtreeGetSyncRaw>('database_subtree_get_sync_raw');
+
+  static late final DatabaseSubtreeDeleteSyncRaw _databaseSubtreeDeleteSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeDeleteSyncRawC, DatabaseSubtreeDeleteSyncRaw>('database_subtree_delete_sync_raw');
+
+  static late final DatabaseSubtreeCount _databaseSubtreeCount = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeCountC, DatabaseSubtreeCount>('database_subtree_count');
+
+  static late final DatabaseSubtreeSnapshot _databaseSubtreeSnapshot = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeSnapshotC, DatabaseSubtreeSnapshot>('database_subtree_snapshot');
+
+  static late final DatabaseSubtreeBatchSyncRaw _databaseSubtreeBatchSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeBatchSyncRawC, DatabaseSubtreeBatchSyncRaw>('database_subtree_batch_sync_raw');
+
+  static late final DatabaseSubtreeScanSyncRaw _databaseSubtreeScanSyncRaw = WaveDBLibrary.load()
+      .lookupFunction<DatabaseSubtreeScanSyncRawC, DatabaseSubtreeScanSyncRaw>('database_subtree_scan_sync_raw');
 
   // Path operations
   static late final PathCreate _pathCreate = WaveDBLibrary.load()
@@ -1859,6 +2033,111 @@ class WaveDBNative {
   }
 
   // ============================================================
+  // PUBLIC API - Subtree Operations
+  // ============================================================
+
+  /// Open a subtree view on a database
+  ///
+  /// [db] - Database handle
+  /// [prefix] - Key prefix (UTF-8 encoded native pointer)
+  /// [delimiter] - Path delimiter character
+  ///
+  /// Returns a pointer to the subtree handle, or nullptr on failure.
+  static Pointer<database_subtree_t> databaseSubtreeOpen(
+    Pointer<database_t> db,
+    Pointer<Utf8> prefix,
+    int delimiter,
+  ) {
+    return _databaseSubtreeOpen(db, prefix, delimiter);
+  }
+
+  /// Close a subtree view
+  static void databaseSubtreeClose(Pointer<database_subtree_t> st) {
+    _databaseSubtreeClose(st);
+  }
+
+  /// Delete all keys under a prefix from the database
+  ///
+  /// [db] - Database handle
+  /// [prefix] - Key prefix (UTF-8 encoded native pointer)
+  /// [delimiter] - Path delimiter character
+  ///
+  /// Returns 0 on success, -1 on failure.
+  static int databaseSubtreeDeletePrefix(
+    Pointer<database_t> db,
+    Pointer<Utf8> prefix,
+    int delimiter,
+  ) {
+    return _databaseSubtreeDeletePrefix(db, prefix, delimiter);
+  }
+
+  /// Synchronously put a raw key-value pair into the subtree
+  static int databaseSubtreePutSyncRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Uint8> value,
+    int valueLen,
+  ) {
+    return _databaseSubtreePutSyncRaw(st, key, keyLen, delimiter, value, valueLen);
+  }
+
+  /// Synchronously get a raw value from the subtree
+  static int databaseSubtreeGetSyncRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+    Pointer<Pointer<Uint8>> valueOut,
+    Pointer<Size> valueLenOut,
+  ) {
+    return _databaseSubtreeGetSyncRaw(st, key, keyLen, delimiter, valueOut, valueLenOut);
+  }
+
+  /// Synchronously delete a raw key from the subtree
+  static int databaseSubtreeDeleteSyncRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> key,
+    int keyLen,
+    int delimiter,
+  ) {
+    return _databaseSubtreeDeleteSyncRaw(st, key, keyLen, delimiter);
+  }
+
+  /// Count entries under the subtree prefix
+  static int databaseSubtreeCount(Pointer<database_subtree_t> st) {
+    return _databaseSubtreeCount(st);
+  }
+
+  /// Snapshot the subtree's underlying database
+  static int databaseSubtreeSnapshot(Pointer<database_subtree_t> st) {
+    return _databaseSubtreeSnapshot(st);
+  }
+
+  /// Synchronously execute a batch of raw operations on the subtree
+  static int databaseSubtreeBatchSyncRaw(
+    Pointer<database_subtree_t> st,
+    int delimiter,
+    Pointer<RawOp> ops,
+    int count,
+  ) {
+    return _databaseSubtreeBatchSyncRaw(st, delimiter, ops, count);
+  }
+
+  /// Synchronously scan the subtree for keys matching a prefix
+  static int databaseSubtreeScanSyncRaw(
+    Pointer<database_subtree_t> st,
+    Pointer<Uint8> prefix,
+    int prefixLen,
+    int delimiter,
+    Pointer<Pointer<RawResult>> results,
+    Pointer<Size> count,
+  ) {
+    return _databaseSubtreeScanSyncRaw(st, prefix, prefixLen, delimiter, results, count);
+  }
+
+  // ============================================================
   // PUBLIC API - Path Operations
   // ============================================================
 
@@ -2068,6 +2347,10 @@ class WaveDBNative {
       );
       if (layer == nullptr) {
         final errorCode = errorPtr.value;
+        if (errorCode == -3) {
+          throw WaveDBException.conflict(
+            'Database already contains schema from a different layer type. Use a subtree to isolate this layer.');
+        }
         throw WaveDBException.ioError('graphql_layer_create',
           'Failed to create GraphQL layer (error code: $errorCode)');
       }
@@ -2212,6 +2495,10 @@ class WaveDBNative {
       );
       if (layer == nullptr) {
         final errCode = errorPtr.value;
+        if (errCode == -3) {
+          throw WaveDBException.conflict(
+            'Database already contains schema from a different layer type. Use a subtree to isolate this layer.');
+        }
         throw WaveDBException.ioError('graph_layer_create', 'Failed to create graph layer (error $errCode)');
       }
       return layer;

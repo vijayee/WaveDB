@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:ffi/ffi.dart';
 import 'native/types.dart';
 import 'native/wavedb_bindings.dart';
+import 'subtree.dart';
 
 GraphQuery g([GraphLayer? layer]) => GraphQuery(layer ?? _defaultGraph);
 GraphLayer? _defaultGraph;
@@ -50,7 +51,7 @@ class GraphLayer implements Finalizable {
   final int _instanceId;
   static int _nextInstanceId = 1;
 
-  GraphLayer([String? path]) : _instanceId = _nextInstanceId++ {
+  GraphLayer([String? path, Subtree? subtree]) : _instanceId = _nextInstanceId++ {
     String actualPath;
     if (path != null) {
       actualPath = path;
@@ -58,7 +59,8 @@ class GraphLayer implements Finalizable {
       _tempDir = Directory.systemTemp.createTempSync('wavedb_graph_').path;
       actualPath = _tempDir!;
     }
-    _layer = WaveDBNative.graphLayerCreate(actualPath);
+    final subtreePtr = subtree?.nativePtr ?? nullptr;
+    _layer = WaveDBNative.graphLayerCreate(actualPath, subtree: subtreePtr == nullptr ? null : subtreePtr);
     _finalizer.attach(this, _layer!.cast(), detach: this);
     if (_defaultGraph == null) _defaultGraph = this;
 
