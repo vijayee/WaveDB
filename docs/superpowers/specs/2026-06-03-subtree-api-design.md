@@ -151,6 +151,51 @@ work_pool_t* database_subtree_get_pool(database_subtree_t* st);
 
 This is a synchronous operation. For large subtrees, a future optimization could add an async variant.
 
+### Layer Config Changes
+
+The subtree field goes in each layer's config struct, not in `database_config_t`. A subtree is a layer concern (which namespace the layer operates in), not a database concern (how the database is configured).
+
+**GraphQL layer** — extend existing `graphql_layer_config_t`:
+```c
+typedef struct graphql_layer_config_t {
+    const char* path;
+    uint8_t chunk_size;
+    uint32_t btree_node_size;
+    size_t lru_memory_mb;
+    uint16_t lru_shards;
+    uint8_t worker_threads;
+    uint8_t enable_persist;
+    wal_config_t wal_config;
+    char delimiter;
+    database_subtree_t* subtree;    // NEW: if set, layer uses this subtree instead of creating a database
+} graphql_layer_config_t;
+```
+
+When `subtree` is non-NULL, `graphql_layer_create` uses the subtree for all database operations and ignores `path`, `chunk_size`, `btree_node_size`, `lru_memory_mb`, `lru_shards`, `worker_threads`, `enable_persist`, and `wal_config` (these are managed by the shared database). The `delimiter` is still read from the config since it's a layer-level concern.
+
+**Graph layer** — create a new `graph_layer_config_t` (doesn't exist today):
+```c
+typedef struct graph_layer_config_t {
+    const char* path;               // Database storage path (NULL = in-memory), ignored if subtree is set
+    database_config_t* db_config;   // Database configuration, ignored if subtree is set
+    database_subtree_t* subtree;    // NEW: if set, layer uses this subtree instead of creating a database
+} graph_layer_config_t;
+```
+
+The graph layer currently takes `database_config_t*` directly in `graph_layer_create`. The new config struct wraps this and adds the subtree field. When `subtree` is non-NULL, `graph_layer_create` uses the subtree and ignores `path` and `db_config`.
+
+**Updated create signatures:**
+```c
+// GraphQL — signature unchanged, config now has optional subtree field
+graphql_layer_t* graphql_layer_create(const char* path,
+                                       const graphql_layer_config_t* config);
+
+// Graph — signature changes to accept new config struct
+graph_layer_t* graph_layer_create(const char* path, graph_layer_config_t* config);
+```
+
+**Layer internals:** When a layer is created with a subtree, it stores the subtree handle and uses `database_subtree_*` functions for all operations instead of `database_*` functions. The `database_subtree_get_pool()` accessor replaces direct `db->pool` access.
+
 ### Layer Integration Pattern
 
 **Before** (each layer owns its own database):
@@ -161,25 +206,35 @@ layer->db = db;
 // ... use database_put_sync(db, path, value)
 ```
 
-**After** (layers receive a subtree of a shared database):
+**After** (subtree passed through layer config):
 ```c
 // Application code creates one database and opens subtrees with arbitrary paths:
 database_t* db = database_create_with_config(db_path, db_config, &error_code);
 database_subtree_t* graphql_subtree = database_subtree_open(db, "layer/graphql", '/');
 database_subtree_t* graph_subtree = database_subtree_open(db, "layer/graphs/graph1", '/');
 
-// Layer creation receives the subtree instead of creating its own database:
-graphql_layer_t* gql = graphql_layer_create_with_subtree(graphql_subtree, config);
-graph_layer_t* graph = graph_layer_create_with_subtree(graph_subtree, config);
+// GraphQL layer — subtree goes in config
+graphql_layer_config_t gql_config = {0};
+gql_config.subtree = graphql_subtree;
+gql_config.delimiter = '/';
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config);
+// path is NULL because the subtree already has a database; config path is ignored
 
-// Inside the layer, all database operations use the subtree API:
+// Graph layer — new config struct with subtree
+graph_layer_config_t graph_config = {0};
+graph_config.subtree = graph_subtree;
+graph_layer_t* graph = graph_layer_create(NULL, &graph_config);
+
+// Inside each layer, all database operations use the subtree API:
 database_subtree_put_sync(layer->subtree, path, value);
 // Path "Users/1/name" is automatically prefixed to "layer/graphql/Users/1/name"
 
 // On reopen:
 database_t* db = database_create_with_config(db_path, config, &error_code);
 database_subtree_t* subtree = database_subtree_open(db, "layer/graphql", '/');
-// graphql_schema_load(subtree) works unchanged — sees __meta/layer at its own root
+gql_config.subtree = subtree;
+graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config);
+// graphql_schema_load works unchanged — sees __meta/layer at its own root
 
 // Delete a layer's data:
 database_subtree_delete(db, "layer/graphql", '/');
@@ -192,12 +247,12 @@ database_subtree_delete(db, "layer/graphql", '/');
 - `src/Database/database_subtree.c` — implementation
 
 **Modified files:**
-- `src/Layers/graphql/graphql_schema.h` — add `graphql_layer_create_with_subtree`
-- `src/Layers/graphql/graphql_schema.c` — implement subtree-based creation
-- `src/Layers/graphql/graphql_types.h` — add `database_subtree_t*` field to `graphql_layer_t`
-- `src/Layers/graph/graph.h` — add `graph_layer_create_with_subtree`
-- `src/Layers/graph/graph.c` — implement subtree-based creation
+- `src/Layers/graphql/graphql_types.h` — add `database_subtree_t*` field to `graphql_layer_config_t` and `graphql_layer_t`
+- `src/Layers/graphql/graphql_schema.h` — update `graphql_layer_create` signature to accept subtree from config
+- `src/Layers/graphql/graphql_schema.c` — when config has a subtree, use it instead of creating a database
+- `src/Layers/graph/graph.h` — create `graph_layer_config_t` struct with `database_subtree_t*` field; update `graph_layer_create` signature
 - `src/Layers/graph/graph_internal.h` — add `database_subtree_t*` field to `graph_layer_t`
+- `src/Layers/graph/graph.c` — when config has a subtree, use it instead of creating a database
 
 ### Error Handling
 
