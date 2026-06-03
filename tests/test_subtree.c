@@ -971,6 +971,164 @@ static void test_subtree_snapshot_count(void) {
     printf("=== test_subtree_snapshot_count DONE ===\n");
 }
 
+/* ---- Test 13: Subtree delete prefix ---- */
+
+static void test_subtree_delete(void) {
+    printf("\n=== test_subtree_delete ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_delete");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "graphql", '/');
+    ASSERT(st != NULL, "Open subtree 'graphql'");
+
+    /* Put 5 values under the subtree */
+    const char* keys[] = {"users/1/name", "users/1/age", "users/2/name", "posts/1/title", "config/version"};
+    const char* values[] = {"Alice", "30", "Bob", "Hello World", "1.0"};
+
+    for (int i = 0; i < 5; i++) {
+        int rc = database_subtree_put_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                               (const uint8_t*)values[i], strlen(values[i]));
+        ASSERT(rc == 0, "Put succeeds for delete test data");
+    }
+
+    /* Verify all 5 values exist */
+    for (int i = 0; i < 5; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int rc = database_subtree_get_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                               &val, &val_len);
+        ASSERT(rc == 0, "Value exists before delete");
+        if (rc == 0 && val != NULL) {
+            ASSERT(memcmp(val, values[i], val_len) == 0, "Value matches before delete");
+            database_raw_value_free(val);
+        }
+    }
+
+    /* Delete the entire subtree prefix */
+    int rc = database_subtree_delete_prefix(db, "graphql", '/');
+    ASSERT(rc == 0, "Delete prefix succeeds");
+
+    /* Verify all 5 values are gone */
+    for (int i = 0; i < 5; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int grc = database_subtree_get_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                                &val, &val_len);
+        ASSERT(grc == -2, "Value is gone after delete prefix");
+    }
+
+    /* Verify the database itself is still usable */
+    int put_rc = database_subtree_put_sync_raw(st, "newkey", strlen("newkey"), '/',
+                                               (const uint8_t*)"newval", strlen("newval"));
+    ASSERT(put_rc == 0, "Put after delete prefix succeeds");
+
+    uint8_t* new_val = NULL;
+    size_t new_val_len = 0;
+    int get_rc = database_subtree_get_sync_raw(st, "newkey", strlen("newkey"), '/',
+                                               &new_val, &new_val_len);
+    ASSERT(get_rc == 0, "Get new value after delete prefix succeeds");
+    if (get_rc == 0 && new_val != NULL) {
+        ASSERT(memcmp(new_val, "newval", new_val_len) == 0,
+               "New value matches after delete prefix");
+        database_raw_value_free(new_val);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_delete DONE ===\n");
+}
+
+/* ---- Test 14: Subtree delete isolation ---- */
+
+static void test_subtree_delete_isolation(void) {
+    printf("\n=== test_subtree_delete_isolation ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_del_iso");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st_a = database_subtree_open(db, "graphql", '/');
+    ASSERT(st_a != NULL, "Open subtree 'graphql'");
+
+    database_subtree_t* st_b = database_subtree_open(db, "graph", '/');
+    ASSERT(st_b != NULL, "Open subtree 'graph'");
+
+    /* Put values into each subtree */
+    const char* keys_a[] = {"users/1/name", "users/1/age", "posts/1/title"};
+    const char* vals_a[] = {"Alice", "30", "Hello"};
+    const char* keys_b[] = {"nodes/1", "edges/1", "meta/type"};
+    const char* vals_b[] = {"node1", "edge1", "social"};
+
+    for (int i = 0; i < 3; i++) {
+        int rc = database_subtree_put_sync_raw(st_a, keys_a[i], strlen(keys_a[i]), '/',
+                                               (const uint8_t*)vals_a[i], strlen(vals_a[i]));
+        ASSERT(rc == 0, "Put in subtree 'graphql' succeeds");
+    }
+
+    for (int i = 0; i < 3; i++) {
+        int rc = database_subtree_put_sync_raw(st_b, keys_b[i], strlen(keys_b[i]), '/',
+                                               (const uint8_t*)vals_b[i], strlen(vals_b[i]));
+        ASSERT(rc == 0, "Put in subtree 'graph' succeeds");
+    }
+
+    /* Verify all values exist before delete */
+    for (int i = 0; i < 3; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int rc = database_subtree_get_sync_raw(st_a, keys_a[i], strlen(keys_a[i]), '/',
+                                               &val, &val_len);
+        ASSERT(rc == 0, "Subtree 'graphql' value exists before delete");
+        if (rc == 0 && val != NULL) database_raw_value_free(val);
+    }
+
+    for (int i = 0; i < 3; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int rc = database_subtree_get_sync_raw(st_b, keys_b[i], strlen(keys_b[i]), '/',
+                                               &val, &val_len);
+        ASSERT(rc == 0, "Subtree 'graph' value exists before delete");
+        if (rc == 0 && val != NULL) database_raw_value_free(val);
+    }
+
+    /* Delete the 'graphql' subtree prefix */
+    int rc = database_subtree_delete_prefix(db, "graphql", '/');
+    ASSERT(rc == 0, "Delete 'graphql' prefix succeeds");
+
+    /* Verify the 'graphql' subtree is empty */
+    for (int i = 0; i < 3; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int grc = database_subtree_get_sync_raw(st_a, keys_a[i], strlen(keys_a[i]), '/',
+                                                &val, &val_len);
+        ASSERT(grc == -2, "Subtree 'graphql' value is gone after delete");
+    }
+
+    /* Verify the 'graph' subtree still has all its values */
+    for (int i = 0; i < 3; i++) {
+        uint8_t* val = NULL;
+        size_t val_len = 0;
+        int grc = database_subtree_get_sync_raw(st_b, keys_b[i], strlen(keys_b[i]), '/',
+                                                &val, &val_len);
+        ASSERT(grc == 0, "Subtree 'graph' value still exists after 'graphql' delete");
+        if (grc == 0 && val != NULL) {
+            ASSERT(memcmp(val, vals_b[i], val_len) == 0,
+                   "Subtree 'graph' value still matches");
+            database_raw_value_free(val);
+        }
+    }
+
+    database_subtree_close(st_a);
+    database_subtree_close(st_b);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_delete_isolation DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -988,6 +1146,8 @@ int main(void) {
     test_subtree_batch_sync_raw();
     test_subtree_scan_sync_raw();
     test_subtree_snapshot_count();
+    test_subtree_delete();
+    test_subtree_delete_isolation();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;
