@@ -12,7 +12,16 @@ const path = require('path');
 const isWin = process.platform === 'win32';
 const scriptDir = __dirname;
 const nodejsDir = path.join(scriptDir, '..');
-const nodeGyp = path.join(nodejsDir, 'node_modules', '.bin', 'node-gyp');
+
+function findNodeGyp() {
+  // Try local node_modules first (monorepo or dev install)
+  const localGyp = path.join(nodejsDir, 'node_modules', '.bin', 'node-gyp');
+  if (fs.existsSync(localGyp + (isWin ? '.cmd' : ''))) {
+    return `"${localGyp}"`;
+  }
+  // Fall back to npx
+  return 'npx node-gyp';
+}
 
 function run(cmd) {
   execSync(cmd, { stdio: 'inherit' });
@@ -77,11 +86,13 @@ function patchVcxprojForMSVC() {
 
 ensureCSources();
 
+const nodeGyp = findNodeGyp();
+
 if (isWin) {
   // On Windows: configure, patch vcxproj for MSVC, then build
-  run(`"${nodeGyp}" configure`);
+  run(`${nodeGyp} configure`);
   patchVcxprojForMSVC();
-  run(`"${nodeGyp}" build`);
+  run(`${nodeGyp} build`);
 } else {
-  run(`"${nodeGyp}" rebuild`);
+  run(`${nodeGyp} rebuild`);
 }
