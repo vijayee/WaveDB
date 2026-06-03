@@ -50,10 +50,6 @@ class Subtree implements Finalizable {
   static int _nextRequestId = 1;
   static final Map<int, _SubtreePendingOp> _pending = {};
 
-  // Promise pointers orphaned by close() — the C callback will still fire,
-  // and it needs to free these promises. The callback removes from this set.
-  static final Set<Pointer<promise_t>> _orphanedPromises = {};
-
   /// NativeFinalizer to ensure database_subtree_close is called if the Dart
   /// object is GC'd without an explicit close(). This prevents native resource leaks.
   static final NativeFinalizer _finalizer = NativeFinalizer(
@@ -443,10 +439,9 @@ class Subtree implements Finalizable {
     final pending = _pending.remove(requestId);
 
     if (pending == null) {
-      // Orphaned resolve — close() already cancelled this operation.
-      // The promise was added to _orphanedPromises by close().
-      // We don't know the operation type, so we can't properly free
-      // identifier_t* payloads. Free malloc'd payloads as a best effort.
+      // Orphaned resolve — no matching request (shouldn't happen since
+      // close() keeps entries in _pending, but handle defensively).
+      // Free malloc'd payloads as best effort.
       if (payload != nullptr) {
         malloc.free(payload);
       }
@@ -454,21 +449,29 @@ class Subtree implements Finalizable {
     }
 
     try {
-      if (pending.completer.isCompleted) return;
+      // If the completer was already completed (e.g., by close()),
+      // we still need to clean up the payload but skip delivering the result.
+      final alreadyCompleted = pending.completer.isCompleted;
 
       switch (pending.type) {
         case _SubtreeAsyncOpType.get:
           final idPtr = payload.cast<identifier_t>();
           if (idPtr == nullptr) {
-            pending.completer.complete(null);
+            if (!alreadyCompleted) pending.completer.complete(null);
           } else {
-            try {
-              pending.completer.complete(IdentifierConverter.fromNative(idPtr));
-            } catch (e) {
-              pending.completer.completeError(e);
-            } finally {
+            if (alreadyCompleted) {
+              // Close() already completed this — just free the identifier.
               WaveDBNative.identifierReference(idPtr);
               WaveDBNative.identifierDestroy(idPtr);
+            } else {
+              try {
+                pending.completer.complete(IdentifierConverter.fromNative(idPtr));
+              } catch (e) {
+                pending.completer.completeError(e);
+              } finally {
+                WaveDBNative.identifierReference(idPtr);
+                WaveDBNative.identifierDestroy(idPtr);
+              }
             }
           }
           break;
@@ -477,7 +480,7 @@ class Subtree implements Finalizable {
           if (payload != nullptr) {
             malloc.free(payload);
           }
-          pending.completer.complete(null);
+          if (!alreadyCompleted) pending.completer.complete(null);
           break;
       }
     } catch (e) {
@@ -504,12 +507,7 @@ class Subtree implements Finalizable {
     }
 
     if (pending == null) {
-      // Orphaned reject — close() already cancelled this operation.
-      // Check if we have an orphaned promise to clean up.
-      // Note: we can't find the promise by requestId since we only have
-      // the ctx, not the promise. The promise will be cleaned up when
-      // the corresponding resolve callback fires (which should happen
-      // shortly after the reject, or the promise is already resolved).
+      // Orphaned reject — no matching request.
       return;
     }
 
@@ -560,26 +558,27 @@ class Subtree implements Finalizable {
   /// Close the subtree and release native resources.
   ///
   /// Does NOT destroy or dereference the underlying database.
-  /// Cancels any pending async operations for this instance.
-  /// In-flight async operations will complete with a databaseClosed error.
-  /// The C callbacks for those operations will fire as orphans and clean
-  /// up the promise memory.
+  /// Cancels any pending async operations for this instance by completing
+  /// their Futures with a databaseClosed error. The entries remain in
+  /// _pending so that when the C callback fires, it can properly clean up
+  /// the promise and payload memory.
   void close() {
     if (_closed || _st == null) return;
 
     // Cancel pending async operations for this instance by completing
-    // their completers with errors. We do NOT destroy the promises here —
-    // the C worker thread will fire the callback, which will find no entry
-    // in _pending (orphan case) and destroy the promise from the callback.
+    // their completers with errors. We do NOT remove from _pending and
+    // do NOT destroy the promises — the C worker still holds a reference
+    // on the subtree and will fire the callback. When the callback arrives,
+    // it will find the entry, see the completer is already completed, skip
+    // the body, and destroy the promise + free the payload in the finally
+    // block. This avoids leaking promise_t and identifier_t memory.
     for (final entry in _pending.entries) {
       if (entry.value.instanceId == _instanceId) {
         if (!entry.value.completer.isCompleted) {
-          _orphanedPromises.add(entry.value.promisePtr);
           entry.value.completer.completeError(WaveDBException.databaseClosed());
         }
       }
     }
-    _pending.removeWhere((_, v) => v.instanceId == _instanceId);
 
     _finalizer.detach(this);
     WaveDBNative.databaseSubtreeClose(_st!);
