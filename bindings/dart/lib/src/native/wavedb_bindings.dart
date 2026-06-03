@@ -702,17 +702,23 @@ typedef DatabaseScanEnd = void Function(Pointer<database_iterator_t> iter);
 
 /// C signature: graphql_layer_t* graphql_layer_create(
 ///   const char* path,
-///   const graphql_layer_config_t* config
+///   const graphql_layer_config_t* config,
+///   database_subtree_t* subtree,
+///   int* error_code
 /// )
 typedef GraphQLLayerCreateC = Pointer<graphql_layer_t> Function(
   Pointer<Utf8> path,
   Pointer<graphql_layer_config_t> config,
+  Pointer<database_subtree_t> subtree,
+  Pointer<Int32> error_code,
 );
 
 /// Dart signature for graphql_layer_create
 typedef GraphQLLayerCreate = Pointer<graphql_layer_t> Function(
   Pointer<Utf8> path,
   Pointer<graphql_layer_config_t> config,
+  Pointer<database_subtree_t> subtree,
+  Pointer<Int32> error_code,
 );
 
 /// C signature: void graphql_layer_destroy(graphql_layer_t* layer)
@@ -834,16 +840,22 @@ typedef GraphQLMutateAsync = void Function(
 
 /// C signature: graph_layer_t* graph_layer_create(
 ///   const char* path,
-///   database_config_t* config
+///   graph_layer_config_t* config,
+///   database_subtree_t* subtree,
+///   int* error_code
 /// )
 typedef GraphLayerCreateC = Pointer<graph_layer_t> Function(
   Pointer<Utf8> path,
-  Pointer<database_config_t> config,
+  Pointer<graph_layer_config_t> config,
+  Pointer<database_subtree_t> subtree,
+  Pointer<Int32> error_code,
 );
 
 typedef GraphLayerCreate = Pointer<graph_layer_t> Function(
   Pointer<Utf8> path,
-  Pointer<database_config_t> config,
+  Pointer<graph_layer_config_t> config,
+  Pointer<database_subtree_t> subtree,
+  Pointer<Int32> error_code,
 );
 
 /// C signature: void graph_layer_destroy(graph_layer_t* layer)
@@ -2179,19 +2191,28 @@ class WaveDBNative {
   /// Create a Graph layer
   static Pointer<graph_layer_t> graphLayerCreate(
     String? path, {
-    Pointer<database_config_t>? config,
+    Pointer<graph_layer_config_t>? config,
+    Pointer<database_subtree_t>? subtree,
   }) {
     final pathPtr = path != null ? path.toNativeUtf8() : nullptr;
+    final errorPtr = calloc<Int32>();
     try {
-      final layer = _graphLayerCreate(pathPtr.cast(), config ?? nullptr);
+      final layer = _graphLayerCreate(
+        pathPtr.cast(),
+        config ?? nullptr,
+        subtree ?? nullptr,
+        errorPtr,
+      );
       if (layer == nullptr) {
-        throw WaveDBException.ioError('graph_layer_create', 'Failed to create graph layer');
+        final errCode = errorPtr.value;
+        throw WaveDBException.ioError('graph_layer_create', 'Failed to create graph layer (error $errCode)');
       }
       return layer;
     } finally {
       if (pathPtr != nullptr) {
         calloc.free(pathPtr);
       }
+      calloc.free(errorPtr);
     }
   }
 

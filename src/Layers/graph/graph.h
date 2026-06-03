@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "../../Database/database.h"
+#include "../../Database/database_subtree.h"
 #include "../../Workers/promise.h"
 
 #ifdef __cplusplus
@@ -44,9 +45,19 @@ typedef enum {
     GRAPH_CMP_LTE
 } graph_cmp_op_t;
 
+/* ── Layer config ── */
+
+typedef struct graph_layer_config_t {
+    const char* path;               // Database storage path (NULL = in-memory), ignored if subtree is set
+    database_config_t* db_config;  // Database configuration, ignored if subtree is set
+} graph_layer_config_t;
+
 /* ── Layer lifecycle ── */
 
-graph_layer_t* graph_layer_create(const char* path, database_config_t* config);
+graph_layer_t* graph_layer_create(const char* path,
+                                   graph_layer_config_t* config,
+                                   database_subtree_t* subtree,
+                                   int* error_code);
 void graph_layer_destroy(graph_layer_t* layer);
 database_t* graph_layer_get_db(graph_layer_t* layer);
 

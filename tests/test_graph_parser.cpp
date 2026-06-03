@@ -29,7 +29,7 @@ protected:
     void SetUp() override {
         test_dir = "/tmp/wavedb_graph_parser_test_" + std::to_string(getpid()) + "_" + std::to_string(test_counter++);
         mkdir(test_dir.c_str(), 0700);
-        layer = graph_layer_create(test_dir.c_str(), NULL);
+        layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
         ASSERT_NE(layer, nullptr);
     }
 

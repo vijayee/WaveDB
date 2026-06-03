@@ -35,7 +35,7 @@ protected:
         // graph_layer_create uses the default config path; with pool/wheel it works.
         // We need to provide pool and wheel because the default config doesn't set
         // worker_threads > 0 or sync_only.
-        layer = graph_layer_create(test_dir.c_str(), NULL);
+        layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
         ASSERT_NE(layer, nullptr);
     }
 

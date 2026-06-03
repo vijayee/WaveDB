@@ -29,6 +29,14 @@ base class encrypted_database_config_t extends Opaque {}
 /// Maps to graph_layer_t in C
 base class graph_layer_t extends Opaque {}
 
+/// Opaque handle to a Graph layer configuration
+/// Maps to graph_layer_config_t in C
+base class graph_layer_config_t extends Opaque {}
+
+/// Opaque handle to a database subtree
+/// Maps to database_subtree_t in C
+base class database_subtree_t extends Opaque {}
+
 /// Opaque handle to a Graph result (array of vertex strings)
 /// Maps to graph_result_t in C
 base class graph_result_t extends Opaque {}

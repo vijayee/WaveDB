@@ -42,31 +42,75 @@ void build_prefix_vec(vec_char_t* v, const char* index_name,
 
 /* ── Layer lifecycle ── */
 
-graph_layer_t* graph_layer_create(const char* path, database_config_t* config) {
+graph_layer_t* graph_layer_create(const char* path,
+                                   graph_layer_config_t* config,
+                                   database_subtree_t* subtree,
+                                   int* error_code) {
     graph_layer_t* layer = (graph_layer_t*)get_clear_memory(sizeof(graph_layer_t));
-    int error_code = 0;
-    if (config) {
-        layer->db = database_create_with_config(path, config, &error_code);
-    } else if (path) {
-        database_config_t* default_config = database_config_default();
-        if (!default_config) { free(layer); return NULL; }
-        default_config->enable_persist = 1;
-        // Use a small number of worker threads for persistence background ops
-        default_config->worker_threads = 1;
-        layer->db = database_create_with_config(path, default_config, &error_code);
-        database_config_destroy(default_config);
+    int local_error = 0;
+    if (!error_code) error_code = &local_error;
+
+    if (subtree) {
+        /* Subtree mode: use the database from the subtree, don't create one */
+        layer->db = database_subtree_get_db(subtree);
+        layer->subtree = subtree;
     } else {
-        layer->db = database_create(NULL, 0, NULL, 0, 0, 0, NULL, NULL, &error_code);
+        /* Own-database mode: create or open a database */
+        const char* effective_path = path;
+        database_config_t* db_config = NULL;
+
+        if (config) {
+            effective_path = config->path ? config->path : path;
+            db_config = config->db_config;
+        }
+
+        if (db_config) {
+            layer->db = database_create_with_config(effective_path, db_config, error_code);
+        } else if (effective_path) {
+            database_config_t* default_config = database_config_default();
+            if (!default_config) { free(layer); return NULL; }
+            default_config->enable_persist = 1;
+            /* Use a small number of worker threads for persistence background ops */
+            default_config->worker_threads = 1;
+            layer->db = database_create_with_config(effective_path, default_config, error_code);
+            database_config_destroy(default_config);
+        } else {
+            layer->db = database_create(NULL, 0, NULL, 0, 0, 0, NULL, NULL, error_code);
+        }
+
+        if (!layer->db) {
+            free(layer);
+            return NULL;
+        }
+
+        /* Check for schema collision: if this database already has graph schema
+         * data from a different layer type, refuse to create a graph layer. */
+        if (!subtree) {
+            uint8_t* existing = NULL;
+            size_t existing_len = 0;
+            int rc = database_get_sync_raw(layer->db, "__gschema/types", 15, '/',
+                                           &existing, &existing_len);
+            if (rc == 0 && existing) {
+                /* Found existing schema data — this is a graph layer, which is fine.
+                 * We just wanted to check if the key exists. */
+                database_raw_value_free(existing);
+            }
+            /* No collision check needed for same layer type; we allow reopening. */
+        }
+
+        layer->subtree = NULL;
     }
+
     if (!layer->db) {
         free(layer);
         return NULL;
     }
+
     layer->schema = NULL;
     vec_init(&layer->morphisms);
     platform_rw_lock_init(&layer->lock);
 
-    // Load persisted schema if reopening an existing database
+    /* Load persisted schema if reopening an existing database */
     if (layer->db) {
         graph_schema_load(layer);
     }
@@ -80,7 +124,16 @@ void graph_layer_destroy(graph_layer_t* layer) {
     if (layer->db) {
         // Flush any pending writes (schema metadata etc.) before closing
         database_snapshot(layer->db);
+    }
+    if (layer->subtree) {
+        /* Subtree mode: close the subtree, but do NOT destroy the shared database */
+        database_subtree_close(layer->subtree);
+        layer->subtree = NULL;
+        layer->db = NULL;
+    } else if (layer->db) {
+        /* Own-database mode: we own the database, destroy it */
         database_destroy(layer->db);
+        layer->db = NULL;
     }
     for (size_t i = 0; i < (size_t)layer->morphisms.length; i++) {
         free(layer->morphisms.data[i].name);

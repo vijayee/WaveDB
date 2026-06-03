@@ -27,7 +27,7 @@ protected:
     void SetUp() override {
         test_dir = "/tmp/wavedb_schema_test_" + std::to_string(getpid()) + "_" + std::to_string(test_counter++);
         mkdir(test_dir.c_str(), 0700);
-        layer = graph_layer_create(test_dir.c_str(), NULL);
+        layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
         ASSERT_NE(layer, nullptr);
     }
 
@@ -184,7 +184,7 @@ TEST_F(GraphSchemaTest, SchemaPersistenceAcrossReopen) {
 
     // Close and reopen at the same path
     graph_layer_destroy(layer);
-    layer = graph_layer_create(test_dir.c_str(), NULL);
+    layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
     ASSERT_NE(layer, nullptr);
 
     // Schema should be loaded from __gschema/ paths
@@ -205,7 +205,7 @@ TEST_F(GraphSchemaTest, IndexSelectionPersistsAfterReopen) {
 
     // Close and reopen
     graph_layer_destroy(layer);
-    layer = graph_layer_create(test_dir.c_str(), NULL);
+    layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
     ASSERT_NE(layer, nullptr);
 
     // Type default: all four
@@ -224,7 +224,7 @@ TEST_F(GraphSchemaTest, InsertStillWorksAfterReopenWithSchema) {
 
     // Close and reopen
     graph_layer_destroy(layer);
-    layer = graph_layer_create(test_dir.c_str(), NULL);
+    layer = graph_layer_create(test_dir.c_str(), NULL, NULL, NULL);
     ASSERT_NE(layer, nullptr);
 
     // Insert should write POS for name (since @index(pos) means POS is needed)

@@ -9,6 +9,7 @@
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
 #include "../../Util/threadding.h"
+#include "../../Database/database_subtree.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -117,6 +118,7 @@ int graph_optimize_reorder_intersect_children(query_step_t** steps, graph_layer_
 
 struct graph_layer_t {
     database_t* db;
+    database_subtree_t* subtree;   // Non-NULL if using a subtree
     graph_schema_t* schema;
     vec_t(morphism_entry_t) morphisms;
     graph_stats_t* stats;

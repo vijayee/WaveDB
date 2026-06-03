@@ -125,11 +125,16 @@ GraphLayer::GraphLayer(const Napi::CallbackInfo& info)
 
   free(defaults);
 
+  // Wrap the database_config_t in a graph_layer_config_t for the new API
+  graph_layer_config_t layer_config;
+  layer_config.path = db_path;
+  layer_config.db_config = &config;
+
   if (db_path) {
-    layer_ = graph_layer_create(db_path, &config);
+    layer_ = graph_layer_create(db_path, &layer_config, NULL, NULL);
   } else {
     // In-memory: pass NULL path, use config for settings
-    layer_ = graph_layer_create(NULL, &config);
+    layer_ = graph_layer_create(NULL, &layer_config, NULL, NULL);
   }
 
   if (!layer_) {
