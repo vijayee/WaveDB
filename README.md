@@ -101,7 +101,7 @@ WaveDB stores values at hierarchical key paths using an HBTrie — a B+tree wher
 
 **Durability:** Thread-local WAL files eliminate write contention. Three sync modes trade durability for throughput: IMMEDIATE (fsync every write), DEBOUNCED (batched fsync every 250ms, recommended), ASYNC (buffer flushed to kernel on 250ms idle timer, survives process crash but not power failure).
 
-**Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans. The Graph layer provides a triple-store with Gremlin-style traversal and cost-based optimization.
+**Schema Layers:** Access the same data through different query paradigms. The GraphQL layer maps type definitions to hierarchical paths and resolves queries with scan plans. The Graph layer provides a triple-store with Gremlin-style traversal and cost-based optimization. Multiple layers can coexist on the same database using subtrees for namespace isolation.
 
 ## Configuration
 
@@ -302,6 +302,52 @@ graph_layer_destroy(layer);
 
 The optimizer automatically reorders `Has` filters by selectivity and sorts `Intersect` children by estimated cardinality, using statistics computed from PSO index scans. See `docs/graph-db-schema-layer.md` for the full design.
 
+## Subtrees
+
+Subtrees provide scoped views into a database with automatic prefix isolation. This enables multiple schema layers to coexist in different namespaces on the same database.
+
+```c
+#include "Database/database_subtree.h"
+
+// Open subtrees with different prefixes
+database_subtree_t* gql_st = database_subtree_open(db, "graphql", '/');
+database_subtree_t* graph_st = database_subtree_open(db, "graph", '/');
+
+// Operations are scoped — keys are automatically prefixed
+database_subtree_put_sync_raw(gql_st, "Users/1/name", 12, '/',
+                              (const uint8_t*)"Alice", 5);
+database_subtree_put_sync_raw(graph_st, "triples/s/p/o", 14, '/',
+                              (const uint8_t*)"data", 4);
+
+// Each subtree only sees its own data
+size_t gql_count = database_subtree_count(gql_st);   // 1
+size_t graph_count = database_subtree_count(graph_st); // 1
+
+// Delete all data under a prefix
+database_subtree_delete_prefix(db, "graphql", '/');
+
+// Close subtrees (does not destroy the database)
+database_subtree_close(gql_st);
+database_subtree_close(graph_st);
+```
+
+### Layer Coexistence
+
+Create multiple layers on the same database by passing a subtree:
+
+```c
+database_subtree_t* gql_sub = database_subtree_open(db, "layer/graphql", '/');
+database_subtree_t* graph_sub = database_subtree_open(db, "layer/graph", '/');
+
+int error_code = 0;
+graphql_layer_t* gql = graphql_layer_create(db_path, gql_config, gql_sub, &error_code);
+graph_layer_t* graph = graph_layer_create(db_path, graph_config, graph_sub, &error_code);
+
+// Both layers operate independently on the same database
+```
+
+Without a subtree, layer creation fails with `error_code = -3` if a different layer type already owns the database.
+
 ## Language Bindings
 
 ### Node.js
@@ -356,6 +402,21 @@ graph.parseSchema('type Clip @index(spo, pos) { tagged_with: [Tag]; }');
 graph.insertSync('clip_abc', 'tagged_with', 'gaming');
 const tags = g.V('clip_abc').Out('tagged_with').All(); // ['gaming']
 graph.close();
+
+// Subtrees — namespace isolation for multiple layers on one database
+const gqlSub = db.openSubtree('graphql');
+const graphSub = db.openSubtree('graph');
+gqlSub.putSync('Users/1/name', 'Alice');
+graphSub.putSync('triples/s/p/o', 'data');
+console.log(gqlSub.count());  // 1
+console.log(graphSub.count()); // 1
+gqlSub.close();
+graphSub.close();
+
+// Create layers with subtrees on the same database
+const { GraphQLLayer } = require('wavedb');
+const gqlLayer = new GraphQLLayer(dbPath, { subtree: gqlSub });
+const graphLayer = new GraphLayer(dbPath, { subtree: graphSub });
 ```
 
 See [bindings/nodejs/README.md](bindings/nodejs/README.md) for full API reference.
@@ -401,6 +462,20 @@ final graph = GraphLayer();
 graph.parseSchema('type Clip @index(spo, pos) { tagged_with: [Tag]; }');
 graph.insertSync('clip_abc', 'tagged_with', 'gaming');
 final clips = g().V('clip_abc').Out('tagged_with').All(); // ['gaming']
+
+// Subtrees — namespace isolation for multiple layers on one database
+final gqlSub = db.openSubtree('graphql');
+final graphSub = db.openSubtree('graph');
+gqlSub.putSync('Users/1/name', 'Alice');
+graphSub.putSync('triples/s/p/o', 'data');
+print(gqlSub.count());  // 1
+print(graphSub.count()); // 1
+gqlSub.close();
+graphSub.close();
+
+// Create layers with subtrees on the same database
+final gqlLayer = GraphQLLayer()..create(GraphQLLayerConfig(path: dbPath, subtree: gqlSub));
+final graphLayer = GraphLayer(subtree: graphSub);
 
 db.close();
 ```

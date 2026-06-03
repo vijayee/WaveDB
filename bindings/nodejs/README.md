@@ -416,6 +416,80 @@ const result = await graph.query('g.V("clip_abc").Out("tagged_with")');
 | `.Count()` | Execute and return count |
 | `.toString()` | Render DSL string (debugging) |
 
+## Subtrees
+
+Subtrees provide scoped views into a database with automatic prefix isolation, enabling multiple schema layers to coexist on the same database.
+
+```javascript
+const { WaveDB, GraphQLLayer, GraphLayer } = require('wavedb');
+
+const db = new WaveDB('/path/to/db');
+
+// Open subtrees with different prefixes
+const gqlSub = db.openSubtree('graphql');
+const graphSub = db.openSubtree('graph');
+
+// Each subtree is isolated — same key in different subtrees
+gqlSub.putSync('Users/1/name', 'Alice');
+graphSub.putSync('Users/1/name', 'Bob');
+
+console.log(gqlSub.getSync('Users/1/name'));   // 'Alice'
+console.log(graphSub.getSync('Users/1/name'));  // 'Bob'
+console.log(gqlSub.count());   // 1
+console.log(graphSub.count()); // 1
+
+// Delete all data under a prefix
+db.deleteSubtree('graphql');
+
+// Close subtrees (does not close the database)
+gqlSub.close();
+graphSub.close();
+```
+
+### Layer Coexistence
+
+Create multiple layers on the same database by passing a subtree:
+
+```javascript
+const gqlSub = db.openSubtree('layer/graphql');
+const graphSub = db.openSubtree('layer/graph');
+
+const gqlLayer = new GraphQLLayer('/path/to/db', { subtree: gqlSub });
+const graphLayer = new GraphLayer('/path/to/db', { subtree: graphSub });
+
+// Both layers operate independently on the same database
+```
+
+Without a subtree, creating a layer on a database owned by a different layer type throws:
+
+```javascript
+// Database already has GraphQL data — creating Graph layer fails
+try {
+  const graph = new GraphLayer('/path/to/db');
+} catch (err) {
+  // err.message includes "different layer type"
+  // Suggests using a subtree for isolation
+}
+```
+
+### Subtree API
+
+| Method | Description |
+|--------|-------------|
+| `db.openSubtree(prefix, delimiter)` | Open a scoped subtree view |
+| `db.deleteSubtree(prefix, delimiter)` | Delete all keys under a prefix |
+| `subtree.putSync(key, value)` | Synchronous put |
+| `subtree.getSync(key)` | Synchronous get (null if not found) |
+| `subtree.delSync(key)` | Synchronous delete |
+| `subtree.batchSync(ops)` | Synchronous batch of put/del |
+| `subtree.scanSyncRaw(prefix)` | Scan keys matching prefix |
+| `subtree.count()` | Count entries in subtree |
+| `subtree.snapshot()` | Snapshot underlying database |
+| `subtree.put(key, value)` | Async put (returns Promise) |
+| `subtree.get(key)` | Async get (returns Promise) |
+| `subtree.del(key)` | Async delete (returns Promise) |
+| `subtree.close()` | Close subtree view |
+
 ## Error Handling
 
 ```javascript
