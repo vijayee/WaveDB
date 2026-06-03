@@ -1816,7 +1816,7 @@ int wal_manager_recover(wal_manager_t* manager, void* db) {
     // This makes recovered MVCC entries visible to subsequent reads
     if (database != NULL && entry_count > 0 && database->tx_manager != NULL) {
         // Use atomic store to safely update the transaction ID
-        atomic_store(&database->tx_manager->last_committed_txn_id, max_txn_id);
+        atomic_store_txn(&database->tx_manager->last_committed_txn_id, max_txn_id);
         log_info("WAL Recovery: Updated last_committed_txn_id (count=%lu)", max_txn_id.count);
 
         // Advance global transaction ID generator to prevent collisions

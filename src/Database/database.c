@@ -574,7 +574,7 @@ static void collect_dirty_bnodes_from_hbnode(
 int database_flush_dirty_bnodes(database_t* db) {
     if (db == NULL || db->page_file == NULL || db->trie == NULL) return -1;
 
-    hbtrie_node_t* root = atomic_load(&db->trie->root);
+    hbtrie_node_t* root = atomic_load_ptr(&db->trie->root, hbtrie_node_t*);
     if (root == NULL) return 0;
 
     // 1. Collect all dirty bnodes (including child hbtrie_nodes)
@@ -945,8 +945,8 @@ database_t* database_create_with_config(const char* location,
                                 root_hbnode->is_loaded = 1;
                                 root_hbnode->is_dirty = 0;
 
-                                hbtrie_node_t* old_root = atomic_load(&db->trie->root);
-                                atomic_store(&db->trie->root, root_hbnode);
+                                hbtrie_node_t* old_root = atomic_load_ptr(&db->trie->root, hbtrie_node_t*);
+                                atomic_store_ptr(&db->trie->root, root_hbnode);
                                 hbtrie_node_destroy(old_root);
                             } else {
                                 bnode_destroy_tree(root_bnode);
@@ -1032,7 +1032,7 @@ database_t* database_create_with_config(const char* location,
         // (page file loads before tx_manager is created, so we deferred this)
         if (db->has_pending_txn_id && db->tx_manager != NULL) {
             transaction_id_advance_to(&db->pending_txn_id);
-            atomic_store(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
+            atomic_store_txn(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
             db->has_pending_txn_id = 0;
         }
     } else {

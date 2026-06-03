@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
   work_queue_t queues[QUEUE_SHARDS];
   PLATFORMLOCKTYPE(locks[QUEUE_SHARDS]);
-  ATOMIC_TYPE(uint64_t) next_shard;   // Round-robin counter
+  ATOMIC_TYPE64 next_shard;   // Round-robin counter
 } sharded_work_queue_t;
 
 void work_queue_init(work_queue_t* queue);

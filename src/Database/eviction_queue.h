@@ -8,8 +8,8 @@
 #define EVICTION_QUEUE_CAPACITY 256
 
 typedef struct eviction_queue_t {
-    ATOMIC_TYPE(uint64_t) head;
-    ATOMIC_TYPE(uint64_t) tail;
+    ATOMIC_TYPE64 head;
+    ATOMIC_TYPE64 tail;
     uint64_t offsets[EVICTION_QUEUE_CAPACITY];
 } eviction_queue_t;
 

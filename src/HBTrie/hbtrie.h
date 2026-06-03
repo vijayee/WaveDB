@@ -41,7 +41,7 @@ typedef struct file_bnode_cache_t file_bnode_cache_t;
  */
 typedef struct hbtrie_node_t {
     refcounter_t refcounter;          // MUST be first member
-    ATOMIC_TYPE(uint64_t) seq;        // Seqlock: even=stable, odd=writing
+    ATOMIC_TYPE64 seq;        // Seqlock: even=stable, odd=writing
     spinlock_t write_lock;             // Writer mutual exclusion (adaptive spinlock)
 
     bnode_t* btree;                   // Root bnode of multi-level B+tree at this level
@@ -74,7 +74,7 @@ typedef struct hbtrie_t {
     uint8_t chunk_size;               // Configurable chunk size (default: DEFAULT_CHUNK_SIZE)
     uint32_t btree_node_size;         // Max B+tree node size in bytes
 
-    ATOMIC_TYPE(hbtrie_node_t*) root; // Root HBTrie node (atomic for lock-free reads)
+    ATOMIC_TYPE_PTR(hbtrie_node_t*) root; // Root HBTrie node (atomic for lock-free reads)
     file_bnode_cache_t* fcache;        // Phase 2: bnode cache for lazy loading (NULL if no persistence)
 } hbtrie_t;
 

@@ -5,6 +5,7 @@
 
 #include "join.h"
 #include "../Util/allocator.h"
+#include "../Util/atomic_compat.h"
 #include <stdlib.h>
 
 async_join_t* async_join_create(int count) {
@@ -25,7 +26,7 @@ async_join_t* async_join_create(int count) {
     }
 
     join->count = count;
-    join->pending = count;  // _Atomic init
+    atomic_init(&join->pending, count);
 
     return join;
 }
@@ -44,7 +45,7 @@ void async_join_complete(async_join_t* join, int index, void* result) {
 
     platform_lock(&join->lock);
     join->results[index] = result;
-    join->pending--;
+    atomic_fetch_sub(&join->pending, 1);
     platform_unlock(&join->lock);
 
     platform_signal_condition(&join->condition);
@@ -54,7 +55,7 @@ void async_join_wait(async_join_t* join) {
     if (join == NULL) return;
 
     platform_lock(&join->lock);
-    while (join->pending > 0) {
+    while (atomic_load(&join->pending) > 0) {
         platform_condition_wait(&join->lock, &join->condition);
     }
     platform_unlock(&join->lock);

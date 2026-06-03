@@ -101,7 +101,9 @@
       ["OS=='win'", {
         "defines": [
           "CBOR_STATIC_DEFINE",
-          "CBOR_RESTRICT_SPECIFIER="
+          "CBOR_RESTRICT_SPECIFIER=",
+          "WIN32_LEAN_AND_MEAN",
+          "_WINSOCKAPI_"
         ],
         "msvs_settings": {
           "VCCLCompilerTool": {
@@ -123,14 +125,14 @@
       "src/graph_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include\")",
+      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp\")",
+      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
       "wavedb_c_lib"
     ],
     "defines": [
@@ -181,14 +183,14 @@
       "src/graph_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include\")",
+      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp\")",
+      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
       "wavedb_c_lib"
     ],
     "defines": [
@@ -239,14 +241,14 @@
       "src/graphql_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include\")",
+      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp\")",
+      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
       "wavedb_c_lib"
     ],
     "cflags!": ["-fno-exceptions"],

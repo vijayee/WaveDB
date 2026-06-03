@@ -500,7 +500,7 @@ int hbtrie_visualize(hbtrie_t* trie, const char* path) {
     fprintf(json_fp, "  \"btree_node_size\": %u,\n", trie->btree_node_size);
     fprintf(json_fp, "  \"root\": ");
 
-    if (serialize_hbtrie_node(trie->root, json_fp, trie->chunk_size, &node_count, 0) != 0) {
+    if (serialize_hbtrie_node(atomic_load_ptr(&trie->root, hbtrie_node_t*), json_fp, trie->chunk_size, &node_count, 0) != 0) {
         log_error("Failed to serialize root node");
         fclose(json_fp);
         unlink(temp_path);

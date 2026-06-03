@@ -64,7 +64,7 @@ void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
 
 work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
   // Fair work stealing: thread-local starting offset prevents bias
-  static _Thread_local size_t start_shard = 0;
+  static THREAD_LOCAL size_t start_shard = 0;
   size_t shard = start_shard;
   start_shard = (start_shard + 1) % QUEUE_SHARDS;  // Rotate for fairness
 

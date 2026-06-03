@@ -151,14 +151,15 @@ database_iterator_t* database_scan_start(database_t* db,
     iter->read_txn_id = tx_manager_get_last_committed(db->tx_manager);
 
     // Push root node onto stack
-    if (db->trie && db->trie->root) {
-        iter->stack[0].node = db->trie->root;
+    hbtrie_node_t* root = db->trie ? atomic_load_ptr(&db->trie->root, hbtrie_node_t*) : NULL;
+    if (root) {
+        iter->stack[0].node = root;
         iter->stack[0].entry_index = 0;
         iter->stack[0].path_index = 0;
         iter->stack_depth = 1;
 
         // Reference the root node
-        REFERENCE(db->trie->root, hbtrie_node_t);
+        REFERENCE(root, hbtrie_node_t);
     }
 
     refcounter_init((refcounter_t*)iter);

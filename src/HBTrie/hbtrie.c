@@ -581,7 +581,7 @@ hbtrie_t* hbtrie_create(uint8_t chunk_size, uint32_t btree_node_size) {
     free(trie);
     return NULL;
   }
-  atomic_store(&trie->root, root);
+  atomic_store_ptr(&trie->root, root);
 
   refcounter_init((refcounter_t*)trie);
 
@@ -594,7 +594,7 @@ void hbtrie_destroy(hbtrie_t* trie) {
   refcounter_dereference((refcounter_t*)trie);
   uint16_t count = refcounter_count((refcounter_t*)trie);
   if (count == 0) {
-    hbtrie_node_t* root = atomic_load(&trie->root);
+    hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
     if (root != NULL) {
       hbtrie_node_destroy(root);
     }
@@ -823,10 +823,10 @@ hbtrie_t* hbtrie_copy(hbtrie_t* trie) {
   copy->chunk_size = trie->chunk_size;
   copy->btree_node_size = trie->btree_node_size;
 
-  hbtrie_node_t* src_root = atomic_load(&trie->root);
+  hbtrie_node_t* src_root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   if (src_root != NULL) {
-    atomic_store(&copy->root, hbtrie_node_copy(src_root));
-    if (atomic_load(&copy->root) == NULL) {
+    atomic_store_ptr(&copy->root, hbtrie_node_copy(src_root));
+    if (atomic_load_ptr(&copy->root, hbtrie_node_t*) == NULL) {
       free(copy);
       return NULL;
     }
@@ -845,7 +845,7 @@ void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
   cursor->finished = 0;
 
   // Push root node onto stack
-  hbtrie_node_t* root = atomic_load(&trie->root);
+  hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   if (root != NULL) {
     cursor->stack[0].node = root;
     cursor->stack[0].entry_index = 0;
@@ -1575,7 +1575,7 @@ cbor_item_t* hbtrie_to_cbor(hbtrie_t* trie) {
   cbor_decref(&btree_size);
 
   // root node
-  cbor_item_t* root_node = hbtrie_node_to_cbor(atomic_load(&trie->root));
+  cbor_item_t* root_node = hbtrie_node_to_cbor(atomic_load_ptr(&trie->root, hbtrie_node_t*));
   cbor_item_t* root_key = cbor_build_string("root");
   cbor_map_add(root, (struct cbor_pair){
       .key = root_key,
@@ -1617,9 +1617,9 @@ hbtrie_t* cbor_to_hbtrie(cbor_item_t* item) {
       hbtrie_destroy(trie);
       return NULL;
     }
-    hbtrie_node_t* old_root = atomic_load(&trie->root);
+    hbtrie_node_t* old_root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
     hbtrie_node_destroy(old_root);
-    atomic_store(&trie->root, root_node);
+    atomic_store_ptr(&trie->root, root_node);
   }
 
   return trie;
@@ -1935,7 +1935,7 @@ identifier_t* hbtrie_find(hbtrie_t* trie, path_t* path, transaction_id_t read_tx
 
   // Optimistic read with seqlock validation: retry from root if seqlock changes
   for (;;) {
-    hbtrie_node_t* current = atomic_load(&trie->root);
+    hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
     int retry_needed = 0;
 
     // Traverse through each identifier in the path
@@ -2103,7 +2103,7 @@ identifier_t* hbtrie_find_unsafe(hbtrie_t* trie, path_t* path) {
     return NULL;
   }
 
-  hbtrie_node_t* current = atomic_load(&trie->root);
+  hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
 
   // Traverse through each identifier in the path
   for (size_t i = 0; i < path_len_ids; i++) {
@@ -2208,7 +2208,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
     return -1;
   }
 
-  hbtrie_node_t* current = atomic_load(&trie->root);
+  hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
@@ -2677,7 +2677,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
     return -1;
   }
 
-  hbtrie_node_t* current = atomic_load(&trie->root);
+  hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
@@ -3010,7 +3010,7 @@ identifier_t* hbtrie_delete(hbtrie_t* trie, path_t* path, transaction_id_t txn_i
   }
 
   // Traverse to find the entry
-  hbtrie_node_t* current = atomic_load(&trie->root);
+  hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
@@ -3264,7 +3264,7 @@ identifier_t* hbtrie_delete_unsafe(hbtrie_t* trie, path_t* path, transaction_id_
   }
 
   // Traverse to find the entry
-  hbtrie_node_t* current = atomic_load(&trie->root);
+  hbtrie_node_t* current = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   size_t path_len_ids = path_length(path);
 
   if (path_len_ids == 0) {
@@ -3446,7 +3446,7 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
   if (trie == NULL) {
     return 0;
   }
-  hbtrie_node_t* root = atomic_load(&trie->root);
+  hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   if (root == NULL) {
     return 0;
   }
@@ -3561,7 +3561,7 @@ size_t hbtrie_gc_unsafe(hbtrie_t* trie) {
   if (trie == NULL) {
     return 0;
   }
-  hbtrie_node_t* root = atomic_load(&trie->root);
+  hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   if (root == NULL) {
     return 0;
   }
@@ -3646,7 +3646,7 @@ size_t hbtrie_gc_unsafe(hbtrie_t* trie) {
 size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
     if (trie == NULL || offset == 0) return 0;
 
-    hbtrie_node_t* root = atomic_load(&trie->root);
+    hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
     if (root == NULL) return 0;
 
     size_t nulled = 0;

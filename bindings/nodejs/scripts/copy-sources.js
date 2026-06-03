@@ -117,3 +117,46 @@ fs.writeFileSync(path.join(configDir, 'configuration.h'), `#ifndef LIBCBOR_CONFI
 `);
 
 console.log('Done. C sources copied to', cSrcDir);
+
+// Create static cbor_export.h (replaces CMake-generated file)
+// When CBOR_STATIC_DEFINE is set, CBOR_EXPORT is a no-op
+const exportDir = path.join(cSrcDir, 'deps', 'libcbor', 'src', 'cbor');
+fs.mkdirSync(exportDir, { recursive: true });
+fs.writeFileSync(path.join(exportDir, 'cbor_export.h'), `#ifndef CBOR_EXPORT_H
+#define CBOR_EXPORT_H
+
+#ifdef CBOR_STATIC_DEFINE
+#define CBOR_EXPORT
+#define CBOR_NO_EXPORT
+#else
+#ifndef CBOR_EXPORT
+#ifdef cbor_EXPORTS
+#define CBOR_EXPORT
+#else
+#define CBOR_EXPORT
+#endif
+#endif
+
+#ifndef CBOR_NO_EXPORT
+#define CBOR_NO_EXPORT
+#endif
+#endif
+
+#ifndef CBOR_DEPRECATED
+#ifdef _MSC_VER
+#define CBOR_DEPRECATED __declspec(deprecated)
+#else
+#define CBOR_DEPRECATED __attribute__((__deprecated__))
+#endif
+#endif
+
+#ifndef CBOR_DEPRECATED_EXPORT
+#define CBOR_DEPRECATED_EXPORT CBOR_EXPORT CBOR_DEPRECATED
+#endif
+
+#ifndef CBOR_DEPRECATED_NO_EXPORT
+#define CBOR_DEPRECATED_NO_EXPORT CBOR_NO_EXPORT CBOR_DEPRECATED
+#endif
+
+#endif /* CBOR_EXPORT_H */
+`);
