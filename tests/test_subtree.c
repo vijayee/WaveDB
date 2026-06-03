@@ -1,5 +1,5 @@
 //
-// test_subtree.c - Minimal lifecycle tests for database_subtree_t
+// test_subtree.c - Tests for database_subtree_t
 //
 
 #include <stdio.h>
@@ -45,15 +45,11 @@ static void make_tmpdir(char* buf, size_t bufsize, const char* prefix) {
 #endif
 }
 
-/* ---- Test 1: Open and close subtree, verify fields ---- */
+/* ---- Helper: create a sync_only database ---- */
 
-static void test_subtree_lifecycle(void) {
-    printf("\n=== test_subtree_lifecycle ===\n");
+static database_t* create_test_db(char* tmpdir, size_t bufsize, const char* prefix) {
+    make_tmpdir(tmpdir, bufsize, prefix);
 
-    char tmpdir[256];
-    make_tmpdir(tmpdir, sizeof(tmpdir), "wavedb_subtree_test1");
-
-    /* Create an in-memory sync_only database */
     database_config_t* config = database_config_default();
     config->enable_persist = 1;
     config->sync_only = 1;
@@ -65,8 +61,29 @@ static void test_subtree_lifecycle(void) {
     int error = 0;
     database_t* db = database_create_with_config(tmpdir, config, &error);
     database_config_destroy(config);
+    return db;
+}
+
+/* ---- Helper: cleanup test directory ---- */
+
+static void cleanup_tmpdir(const char* tmpdir) {
+    char cmd[512];
+#if _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+#else
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+#endif
+    system(cmd);
+}
+
+/* ---- Test 1: Open and close subtree, verify fields ---- */
+
+static void test_subtree_lifecycle(void) {
+    printf("\n=== test_subtree_lifecycle ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_test1");
     ASSERT(db != NULL, "Create database");
-    ASSERT(error == 0, "No error on creation");
 
     /* Open a subtree */
     database_subtree_t* st = database_subtree_open(db, "layer/graphql", '/');
@@ -91,17 +108,7 @@ static void test_subtree_lifecycle(void) {
 
     /* Destroy database */
     database_destroy(db);
-
-    /* Clean up test directory */
-    {
-        char cmd[512];
-#if _WIN32
-        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
-#else
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
-#endif
-        system(cmd);
-    }
+    cleanup_tmpdir(tmpdir);
 
     printf("=== test_subtree_lifecycle DONE ===\n");
 }
@@ -112,19 +119,7 @@ static void test_subtree_prepend_key(void) {
     printf("\n=== test_subtree_prepend_key ===\n");
 
     char tmpdir[256];
-    make_tmpdir(tmpdir, sizeof(tmpdir), "wavedb_subtree_test2");
-
-    database_config_t* config = database_config_default();
-    config->enable_persist = 1;
-    config->sync_only = 1;
-    config->worker_threads = 0;
-    config->timer_resolution_ms = 0;
-    config->chunk_size = 4;
-    config->btree_node_size = 4096;
-
-    int error = 0;
-    database_t* db = database_create_with_config(tmpdir, config, &error);
-    database_config_destroy(config);
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_test2");
     ASSERT(db != NULL, "Create database");
 
     database_subtree_t* st = database_subtree_open(db, "layer/graphql", '/');
@@ -151,16 +146,7 @@ static void test_subtree_prepend_key(void) {
 
     database_subtree_close(st);
     database_destroy(db);
-
-    {
-        char cmd[512];
-#if _WIN32
-        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
-#else
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
-#endif
-        system(cmd);
-    }
+    cleanup_tmpdir(tmpdir);
 
     printf("=== test_subtree_prepend_key DONE ===\n");
 }
@@ -171,19 +157,7 @@ static void test_subtree_prepend_path(void) {
     printf("\n=== test_subtree_prepend_path ===\n");
 
     char tmpdir[256];
-    make_tmpdir(tmpdir, sizeof(tmpdir), "wavedb_subtree_test3");
-
-    database_config_t* config = database_config_default();
-    config->enable_persist = 1;
-    config->sync_only = 1;
-    config->worker_threads = 0;
-    config->timer_resolution_ms = 0;
-    config->chunk_size = 4;
-    config->btree_node_size = 4096;
-
-    int error = 0;
-    database_t* db = database_create_with_config(tmpdir, config, &error);
-    database_config_destroy(config);
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_test3");
     ASSERT(db != NULL, "Create database");
 
     database_subtree_t* st = database_subtree_open(db, "layer/graphql", '/');
@@ -203,18 +177,230 @@ static void test_subtree_prepend_path(void) {
 
     database_subtree_close(st);
     database_destroy(db);
-
-    {
-        char cmd[512];
-#if _WIN32
-        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
-#else
-        snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
-#endif
-        system(cmd);
-    }
+    cleanup_tmpdir(tmpdir);
 
     printf("=== test_subtree_prepend_path DONE ===\n");
+}
+
+/* ---- Test 4: Path-based sync CRUD ---- */
+
+static void test_subtree_sync_crud(void) {
+    printf("\n=== test_subtree_sync_crud ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_crud");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "graphql", '/');
+    ASSERT(st != NULL, "Open subtree on 'graphql'");
+
+    /* Put a value via subtree: path "Users/1/name", value "Alice" */
+    path_t* put_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(put_path != NULL, "Create put path");
+
+    identifier_t* put_value = identifier_create_from_raw((const uint8_t*)"Alice", strlen("Alice"), 4);
+    ASSERT(put_value != NULL, "Create put value");
+
+    int rc = database_subtree_put_sync(st, put_path, put_value);
+    ASSERT(rc == 0, "Put via subtree succeeds");
+
+    /* Get the value back via subtree */
+    path_t* get_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(get_path != NULL, "Create get path");
+
+    identifier_t* result = NULL;
+    rc = database_subtree_get_sync(st, get_path, &result);
+    ASSERT(rc == 0, "Get via subtree succeeds");
+    ASSERT(result != NULL, "Get returns non-NULL result");
+
+    /* Verify value content */
+    if (result != NULL) {
+        buffer_t* result_buf = identifier_to_buffer(result);
+        if (result_buf != NULL) {
+            ASSERT(memcmp(result_buf->data, "Alice", result_buf->size) == 0,
+                   "Get value matches put value 'Alice'");
+            buffer_destroy(result_buf);
+        }
+        identifier_destroy(result);
+    }
+
+    /* Verify that the raw database sees the prefixed key */
+    {
+        uint8_t* raw_val = NULL;
+        size_t raw_val_len = 0;
+        int raw_rc = database_get_sync_raw(db, "graphql/Users/1/name",
+                                           strlen("graphql/Users/1/name"), '/',
+                                           &raw_val, &raw_val_len);
+        ASSERT(raw_rc == 0, "Raw get on prefixed key succeeds");
+        if (raw_rc == 0) {
+            ASSERT(raw_val != NULL, "Raw get returns non-NULL value");
+            ASSERT(memcmp(raw_val, "Alice", raw_val_len) == 0,
+                   "Raw value matches 'Alice'");
+            database_raw_value_free(raw_val);
+        }
+    }
+
+    /* Delete via subtree */
+    path_t* del_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(del_path != NULL, "Create delete path");
+
+    rc = database_subtree_delete_sync(st, del_path);
+    ASSERT(rc == 0, "Delete via subtree succeeds");
+
+    /* Verify get returns not found */
+    path_t* get_path2 = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(get_path2 != NULL, "Create second get path");
+
+    identifier_t* result2 = NULL;
+    rc = database_subtree_get_sync(st, get_path2, &result2);
+    ASSERT(rc == -2, "Get after delete returns not found (-2)");
+    ASSERT(result2 == NULL, "Result is NULL after delete");
+
+    /* Test increment */
+    path_t* inc_path = path_create_from_raw("counter", strlen("counter"), '/', 4);
+    ASSERT(inc_path != NULL, "Create increment path");
+
+    int64_t new_val = database_subtree_increment_sync(st, inc_path, 10);
+    ASSERT(new_val == 10, "Increment from 0 by 10 returns 10");
+
+    path_t* inc_path2 = path_create_from_raw("counter", strlen("counter"), '/', 4);
+    ASSERT(inc_path2 != NULL, "Create second increment path");
+
+    new_val = database_subtree_increment_sync(st, inc_path2, 5);
+    ASSERT(new_val == 15, "Increment from 10 by 5 returns 15");
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_sync_crud DONE ===\n");
+}
+
+/* ---- Test 5: Raw sync CRUD ---- */
+
+static void test_subtree_sync_crud_raw(void) {
+    printf("\n=== test_subtree_sync_crud_raw ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_raw");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "layer", '/');
+    ASSERT(st != NULL, "Open subtree on 'layer'");
+
+    /* Put via raw */
+    const uint8_t* val = (const uint8_t*) "hello";
+    int rc = database_subtree_put_sync_raw(st, "key1", strlen("key1"), '/',
+                                           val, strlen("hello"));
+    ASSERT(rc == 0, "Raw put via subtree succeeds");
+
+    /* Get via raw */
+    uint8_t* out_val = NULL;
+    size_t out_val_len = 0;
+    rc = database_subtree_get_sync_raw(st, "key1", strlen("key1"), '/',
+                                       &out_val, &out_val_len);
+    ASSERT(rc == 0, "Raw get via subtree succeeds");
+    ASSERT(out_val != NULL, "Raw get returns non-NULL value");
+    if (out_val != NULL) {
+        ASSERT(out_val_len == strlen("hello"), "Raw get value length matches");
+        ASSERT(memcmp(out_val, "hello", out_val_len) == 0,
+               "Raw get value matches 'hello'");
+        database_raw_value_free(out_val);
+    }
+
+    /* Delete via raw */
+    rc = database_subtree_delete_sync_raw(st, "key1", strlen("key1"), '/');
+    ASSERT(rc == 0, "Raw delete via subtree succeeds");
+
+    /* Verify get returns not found */
+    out_val = NULL;
+    out_val_len = 0;
+    rc = database_subtree_get_sync_raw(st, "key1", strlen("key1"), '/',
+                                       &out_val, &out_val_len);
+    ASSERT(rc == -2, "Raw get after delete returns not found (-2)");
+    ASSERT(out_val == NULL, "Raw value is NULL after delete");
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_sync_crud_raw DONE ===\n");
+}
+
+/* ---- Test 6: Subtree isolation ---- */
+
+static void test_subtree_isolation(void) {
+    printf("\n=== test_subtree_isolation ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_iso");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st_a = database_subtree_open(db, "graphql", '/');
+    ASSERT(st_a != NULL, "Open subtree 'graphql'");
+
+    database_subtree_t* st_b = database_subtree_open(db, "graph", '/');
+    ASSERT(st_b != NULL, "Open subtree 'graph'");
+
+    /* Put different values at the same key in each subtree */
+    path_t* path_a = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(path_a != NULL, "Create path for subtree A");
+
+    identifier_t* val_a = identifier_create_from_raw((const uint8_t*)"Alice", strlen("Alice"), 4);
+    ASSERT(val_a != NULL, "Create value for subtree A");
+
+    int rc = database_subtree_put_sync(st_a, path_a, val_a);
+    ASSERT(rc == 0, "Put in subtree 'graphql' succeeds");
+
+    path_t* path_b = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(path_b != NULL, "Create path for subtree B");
+
+    identifier_t* val_b = identifier_create_from_raw((const uint8_t*)"Bob", strlen("Bob"), 4);
+    ASSERT(val_b != NULL, "Create value for subtree B");
+
+    rc = database_subtree_put_sync(st_b, path_b, val_b);
+    ASSERT(rc == 0, "Put in subtree 'graph' succeeds");
+
+    /* Get from subtree A — should return "Alice" */
+    path_t* get_a = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(get_a != NULL, "Create get path for subtree A");
+
+    identifier_t* result_a = NULL;
+    rc = database_subtree_get_sync(st_a, get_a, &result_a);
+    ASSERT(rc == 0, "Get from subtree 'graphql' succeeds");
+    if (result_a != NULL) {
+        buffer_t* buf_a = identifier_to_buffer(result_a);
+        if (buf_a != NULL) {
+            ASSERT(memcmp(buf_a->data, "Alice", buf_a->size) == 0,
+                   "Subtree 'graphql' returns 'Alice'");
+            buffer_destroy(buf_a);
+        }
+        identifier_destroy(result_a);
+    }
+
+    /* Get from subtree B — should return "Bob" */
+    path_t* get_b = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+    ASSERT(get_b != NULL, "Create get path for subtree B");
+
+    identifier_t* result_b = NULL;
+    rc = database_subtree_get_sync(st_b, get_b, &result_b);
+    ASSERT(rc == 0, "Get from subtree 'graph' succeeds");
+    if (result_b != NULL) {
+        buffer_t* buf_b = identifier_to_buffer(result_b);
+        if (buf_b != NULL) {
+            ASSERT(memcmp(buf_b->data, "Bob", buf_b->size) == 0,
+                   "Subtree 'graph' returns 'Bob'");
+            buffer_destroy(buf_b);
+        }
+        identifier_destroy(result_b);
+    }
+
+    database_subtree_close(st_a);
+    database_subtree_close(st_b);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_isolation DONE ===\n");
 }
 
 /* ---- Main ---- */
@@ -225,6 +411,9 @@ int main(void) {
     test_subtree_lifecycle();
     test_subtree_prepend_key();
     test_subtree_prepend_path();
+    test_subtree_sync_crud();
+    test_subtree_sync_crud_raw();
+    test_subtree_isolation();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

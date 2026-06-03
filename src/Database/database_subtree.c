@@ -136,3 +136,90 @@ char* database_subtree_prepend_key(database_subtree_t* st,
 
     return result;
 }
+
+/* --- Path-based sync CRUD --- */
+
+int database_subtree_put_sync(database_subtree_t* st, path_t* path, identifier_t* value) {
+    if (st == NULL || path == NULL || value == NULL) return -1;
+
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    if (full_path == NULL) return -1;
+
+    /* database_put_sync consumes full_path and value */
+    return database_put_sync(st->db, full_path, value);
+}
+
+int database_subtree_get_sync(database_subtree_t* st, path_t* path, identifier_t** result) {
+    if (st == NULL || path == NULL || result == NULL) return -1;
+
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    if (full_path == NULL) return -1;
+
+    /* database_get_sync consumes full_path */
+    return database_get_sync(st->db, full_path, result);
+}
+
+int database_subtree_delete_sync(database_subtree_t* st, path_t* path) {
+    if (st == NULL || path == NULL) return -1;
+
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    if (full_path == NULL) return -1;
+
+    /* database_delete_sync consumes full_path */
+    return database_delete_sync(st->db, full_path);
+}
+
+int64_t database_subtree_increment_sync(database_subtree_t* st, path_t* path, int64_t delta) {
+    if (st == NULL || path == NULL) return -1;
+
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    if (full_path == NULL) return -1;
+
+    /* database_increment_sync consumes full_path */
+    return database_increment_sync(st->db, full_path, delta);
+}
+
+/* --- Raw (byte) sync CRUD --- */
+
+int database_subtree_put_sync_raw(database_subtree_t* st,
+                                   const char* key, size_t key_len, char delimiter,
+                                   const uint8_t* value, size_t value_len) {
+    if (st == NULL || key == NULL) return -1;
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) return -1;
+
+    int rc = database_put_sync_raw(st->db, prefixed_key, prefixed_len, delimiter,
+                                   value, value_len);
+    free(prefixed_key);
+    return rc;
+}
+
+int database_subtree_get_sync_raw(database_subtree_t* st,
+                                   const char* key, size_t key_len, char delimiter,
+                                   uint8_t** value_out, size_t* value_len_out) {
+    if (st == NULL || key == NULL) return -1;
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) return -1;
+
+    int rc = database_get_sync_raw(st->db, prefixed_key, prefixed_len, delimiter,
+                                   value_out, value_len_out);
+    free(prefixed_key);
+    return rc;
+}
+
+int database_subtree_delete_sync_raw(database_subtree_t* st,
+                                      const char* key, size_t key_len, char delimiter) {
+    if (st == NULL || key == NULL) return -1;
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) return -1;
+
+    int rc = database_delete_sync_raw(st->db, prefixed_key, prefixed_len, delimiter);
+    free(prefixed_key);
+    return rc;
+}
