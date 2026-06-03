@@ -125,14 +125,14 @@
       "src/graph_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').include\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').gyp\")",
       "wavedb_c_lib"
     ],
     "defines": [
@@ -183,14 +183,14 @@
       "src/graph_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').include\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').gyp\")",
       "wavedb_c_lib"
     ],
     "defines": [
@@ -241,14 +241,14 @@
       "src/graphql_result_js.cc"
     ],
     "include_dirs": [
-      "<!@(node -p \"require('node-addon-api').include.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').include\")",
       "c_src/src",
       "c_src/deps/libcbor/src",
       "c_src/deps/hashmap/include",
       "c_src/deps/xxhash"
     ],
     "dependencies": [
-      "<!@(node -p \"require('node-addon-api').gyp.replace(/\\\\/g, '/')\")",
+      "<!@(node -p \"require('node-addon-api').gyp\")",
       "wavedb_c_lib"
     ],
     "cflags!": ["-fno-exceptions"],
