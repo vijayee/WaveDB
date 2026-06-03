@@ -782,6 +782,42 @@ int database_subtree_batch_raw(database_subtree_t* st, char delimiter,
     return rc;
 }
 
+/* --- Snapshot and introspection operations --- */
+
+int database_subtree_snapshot(database_subtree_t* st) {
+    if (st == NULL) return -1;
+    return database_snapshot(st->db);
+}
+
+int database_subtree_flush_dirty_bnodes(database_subtree_t* st) {
+    if (st == NULL) return -1;
+    return database_flush_dirty_bnodes(st->db);
+}
+
+size_t database_subtree_count(database_subtree_t* st) {
+    if (st == NULL) return 0;
+
+    /* Build the scan prefix: "prefix{delimiter}" */
+    size_t scan_len = st->prefix_len + 1; /* prefix + delimiter */
+    char* scan_prefix = get_memory(scan_len + 1); /* +1 for null terminator */
+    if (scan_prefix == NULL) return 0;
+
+    memcpy(scan_prefix, st->prefix, st->prefix_len);
+    scan_prefix[st->prefix_len] = st->delimiter;
+    scan_prefix[scan_len] = '\0';
+
+    raw_result_t* results = NULL;
+    size_t count = 0;
+    int rc = database_scan_sync_raw(st->db, scan_prefix, scan_len, st->delimiter,
+                                     &results, &count);
+    free(scan_prefix);
+
+    if (rc != 0) return 0;
+
+    database_raw_results_free(results, count);
+    return count;
+}
+
 /* --- Scan/Iterator operations --- */
 
 database_iterator_t* database_subtree_scan_start(database_subtree_t* st,

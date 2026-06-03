@@ -378,6 +378,39 @@ int database_subtree_batch_raw(database_subtree_t* st, char delimiter,
                                 const raw_op_t* ops, size_t count,
                                 promise_t* promise);
 
+/* --- Snapshot and introspection operations --- */
+
+/**
+ * Snapshot the subtree's underlying database.
+ *
+ * Delegates to database_snapshot on the underlying database.
+ *
+ * @param st  Subtree to snapshot
+ * @return 0 on success, -1 on error
+ */
+int database_subtree_snapshot(database_subtree_t* st);
+
+/**
+ * Flush dirty bnodes for the subtree's underlying database.
+ *
+ * Delegates to database_flush_dirty_bnodes on the underlying database.
+ *
+ * @param st  Subtree to flush
+ * @return 0 on success, -1 on error
+ */
+int database_subtree_flush_dirty_bnodes(database_subtree_t* st);
+
+/**
+ * Count the number of entries under the subtree's prefix.
+ *
+ * Scans all keys matching "prefix{delimiter}*" and returns the count.
+ * The scan results are freed internally; only the count is returned.
+ *
+ * @param st  Subtree to count entries in
+ * @return Number of entries, or 0 on error
+ */
+size_t database_subtree_count(database_subtree_t* st);
+
 /* --- Scan/Iterator operations --- */
 
 /**

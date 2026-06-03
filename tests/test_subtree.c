@@ -922,6 +922,55 @@ static void test_subtree_scan_sync_raw(void) {
     printf("=== test_subtree_scan_sync_raw DONE ===\n");
 }
 
+/* ---- Test 12: Snapshot and count ---- */
+
+static void test_subtree_snapshot_count(void) {
+    printf("\n=== test_subtree_snapshot_count ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_snap_count");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st = database_subtree_open(db, "snap_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'snap_ns'");
+
+    /* Count should be 0 initially */
+    size_t count = database_subtree_count(st);
+    ASSERT(count == 0, "Count is 0 before any puts");
+
+    /* Put 3 values via subtree */
+    const char* keys[] = {"key1", "key2", "key3"};
+    const char* values[] = {"val1", "val2", "val3"};
+
+    for (int i = 0; i < 3; i++) {
+        int rc = database_subtree_put_sync_raw(st, keys[i], strlen(keys[i]), '/',
+                                               (const uint8_t*)values[i], strlen(values[i]));
+        ASSERT(rc == 0, "Put succeeds for count test data");
+    }
+
+    /* Count should be 3 */
+    count = database_subtree_count(st);
+    ASSERT(count == 3, "Count is 3 after 3 puts");
+
+    /* Snapshot */
+    int rc = database_subtree_snapshot(st);
+    ASSERT(rc == 0, "Snapshot succeeds");
+
+    /* Flush dirty bnodes */
+    rc = database_subtree_flush_dirty_bnodes(st);
+    ASSERT(rc == 0, "Flush dirty bnodes succeeds");
+
+    /* Count should still be 3 after snapshot */
+    count = database_subtree_count(st);
+    ASSERT(count == 3, "Count is still 3 after snapshot");
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_snapshot_count DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -938,6 +987,7 @@ int main(void) {
     test_subtree_async_sync_only();
     test_subtree_batch_sync_raw();
     test_subtree_scan_sync_raw();
+    test_subtree_snapshot_count();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;
