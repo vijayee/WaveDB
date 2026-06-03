@@ -16,14 +16,15 @@ Allow multiple schema layers to share a single `database_t` (single persistence,
 
 ### New Type: `database_subtree_t`
 
-A subtree wraps an existing `database_t` and a path prefix. All operations prepend the prefix before delegating to the underlying database. The layer never sees the prefix.
+A subtree wraps an existing `database_t` and a path prefix. All operations prepend the prefix before delegating to the underlying database. The layer never sees the prefix. The prefix can be a multi-level path like `"layer/graphs/graph1"` with the user's chosen delimiter.
 
 ```c
 typedef struct database_subtree {
     refcounter_t refcounter;     // standard refcounting (first member per project convention)
     database_t* db;               // shared underlying database
-    char* prefix;                 // namespace, e.g. "graphql" or "graph"
-    char delimiter;               // path delimiter, copied from db config
+    char* prefix;                 // namespace path, e.g. "layer/graphs/graph1"
+    size_t prefix_len;            // length of prefix string
+    char delimiter;               // path delimiter, e.g. '/' or '.' — used to join prefix with keys
 } database_subtree_t;
 ```
 
@@ -31,34 +32,40 @@ typedef struct database_subtree {
 
 ```c
 // Open or create a subtree within an existing database.
+// prefix: namespace path, e.g. "layer/graphs/graph1" — can be multi-level
+// delimiter: path delimiter character, e.g. '/' or '.' — used to join prefix with keys
 // If the subtree namespace doesn't exist yet, it's implicitly created on first write.
 // The prefix becomes the root namespace for all operations through this handle.
-database_subtree_t* database_subtree_open(database_t* db, const char* prefix);
+database_subtree_t* database_subtree_open(database_t* db, const char* prefix, char delimiter);
 
 // Close a subtree handle — decrements refcount, frees the handle.
 // Does NOT delete the subtree's data. Data persists on disk.
 void database_subtree_close(database_subtree_t* subtree);
 
 // Delete all data under a prefix from the database.
-// Scans for all keys starting with "prefix/" and removes them.
+// prefix: namespace path, e.g. "layer/graphs/graph1"
+// delimiter: must match the delimiter used when opening the subtree
+// Scans for all keys starting with "prefix{delimiter}" and removes them.
 // Can be called without an open subtree handle (operates on database directly).
 // Returns 0 on success, non-zero on error.
-int database_subtree_delete(database_t* db, const char* prefix);
+int database_subtree_delete(database_t* db, const char* prefix, char delimiter);
 ```
 
 `database_subtree_open` handles both create and reopen, similar to how `database_create_with_config` handles both cases. On reopen, the layer's schema data (`__meta/layer`, `__gschema/types`) is already under the prefix, so the layer's existing load logic works unchanged.
 
 ### Path Translation
 
-For **path-based APIs**, the implementation prepends the prefix as the first `identifier_t` in the `path_t`:
+For **path-based APIs**, the implementation prepends the prefix as additional `identifier_t` components in the `path_t`. The delimiter is used to split the prefix into path components:
 
+- Subtree opened with `database_subtree_open(db, "layer/graphs/graph1", '/')`
 - Layer calls: `database_subtree_put_sync(subtree, path("Users/1/name"), value)`
-- Implementation calls: `database_put_sync(db, path("graphql/Users/1/name"), value)`
+- Implementation calls: `database_put_sync(db, path("layer/graphs/graph1/Users/1/name"), value)`
 
-For **raw (string) APIs**, the implementation prepends `"prefix/"` to the key string:
+For **raw (string) APIs**, the implementation prepends `"prefix{delimiter}"` to the key string:
 
+- Subtree opened with `database_subtree_open(db, "layer/graphs/graph1", '/')`
 - Layer calls: `database_subtree_put_sync_raw(subtree, "__meta/layer", 12, '/', value, len)`
-- Implementation calls: `database_put_sync_raw(db, "graphql/__meta/layer", 20, '/', value, len)`
+- Implementation calls: `database_put_sync_raw(db, "layer/graphs/graph1/__meta/layer", 27, '/', value, len)`
 
 ### CRUD Operations
 
@@ -136,9 +143,10 @@ work_pool_t* database_subtree_get_pool(database_subtree_t* st);
 `database_subtree_delete` uses the existing `database_scan_sync_raw` to find all keys under the prefix, then deletes each one using `database_delete_sync_raw` (or uses `database_batch_sync_raw` for efficiency):
 
 ```
-1. Scan database for all keys starting with "prefix/"
-2. Delete each key (or batch-delete for efficiency)
-3. Return 0 on success
+1. Construct scan prefix: "prefix{delimiter}" (e.g. "layer/graphql/")
+2. Scan database for all keys starting with that prefix
+3. Delete each key (or batch-delete for efficiency)
+4. Return 0 on success
 ```
 
 This is a synchronous operation. For large subtrees, a future optimization could add an async variant.
@@ -155,10 +163,10 @@ layer->db = db;
 
 **After** (layers receive a subtree of a shared database):
 ```c
-// Application code creates one database and opens subtrees:
+// Application code creates one database and opens subtrees with arbitrary paths:
 database_t* db = database_create_with_config(db_path, db_config, &error_code);
-database_subtree_t* graphql_subtree = database_subtree_open(db, "graphql");
-database_subtree_t* graph_subtree = database_subtree_open(db, "graph");
+database_subtree_t* graphql_subtree = database_subtree_open(db, "layer/graphql", '/');
+database_subtree_t* graph_subtree = database_subtree_open(db, "layer/graphs/graph1", '/');
 
 // Layer creation receives the subtree instead of creating its own database:
 graphql_layer_t* gql = graphql_layer_create_with_subtree(graphql_subtree, config);
@@ -166,15 +174,15 @@ graph_layer_t* graph = graph_layer_create_with_subtree(graph_subtree, config);
 
 // Inside the layer, all database operations use the subtree API:
 database_subtree_put_sync(layer->subtree, path, value);
-// Path "Users/1/name" is automatically prefixed to "graphql/Users/1/name"
+// Path "Users/1/name" is automatically prefixed to "layer/graphql/Users/1/name"
 
 // On reopen:
 database_t* db = database_create_with_config(db_path, config, &error_code);
-database_subtree_t* subtree = database_subtree_open(db, "graphql");
+database_subtree_t* subtree = database_subtree_open(db, "layer/graphql", '/');
 // graphql_schema_load(subtree) works unchanged — sees __meta/layer at its own root
 
 // Delete a layer's data:
-database_subtree_delete(db, "graphql");
+database_subtree_delete(db, "layer/graphql", '/');
 ```
 
 ### Files to Create/Modify
