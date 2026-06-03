@@ -83,6 +83,10 @@ Subtree::~Subtree() {
 // --- Cross-addon pointer accessor ---
 
 Napi::Value Subtree::GetPtr(const Napi::CallbackInfo& info) {
+  if (!st_) {
+    Napi::Error::New(info.Env(), "SUBTREE_CLOSED: Subtree is closed").ThrowAsJavaScriptException();
+    return info.Env().Null();
+  }
   return Napi::BigInt::New(info.Env(), reinterpret_cast<uint64_t>(st_));
 }
 
@@ -449,9 +453,18 @@ Napi::Value Subtree::Put(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_subtree_put_raw(st_, key_str.c_str(), key_str.size(), delimiter_,
-                           reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(),
-                           promise_c);
+  int rc = database_subtree_put_raw(st_, key_str.c_str(), key_str.size(), delimiter_,
+                                     reinterpret_cast<const uint8_t*>(val_str.data()), val_str.size(),
+                                     promise_c);
+  if (rc != 0) {
+    // C function failed to enqueue — reject the promise and clean up.
+    // The promise will never be resolved by the worker thread.
+    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch async put").Value();
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, ctx->promise);
+  }
 
   return Napi::Value(env, ctx->promise);
 }
@@ -486,7 +499,14 @@ Napi::Value Subtree::Get(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_subtree_get_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
+  int rc = database_subtree_get_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
+  if (rc != 0) {
+    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch async get").Value();
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, ctx->promise);
+  }
 
   return Napi::Value(env, ctx->promise);
 }
@@ -521,7 +541,14 @@ Napi::Value Subtree::Del(const Napi::CallbackInfo& info) {
 
   ctx->promise_c = promise_c;
 
-  database_subtree_delete_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
+  int rc = database_subtree_delete_raw(st_, key_str.c_str(), key_str.size(), delimiter_, promise_c);
+  if (rc != 0) {
+    napi_value error_val = Napi::Error::New(env, "IO_ERROR: Failed to dispatch async delete").Value();
+    napi_reject_deferred(env, ctx->deferred, error_val);
+    if (ctx->callback_ref) napi_delete_reference(env, ctx->callback_ref);
+    delete ctx;
+    return Napi::Value(env, ctx->promise);
+  }
 
   return Napi::Value(env, ctx->promise);
 }

@@ -1445,8 +1445,11 @@ Napi::Value WaveDB::OpenSubtree(const Napi::CallbackInfo& info) {
     return env.Null();
   }
 
-  // Create the Subtree native object by calling its constructor with External pointer
-  napi_value ext = Napi::External<database_subtree_t>::New(env, st);
+  // Create the Subtree native object by calling its constructor with External pointer.
+  // The no-op finalizer prevents V8 from treating the External as needing no cleanup,
+  // which would otherwise leak the External wrapper on the V8 heap. The Subtree
+  // destructor calls database_subtree_close to properly free the native resource.
+  napi_value ext = Napi::External<database_subtree_t>::New(env, st, [](Napi::Env, database_subtree_t*) { /* no-op: Subtree destructor handles cleanup */ });
   Napi::Object subtreeObj = Subtree::constructor_.New({
     Napi::Value(env, ext),
     Napi::String::New(env, std::string(1, delim)),

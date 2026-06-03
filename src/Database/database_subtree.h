@@ -36,6 +36,7 @@ typedef struct {
     size_t prefix_len;           // Length of prefix string
     char delimiter;              // Path delimiter character
     uint8_t chunk_size;          // Chunk size copied from db
+    bool destroying;             // True once destruction begins
 } database_subtree_t;
 
 /**

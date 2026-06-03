@@ -12,15 +12,17 @@
 #include <stdlib.h>
 
 /**
- * Destroy callback for refcounter.
- * Called when reference count drops to 0.
+ * Destroy the subtree when its reference count drops to 0.
+ * Uses an atomic-ish destroying flag to prevent double-free from
+ * concurrent close calls (the TOCTOU race between dereference and count check).
  */
 static void subtree_destroy(database_subtree_t* st) {
-    if (st == NULL) return;
+    if (st == NULL || st->destroying) return;
 
-    // Capture db pointer before freeing the subtree struct.
-    // Release the reference we took on the database in database_subtree_open.
-    // database_destroy will only tear down when no references remain.
+    // Mark as destroying so a concurrent close cannot also enter this path.
+    st->destroying = true;
+
+    // Capture locals before freeing the struct.
     database_t* db = st->db;
     char* prefix = st->prefix;
 
@@ -36,6 +38,7 @@ database_subtree_t* database_subtree_open(database_t* db,
                                            const char* prefix,
                                            char delimiter) {
     if (db == NULL || prefix == NULL) return NULL;
+    if (delimiter == '\0') return NULL;
 
     database_subtree_t* st = get_clear_memory(sizeof(database_subtree_t));
     if (st == NULL) return NULL;
@@ -59,7 +62,7 @@ database_subtree_t* database_subtree_open(database_t* db,
 }
 
 void database_subtree_close(database_subtree_t* subtree) {
-    if (subtree == NULL) return;
+    if (subtree == NULL || subtree->destroying) return;
 
     refcounter_dereference((refcounter_t*) subtree);
     if (refcounter_count((refcounter_t*) subtree) == 0) {
@@ -90,14 +93,16 @@ int database_subtree_delete_prefix(database_t* db,
 
     if (rc != 0) return -1;
 
-    /* Delete each key */
+    /* Delete each key, tracking errors */
+    int delete_errors = 0;
     for (size_t i = 0; i < count; i++) {
-        database_delete_sync_raw(db, results[i].key, results[i].key_len,
-                                  delimiter);
+        int rc = database_delete_sync_raw(db, results[i].key, results[i].key_len,
+                                          delimiter);
+        if (rc != 0) delete_errors++;
     }
 
     database_raw_results_free(results, count);
-    return 0;
+    return delete_errors > 0 ? -1 : 0;
 }
 
 database_t* database_subtree_get_db(database_subtree_t* st) {
@@ -140,6 +145,9 @@ char* database_subtree_prepend_key(database_subtree_t* st,
                                     const char* key, size_t key_len,
                                     size_t* out_len) {
     if (st == NULL || key == NULL) return NULL;
+
+    /* Overflow check: prefix_len + 1 + key_len must not wrap around */
+    if (key_len > SIZE_MAX - st->prefix_len - 1) return NULL;
 
     /* Allocate: prefix + delimiter + key + null terminator */
     size_t total_len = st->prefix_len + 1 + key_len;
@@ -254,6 +262,7 @@ int database_subtree_delete_sync_raw(database_subtree_t* st,
 /* --- Async context structs --- */
 
 typedef struct {
+    database_subtree_t* st;   // Reference held for lifetime of async op
     database_t* db;
     path_t* path;
     identifier_t* value;
@@ -261,12 +270,14 @@ typedef struct {
 } subtree_put_ctx_t;
 
 typedef struct {
+    database_subtree_t* st;   // Reference held for lifetime of async op
     database_t* db;
     path_t* path;
     promise_t* promise;
 } subtree_get_ctx_t;
 
 typedef struct {
+    database_subtree_t* st;   // Reference held for lifetime of async op
     database_t* db;
     path_t* path;
     promise_t* promise;
@@ -277,18 +288,21 @@ typedef struct {
 static void _subtree_put_worker(void* ctx_ptr) {
     subtree_put_ctx_t* ctx = (subtree_put_ctx_t*)ctx_ptr;
     database_put(ctx->db, ctx->path, ctx->value, ctx->promise);
+    database_subtree_close(ctx->st);
     free(ctx);
 }
 
 static void _subtree_get_worker(void* ctx_ptr) {
     subtree_get_ctx_t* ctx = (subtree_get_ctx_t*)ctx_ptr;
     database_get(ctx->db, ctx->path, ctx->promise);
+    database_subtree_close(ctx->st);
     free(ctx);
 }
 
 static void _subtree_delete_worker(void* ctx_ptr) {
     subtree_delete_ctx_t* ctx = (subtree_delete_ctx_t*)ctx_ptr;
     database_delete(ctx->db, ctx->path, ctx->promise);
+    database_subtree_close(ctx->st);
     free(ctx);
 }
 
@@ -298,18 +312,21 @@ static void abort_subtree_put(void* ctx_ptr) {
     subtree_put_ctx_t* ctx = (subtree_put_ctx_t*)ctx_ptr;
     if (ctx->path) path_destroy(ctx->path);
     if (ctx->value) identifier_destroy(ctx->value);
+    if (ctx->st) database_subtree_close(ctx->st);
     free(ctx);
 }
 
 static void abort_subtree_get(void* ctx_ptr) {
     subtree_get_ctx_t* ctx = (subtree_get_ctx_t*)ctx_ptr;
     if (ctx->path) path_destroy(ctx->path);
+    if (ctx->st) database_subtree_close(ctx->st);
     free(ctx);
 }
 
 static void abort_subtree_delete(void* ctx_ptr) {
     subtree_delete_ctx_t* ctx = (subtree_delete_ctx_t*)ctx_ptr;
     if (ctx->path) path_destroy(ctx->path);
+    if (ctx->st) database_subtree_close(ctx->st);
     free(ctx);
 }
 
@@ -350,6 +367,10 @@ void database_subtree_put(database_subtree_t* st, path_t* path,
         return;
     }
 
+    /* Hold a reference on the subtree so it stays alive during async work.
+     * Released in the worker function or abort handler. */
+    refcounter_reference((refcounter_t*) st);
+    ctx->st = st;
     ctx->db = st->db;
     ctx->path = full_path;
     ctx->value = value;
@@ -390,7 +411,8 @@ void database_subtree_get(database_subtree_t* st, path_t* path,
     /* Sync-only mode: call sync variant and resolve promise */
     if (st->db->sync_only) {
         identifier_t* result = NULL;
-        database_get_sync(st->db, full_path, &result);
+        int rc = database_get_sync(st->db, full_path, &result);
+        (void)rc; /* result pointer conveys not-found vs error */
         promise_resolve(promise, result);
         return;
     }
@@ -402,6 +424,9 @@ void database_subtree_get(database_subtree_t* st, path_t* path,
         return;
     }
 
+    /* Hold a reference on the subtree so it stays alive during async work. */
+    refcounter_reference((refcounter_t*) st);
+    ctx->st = st;
     ctx->db = st->db;
     ctx->path = full_path;
     ctx->promise = promise;
@@ -453,6 +478,9 @@ void database_subtree_delete(database_subtree_t* st, path_t* path,
         return;
     }
 
+    /* Hold a reference on the subtree so it stays alive during async work. */
+    refcounter_reference((refcounter_t*) st);
+    ctx->st = st;
     ctx->db = st->db;
     ctx->path = full_path;
     ctx->promise = promise;
@@ -587,45 +615,61 @@ int database_subtree_write_batch_sync(database_subtree_t* st, batch_t* batch) {
     platform_lock(&batch->lock);
     size_t count = batch->count;
     uint8_t submitted = batch->submitted;
-    platform_unlock(&batch->lock);
 
-    if (count == 0) return -3;
-    if (submitted) return -6;
+    if (count == 0 || submitted) {
+        platform_unlock(&batch->lock);
+        return count == 0 ? -3 : -6;
+    }
+
+    /* Snapshot the ops while holding the lock to prevent concurrent modification. */
+    batch_op_t* ops_snapshot = malloc(count * sizeof(batch_op_t));
+    if (ops_snapshot == NULL) {
+        platform_unlock(&batch->lock);
+        return -1;
+    }
+    memcpy(ops_snapshot, batch->ops, count * sizeof(batch_op_t));
+    platform_unlock(&batch->lock);
 
     /* Create a new batch with prefixed paths */
     batch_t* prefixed_batch = batch_create(count);
-    if (prefixed_batch == NULL) return -1;
+    if (prefixed_batch == NULL) {
+        free(ops_snapshot);
+        return -1;
+    }
 
     for (size_t i = 0; i < count; i++) {
-        path_t* prefixed_path = database_subtree_prepend_path(st, batch->ops[i].path);
+        path_t* prefixed_path = database_subtree_prepend_path(st, ops_snapshot[i].path);
         if (prefixed_path == NULL) {
             batch_destroy(prefixed_batch);
+            free(ops_snapshot);
             return -1;
         }
 
-        if (batch->ops[i].type == WAL_PUT) {
+        if (ops_snapshot[i].type == WAL_PUT) {
             /* REFERENCE the value so the original batch keeps its copy */
             identifier_t* value = (identifier_t*)refcounter_reference(
-                (refcounter_t*) batch->ops[i].value);
+                (refcounter_t*) ops_snapshot[i].value);
             int rc = batch_add_put(prefixed_batch, prefixed_path, value);
             if (rc != 0) {
                 path_destroy(prefixed_path);
                 identifier_destroy(value);
                 batch_destroy(prefixed_batch);
+                free(ops_snapshot);
                 return -1;
             }
-            /* batch_add_put takes ownership on success, so prefixed_path
-             * and value are now owned by prefixed_batch */
         } else {
             /* WAL_DELETE */
             int rc = batch_add_delete(prefixed_batch, prefixed_path);
             if (rc != 0) {
                 path_destroy(prefixed_path);
                 batch_destroy(prefixed_batch);
+                free(ops_snapshot);
                 return -1;
             }
         }
     }
+
+    free(ops_snapshot);
 
     int rc = database_write_batch_sync(st->db, prefixed_batch);
     batch_destroy(prefixed_batch);
@@ -947,6 +991,7 @@ static char* path_to_key_string(path_t* path, char delimiter, size_t* out_len) {
     size_t total = 0;
     for (size_t i = 0; i < len; i++) {
         identifier_t* id = path_get(path, i);
+        if (id == NULL) return NULL;
         total += id->length;
         if (i > 0) total++;  /* delimiter */
     }
@@ -1100,6 +1145,13 @@ int database_subtree_scan_sync_raw(database_subtree_t* st,
             out[n].key_len = stripped_key_len;
             size_t value_len = 0;
             uint8_t* value_data = identifier_get_data_copy(out_value, &value_len);
+            if (value_data == NULL && value_len > 0) {
+                /* OOM — skip this entry rather than store a NULL value */
+                free(stripped_key);
+                path_destroy(out_path);
+                identifier_destroy(out_value);
+                continue;
+            }
             out[n].value = value_data;
             out[n].value_len = value_len;
             n++;
@@ -1208,6 +1260,13 @@ int database_subtree_scan_range_sync_raw(database_subtree_t* st,
             out[n].key_len = stripped_key_len;
             size_t value_len = 0;
             uint8_t* value_data = identifier_get_data_copy(out_value, &value_len);
+            if (value_data == NULL && value_len > 0) {
+                /* OOM — skip this entry rather than store a NULL value */
+                free(stripped_key);
+                path_destroy(out_path);
+                identifier_destroy(out_value);
+                continue;
+            }
             out[n].value = value_data;
             out[n].value_len = value_len;
             n++;

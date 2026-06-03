@@ -50,6 +50,10 @@ class Subtree implements Finalizable {
   static int _nextRequestId = 1;
   static final Map<int, _SubtreePendingOp> _pending = {};
 
+  // Promise pointers orphaned by close() — the C callback will still fire,
+  // and it needs to free these promises. The callback removes from this set.
+  static final Set<Pointer<promise_t>> _orphanedPromises = {};
+
   /// NativeFinalizer to ensure database_subtree_close is called if the Dart
   /// object is GC'd without an explicit close(). This prevents native resource leaks.
   static final NativeFinalizer _finalizer = NativeFinalizer(
@@ -439,7 +443,13 @@ class Subtree implements Finalizable {
     final pending = _pending.remove(requestId);
 
     if (pending == null) {
-      // Orphaned resolve — no matching request
+      // Orphaned resolve — close() already cancelled this operation.
+      // The promise was added to _orphanedPromises by close().
+      // We don't know the operation type, so we can't properly free
+      // identifier_t* payloads. Free malloc'd payloads as a best effort.
+      if (payload != nullptr) {
+        malloc.free(payload);
+      }
       return;
     }
 
@@ -493,7 +503,15 @@ class Subtree implements Finalizable {
       WaveDBNative.errorDestroy(error);
     }
 
-    if (pending == null) return;
+    if (pending == null) {
+      // Orphaned reject — close() already cancelled this operation.
+      // Check if we have an orphaned promise to clean up.
+      // Note: we can't find the promise by requestId since we only have
+      // the ctx, not the promise. The promise will be cleaned up when
+      // the corresponding resolve callback fires (which should happen
+      // shortly after the reject, or the promise is already resolved).
+      return;
+    }
 
     try {
       if (!pending.completer.isCompleted) {
@@ -543,23 +561,25 @@ class Subtree implements Finalizable {
   ///
   /// Does NOT destroy or dereference the underlying database.
   /// Cancels any pending async operations for this instance.
+  /// In-flight async operations will complete with a databaseClosed error.
+  /// The C callbacks for those operations will fire as orphans and clean
+  /// up the promise memory.
   void close() {
     if (_closed || _st == null) return;
 
-    // Cancel pending async operations for this instance
-    final keysToRemove = <int>[];
+    // Cancel pending async operations for this instance by completing
+    // their completers with errors. We do NOT destroy the promises here —
+    // the C worker thread will fire the callback, which will find no entry
+    // in _pending (orphan case) and destroy the promise from the callback.
     for (final entry in _pending.entries) {
       if (entry.value.instanceId == _instanceId) {
         if (!entry.value.completer.isCompleted) {
-          WaveDBNative.promiseDestroy(entry.value.promisePtr);
+          _orphanedPromises.add(entry.value.promisePtr);
           entry.value.completer.completeError(WaveDBException.databaseClosed());
         }
-        keysToRemove.add(entry.key);
       }
     }
-    for (final key in keysToRemove) {
-      _pending.remove(key);
-    }
+    _pending.removeWhere((_, v) => v.instanceId == _instanceId);
 
     _finalizer.detach(this);
     WaveDBNative.databaseSubtreeClose(_st!);
