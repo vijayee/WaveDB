@@ -25,6 +25,7 @@
 #include "Workers/error.h"
 #include "Workers/pool.h"
 #include "Time/wheel.h"
+#include "Layers/graph/graph.h"
 
 static int failures = 0;
 
@@ -1129,6 +1130,375 @@ static void test_subtree_delete_isolation(void) {
     printf("=== test_subtree_delete_isolation DONE ===\n");
 }
 
+/* ---- Test 15: Cross-subtree isolation ---- */
+
+static void test_subtree_cross_isolation(void) {
+    printf("\n=== test_subtree_cross_isolation ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_cross_iso");
+    ASSERT(db != NULL, "Create database");
+
+    database_subtree_t* st_gql = database_subtree_open(db, "gql", '/');
+    ASSERT(st_gql != NULL, "Open subtree 'gql'");
+
+    database_subtree_t* st_graph = database_subtree_open(db, "graph", '/');
+    ASSERT(st_graph != NULL, "Open subtree 'graph'");
+
+    /* Put different values at the same key "data/key1" in each subtree */
+    int rc = database_subtree_put_sync_raw(st_gql, "data/key1", strlen("data/key1"), '/',
+                                           (const uint8_t*)"gql_value", strlen("gql_value"));
+    ASSERT(rc == 0, "Put 'data/key1' in 'gql' subtree succeeds");
+
+    rc = database_subtree_put_sync_raw(st_graph, "data/key1", strlen("data/key1"), '/',
+                                        (const uint8_t*)"graph_value", strlen("graph_value"));
+    ASSERT(rc == 0, "Put 'data/key1' in 'graph' subtree succeeds");
+
+    /* Get from each subtree and verify each sees its own value */
+    uint8_t* val_gql = NULL;
+    size_t val_gql_len = 0;
+    rc = database_subtree_get_sync_raw(st_gql, "data/key1", strlen("data/key1"), '/',
+                                       &val_gql, &val_gql_len);
+    ASSERT(rc == 0, "Get 'data/key1' from 'gql' succeeds");
+    if (rc == 0 && val_gql != NULL) {
+        ASSERT(val_gql_len == strlen("gql_value"), "GQL value length matches");
+        ASSERT(memcmp(val_gql, "gql_value", val_gql_len) == 0,
+               "GQL subtree returns 'gql_value'");
+        database_raw_value_free(val_gql);
+    }
+
+    uint8_t* val_graph = NULL;
+    size_t val_graph_len = 0;
+    rc = database_subtree_get_sync_raw(st_graph, "data/key1", strlen("data/key1"), '/',
+                                       &val_graph, &val_graph_len);
+    ASSERT(rc == 0, "Get 'data/key1' from 'graph' succeeds");
+    if (rc == 0 && val_graph != NULL) {
+        ASSERT(val_graph_len == strlen("graph_value"), "Graph value length matches");
+        ASSERT(memcmp(val_graph, "graph_value", val_graph_len) == 0,
+               "Graph subtree returns 'graph_value'");
+        database_raw_value_free(val_graph);
+    }
+
+    /* Verify cross-isolation: 'gql' subtree does NOT see 'graph' keys and vice versa */
+    uint8_t* cross_val = NULL;
+    size_t cross_val_len = 0;
+    int cross_rc = database_subtree_get_sync_raw(st_gql, "graph_data", strlen("graph_data"), '/',
+                                                  &cross_val, &cross_val_len);
+    ASSERT(cross_rc == -2, "GQL subtree does not see 'graph' prefixed keys");
+
+    cross_val = NULL;
+    cross_val_len = 0;
+    cross_rc = database_subtree_get_sync_raw(st_graph, "gql_data", strlen("gql_data"), '/',
+                                             &cross_val, &cross_val_len);
+    ASSERT(cross_rc == -2, "Graph subtree does not see 'gql' prefixed keys");
+
+    /* Verify each subtree has at least 1 entry via count */
+    size_t count_gql = database_subtree_count(st_gql);
+    ASSERT(count_gql >= 1, "GQL subtree count is >= 1");
+
+    size_t count_graph = database_subtree_count(st_graph);
+    ASSERT(count_graph >= 1, "Graph subtree count is >= 1");
+
+    /* Scan each subtree with a scoped prefix and verify the correct value is present */
+    {
+        raw_result_t* results = NULL;
+        size_t scan_count = 0;
+        rc = database_subtree_scan_sync_raw(st_gql, "data", strlen("data"), '/', &results, &scan_count);
+        ASSERT(rc == 0, "Scan 'gql' subtree with 'data' prefix succeeds");
+        ASSERT(scan_count >= 1, "Scan 'gql/data' returns at least 1 result");
+        /* Verify the correct value is present in the results */
+        int found_gql = 0;
+        for (size_t i = 0; i < scan_count; i++) {
+            if (results[i].value_len == strlen("gql_value") &&
+                memcmp(results[i].value, "gql_value", results[i].value_len) == 0) {
+                found_gql = 1;
+            }
+        }
+        ASSERT(found_gql, "Scanned 'gql' results contain 'gql_value'");
+        database_raw_results_free(results, scan_count);
+    }
+
+    {
+        raw_result_t* results = NULL;
+        size_t scan_count = 0;
+        rc = database_subtree_scan_sync_raw(st_graph, "data", strlen("data"), '/', &results, &scan_count);
+        ASSERT(rc == 0, "Scan 'graph' subtree with 'data' prefix succeeds");
+        ASSERT(scan_count >= 1, "Scan 'graph/data' returns at least 1 result");
+        /* Verify the correct value is present in the results */
+        int found_graph = 0;
+        for (size_t i = 0; i < scan_count; i++) {
+            if (results[i].value_len == strlen("graph_value") &&
+                memcmp(results[i].value, "graph_value", results[i].value_len) == 0) {
+                found_graph = 1;
+            }
+        }
+        ASSERT(found_graph, "Scanned 'graph' results contain 'graph_value'");
+        database_raw_results_free(results, scan_count);
+    }
+
+    database_subtree_close(st_gql);
+    database_subtree_close(st_graph);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_cross_isolation DONE ===\n");
+}
+
+/* ---- Test 16: Data persists across reopen ---- */
+
+static void test_subtree_reopen(void) {
+    printf("\n=== test_subtree_reopen ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_reopen");
+    ASSERT(db != NULL, "Create persistent database");
+
+    /* Open a subtree, put a value */
+    database_subtree_t* st = database_subtree_open(db, "app", '/');
+    ASSERT(st != NULL, "Open subtree 'app'");
+
+    int rc = database_subtree_put_sync_raw(st, "key1", strlen("key1"), '/',
+                                           (const uint8_t*)"value1", strlen("value1"));
+    ASSERT(rc == 0, "Put 'key1' -> 'value1' succeeds");
+
+    /* Snapshot to flush to disk */
+    database_subtree_snapshot(st);
+    database_subtree_flush_dirty_bnodes(st);
+
+    database_subtree_close(st);
+    database_destroy(db);
+
+    /* Reopen the database from the same path */
+    int error = 0;
+    database_config_t* config = database_config_default();
+    config->enable_persist = 1;
+    config->sync_only = 1;
+    config->worker_threads = 0;
+    config->timer_resolution_ms = 0;
+    config->chunk_size = 4;
+    config->btree_node_size = 4096;
+    db = database_create_with_config(tmpdir, config, &error);
+    database_config_destroy(config);
+    ASSERT(db != NULL, "Reopen database succeeds");
+    ASSERT(error == 0, "No error on reopen");
+
+    /* Open subtree 'app' again */
+    st = database_subtree_open(db, "app", '/');
+    ASSERT(st != NULL, "Reopen subtree 'app'");
+
+    /* Get 'key1' and verify it returns 'value1' */
+    uint8_t* val = NULL;
+    size_t val_len = 0;
+    rc = database_subtree_get_sync_raw(st, "key1", strlen("key1"), '/',
+                                       &val, &val_len);
+    ASSERT(rc == 0, "Get 'key1' after reopen succeeds");
+    if (rc == 0 && val != NULL) {
+        ASSERT(val_len == strlen("value1"), "Value length matches after reopen");
+        ASSERT(memcmp(val, "value1", val_len) == 0,
+               "Value matches 'value1' after reopen");
+        database_raw_value_free(val);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_reopen DONE ===\n");
+}
+
+/* ---- Test 17: Delete prefix on raw database keys ---- */
+
+static void test_subtree_delete_comprehensive(void) {
+    printf("\n=== test_subtree_delete_comprehensive ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_del_comp");
+    ASSERT(db != NULL, "Create database");
+
+    /* Put values directly under "graphql/key1" and "graph/key1" using raw database API */
+    int rc = database_put_sync_raw(db, "graphql/key1", strlen("graphql/key1"), '/',
+                                   (const uint8_t*)"gql_val", strlen("gql_val"));
+    ASSERT(rc == 0, "Put 'graphql/key1' via raw API succeeds");
+
+    rc = database_put_sync_raw(db, "graph/key1", strlen("graph/key1"), '/',
+                                (const uint8_t*)"graph_val", strlen("graph_val"));
+    ASSERT(rc == 0, "Put 'graph/key1' via raw API succeeds");
+
+    /* Verify both exist */
+    uint8_t* val = NULL;
+    size_t val_len = 0;
+    rc = database_get_sync_raw(db, "graphql/key1", strlen("graphql/key1"), '/', &val, &val_len);
+    ASSERT(rc == 0, "Raw get 'graphql/key1' succeeds before delete");
+    if (rc == 0 && val != NULL) database_raw_value_free(val);
+
+    val = NULL;
+    val_len = 0;
+    rc = database_get_sync_raw(db, "graph/key1", strlen("graph/key1"), '/', &val, &val_len);
+    ASSERT(rc == 0, "Raw get 'graph/key1' succeeds before delete");
+    if (rc == 0 && val != NULL) database_raw_value_free(val);
+
+    /* Delete the 'graphql' prefix */
+    rc = database_subtree_delete_prefix(db, "graphql", '/');
+    ASSERT(rc == 0, "Delete prefix 'graphql' succeeds");
+
+    /* Verify 'graphql/key1' is gone */
+    val = NULL;
+    val_len = 0;
+    int grc = database_get_sync_raw(db, "graphql/key1", strlen("graphql/key1"), '/', &val, &val_len);
+    ASSERT(grc == -2, "Raw get 'graphql/key1' returns not found after delete");
+
+    /* Verify 'graph/key1' still exists */
+    val = NULL;
+    val_len = 0;
+    rc = database_get_sync_raw(db, "graph/key1", strlen("graph/key1"), '/', &val, &val_len);
+    ASSERT(rc == 0, "Raw get 'graph/key1' still succeeds after 'graphql' delete");
+    if (rc == 0 && val != NULL) {
+        ASSERT(memcmp(val, "graph_val", val_len) == 0,
+               "Value at 'graph/key1' still matches 'graph_val'");
+        database_raw_value_free(val);
+    }
+
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_delete_comprehensive DONE ===\n");
+}
+
+/* ---- Test 18: Multi-level prefix ---- */
+
+static void test_subtree_multi_level_prefix(void) {
+    printf("\n=== test_subtree_multi_level_prefix ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_multi");
+    ASSERT(db != NULL, "Create database");
+
+    /* Open subtree with multi-level prefix "layer/graphs/graph1" */
+    database_subtree_t* st = database_subtree_open(db, "layer/graphs/graph1", '/');
+    ASSERT(st != NULL, "Open subtree 'layer/graphs/graph1'");
+
+    /* Put a value at "node1" via subtree */
+    int rc = database_subtree_put_sync_raw(st, "node1", strlen("node1"), '/',
+                                           (const uint8_t*)"node1_val", strlen("node1_val"));
+    ASSERT(rc == 0, "Put 'node1' via subtree succeeds");
+
+    /* Get from raw database at "layer/graphs/graph1/node1" and verify */
+    uint8_t* raw_val = NULL;
+    size_t raw_val_len = 0;
+    rc = database_get_sync_raw(db, "layer/graphs/graph1/node1",
+                               strlen("layer/graphs/graph1/node1"), '/',
+                               &raw_val, &raw_val_len);
+    ASSERT(rc == 0, "Raw get 'layer/graphs/graph1/node1' succeeds");
+    if (rc == 0 && raw_val != NULL) {
+        ASSERT(raw_val_len == strlen("node1_val"), "Raw value length matches");
+        ASSERT(memcmp(raw_val, "node1_val", raw_val_len) == 0,
+               "Raw value matches 'node1_val'");
+        database_raw_value_free(raw_val);
+    }
+
+    /* Put another value via subtree at "edges/conn1" */
+    rc = database_subtree_put_sync_raw(st, "edges/conn1", strlen("edges/conn1"), '/',
+                                        (const uint8_t*)"conn1_val", strlen("conn1_val"));
+    ASSERT(rc == 0, "Put 'edges/conn1' via subtree succeeds");
+
+    /* Get from raw database at "layer/graphs/graph1/edges/conn1" and verify */
+    raw_val = NULL;
+    raw_val_len = 0;
+    rc = database_get_sync_raw(db, "layer/graphs/graph1/edges/conn1",
+                               strlen("layer/graphs/graph1/edges/conn1"), '/',
+                               &raw_val, &raw_val_len);
+    ASSERT(rc == 0, "Raw get 'layer/graphs/graph1/edges/conn1' succeeds");
+    if (rc == 0 && raw_val != NULL) {
+        ASSERT(raw_val_len == strlen("conn1_val"), "Raw value length matches");
+        ASSERT(memcmp(raw_val, "conn1_val", raw_val_len) == 0,
+               "Raw value matches 'conn1_val'");
+        database_raw_value_free(raw_val);
+    }
+
+    /* Verify subtree count is 2 */
+    size_t count = database_subtree_count(st);
+    ASSERT(count == 2, "Subtree count is 2");
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_multi_level_prefix DONE ===\n");
+}
+
+/* ---- Test 19: Schema collision detection ---- */
+
+static void test_subtree_schema_collision(void) {
+    printf("\n=== test_subtree_schema_collision ===\n");
+
+    /* Step 1: Create a database and write __meta/layer = "graphql" to simulate
+     * a database owned by a GraphQL layer. */
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_collision");
+    ASSERT(db != NULL, "Create database for collision test");
+
+    int rc = database_put_sync_raw(db, "__meta/layer", strlen("__meta/layer"), '/',
+                                   (const uint8_t*)"graphql", strlen("graphql"));
+    ASSERT(rc == 0, "Write __meta/layer = 'graphql' to simulate GraphQL layer");
+
+    /* Snapshot to persist the metadata */
+    database_snapshot(db);
+    database_flush_dirty_bnodes(db);
+
+    /* Destroy the database (data persists on disk) */
+    database_destroy(db);
+
+    /* Step 2: Try to create a Graph layer on the same database path — should fail with -3 */
+    database_config_t* db_config_for_graph = database_config_default();
+    db_config_for_graph->enable_persist = 1;
+    db_config_for_graph->sync_only = 1;
+    db_config_for_graph->worker_threads = 0;
+    db_config_for_graph->timer_resolution_ms = 0;
+    db_config_for_graph->chunk_size = 4;
+    db_config_for_graph->btree_node_size = 4096;
+
+    graph_layer_config_t graph_config;
+    graph_config.path = tmpdir;
+    graph_config.db_config = db_config_for_graph;
+
+    int error_code = 0;
+    graph_layer_t* graph_layer = graph_layer_create(tmpdir, &graph_config, NULL, &error_code);
+    ASSERT(graph_layer == NULL, "Graph layer without subtree returns NULL (collision)");
+    ASSERT(error_code == -3, "Graph layer error code is -3 (layer type mismatch)");
+
+    /* Clean up the collision test directory */
+    database_config_destroy(db_config_for_graph);
+    cleanup_tmpdir(tmpdir);
+
+    /* Step 3: Create a fresh database and subtree, then create Graph layer WITH subtree — should succeed */
+    char tmpdir2[256];
+    db = create_test_db(tmpdir2, sizeof(tmpdir2), "wavedb_subtree_collision_sub");
+    ASSERT(db != NULL, "Create database for subtree collision test");
+
+    /* Write __meta/layer = "graphql" to simulate an existing graphql database */
+    rc = database_put_sync_raw(db, "__meta/layer", strlen("__meta/layer"), '/',
+                               (const uint8_t*)"graphql", strlen("graphql"));
+    ASSERT(rc == 0, "Write __meta/layer = 'graphql' to simulate collision");
+
+    database_subtree_t* st = database_subtree_open(db, "graph_sub", '/');
+    ASSERT(st != NULL, "Open subtree 'graph_sub' for collision test");
+
+    error_code = 0;
+    graph_layer_t* graph_layer_sub = graph_layer_create(tmpdir2, &graph_config, st, &error_code);
+    ASSERT(graph_layer_sub != NULL, "Graph layer WITH subtree succeeds (isolation)");
+    ASSERT(error_code == 0, "Graph layer with subtree has no error");
+
+    if (graph_layer_sub != NULL) {
+        graph_layer_destroy(graph_layer_sub);
+        /* graph_layer_destroy closes the subtree internally, so do NOT close it again */
+    }
+
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir2);
+
+    printf("=== test_subtree_schema_collision DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -1148,6 +1518,11 @@ int main(void) {
     test_subtree_snapshot_count();
     test_subtree_delete();
     test_subtree_delete_isolation();
+    test_subtree_cross_isolation();
+    test_subtree_reopen();
+    test_subtree_delete_comprehensive();
+    test_subtree_multi_level_prefix();
+    test_subtree_schema_collision();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

@@ -83,25 +83,34 @@ graph_layer_t* graph_layer_create(const char* path,
             return NULL;
         }
 
-        /* Check for schema collision: if this database already has graph schema
-         * data from a different layer type, refuse to create a graph layer. */
+        /* Check for layer type collision: if this database already has a
+         * different layer type (e.g. graphql), refuse to create a graph layer.
+         * When using a subtree, the collision is skipped because the subtree
+         * provides namespace isolation. */
         if (!subtree) {
             uint8_t* existing = NULL;
             size_t existing_len = 0;
-            int rc;
-            if (layer->subtree) {
-                rc = database_subtree_get_sync_raw(layer->subtree, "__gschema/types", 15, '/',
-                                                   &existing, &existing_len);
-            } else {
-                rc = database_get_sync_raw(layer->db, "__gschema/types", 15, '/',
+            int rc = database_get_sync_raw(layer->db, "__meta/layer", 12, '/',
                                            &existing, &existing_len);
-            }
-            if (rc == 0 && existing) {
-                /* Found existing schema data — this is a graph layer, which is fine.
-                 * We just wanted to check if the key exists. */
+            if (rc == 0 && existing != NULL) {
+                /* Found __meta/layer — check if it matches "graph" */
+                int is_graph = (existing_len == strlen("graph") &&
+                               memcmp(existing, "graph", existing_len) == 0);
+                if (!is_graph) {
+                    /* Layer type mismatch — destroy the database we just created */
+                    database_raw_value_free(existing);
+                    database_destroy(layer->db);
+                    free(layer);
+                    if (error_code) *error_code = -3;
+                    return NULL;
+                }
                 database_raw_value_free(existing);
             }
-            /* No collision check needed for same layer type; we allow reopening. */
+            /* Write __meta/layer = "graph" for new databases */
+            if (rc != 0) {
+                database_put_sync_raw(layer->db, "__meta/layer", 12, '/',
+                                     (const uint8_t*)"graph", strlen("graph"));
+            }
         }
 
         layer->subtree = NULL;
