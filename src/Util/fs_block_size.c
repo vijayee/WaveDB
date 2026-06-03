@@ -3,6 +3,7 @@
 //
 
 #include "fs_block_size.h"
+#include <stddef.h>
 
 #if _WIN32
 #include "Util/windows_compat.h"
