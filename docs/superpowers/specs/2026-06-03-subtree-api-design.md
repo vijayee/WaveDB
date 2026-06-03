@@ -245,6 +245,11 @@ database_subtree_delete(db, "layer/graphql", '/');
 **New files:**
 - `src/Database/database_subtree.h` — public API header
 - `src/Database/database_subtree.c` — implementation
+- `bindings/nodejs/src/subtree.cc` — Node.js Subtree class wrapping database_subtree_t
+- `bindings/nodejs/src/subtree.h` — Node.js Subtree class header
+- `bindings/nodejs/test/subtree.test.js` — Node.js Subtree API tests
+- `bindings/dart/lib/src/subtree.dart` — Dart Subtree class
+- `bindings/dart/test/subtree_test.dart` — Dart Subtree API tests
 
 **Modified files:**
 - `src/Layers/graphql/graphql_types.h` — add `database_subtree_t*` field to `graphql_layer_config_t` and `graphql_layer_t`
@@ -253,6 +258,17 @@ database_subtree_delete(db, "layer/graphql", '/');
 - `src/Layers/graph/graph.h` — create `graph_layer_config_t` struct with `database_subtree_t*` field; update `graph_layer_create` signature
 - `src/Layers/graph/graph_internal.h` — add `database_subtree_t*` field to `graph_layer_t`
 - `src/Layers/graph/graph.c` — when config has a subtree, use it instead of creating a database
+- `bindings/nodejs/src/graph_layer.cc` — accept optional `subtree` in constructor options
+- `bindings/nodejs/src/graphql_layer.cc` — accept optional `subtree` in constructor options
+- `bindings/nodejs/src/database.cc` — add `openSubtree()` and `deleteSubtree()` methods
+- `bindings/dart/lib/src/native/wavedb_bindings.dart` — add FFI typedefs for all subtree functions, update GraphLayerCreate
+- `bindings/dart/lib/src/native/types.dart` — add `database_subtree_t` opaque type, `graph_layer_config_t` struct
+- `bindings/dart/lib/src/database.dart` — add `openSubtree()` and `deleteSubtree()` methods
+- `bindings/dart/lib/src/graph_layer.dart` — add `GraphLayerConfig` class with `subtree` field
+- `bindings/dart/lib/src/graphql_layer.dart` — add `subtree` field to `GraphQLLayerConfig`
+- `bindings/dart/lib/wavedb.dart` — export `Subtree` and `GraphLayerConfig`
+- `bindings/nodejs/test/graph.test.js` — add subtree-based creation tests
+- `bindings/dart/test/graph_layer_test.dart` — add subtree-based creation tests
 
 ### Error Handling
 
@@ -260,6 +276,90 @@ database_subtree_delete(db, "layer/graphql", '/');
 - `database_subtree_delete` returns `0` on success, non-zero on error
 - All CRUD operations return the same error codes as their `database_t` counterparts
 - Scan operations return `NULL` iterators or negative counts on failure
+
+### Binding Updates
+
+The Node.js and Dart bindings must be updated to expose the subtree config and new API.
+
+#### C API Changes That Affect Bindings
+
+| Change | Impact |
+|--------|--------|
+| New `database_subtree_t` type and all `database_subtree_*` functions | New FFI bindings needed |
+| New `graph_layer_config_t` struct (replaces direct `database_config_t*` param) | Changes `graph_layer_create` signature |
+| `graphql_layer_config_t` gains `database_subtree_t* subtree` field | New field in existing struct |
+| `database_subtree_open(db, prefix, delimiter)` | New function |
+| `database_subtree_close(subtree)` | New function |
+| `database_subtree_delete(db, prefix, delimiter)` | New function |
+
+#### Node.js Binding Updates
+
+**Files to modify:**
+- `bindings/nodejs/src/graph_layer.cc` — Update `GraphLayer` constructor to accept optional `subtree` option. When provided, create a `database_subtree_t` and pass it via `graph_layer_config_t`. If not provided, behave as before (backward compatible).
+- `bindings/nodejs/src/graphql_layer.cc` — Update `GraphQLLayer` constructor to accept optional `subtree` option. Pass it in `graphql_layer_config_t.subtree`.
+- `bindings/nodejs/src/database.cc` — Add `WaveDB.openSubtree(prefix, delimiter)` method that returns a `Subtree` wrapper object wrapping a `database_subtree_t*`.
+- New `bindings/nodejs/src/subtree.cc` and `subtree.h` — `Subtree` class wrapping `database_subtree_t*`. Exposes all `database_subtree_*` CRUD, batch, scan, and snapshot methods.
+- `bindings/nodejs/test/graph.test.js` — Add tests for subtree-based GraphLayer creation
+- `bindings/nodejs/test/subtree.test.js` — New test file for Subtree API
+
+**Node.js API surface:**
+
+```js
+// Create a subtree from an existing database
+const subtree = db.openSubtree('layer/graphql', '/');
+
+// Pass subtree to layer via config
+const graph = new GraphLayer(null, { subtree });
+const gql = new GraphQLLayer(null, { subtree });
+
+// Subtree CRUD (mirrors database API)
+await subtree.put(path, value);
+const result = await subtree.get(path);
+await subtree.delete(path);
+const results = subtree.scanSync(prefix, delimiter);
+subtree.close();
+
+// Delete all data under a subtree prefix
+db.deleteSubtree('layer/graphql', '/');
+```
+
+#### Dart Binding Updates
+
+**Files to modify:**
+- `bindings/dart/lib/src/native/wavedb_bindings.dart` — Add FFI typedefs for `database_subtree_open`, `database_subtree_close`, `database_subtree_delete`, and all `database_subtree_*` CRUD/scan functions. Update `GraphLayerCreate` typedef to use `graph_layer_config_t*` instead of `database_config_t*`.
+- `bindings/dart/lib/src/native/types.dart` — Add `database_subtree_t` opaque type. Add `graph_layer_config_t` struct definition for FFI.
+- `bindings/dart/lib/src/database.dart` — Add `openSubtree(String prefix, String delimiter)` method to `WaveDB` class. Add `deleteSubtree(String prefix, String delimiter)` method.
+- `bindings/dart/lib/src/graph_layer.dart` — Update `GraphLayer` constructor to accept optional `GraphLayerConfig` with `subtree` field.
+- `bindings/dart/lib/src/graphql_layer.dart` — Update `GraphQLLayerConfig` to include `subtree` field.
+- New `bindings/dart/lib/src/subtree.dart` — `Subtree` class wrapping `database_subtree_t*`. Exposes CRUD, batch, scan, and snapshot methods.
+- `bindings/dart/lib/wavedb.dart` — Export new `Subtree` class and `GraphLayerConfig`.
+- `bindings/dart/test/graph_layer_test.dart` — Add tests for subtree-based creation
+- `bindings/dart/test/subtree_test.dart` — New test file for Subtree API
+
+**Dart API surface:**
+
+```dart
+// Create a subtree from an existing database
+final subtree = db.openSubtree('layer/graphql', '/');
+await subtree.put(path, value);
+final result = await subtree.get(path);
+await subtree.delete(path);
+subtree.close();
+
+// Delete all data under a subtree prefix
+db.deleteSubtree('layer/graphql', '/');
+
+// Pass subtree to layer via config
+final graph = GraphLayer(config: GraphLayerConfig(subtree: subtree));
+final gql = GraphQLLayer(config: GraphQLLayerConfig(subtree: subtree));
+```
+
+#### Backward Compatibility
+
+Both bindings must remain backward compatible:
+- If `subtree` is not provided in config, layers create their own `database_t` as before
+- `graph_layer_create` with `database_config_t*` must still work (we'll add a compatibility wrapper or update the binding to construct a `graph_layer_config_t` internally)
+- The `Subtree` class is additive — no existing API changes required
 
 ### Thread Safety
 
