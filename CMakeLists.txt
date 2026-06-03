@@ -103,6 +103,7 @@ set(WAVEDB_SOURCES
     src/Database/database_iterator.c
     src/Database/batch.c
     src/Database/eviction_queue.c
+    src/Database/database_subtree.c
 
     # Layers - GraphQL
     src/Layers/graphql/graphql_types.c
@@ -311,6 +312,11 @@ if(BUILD_TESTS)
     add_executable(test_sync_only tests/test_sync_only.c)
     target_link_libraries(test_sync_only PRIVATE wavedb Threads::Threads)
     add_test(NAME test_sync_only COMMAND test_sync_only)
+
+    # Test for subtree
+    add_executable(test_subtree tests/test_subtree.c)
+    target_link_libraries(test_subtree PRIVATE wavedb Threads::Threads)
+    add_test(NAME test_subtree COMMAND test_subtree)
 
     # Quick database benchmark (for memory leak testing)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
