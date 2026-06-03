@@ -50,7 +50,7 @@ function findFiles(dir, ext) {
     if (!fs.existsSync(d)) return;
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
-      if (entry.isDirectory() && entry.name !== 'node_modules') walk(full);
+      if (entry.isDirectory()) walk(full);
       else if (entry.isFile() && entry.name.endsWith(ext)) results.push(full);
     }
   }
@@ -73,6 +73,13 @@ function patchVcxprojForMSVC() {
     }
     if (content.includes('-flto=thin')) {
       content = content.replace(/-flto=thin\s*/g, '');
+      modified = true;
+    }
+
+    // Replace ClangCL toolset with MSVC v143 if ClangCL is not available
+    if (content.includes('<PlatformToolset>ClangCL</PlatformToolset>')) {
+      content = content.replace(/<PlatformToolset>ClangCL<\/PlatformToolset>/g,
+        '<PlatformToolset>v143</PlatformToolset>');
       modified = true;
     }
 
