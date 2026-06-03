@@ -18,12 +18,15 @@
 static void subtree_destroy(database_subtree_t* st) {
     if (st == NULL) return;
 
-    database_t* db = st->db;
-    free(st->prefix);
-    free(st);
-
+    // Capture db pointer before freeing the subtree struct.
     // Release the reference we took on the database in database_subtree_open.
     // database_destroy will only tear down when no references remain.
+    database_t* db = st->db;
+    char* prefix = st->prefix;
+
+    free(prefix);
+    free(st);
+
     if (db) {
         database_destroy(db);
     }
@@ -103,7 +106,7 @@ database_t* database_subtree_get_db(database_subtree_t* st) {
 }
 
 work_pool_t* database_subtree_get_pool(database_subtree_t* st) {
-    if (st == NULL) return NULL;
+    if (st == NULL || st->db == NULL) return NULL;
     return st->db->pool;
 }
 
