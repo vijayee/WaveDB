@@ -2055,21 +2055,28 @@ class WaveDBNative {
   static Pointer<graphql_layer_t> graphQLLayerCreate(
     String? path, {
     Pointer<graphql_layer_config_t>? config,
+    Pointer<database_subtree_t>? subtree,
   }) {
     final pathPtr = path != null ? path.toNativeUtf8() : nullptr;
+    final errorPtr = calloc<Int32>();
     try {
       final layer = _graphQLLayerCreate(
         pathPtr.cast(),
         config ?? nullptr,
+        subtree ?? nullptr,
+        errorPtr,
       );
       if (layer == nullptr) {
-        throw WaveDBException.ioError('graphql_layer_create', 'Failed to create GraphQL layer');
+        final errorCode = errorPtr.value;
+        throw WaveDBException.ioError('graphql_layer_create',
+          'Failed to create GraphQL layer (error code: $errorCode)');
       }
       return layer;
     } finally {
       if (pathPtr != nullptr) {
         calloc.free(pathPtr);
       }
+      calloc.free(errorPtr);
     }
   }
 

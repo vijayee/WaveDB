@@ -43,7 +43,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Register a simple schema

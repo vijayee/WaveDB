@@ -52,7 +52,7 @@ TEST_F(GraphQLSchemaTest, CreateLayerInMemory) {
     config->enable_persist = 0;  // In-memory mode
     config->path = nullptr;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     graphql_layer_destroy(layer);
@@ -69,7 +69,7 @@ TEST_F(GraphQLSchemaTest, CreateLayerPersistent) {
     config->path = db_path;
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(db_path, config);
+    graphql_layer_t* layer = graphql_layer_create(db_path, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     graphql_layer_destroy(layer);
@@ -84,7 +84,7 @@ TEST_F(GraphQLSchemaTest, ParseSimpleSchema) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String age: Int }";
@@ -106,7 +106,7 @@ TEST_F(GraphQLSchemaTest, ParseEnumSchema) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "enum Role { ADMIN USER }";
@@ -126,7 +126,7 @@ TEST_F(GraphQLSchemaTest, ParseSchemaWithDirectives) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Person @plural(name: \"People\") { name: String }";
@@ -148,7 +148,7 @@ TEST_F(GraphQLSchemaTest, ParseSchemaDefinition) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "schema { query: Query mutation: Mutation }";
@@ -163,7 +163,7 @@ TEST_F(GraphQLSchemaTest, ParseMultipleTypes) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String } type Post { title: String }";
@@ -186,7 +186,7 @@ TEST_F(GraphQLSchemaTest, ParseInvalidSDL) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     int result = graphql_schema_parse(layer, "type !Invalid { }", NULL);
@@ -210,7 +210,7 @@ TEST_F(GraphQLSchemaTest, TypeRegistryLookup) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }";
@@ -240,7 +240,7 @@ TEST_F(GraphQLSchemaTest, FieldTypesPreserved) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String age: Int friends: [User] id: ID! }";
@@ -297,7 +297,7 @@ TEST_F(GraphQLSchemaTest, NullLayerParse) {
 
 TEST_F(GraphQLSchemaTest, NullConfigDefaults) {
     // Creating layer with null config should use defaults
-    graphql_layer_t* layer = graphql_layer_create(nullptr, nullptr);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, nullptr, nullptr, nullptr);
     // In-memory mode with default config
     // This might fail if defaults try to persist to a null path
     // Let's just verify it doesn't crash
@@ -314,7 +314,7 @@ TEST_F(GraphQLSchemaTest, DefaultPluralName) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }";
@@ -335,7 +335,7 @@ TEST_F(GraphQLSchemaTest, CustomPluralName) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Person @plural(name: \"People\") { name: String }";
@@ -361,7 +361,7 @@ TEST_F(GraphQLSchemaTest, ParseScalarDefinition) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "scalar Date\nscalar DateTime\ntype User { name: String }";
@@ -400,7 +400,7 @@ TEST_F(GraphQLSchemaTest, ScalarTypePersistAndLoad) {
     config->path = test_dir;
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "scalar Date\ntype Event { title: String date: Date }";
@@ -434,7 +434,7 @@ TEST_F(GraphQLSchemaTest, ParseTypeExtension) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }\nextend type User { age: Int email: String }";
@@ -467,7 +467,7 @@ TEST_F(GraphQLSchemaTest, ExtendTypeMergesFields) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     // Extension before definition — should create type first
@@ -494,7 +494,7 @@ TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
     config->path = test_dir;
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }\nextend type User { age: Int }";
@@ -520,7 +520,7 @@ TEST_F(GraphQLSchemaTest, ParseDefaultValue) {
     graphql_layer_config_t* config = graphql_layer_config_default();
     config->enable_persist = 0;
 
-    graphql_layer_t* layer = graphql_layer_create(nullptr, config);
+    graphql_layer_t* layer = graphql_layer_create(nullptr, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String = \"Anonymous\" age: Int = 0 active: Boolean = true }";
@@ -567,7 +567,7 @@ TEST_F(GraphQLSchemaTest, DefaultValuesPersistAndLoad) {
     config->path = test_dir;
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config);
+    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Config { name: String = \"default\" count: Int = 10 }";

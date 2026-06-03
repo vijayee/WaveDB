@@ -33,12 +33,20 @@ extern "C" {
  * If opening an existing database, validates __meta to confirm it was
  * created by the GraphQL layer and loads the stored schema.
  *
- * @param path    Database storage path (NULL for in-memory)
- * @param config  Configuration (NULL for defaults)
+ * When subtree is non-NULL, uses the subtree's database instead of
+ * creating a new one. Schema data is stored within the subtree's
+ * prefix namespace.
+ *
+ * @param path        Database storage path (NULL for in-memory)
+ * @param config      Configuration (NULL for defaults)
+ * @param subtree     Optional subtree for namespace isolation (NULL = own db)
+ * @param error_code  Output: 0 on success, -3 on layer type mismatch (NULL = ignore)
  * @return New layer or NULL on failure
  */
 graphql_layer_t* graphql_layer_create(const char* path,
-                                       const graphql_layer_config_t* config);
+                                       const graphql_layer_config_t* config,
+                                       database_subtree_t* subtree,
+                                       int* error_code);
 
 /**
  * Destroy a GraphQL layer.

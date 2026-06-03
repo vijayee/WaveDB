@@ -96,7 +96,7 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
     }
   }
 
-  layer_ = graphql_layer_create(config->path, config);
+  layer_ = graphql_layer_create(config->path, config, nullptr, nullptr);
   if (!layer_) {
     if (config->path) std::free(const_cast<char*>(config->path));
     graphql_layer_config_destroy(config);

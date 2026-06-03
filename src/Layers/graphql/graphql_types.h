@@ -12,6 +12,7 @@
 #include "../../RefCounter/refcounter.h"
 #include "../../Util/vec.h"
 #include "../../Database/database.h"
+#include "../../Database/database_subtree.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -258,7 +259,8 @@ typedef struct graphql_layer_config_t {
 
 struct graphql_layer_t {
     refcounter_t refcounter;                // MUST be first member
-    database_t* db;                          // Owned by the layer
+    database_t* db;                          // Owned by the layer (unless subtree is set)
+    database_subtree_t* subtree;             // Non-NULL if using a subtree
     graphql_type_registry_t* registry;       // In-memory type definitions
     work_pool_t* pool;                       // Reuses db's worker pool
     char delimiter;                           // Path delimiter (default '/')

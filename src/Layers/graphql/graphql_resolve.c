@@ -14,6 +14,7 @@
 #include "../../HBTrie/identifier.h"
 #include "../../HBTrie/chunk.h"
 #include "../../Database/database.h"
+#include "../../Database/database_subtree.h"
 #include "../../Database/database_iterator.h"
 #include "../../Database/batch.h"
 #include "../../Workers/pool.h"
@@ -95,6 +96,93 @@ static int db_put_string(database_t* db, const char* path_str, const char* value
 
 // Re-declare from schema.c — these are static there, so we implement local versions
 static char* local_db_get_string(database_t* db, const char* path_str);
+
+// ============================================================
+// Subtree-aware database helpers for resolve module
+// ============================================================
+
+static char* resolve_layer_get_string(graphql_layer_t* layer, const char* path_str) {
+    if (layer->subtree) {
+        path_t* path = path_create();
+        if (path == NULL) return NULL;
+
+        const char* start = path_str;
+        while (*start) {
+            const char* end = strchr(start, '/');
+            size_t len = end ? (size_t)(end - start) : strlen(start);
+            if (len > 0) {
+                buffer_t* buf = buffer_create(len);
+                if (buf == NULL) {
+                    path_destroy(path);
+                    return NULL;
+                }
+                memcpy(buf->data, start, len);
+                buf->size = len;
+                identifier_t* id = identifier_create(buf, 0);
+                buffer_destroy(buf);
+                if (id == NULL) {
+                    path_destroy(path);
+                    return NULL;
+                }
+                path_append(path, id);
+                identifier_destroy(id);
+            }
+            if (end) {
+                start = end + 1;
+            } else {
+                break;
+            }
+        }
+
+        identifier_t* value = NULL;
+        int rc = database_subtree_get_sync(layer->subtree, path, &value);
+        // path is consumed by database_subtree_get_sync
+        if (rc != 0) return NULL;
+
+        buffer_t* val_buf = identifier_to_buffer(value);
+        identifier_destroy(value);
+        if (val_buf == NULL) return NULL;
+
+        char* result = malloc(val_buf->size + 1);
+        if (result == NULL) {
+            buffer_destroy(val_buf);
+            return NULL;
+        }
+        memcpy(result, val_buf->data, val_buf->size);
+        result[val_buf->size] = '\0';
+        buffer_destroy(val_buf);
+        return result;
+    }
+    return local_db_get_string(layer->db, path_str);
+}
+
+static database_iterator_t* resolve_layer_scan_start(graphql_layer_t* layer, path_t* start_path, path_t* end_path) {
+    if (layer->subtree) {
+        return database_subtree_scan_start(layer->subtree, start_path, end_path);
+    }
+    return database_scan_start(layer->db, start_path, end_path);
+}
+
+static int64_t resolve_layer_increment_sync(graphql_layer_t* layer, path_t* path, int64_t delta) {
+    if (layer->subtree) {
+        return database_subtree_increment_sync(layer->subtree, path, delta);
+    }
+    return database_increment_sync(layer->db, path, delta);
+}
+
+static int resolve_layer_write_batch_sync(graphql_layer_t* layer, batch_t* batch) {
+    if (layer->subtree) {
+        return database_subtree_write_batch_sync(layer->subtree, batch);
+    }
+    return database_write_batch_sync(layer->db, batch);
+}
+
+static int resolve_layer_delete_sync(graphql_layer_t* layer, path_t* path) {
+    if (layer->subtree) {
+        return database_subtree_delete_sync(layer->subtree, path);
+    }
+    return database_delete_sync(layer->db, path);
+}
 
 // ============================================================
 // Database helpers (local copies for resolve module)
@@ -254,7 +342,7 @@ static graphql_result_node_t* execute_get(graphql_layer_t* layer,
         buffer_destroy(buf);
     }
 
-    char* value = local_db_get_string(layer->db, path_buf);
+    char* value = resolve_layer_get_string(layer, path_buf);
     if (value == NULL) {
         return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
     }
@@ -300,7 +388,7 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
         return list;
     }
 
-    database_iterator_t* iter = database_scan_start(layer->db, scan_start, NULL);
+    database_iterator_t* iter = resolve_layer_scan_start(layer, scan_start, NULL);
     if (iter == NULL) {
         return list;
     }
@@ -455,7 +543,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                 snprintf(path_buf, sizeof(path_buf), "%s/%s", plural, resolve_name);
             }
 
-            char* value = local_db_get_string(layer->db, path_buf);
+            char* value = resolve_layer_get_string(layer, path_buf);
             if (value == NULL) {
                 return graphql_result_node_create(RESULT_NULL, PLAN_NAME(plan));
             }
@@ -618,7 +706,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
             snprintf(scan_path, sizeof(scan_path), "%s/%s/%s", plural, parent_id, ref_field_name);
 
             // Get the field value(s) — could be a single ID or a list
-            char* ref_value = local_db_get_string(layer->db, scan_path);
+            char* ref_value = resolve_layer_get_string(layer, scan_path);
             if (ref_value != NULL) {
                 // Single reference — resolve it
                 graphql_result_node_t* ref_result = graphql_result_node_create(RESULT_OBJECT, PLAN_NAME(plan));
@@ -674,7 +762,7 @@ static graphql_result_node_t* resolve_field(graphql_layer_t* layer,
                 if (e) { s = e + 1; } else { break; }
             }
 
-            database_iterator_t* iter = database_scan_start(layer->db, field_path, NULL);
+            database_iterator_t* iter = resolve_layer_scan_start(layer, field_path, NULL);
             // field_path consumed by scan_start
 
             if (iter == NULL) {
@@ -1390,7 +1478,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
             path_t* id_path = path_from_string(path_buf);
             int64_t next_id = 1;
             if (id_path != NULL) {
-                int64_t new_id = database_increment_sync(layer->db, id_path, 1);
+                int64_t new_id = resolve_layer_increment_sync(layer, id_path, 1);
                 path_destroy(id_path);
                 if (new_id > 0) {
                     next_id = new_id - 1;  // Use the value BEFORE the increment
@@ -1433,7 +1521,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                 }
 
                 // Execute batch atomically
-                database_write_batch_sync(layer->db, batch);
+                resolve_layer_write_batch_sync(layer, batch);
                 batch_destroy(batch);
 
                 // If the mutation has sub-selections, resolve them on the created entity
@@ -1512,7 +1600,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
 
                     // Execute batch atomically
                     if (batch != NULL) {
-                        database_write_batch_sync(layer->db, batch);
+                        resolve_layer_write_batch_sync(layer, batch);
                         batch_destroy(batch);
                     }
 
@@ -1563,7 +1651,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
 
                 path_t* start = path_from_string(prefix);
                 if (start != NULL) {
-                    database_iterator_t* iter = database_scan_start(layer->db, start, NULL);
+                    database_iterator_t* iter = resolve_layer_scan_start(layer, start, NULL);
                     path_destroy(start);
 
                     if (iter != NULL) {
@@ -1571,7 +1659,7 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
                         identifier_t* out_value = NULL;
                         while (database_scan_next(iter, &out_path, &out_value) == 0) {
                             if (out_path == NULL) break;
-                            database_delete_sync(layer->db, out_path);
+                            resolve_layer_delete_sync(layer, out_path);
                             // out_path consumed by delete
                             if (out_value) identifier_destroy(out_value);
                             out_path = NULL;

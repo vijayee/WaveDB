@@ -12,6 +12,7 @@
 #include "../../HBTrie/identifier.h"
 #include "../../HBTrie/chunk.h"
 #include "../../Database/database.h"
+#include "../../Database/database_subtree.h"
 #include "../../Database/database_iterator.h"
 #include "../../Database/batch.h"
 #include <stdlib.h>
@@ -35,6 +36,158 @@ static int convert_ast_to_types(graphql_layer_t* layer, graphql_ast_node_t* doc)
 static graphql_type_t* convert_type_definition(graphql_ast_node_t* node);
 static graphql_type_t* convert_enum_definition(graphql_ast_node_t* node);
 static int convert_schema_definition(graphql_layer_t* layer, graphql_ast_node_t* node);
+
+// Forward declarations for local db helpers
+static int db_put_string(database_t* db, const char* path_str, const char* value);
+static char* db_get_string(database_t* db, const char* path_str);
+
+// ============================================================
+// Subtree-aware database helpers
+// ============================================================
+
+// Helper: put a string value, routing through subtree if set
+static int layer_put_string(graphql_layer_t* layer, const char* path_str, const char* value) {
+    if (layer->subtree) {
+        // Build path and value, then use subtree put
+        path_t* path = path_create();
+        if (path == NULL) return -1;
+
+        const char* start = path_str;
+        while (*start) {
+            const char* end = strchr(start, '/');
+            size_t len = end ? (size_t)(end - start) : strlen(start);
+            if (len > 0) {
+                buffer_t* buf = buffer_create(len);
+                if (buf == NULL) {
+                    path_destroy(path);
+                    return -1;
+                }
+                memcpy(buf->data, start, len);
+                buf->size = len;
+                identifier_t* id = identifier_create(buf, 0);
+                buffer_destroy(buf);
+                if (id == NULL) {
+                    path_destroy(path);
+                    return -1;
+                }
+                path_append(path, id);
+                identifier_destroy(id);
+            }
+            if (end) {
+                start = end + 1;
+            } else {
+                break;
+            }
+        }
+
+        buffer_t* val_buf = buffer_create(strlen(value));
+        if (val_buf == NULL) {
+            path_destroy(path);
+            return -1;
+        }
+        memcpy(val_buf->data, value, strlen(value));
+        val_buf->size = strlen(value);
+        identifier_t* val_id = identifier_create(val_buf, 0);
+        buffer_destroy(val_buf);
+        if (val_id == NULL) {
+            path_destroy(path);
+            return -1;
+        }
+
+        int rc = database_subtree_put_sync(layer->subtree, path, val_id);
+        return rc;
+    }
+    return db_put_string(layer->db, path_str, value);
+}
+
+// Helper: get a string value, routing through subtree if set
+static char* layer_get_string(graphql_layer_t* layer, const char* path_str) {
+    if (layer->subtree) {
+        path_t* path = path_create();
+        if (path == NULL) return NULL;
+
+        const char* start = path_str;
+        while (*start) {
+            const char* end = strchr(start, '/');
+            size_t len = end ? (size_t)(end - start) : strlen(start);
+            if (len > 0) {
+                buffer_t* buf = buffer_create(len);
+                if (buf == NULL) {
+                    path_destroy(path);
+                    return NULL;
+                }
+                memcpy(buf->data, start, len);
+                buf->size = len;
+                identifier_t* id = identifier_create(buf, 0);
+                buffer_destroy(buf);
+                if (id == NULL) {
+                    path_destroy(path);
+                    return NULL;
+                }
+                path_append(path, id);
+                identifier_destroy(id);
+            }
+            if (end) {
+                start = end + 1;
+            } else {
+                break;
+            }
+        }
+
+        identifier_t* value = NULL;
+        int rc = database_subtree_get_sync(layer->subtree, path, &value);
+        // path is consumed by get_sync, do not destroy it
+        if (rc != 0) return NULL;
+
+        buffer_t* val_buf = identifier_to_buffer(value);
+        identifier_destroy(value);
+        if (val_buf == NULL) return NULL;
+
+        char* result = malloc(val_buf->size + 1);
+        if (result == NULL) {
+            buffer_destroy(val_buf);
+            return NULL;
+        }
+        memcpy(result, val_buf->data, val_buf->size);
+        result[val_buf->size] = '\0';
+        buffer_destroy(val_buf);
+        return result;
+    }
+    return db_get_string(layer->db, path_str);
+}
+
+// Helper: scan start, routing through subtree if set
+static database_iterator_t* layer_scan_start(graphql_layer_t* layer, path_t* start_path, path_t* end_path) {
+    if (layer->subtree) {
+        return database_subtree_scan_start(layer->subtree, start_path, end_path);
+    }
+    return database_scan_start(layer->db, start_path, end_path);
+}
+
+// Helper: increment, routing through subtree if set
+static int64_t layer_increment_sync(graphql_layer_t* layer, path_t* path, int64_t delta) {
+    if (layer->subtree) {
+        return database_subtree_increment_sync(layer->subtree, path, delta);
+    }
+    return database_increment_sync(layer->db, path, delta);
+}
+
+// Helper: write batch, routing through subtree if set
+static int layer_write_batch_sync(graphql_layer_t* layer, batch_t* batch) {
+    if (layer->subtree) {
+        return database_subtree_write_batch_sync(layer->subtree, batch);
+    }
+    return database_write_batch_sync(layer->db, batch);
+}
+
+// Helper: delete, routing through subtree if set
+static int layer_delete_sync(graphql_layer_t* layer, path_t* path) {
+    if (layer->subtree) {
+        return database_subtree_delete_sync(layer->subtree, path);
+    }
+    return database_delete_sync(layer->db, path);
+}
+
 // Helper: resolve the base type name from a type reference
 // For named types, returns the name directly
 // For LIST/NON_NULL wrappers, unwraps to find the inner named type
@@ -231,132 +384,211 @@ static char* make_plural(const char* name) {
 // ============================================================
 
 graphql_layer_t* graphql_layer_create(const char* path,
-                                       const graphql_layer_config_t* config) {
+                                       const graphql_layer_config_t* config,
+                                       database_subtree_t* subtree,
+                                       int* error_code) {
     // Create config with defaults if not provided
     graphql_layer_config_t* cfg = config ? NULL : graphql_layer_config_default();
-    if (config == NULL && cfg == NULL) return NULL;
+    if (config == NULL && cfg == NULL) {
+        if (error_code) *error_code = -1;
+        return NULL;
+    }
 
     const graphql_layer_config_t* active_config = config ? config : cfg;
-
-    // Database requires a path — if NULL, create a temp directory
-    char* db_path = NULL;
-    bool owns_path = false;
-    if (path != NULL) {
-        db_path = (char*)path;
-    } else {
-        // Generate a temp directory for in-memory mode
-        db_path = malloc(GRAPHQL_BUF_SIZE);
-        if (db_path == NULL) {
-            graphql_layer_config_destroy(cfg);
-            return NULL;
-        }
-        const char* tmpdir = getenv("TMPDIR");
-#if _WIN32
-        if (tmpdir == NULL) tmpdir = getenv("TEMP");
-        if (tmpdir == NULL) tmpdir = ".";
-#else
-        if (tmpdir == NULL) tmpdir = "/tmp";
-#endif
-        snprintf(db_path, GRAPHQL_BUF_SIZE, "%s/wavedb_graphql_XXXXXX", tmpdir);
-#if _WIN32
-        // Windows doesn't have mkdtemp; use _mktemp + _mkdir
-        if (_mktemp(db_path) == NULL || _mkdir(db_path) != 0) {
-#else
-        if (mkdtemp(db_path) == NULL) {
-#endif
-            free(db_path);
-            graphql_layer_config_destroy(cfg);
-            return NULL;
-        }
-        owns_path = true;
-    }
-
-    // Create database configuration
-    database_config_t* db_config = database_config_default();
-    if (db_config == NULL) {
-        if (owns_path) free(db_path);
-        graphql_layer_config_destroy(cfg);
-        return NULL;
-    }
-
-    db_config->chunk_size = active_config->chunk_size;
-    db_config->btree_node_size = active_config->btree_node_size;
-    db_config->lru_memory_mb = active_config->lru_memory_mb;
-    db_config->lru_shards = active_config->lru_shards;
-    db_config->worker_threads = active_config->worker_threads;
-    db_config->enable_persist = active_config->enable_persist;
-    // WAL config is copied separately if needed
-
-    // Create the database
-    int error_code = 0;
-    database_t* db = database_create_with_config(db_path, db_config, &error_code);
-    database_config_destroy(db_config);
-
-    if (db == NULL) {
-        if (owns_path) {
-            // Clean up temp directory
-            rmdir(db_path);
-            free(db_path);
-        }
-        graphql_layer_config_destroy(cfg);
-        return NULL;
-    }
 
     // Create the layer
     graphql_layer_t* layer = get_clear_memory(sizeof(graphql_layer_t));
     if (layer == NULL) {
-        database_destroy(db);
-        if (owns_path) { rmdir(db_path); free(db_path); }
-        else { free(db_path); }
         graphql_layer_config_destroy(cfg);
+        if (error_code) *error_code = -1;
         return NULL;
     }
 
     refcounter_init((refcounter_t*)layer);
-    layer->db = db;
-    layer->registry = graphql_type_registry_create();
-    layer->pool = db->pool;
     layer->delimiter = active_config->delimiter ? active_config->delimiter : '/';
     layer->version = strdup(GRAPHQL_LAYER_VERSION);
-    layer->db_path = owns_path ? db_path : (path ? strdup(path) : NULL);
-    layer->owns_db_path = owns_path;
+    layer->registry = graphql_type_registry_create();
 
     if (layer->registry == NULL || layer->version == NULL) {
         if (layer->registry) graphql_type_registry_destroy(layer->registry);
         free(layer->version);
-        free(layer->db_path);
-        database_destroy(db);
         free(layer);
         graphql_layer_config_destroy(cfg);
+        if (error_code) *error_code = -1;
         return NULL;
     }
 
-    // Check if this is a new database or an existing one
-    char* existing_layer = db_get_string(db, "__meta/layer");
-    if (existing_layer != NULL) {
-        // Existing database - validate and load schema
-        char* existing_version = db_get_string(db, "__meta/version");
-        if (existing_version != NULL) {
-            // Version compatibility check
-            if (strcmp(existing_version, GRAPHQL_LAYER_VERSION) != 0) {
-                log_warn("GraphQL layer version mismatch: stored=%s, current=%s",
-                         existing_version, GRAPHQL_LAYER_VERSION);
+    if (subtree != NULL) {
+        // Subtree mode: use the subtree's database and pool
+        layer->db = database_subtree_get_db(subtree);
+        layer->subtree = subtree;
+        layer->pool = database_subtree_get_pool(subtree);
+        layer->db_path = NULL;
+        layer->owns_db_path = false;
+
+        // Check for layer type mismatch in the subtree
+        char* existing_layer = layer_get_string(layer, "__meta/layer");
+        if (existing_layer != NULL) {
+            if (strcmp(existing_layer, "graphql") != 0) {
+                free(existing_layer);
+                // Layer type mismatch — don't destroy the subtree or its db
+                layer->db = NULL;
+                layer->subtree = NULL;
+                layer->pool = NULL;
+                graphql_type_registry_destroy(layer->registry);
+                free(layer->version);
+                free(layer);
+                graphql_layer_config_destroy(cfg);
+                if (error_code) *error_code = -3;
+                return NULL;
             }
-            free(existing_version);
+            free(existing_layer);
+
+            // Existing subtree data — load schema
+            char* existing_version = layer_get_string(layer, "__meta/version");
+            if (existing_version != NULL) {
+                if (strcmp(existing_version, GRAPHQL_LAYER_VERSION) != 0) {
+                    log_warn("GraphQL layer version mismatch: stored=%s, current=%s",
+                             existing_version, GRAPHQL_LAYER_VERSION);
+                }
+                free(existing_version);
+            }
+            graphql_schema_load(layer);
+        } else {
+            // New subtree namespace - write metadata
+            layer_put_string(layer, "__meta/layer", "graphql");
+            layer_put_string(layer, "__meta/version", GRAPHQL_LAYER_VERSION);
+            time_t now = time(NULL);
+            char ts_buf[64];
+            snprintf(ts_buf, sizeof(ts_buf), "%ld", (long)now);
+            layer_put_string(layer, "__meta/created", ts_buf);
         }
-        free(existing_layer);
-        graphql_schema_load(layer);
     } else {
-        // New database - write metadata
-        db_put_string(db, "__meta/layer", "graphql");
-        db_put_string(db, "__meta/version", GRAPHQL_LAYER_VERSION);
-        // Write creation timestamp
-        time_t now = time(NULL);
-        char ts_buf[64];
-        snprintf(ts_buf, sizeof(ts_buf), "%ld", (long)now);
-        db_put_string(db, "__meta/created", ts_buf);
+        // Own-database mode: create the database as before
+        char* db_path = NULL;
+        bool owns_path = false;
+        if (path != NULL) {
+            db_path = (char*)path;
+        } else {
+            // Generate a temp directory for in-memory mode
+            db_path = malloc(GRAPHQL_BUF_SIZE);
+            if (db_path == NULL) {
+                graphql_type_registry_destroy(layer->registry);
+                free(layer->version);
+                free(layer);
+                graphql_layer_config_destroy(cfg);
+                if (error_code) *error_code = -1;
+                return NULL;
+            }
+            const char* tmpdir = getenv("TMPDIR");
+#if _WIN32
+            if (tmpdir == NULL) tmpdir = getenv("TEMP");
+            if (tmpdir == NULL) tmpdir = ".";
+#else
+            if (tmpdir == NULL) tmpdir = "/tmp";
+#endif
+            snprintf(db_path, GRAPHQL_BUF_SIZE, "%s/wavedb_graphql_XXXXXX", tmpdir);
+#if _WIN32
+            if (_mktemp(db_path) == NULL || _mkdir(db_path) != 0) {
+#else
+            if (mkdtemp(db_path) == NULL) {
+#endif
+                free(db_path);
+                graphql_type_registry_destroy(layer->registry);
+                free(layer->version);
+                free(layer);
+                graphql_layer_config_destroy(cfg);
+                if (error_code) *error_code = -1;
+                return NULL;
+            }
+            owns_path = true;
+        }
+
+        // Create database configuration
+        database_config_t* db_config = database_config_default();
+        if (db_config == NULL) {
+            if (owns_path) free(db_path);
+            graphql_type_registry_destroy(layer->registry);
+            free(layer->version);
+            free(layer);
+            graphql_layer_config_destroy(cfg);
+            if (error_code) *error_code = -1;
+            return NULL;
+        }
+
+        db_config->chunk_size = active_config->chunk_size;
+        db_config->btree_node_size = active_config->btree_node_size;
+        db_config->lru_memory_mb = active_config->lru_memory_mb;
+        db_config->lru_shards = active_config->lru_shards;
+        db_config->worker_threads = active_config->worker_threads;
+        db_config->enable_persist = active_config->enable_persist;
+
+        // Create the database
+        int db_error = 0;
+        database_t* db = database_create_with_config(db_path, db_config, &db_error);
+        database_config_destroy(db_config);
+
+        if (db == NULL) {
+            if (owns_path) {
+                rmdir(db_path);
+                free(db_path);
+            }
+            graphql_type_registry_destroy(layer->registry);
+            free(layer->version);
+            free(layer);
+            graphql_layer_config_destroy(cfg);
+            if (error_code) *error_code = db_error ? db_error : -1;
+            return NULL;
+        }
+
+        layer->db = db;
+        layer->subtree = NULL;
+        layer->pool = db->pool;
+        layer->db_path = owns_path ? db_path : (path ? strdup(path) : NULL);
+        layer->owns_db_path = owns_path;
+
+        // Check for layer type mismatch
+        char* existing_layer = db_get_string(db, "__meta/layer");
+        if (existing_layer != NULL) {
+            if (strcmp(existing_layer, "graphql") != 0) {
+                free(existing_layer);
+                // Layer type mismatch — destroy the database we just created
+                database_destroy(db);
+                if (layer->db_path) {
+                    if (layer->owns_db_path) rmdir(layer->db_path);
+                    free(layer->db_path);
+                }
+                graphql_type_registry_destroy(layer->registry);
+                free(layer->version);
+                free(layer);
+                graphql_layer_config_destroy(cfg);
+                if (error_code) *error_code = -3;
+                return NULL;
+            }
+
+            // Existing database - validate and load schema
+            char* existing_version = db_get_string(db, "__meta/version");
+            if (existing_version != NULL) {
+                if (strcmp(existing_version, GRAPHQL_LAYER_VERSION) != 0) {
+                    log_warn("GraphQL layer version mismatch: stored=%s, current=%s",
+                             existing_version, GRAPHQL_LAYER_VERSION);
+                }
+                free(existing_version);
+            }
+            free(existing_layer);
+            graphql_schema_load(layer);
+        } else {
+            // New database - write metadata
+            db_put_string(db, "__meta/layer", "graphql");
+            db_put_string(db, "__meta/version", GRAPHQL_LAYER_VERSION);
+            time_t now = time(NULL);
+            char ts_buf[64];
+            snprintf(ts_buf, sizeof(ts_buf), "%ld", (long)now);
+            db_put_string(db, "__meta/created", ts_buf);
+        }
     }
 
+    if (error_code) *error_code = 0;
     graphql_layer_config_destroy(cfg);
     return layer;
 }
@@ -366,7 +598,13 @@ void graphql_layer_destroy(graphql_layer_t* layer) {
     refcounter_dereference((refcounter_t*)layer);
     if (refcounter_count((refcounter_t*)layer) == 0) {
         if (layer->registry) graphql_type_registry_destroy(layer->registry);
-        if (layer->db) database_destroy(layer->db);
+        // Close subtree if we were using one (does NOT destroy the underlying db)
+        if (layer->subtree) {
+            database_subtree_close(layer->subtree);
+        } else {
+            // Only destroy the db if we own it (no subtree)
+            if (layer->db) database_destroy(layer->db);
+        }
         if (layer->db_path) {
             if (layer->owns_db_path) {
                 // Clean up auto-generated temp directory
@@ -422,7 +660,7 @@ graphql_type_t* graphql_schema_get_type(graphql_layer_t* layer, const char* name
 // ============================================================
 
 int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
-    if (layer == NULL || type == NULL || layer->db == NULL) return -1;
+    if (layer == NULL || type == NULL || (layer->db == NULL && layer->subtree == NULL)) return -1;
 
     const char* plural = graphql_type_get_plural(type);
     char path_buf[512];
@@ -432,11 +670,11 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
     const char* kind_str = "object";
     if (type->kind == GRAPHQL_TYPE_SCALAR) kind_str = "scalar";
     else if (type->kind == GRAPHQL_TYPE_ENUM) kind_str = "enum";
-    if (db_put_string(layer->db, path_buf, kind_str) != 0) return -1;
+    if (layer_put_string(layer, path_buf, kind_str) != 0) return -1;
 
     // Register in global type registry
     snprintf(path_buf, sizeof(path_buf), "__schema/types/%s", type->name);
-    if (db_put_string(layer->db, path_buf, type->name) != 0) return -1;
+    if (layer_put_string(layer, path_buf, type->name) != 0) return -1;
 
     // Store fields
     for (int i = 0; i < type->fields.length; i++) {
@@ -445,16 +683,16 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
         // Store field type - resolve the base type name (unwrap LIST/NON_NULL)
         snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/type", plural, field->name);
         const char* field_type = resolve_base_type_name(field->type);
-        if (db_put_string(layer->db, path_buf, field_type ? field_type : "Unknown") != 0) return -1;
+        if (layer_put_string(layer, path_buf, field_type ? field_type : "Unknown") != 0) return -1;
 
         // Store field required
         snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/required", plural, field->name);
-        if (db_put_string(layer->db, path_buf, field->is_required ? "true" : "false") != 0) return -1;
+        if (layer_put_string(layer, path_buf, field->is_required ? "true" : "false") != 0) return -1;
 
         // Store field list flag
         if (is_list_type(field->type)) {
             snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/is_list", plural, field->name);
-            if (db_put_string(layer->db, path_buf, "true") != 0) return -1;
+            if (layer_put_string(layer, path_buf, "true") != 0) return -1;
         }
 
         // Store field directives
@@ -462,7 +700,7 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
             graphql_directive_t* dir = field->directives.data[j];
             snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/directive/%s", plural, field->name, dir->name);
             // Store directive as a simple presence marker for now
-            if (db_put_string(layer->db, path_buf, "true") != 0) return -1;
+            if (layer_put_string(layer, path_buf, "true") != 0) return -1;
         }
 
         // Store default value if present (type-prefixed: s:hello, i:42, b:true, n:null, f:3.14, e:ENUMVAL)
@@ -505,7 +743,7 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
             }
             if (val_buf[0] != '\0') {
                 snprintf(path_buf, sizeof(path_buf), "%s/__schema/fields/%s/default_value", plural, field->name);
-                if (db_put_string(layer->db, path_buf, val_buf) != 0) return -1;
+                if (layer_put_string(layer, path_buf, val_buf) != 0) return -1;
             }
         }
     }
@@ -513,19 +751,19 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
     // Store enum values
     for (int i = 0; i < type->enum_values.length; i++) {
         snprintf(path_buf, sizeof(path_buf), "%s/__schema/enum/%s", plural, type->enum_values.data[i]);
-        if (db_put_string(layer->db, path_buf, type->enum_values.data[i]) != 0) return -1;
+        if (layer_put_string(layer, path_buf, type->enum_values.data[i]) != 0) return -1;
     }
 
     // Store custom plural name if set
     if (type->plural_name != NULL) {
         snprintf(path_buf, sizeof(path_buf), "%s/__schema/plural", plural);
-        if (db_put_string(layer->db, path_buf, type->plural_name) != 0) return -1;
+        if (layer_put_string(layer, path_buf, type->plural_name) != 0) return -1;
     }
 
     // Store next_id for object types
     if (type->kind == GRAPHQL_TYPE_OBJECT) {
         snprintf(path_buf, sizeof(path_buf), "%s/__meta/next_id", plural);
-        if (db_put_string(layer->db, path_buf, "1") != 0) return -1;
+        if (layer_put_string(layer, path_buf, "1") != 0) return -1;
     }
 
     return 0;
@@ -536,7 +774,7 @@ int graphql_schema_store_type(graphql_layer_t* layer, graphql_type_t* type) {
 // ============================================================
 
 int graphql_schema_load(graphql_layer_t* layer) {
-    if (layer == NULL || layer->db == NULL || layer->registry == NULL) return -1;
+    if (layer == NULL || (layer->db == NULL && layer->subtree == NULL) || layer->registry == NULL) return -1;
 
     // Scan __schema/types/* to find all type names
     path_t* start_path = path_create();
@@ -560,7 +798,7 @@ int graphql_schema_load(graphql_layer_t* layer) {
     buffer_destroy(buf2);
 
     // Iterate over all types
-    database_iterator_t* iter = database_scan_start(layer->db, start_path, NULL);
+    database_iterator_t* iter = layer_scan_start(layer, start_path, NULL);
     path_destroy(start_path);
 
     if (iter == NULL) return -1;
@@ -603,31 +841,31 @@ int graphql_schema_load(graphql_layer_t* layer) {
     database_scan_end(iter);
 
     // Load query and mutation type names — layer takes ownership
-    layer->query_type = db_get_string(layer->db, "__schema/query_type");
-    layer->mutation_type = db_get_string(layer->db, "__schema/mutation_type");
+    layer->query_type = layer_get_string(layer, "__schema/query_type");
+    layer->mutation_type = layer_get_string(layer, "__schema/mutation_type");
 
     return 0;
 }
 
 // Load a single type from its __schema paths
 static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const char* type_name) {
-    if (layer == NULL || layer->db == NULL || type_name == NULL) return NULL;
+    if (layer == NULL || (layer->db == NULL && layer->subtree == NULL) || type_name == NULL) return NULL;
 
     // Get plural name - first try to get custom plural, then default
     char path_buf[512];
     snprintf(path_buf, sizeof(path_buf), "%s/__schema/plural", type_name);
-    char* plural_name = db_get_string(layer->db, path_buf);
+    char* plural_name = layer_get_string(layer, path_buf);
     const char* plural = plural_name ? plural_name : make_plural(type_name);
 
     // Check if there's a type at plural/__schema/type
     // (schema data is stored using the plural form as the path prefix)
     snprintf(path_buf, sizeof(path_buf), "%s/__schema/type", plural);
-    char* kind_str = db_get_string(layer->db, path_buf);
+    char* kind_str = layer_get_string(layer, path_buf);
 
     // If not found, try using type_name directly (backward compat)
     if (kind_str == NULL) {
         snprintf(path_buf, sizeof(path_buf), "%s/__schema/type", type_name);
-        kind_str = db_get_string(layer->db, path_buf);
+        kind_str = layer_get_string(layer, path_buf);
     }
 
     // If still not found, unknown type
@@ -674,7 +912,7 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
             if (e) { s = e + 1; } else { break; }
         }
 
-        database_iterator_t* iter = database_scan_start(layer->db, fields_start, NULL);
+        database_iterator_t* iter = layer_scan_start(layer, fields_start, NULL);
         // fields_start consumed by scan_start
 
         if (iter != NULL) {
@@ -715,16 +953,16 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                     // Load field type
                                     char field_path[512];
                                     snprintf(field_path, sizeof(field_path), "%s/__schema/fields/%s/type", plural, fname);
-                                    char* field_type_str = db_get_string(layer->db, field_path);
+                                    char* field_type_str = layer_get_string(layer, field_path);
 
                                     // Load field required
                                     snprintf(field_path, sizeof(field_path), "%s/__schema/fields/%s/required", plural, fname);
-                                    char* required_str = db_get_string(layer->db, field_path);
+                                    char* required_str = layer_get_string(layer, field_path);
                                     bool is_required = (required_str != NULL && strcmp(required_str, "true") == 0);
 
                                     // Load field is_list
                                     snprintf(field_path, sizeof(field_path), "%s/__schema/fields/%s/is_list", plural, fname);
-                                    char* is_list_str = db_get_string(layer->db, field_path);
+                                    char* is_list_str = layer_get_string(layer, field_path);
                                     bool is_list = (is_list_str != NULL && strcmp(is_list_str, "true") == 0);
 
                                     // Build type reference
@@ -782,7 +1020,7 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                                     if (field != NULL) {
                                         // Load default value if present
                                         snprintf(field_path, sizeof(field_path), "%s/__schema/fields/%s/default_value", plural, fname);
-                                        char* default_val_str = db_get_string(layer->db, field_path);
+                                        char* default_val_str = layer_get_string(layer, field_path);
                                         if (default_val_str != NULL) {
                                             field->default_value = parse_default_value(default_val_str);
                                             free(default_val_str);
@@ -842,7 +1080,7 @@ static graphql_type_t* load_type_from_database(graphql_layer_t* layer, const cha
                 if (e) { s = e + 1; } else { break; }
             }
 
-            database_iterator_t* iter = database_scan_start(layer->db, enum_start, NULL);
+            database_iterator_t* iter = layer_scan_start(layer, enum_start, NULL);
             // enum_start consumed by scan_start
 
             if (iter != NULL) {
@@ -1166,9 +1404,9 @@ static int convert_schema_definition(graphql_layer_t* layer, graphql_ast_node_t*
         if (field->name == NULL) continue;
 
         if (strcmp(field->name, "query") == 0 && field->type_ref && field->type_ref->name) {
-            db_put_string(layer->db, "__schema/query_type", field->type_ref->name);
+            layer_put_string(layer, "__schema/query_type", field->type_ref->name);
         } else if (strcmp(field->name, "mutation") == 0 && field->type_ref && field->type_ref->name) {
-            db_put_string(layer->db, "__schema/mutation_type", field->type_ref->name);
+            layer_put_string(layer, "__schema/mutation_type", field->type_ref->name);
         }
     }
 

@@ -7,6 +7,7 @@
 #define WAVEDB_GRAPHQL_SCHEMA_H
 
 #include "graphql_types.h"
+#include "../../Database/database_subtree.h"
 
 #ifdef __cplusplus
 extern "C" {

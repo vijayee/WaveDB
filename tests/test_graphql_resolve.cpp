@@ -41,7 +41,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Register schema
@@ -360,7 +360,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Schema with required fields: name is required, age and email are optional
@@ -480,7 +480,7 @@ TEST_F(GraphQLRequiredFieldTest, MultipleMissingRequiredFields) {
     config2->path = test_dir2;
     config2->enable_persist = 1;
 
-    graphql_layer_t* layer2 = graphql_layer_create(test_dir2, config2);
+    graphql_layer_t* layer2 = graphql_layer_create(test_dir2, config2, nullptr, nullptr);
     ASSERT_NE(layer2, nullptr);
 
     const char* sdl = "type Account { name: String! email: String! age: Int }";
@@ -541,7 +541,7 @@ protected:
         config->enable_persist = 1;
         config->worker_threads = 2;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Launch worker pool threads for async execution
@@ -712,7 +712,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int email: String }";
@@ -805,7 +805,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int }";
@@ -1030,7 +1030,7 @@ protected:
         config->path = test_dir;
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config);
+        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Schema with Int, Float, Boolean, String, ID fields
