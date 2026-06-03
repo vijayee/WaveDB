@@ -422,7 +422,7 @@ static void test_on_resolve(void* ctx, void* payload) {
     test_async_result_t* r = (test_async_result_t*)ctx;
     r->status = 0;
     r->completed = 1;
-    (void)payload;
+    free(payload);
 }
 
 static void test_on_resolve_get(void* ctx, void* payload) {
