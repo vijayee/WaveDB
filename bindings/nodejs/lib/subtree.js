@@ -152,6 +152,16 @@ class Subtree {
   }
 
   /**
+   * Get the native subtree pointer as a BigInt for cross-addon use.
+   * Used to pass a subtree reference to GraphLayer or GraphQLLayer.
+   * @returns {bigint} Native pointer as BigInt
+   */
+  _getPtr() {
+    if (this._closed) throw new IOError('Subtree is closed');
+    return this._st._getPtr();
+  }
+
+  /**
    * Close the subtree and release resources.
    * Does NOT close or destroy the underlying database.
    */

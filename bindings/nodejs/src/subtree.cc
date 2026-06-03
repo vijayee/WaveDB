@@ -83,7 +83,7 @@ Subtree::~Subtree() {
 // --- Cross-addon pointer accessor ---
 
 Napi::Value Subtree::GetPtr(const Napi::CallbackInfo& info) {
-  return Napi::Number::New(info.Env(), reinterpret_cast<uintptr_t>(st_));
+  return Napi::BigInt::New(info.Env(), reinterpret_cast<uint64_t>(st_));
 }
 
 // --- Helper: create AsyncOpContext with JS Promise ---
@@ -339,8 +339,8 @@ Napi::Value Subtree::ScanSyncRaw(const Napi::CallbackInfo& info) {
       }
       bool key_printable = true;
       for (size_t j = 0; j < key_len; j++) {
-        if (!isprint(results[i].key[j]) && results[i].key[j] != '\t' &&
-            results[i].key[j] != '\n' && results[i].key[j] != '\r') {
+        unsigned char c = static_cast<unsigned char>(results[i].key[j]);
+        if (!isprint(c) && c != '\t' && c != '\n' && c != '\r') {
           key_printable = false;
           break;
         }

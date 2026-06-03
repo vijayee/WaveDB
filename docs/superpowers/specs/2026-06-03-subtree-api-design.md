@@ -48,7 +48,7 @@ void database_subtree_close(database_subtree_t* subtree);
 // Scans for all keys starting with "prefix{delimiter}" and removes them.
 // Can be called without an open subtree handle (operates on database directly).
 // Returns 0 on success, non-zero on error.
-int database_subtree_delete(database_t* db, const char* prefix, char delimiter);
+int database_subtree_delete_prefix(database_t* db, const char* prefix, char delimiter);
 ```
 
 `database_subtree_open` handles both create and reopen, similar to how `database_create_with_config` handles both cases. On reopen, the layer's schema data (`__meta/layer`, `__gschema/types`) is already under the prefix, so the layer's existing load logic works unchanged.
@@ -243,7 +243,7 @@ graphql_layer_t* gql = graphql_layer_create(NULL, &gql_config, gql_subtree, &gql
 // graphql_schema_load works unchanged — sees __meta/layer at its own root
 
 // Delete a layer's data:
-database_subtree_delete(db, "layer/graphql", '/');
+database_subtree_delete_prefix(db, "layer/graphql", '/');
 
 // Business as usual — no subtree, layer creates its own database
 // Schema collision detection protects against overwriting a different layer's data
@@ -374,7 +374,7 @@ The Node.js and Dart bindings must be updated to expose the subtree config and n
 | `graph_layer_create` gains optional `database_subtree_t* subtree` and `int* error_code` params | New optional parameters |
 | `database_subtree_open(db, prefix, delimiter)` | New function |
 | `database_subtree_close(subtree)` | New function |
-| `database_subtree_delete(db, prefix, delimiter)` | New function |
+| `database_subtree_delete_prefix(db, prefix, delimiter)` | New function |
 
 #### Node.js Binding Updates
 

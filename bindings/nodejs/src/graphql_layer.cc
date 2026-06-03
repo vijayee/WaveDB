@@ -97,13 +97,16 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
     }
   }
 
-  // Extract subtree pointer if provided (cross-addon via number)
+  // Extract subtree pointer if provided (cross-addon via BigInt)
   database_subtree_t* subtree_ptr = nullptr;
   if (info.Length() > 1 && info[1].IsObject()) {
     Napi::Object options = info[1].As<Napi::Object>();
     if (options.Has("_subtreePtr")) {
-      double ptrVal = options.Get("_subtreePtr").As<Napi::Number>().DoubleValue();
-      subtree_ptr = reinterpret_cast<database_subtree_t*>(static_cast<uintptr_t>(ptrVal));
+      bool lossless = false;
+      int64_t ptrVal = options.Get("_subtreePtr").As<Napi::BigInt>().Int64Value(&lossless);
+      if (lossless) {
+        subtree_ptr = reinterpret_cast<database_subtree_t*>(static_cast<uintptr_t>(ptrVal));
+      }
     }
   }
 

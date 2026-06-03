@@ -10,7 +10,9 @@
 #include <io.h>
 #include <direct.h>
 #include <process.h>
+#include <windows.h>
 #define getpid() _getpid()
+#define usleep(us) Sleep((us) / 1000 ? (us) / 1000 : 1)
 #else
 #include <unistd.h>
 #endif
@@ -74,9 +76,9 @@ static database_t* create_test_db(char* tmpdir, size_t bufsize, const char* pref
 static void cleanup_tmpdir(const char* tmpdir) {
     char cmd[512];
 #if _WIN32
-    snprintf(cmd, sizeof(cmd), "rmdir /s /q %s", tmpdir);
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", tmpdir);
 #else
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", tmpdir);
+    snprintf(cmd, sizeof(cmd), "rm -rf \"%s\"", tmpdir);
 #endif
     system(cmd);
 }
