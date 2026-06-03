@@ -21,6 +21,10 @@
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
+#include "Workers/promise.h"
+#include "Workers/error.h"
+#include "Workers/pool.h"
+#include "Time/wheel.h"
 
 static int failures = 0;
 
@@ -403,6 +407,365 @@ static void test_subtree_isolation(void) {
     printf("=== test_subtree_isolation DONE ===\n");
 }
 
+/* ---- Async test helpers ---- */
+
+typedef struct {
+    volatile int completed;
+    int status;
+    identifier_t* result;
+    uint8_t* raw_result;
+    size_t raw_result_len;
+} test_async_result_t;
+
+static void test_on_resolve(void* ctx, void* payload) {
+    test_async_result_t* r = (test_async_result_t*)ctx;
+    r->status = 0;
+    r->completed = 1;
+    (void)payload;
+}
+
+static void test_on_resolve_get(void* ctx, void* payload) {
+    test_async_result_t* r = (test_async_result_t*)ctx;
+    if (payload != NULL) {
+        identifier_t* id = (identifier_t*)payload;
+        REFERENCE(id, identifier_t);
+        r->result = id;
+        r->status = 0;
+    } else {
+        r->status = -2;
+        r->result = NULL;
+    }
+    r->completed = 1;
+}
+
+static void test_on_reject(void* ctx, async_error_t* error) {
+    test_async_result_t* r = (test_async_result_t*)ctx;
+    r->status = -1;
+    r->completed = 1;
+    error_destroy(error);
+}
+
+/* ---- Helper: create a database with worker pool for async tests ---- */
+
+static database_t* create_async_db(char* tmpdir, size_t bufsize, const char* prefix) {
+    make_tmpdir(tmpdir, bufsize, prefix);
+
+    database_config_t* config = database_config_default();
+    config->enable_persist = 1;
+    config->sync_only = 0;
+    config->worker_threads = 1;
+    config->timer_resolution_ms = 100;
+    config->chunk_size = 4;
+    config->btree_node_size = 4096;
+
+    int error = 0;
+    database_t* db = database_create_with_config(tmpdir, config, &error);
+    database_config_destroy(config);
+    return db;
+}
+
+/* ---- Test 7: Path-based async CRUD ---- */
+
+static void test_subtree_async_crud(void) {
+    printf("\n=== test_subtree_async_crud ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_async_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_async");
+    ASSERT(db != NULL, "Create async database");
+    ASSERT(db->sync_only == 0, "Database is not sync_only");
+
+    database_subtree_t* st = database_subtree_open(db, "async_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'async_ns'");
+
+    /* --- Async put --- */
+    {
+        path_t* put_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+        ASSERT(put_path != NULL, "Create async put path");
+
+        identifier_t* put_value = identifier_create_from_raw((const uint8_t*)"AsyncAlice", strlen("AsyncAlice"), 4);
+        ASSERT(put_value != NULL, "Create async put value");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create put promise");
+
+        database_subtree_put(st, put_path, put_value, promise);
+
+        /* Wait for completion */
+        int max_wait = 10000;  /* 10 seconds in ms */
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async put completed");
+        ASSERT(result.status == 0, "Async put succeeded");
+
+        promise_destroy(promise);
+    }
+
+    /* --- Async get --- */
+    {
+        path_t* get_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+        ASSERT(get_path != NULL, "Create async get path");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve_get, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create get promise");
+
+        database_subtree_get(st, get_path, promise);
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async get completed");
+        ASSERT(result.status == 0, "Async get succeeded");
+        ASSERT(result.result != NULL, "Async get returned non-NULL result");
+
+        if (result.result != NULL) {
+            buffer_t* buf = identifier_to_buffer(result.result);
+            if (buf != NULL) {
+                ASSERT(memcmp(buf->data, "AsyncAlice", buf->size) == 0,
+                       "Async get value matches 'AsyncAlice'");
+                buffer_destroy(buf);
+            }
+            identifier_destroy(result.result);
+        }
+
+        promise_destroy(promise);
+    }
+
+    /* --- Async delete --- */
+    {
+        path_t* del_path = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+        ASSERT(del_path != NULL, "Create async delete path");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create delete promise");
+
+        database_subtree_delete(st, del_path, promise);
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async delete completed");
+        ASSERT(result.status == 0, "Async delete succeeded");
+
+        promise_destroy(promise);
+    }
+
+    /* --- Verify deletion with async get --- */
+    {
+        path_t* get_path2 = path_create_from_raw("Users/1/name", strlen("Users/1/name"), '/', 4);
+        ASSERT(get_path2 != NULL, "Create second async get path");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve_get, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create second get promise");
+
+        database_subtree_get(st, get_path2, promise);
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async get after delete completed");
+        ASSERT(result.result == NULL, "Async get after delete returns NULL");
+
+        promise_destroy(promise);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_async_crud DONE ===\n");
+}
+
+/* ---- Test 8: Raw async CRUD ---- */
+
+static void test_subtree_async_crud_raw(void) {
+    printf("\n=== test_subtree_async_crud_raw ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_async_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_async_raw");
+    ASSERT(db != NULL, "Create async database for raw test");
+
+    database_subtree_t* st = database_subtree_open(db, "raw_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'raw_ns'");
+
+    /* --- Async raw put --- */
+    {
+        const uint8_t* val = (const uint8_t*)"hello_async";
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create raw put promise");
+
+        int rc = database_subtree_put_raw(st, "key1", strlen("key1"), '/',
+                                           val, strlen("hello_async"), promise);
+        ASSERT(rc == 0, "Async raw put returns 0");
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async raw put completed");
+        ASSERT(result.status == 0, "Async raw put succeeded");
+
+        promise_destroy(promise);
+    }
+
+    /* --- Async raw get --- */
+    {
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve_get, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create raw get promise");
+
+        int rc = database_subtree_get_raw(st, "key1", strlen("key1"), '/', promise);
+        ASSERT(rc == 0, "Async raw get returns 0");
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async raw get completed");
+
+        if (result.result != NULL) {
+            buffer_t* buf = identifier_to_buffer(result.result);
+            if (buf != NULL) {
+                ASSERT(memcmp(buf->data, "hello_async", buf->size) == 0,
+                       "Async raw get value matches 'hello_async'");
+                buffer_destroy(buf);
+            }
+            identifier_destroy(result.result);
+        } else {
+            printf("  FAIL: Async raw get returned NULL result\n");
+            failures++;
+        }
+
+        promise_destroy(promise);
+    }
+
+    /* --- Async raw delete --- */
+    {
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create raw delete promise");
+
+        int rc = database_subtree_delete_raw(st, "key1", strlen("key1"), '/', promise);
+        ASSERT(rc == 0, "Async raw delete returns 0");
+
+        int max_wait = 10000;
+        while (!result.completed && max_wait > 0) {
+            usleep(1000);
+            max_wait--;
+        }
+        ASSERT(result.completed, "Async raw delete completed");
+        ASSERT(result.status == 0, "Async raw delete succeeded");
+
+        promise_destroy(promise);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_async_crud_raw DONE ===\n");
+}
+
+/* ---- Test 9: Async CRUD in sync_only mode ---- */
+
+static void test_subtree_async_sync_only(void) {
+    printf("\n=== test_subtree_async_sync_only ===\n");
+
+    /* In sync_only mode, async functions should call sync variants */
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir), "wavedb_subtree_async_sync");
+    ASSERT(db != NULL, "Create sync_only database");
+    ASSERT(db->sync_only == 1, "Database is sync_only");
+
+    database_subtree_t* st = database_subtree_open(db, "sync_ns", '/');
+    ASSERT(st != NULL, "Open subtree on 'sync_ns'");
+
+    /* Async put in sync_only mode */
+    {
+        path_t* put_path = path_create_from_raw("counter", strlen("counter"), '/', 4);
+        ASSERT(put_path != NULL, "Create put path");
+
+        identifier_t* put_value = identifier_create_from_raw((const uint8_t*)"42", strlen("42"), 4);
+        ASSERT(put_value != NULL, "Create put value");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create put promise");
+
+        database_subtree_put(st, put_path, put_value, promise);
+
+        /* In sync_only mode, promise should resolve immediately */
+        ASSERT(result.completed, "Sync-only put completed immediately");
+        ASSERT(result.status == 0, "Sync-only put succeeded");
+
+        promise_destroy(promise);
+    }
+
+    /* Async get in sync_only mode */
+    {
+        path_t* get_path = path_create_from_raw("counter", strlen("counter"), '/', 4);
+        ASSERT(get_path != NULL, "Create get path");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve_get, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create get promise");
+
+        database_subtree_get(st, get_path, promise);
+
+        ASSERT(result.completed, "Sync-only get completed immediately");
+        ASSERT(result.result != NULL, "Sync-only get returned non-NULL result");
+
+        if (result.result != NULL) {
+            buffer_t* buf = identifier_to_buffer(result.result);
+            if (buf != NULL) {
+                ASSERT(memcmp(buf->data, "42", buf->size) == 0,
+                       "Sync-only get value matches '42'");
+                buffer_destroy(buf);
+            }
+            identifier_destroy(result.result);
+        }
+
+        promise_destroy(promise);
+    }
+
+    /* Async delete in sync_only mode */
+    {
+        path_t* del_path = path_create_from_raw("counter", strlen("counter"), '/', 4);
+        ASSERT(del_path != NULL, "Create delete path");
+
+        test_async_result_t result = {0};
+        promise_t* promise = promise_create(test_on_resolve, test_on_reject, &result);
+        ASSERT(promise != NULL, "Create delete promise");
+
+        database_subtree_delete(st, del_path, promise);
+
+        ASSERT(result.completed, "Sync-only delete completed immediately");
+        ASSERT(result.status == 0, "Sync-only delete succeeded");
+
+        promise_destroy(promise);
+    }
+
+    database_subtree_close(st);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_async_sync_only DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -414,6 +777,9 @@ int main(void) {
     test_subtree_sync_crud();
     test_subtree_sync_crud_raw();
     test_subtree_isolation();
+    test_subtree_async_crud();
+    test_subtree_async_crud_raw();
+    test_subtree_async_sync_only();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

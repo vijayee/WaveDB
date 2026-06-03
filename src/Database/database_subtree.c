@@ -5,6 +5,8 @@
 #include "database_subtree.h"
 #include "../Util/allocator.h"
 #include "../HBTrie/identifier.h"
+#include "../Workers/work.h"
+#include "../Workers/error.h"
 #include <string.h>
 #include <stdlib.h>
 
@@ -47,9 +49,9 @@ void database_subtree_close(database_subtree_t* subtree) {
     }
 }
 
-int database_subtree_delete(database_t* db,
-                            const char* prefix,
-                            char delimiter) {
+int database_subtree_delete_prefix(database_t* db,
+                                    const char* prefix,
+                                    char delimiter) {
     if (db == NULL || prefix == NULL) return -1;
 
     /* Build the scan prefix: "prefix{delimiter}" */
@@ -220,6 +222,334 @@ int database_subtree_delete_sync_raw(database_subtree_t* st,
     if (prefixed_key == NULL) return -1;
 
     int rc = database_delete_sync_raw(st->db, prefixed_key, prefixed_len, delimiter);
+    free(prefixed_key);
+    return rc;
+}
+
+/* --- Async context structs --- */
+
+typedef struct {
+    database_t* db;
+    path_t* path;
+    identifier_t* value;
+    promise_t* promise;
+} subtree_put_ctx_t;
+
+typedef struct {
+    database_t* db;
+    path_t* path;
+    promise_t* promise;
+} subtree_get_ctx_t;
+
+typedef struct {
+    database_t* db;
+    path_t* path;
+    promise_t* promise;
+} subtree_delete_ctx_t;
+
+/* --- Async worker functions --- */
+
+static void _subtree_put_worker(void* ctx_ptr) {
+    subtree_put_ctx_t* ctx = (subtree_put_ctx_t*)ctx_ptr;
+    database_put(ctx->db, ctx->path, ctx->value, ctx->promise);
+    free(ctx);
+}
+
+static void _subtree_get_worker(void* ctx_ptr) {
+    subtree_get_ctx_t* ctx = (subtree_get_ctx_t*)ctx_ptr;
+    database_get(ctx->db, ctx->path, ctx->promise);
+    free(ctx);
+}
+
+static void _subtree_delete_worker(void* ctx_ptr) {
+    subtree_delete_ctx_t* ctx = (subtree_delete_ctx_t*)ctx_ptr;
+    database_delete(ctx->db, ctx->path, ctx->promise);
+    free(ctx);
+}
+
+/* --- Async abort functions --- */
+
+static void abort_subtree_put(void* ctx_ptr) {
+    subtree_put_ctx_t* ctx = (subtree_put_ctx_t*)ctx_ptr;
+    if (ctx->path) path_destroy(ctx->path);
+    if (ctx->value) identifier_destroy(ctx->value);
+    free(ctx);
+}
+
+static void abort_subtree_get(void* ctx_ptr) {
+    subtree_get_ctx_t* ctx = (subtree_get_ctx_t*)ctx_ptr;
+    if (ctx->path) path_destroy(ctx->path);
+    free(ctx);
+}
+
+static void abort_subtree_delete(void* ctx_ptr) {
+    subtree_delete_ctx_t* ctx = (subtree_delete_ctx_t*)ctx_ptr;
+    if (ctx->path) path_destroy(ctx->path);
+    free(ctx);
+}
+
+/* --- Path-based async CRUD --- */
+
+void database_subtree_put(database_subtree_t* st, path_t* path,
+                           identifier_t* value, promise_t* promise) {
+    if (st == NULL || path == NULL || value == NULL || promise == NULL) {
+        if (path) path_destroy(path);
+        if (value) identifier_destroy(value);
+        if (promise) promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Prepend prefix to path; original path is consumed */
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
+    if (full_path == NULL) {
+        identifier_destroy(value);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        int rc = database_put_sync(st->db, full_path, value);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return;
+    }
+
+    subtree_put_ctx_t* ctx = get_clear_memory(sizeof(subtree_put_ctx_t));
+    if (ctx == NULL) {
+        path_destroy(full_path);
+        identifier_destroy(value);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    ctx->db = st->db;
+    ctx->path = full_path;
+    ctx->value = value;
+    ctx->promise = promise;
+
+    work_t* work = work_create(
+        _subtree_put_worker,
+        abort_subtree_put,
+        ctx);
+    if (work == NULL) {
+        free(ctx);
+        path_destroy(full_path);
+        identifier_destroy(value);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    refcounter_yield((refcounter_t*) work);
+    work_pool_enqueue(database_subtree_get_pool(st), work);
+}
+
+void database_subtree_get(database_subtree_t* st, path_t* path,
+                           promise_t* promise) {
+    if (st == NULL || path == NULL || promise == NULL) {
+        if (path) path_destroy(path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Prepend prefix to path; original path is consumed */
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
+    if (full_path == NULL) {
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        identifier_t* result = NULL;
+        database_get_sync(st->db, full_path, &result);
+        promise_resolve(promise, result);
+        return;
+    }
+
+    subtree_get_ctx_t* ctx = get_clear_memory(sizeof(subtree_get_ctx_t));
+    if (ctx == NULL) {
+        path_destroy(full_path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    ctx->db = st->db;
+    ctx->path = full_path;
+    ctx->promise = promise;
+
+    work_t* work = work_create(
+        _subtree_get_worker,
+        abort_subtree_get,
+        ctx);
+    if (work == NULL) {
+        free(ctx);
+        path_destroy(full_path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    refcounter_yield((refcounter_t*) work);
+    work_pool_enqueue(database_subtree_get_pool(st), work);
+}
+
+void database_subtree_delete(database_subtree_t* st, path_t* path,
+                              promise_t* promise) {
+    if (st == NULL || path == NULL || promise == NULL) {
+        if (path) path_destroy(path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Prepend prefix to path; original path is consumed */
+    path_t* full_path = database_subtree_prepend_path(st, path);
+    path_destroy(path);
+    if (full_path == NULL) {
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        int rc = database_delete_sync(st->db, full_path);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return;
+    }
+
+    subtree_delete_ctx_t* ctx = get_clear_memory(sizeof(subtree_delete_ctx_t));
+    if (ctx == NULL) {
+        path_destroy(full_path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    ctx->db = st->db;
+    ctx->path = full_path;
+    ctx->promise = promise;
+
+    work_t* work = work_create(
+        _subtree_delete_worker,
+        abort_subtree_delete,
+        ctx);
+    if (work == NULL) {
+        free(ctx);
+        path_destroy(full_path);
+        promise_resolve(promise, NULL);
+        return;
+    }
+
+    refcounter_yield((refcounter_t*) work);
+    work_pool_enqueue(database_subtree_get_pool(st), work);
+}
+
+/* --- Raw async CRUD --- */
+
+int database_subtree_put_raw(database_subtree_t* st,
+                              const char* key, size_t key_len, char delimiter,
+                              const uint8_t* value, size_t value_len,
+                              promise_t* promise) {
+    if (st == NULL || key == NULL || promise == NULL) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) {
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        int rc = database_put_sync_raw(st->db, prefixed_key, prefixed_len, delimiter,
+                                        value, value_len);
+        free(prefixed_key);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return 0;
+    }
+
+    /* Delegate to database_put_raw which handles its own async work */
+    int rc = database_put_raw(st->db, prefixed_key, prefixed_len, delimiter,
+                               value, value_len, promise);
+    free(prefixed_key);
+    return rc;
+}
+
+int database_subtree_get_raw(database_subtree_t* st,
+                              const char* key, size_t key_len, char delimiter,
+                              promise_t* promise) {
+    if (st == NULL || key == NULL || promise == NULL) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) {
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        uint8_t* value_out = NULL;
+        size_t value_len_out = 0;
+        int rc = database_get_sync_raw(st->db, prefixed_key, prefixed_len, delimiter,
+                                       &value_out, &value_len_out);
+        free(prefixed_key);
+        if (rc == 0 && value_out != NULL) {
+            /* Wrap raw value in an identifier for promise resolution */
+            identifier_t* id = identifier_create_from_raw(value_out, value_len_out,
+                                                           st->db->chunk_size);
+            free(value_out);
+            promise_resolve(promise, id);
+        } else {
+            promise_resolve(promise, NULL);
+        }
+        return 0;
+    }
+
+    /* Delegate to database_get_raw which handles its own async work */
+    int rc = database_get_raw(st->db, prefixed_key, prefixed_len, delimiter, promise);
+    free(prefixed_key);
+    return rc;
+}
+
+int database_subtree_delete_raw(database_subtree_t* st,
+                                 const char* key, size_t key_len, char delimiter,
+                                 promise_t* promise) {
+    if (st == NULL || key == NULL || promise == NULL) {
+        if (promise) promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    size_t prefixed_len = 0;
+    char* prefixed_key = database_subtree_prepend_key(st, key, key_len, &prefixed_len);
+    if (prefixed_key == NULL) {
+        promise_resolve(promise, NULL);
+        return -1;
+    }
+
+    /* Sync-only mode: call sync variant and resolve promise */
+    if (st->db->sync_only) {
+        int rc = database_delete_sync_raw(st->db, prefixed_key, prefixed_len, delimiter);
+        free(prefixed_key);
+        int* result = malloc(sizeof(int));
+        if (result) *result = rc;
+        promise_resolve(promise, result);
+        return 0;
+    }
+
+    /* Delegate to database_delete_raw which handles its own async work */
+    int rc = database_delete_raw(st->db, prefixed_key, prefixed_len, delimiter, promise);
     free(prefixed_key);
     return rc;
 }

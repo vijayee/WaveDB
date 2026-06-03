@@ -14,6 +14,7 @@
 #include "../RefCounter/refcounter.h"
 #include "database.h"
 #include "../HBTrie/path.h"
+#include "../Workers/promise.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -72,9 +73,9 @@ void database_subtree_close(database_subtree_t* subtree);
  * @param delimiter Path delimiter character
  * @return 0 on success, -1 on failure
  */
-int database_subtree_delete(database_t* db,
-                            const char* prefix,
-                            char delimiter);
+int database_subtree_delete_prefix(database_t* db,
+                                    const char* prefix,
+                                    char delimiter);
 
 /**
  * Get the database associated with a subtree.
@@ -223,6 +224,102 @@ int database_subtree_get_sync_raw(database_subtree_t* st,
  */
 int database_subtree_delete_sync_raw(database_subtree_t* st,
                                       const char* key, size_t key_len, char delimiter);
+
+/* --- Path-based async CRUD --- */
+
+/**
+ * Asynchronously put a value into the subtree.
+ *
+ * Prepends the subtree prefix to the path and delegates to database_put.
+ * Takes ownership of path and value on all code paths.
+ *
+ * @param st       Subtree to operate on
+ * @param path     Path key (ownership transferred)
+ * @param value    Value to store (ownership transferred)
+ * @param promise  Promise to resolve on completion
+ */
+void database_subtree_put(database_subtree_t* st, path_t* path,
+                           identifier_t* value, promise_t* promise);
+
+/**
+ * Asynchronously get a value from the subtree.
+ *
+ * Prepends the subtree prefix to the path and delegates to database_get.
+ * Takes ownership of path on all code paths.
+ * Resolves promise with identifier_t* (caller must destroy) or NULL if not found.
+ *
+ * @param st       Subtree to query
+ * @param path     Path key (ownership transferred)
+ * @param promise  Promise to resolve with value
+ */
+void database_subtree_get(database_subtree_t* st, path_t* path,
+                           promise_t* promise);
+
+/**
+ * Asynchronously delete a value from the subtree.
+ *
+ * Prepends the subtree prefix to the path and delegates to database_delete.
+ * Takes ownership of path on all code paths.
+ *
+ * @param st       Subtree to modify
+ * @param path     Path key (ownership transferred)
+ * @param promise  Promise to resolve on completion
+ */
+void database_subtree_delete(database_subtree_t* st, path_t* path,
+                              promise_t* promise);
+
+/* --- Raw async CRUD --- */
+
+/**
+ * Asynchronously put a raw key-value pair into the subtree.
+ *
+ * Prepends the subtree prefix to the key and delegates to database_put_raw.
+ *
+ * @param st         Subtree to operate on
+ * @param key        Raw key bytes
+ * @param key_len    Length of key
+ * @param delimiter  Path delimiter character
+ * @param value      Value bytes to store
+ * @param value_len  Length of value
+ * @param promise    Promise to resolve on completion
+ * @return 0 on success (work enqueued), -1 on error
+ */
+int database_subtree_put_raw(database_subtree_t* st,
+                              const char* key, size_t key_len, char delimiter,
+                              const uint8_t* value, size_t value_len,
+                              promise_t* promise);
+
+/**
+ * Asynchronously get a raw value from the subtree.
+ *
+ * Prepends the subtree prefix to the key and delegates to database_get_raw.
+ *
+ * @param st         Subtree to query
+ * @param key        Raw key bytes
+ * @param key_len    Length of key
+ * @param delimiter  Path delimiter character
+ * @param promise    Promise to resolve with value
+ * @return 0 on success (work enqueued), -1 on error
+ */
+int database_subtree_get_raw(database_subtree_t* st,
+                              const char* key, size_t key_len, char delimiter,
+                              promise_t* promise);
+
+/**
+ * Asynchronously delete a raw key from the subtree.
+ *
+ * Prepends the subtree prefix to the key and delegates to database_delete_raw.
+ *
+ * @param st         Subtree to modify
+ * @param key        Raw key bytes
+ * @param key_len    Length of key
+ * @param delimiter  Path delimiter character
+ * @param promise    Promise to resolve on completion
+ * @return 0 on success (work enqueued), -1 on error
+ */
+int database_subtree_delete_raw(database_subtree_t* st,
+                                 const char* key, size_t key_len, char delimiter,
+                                 promise_t* promise);
 
 #ifdef __cplusplus
 }
