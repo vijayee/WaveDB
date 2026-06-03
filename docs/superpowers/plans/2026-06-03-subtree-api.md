@@ -728,11 +728,21 @@ In `bindings/nodejs/src/database.cc`, add two methods:
 
 - [ ] **Step 3: Update GraphLayer constructor**
 
-In `bindings/nodejs/src/graph_layer.cc`, add an optional `subtree` option to the constructor. If provided, call `graph_layer_create(path, config, subtree_ptr)` instead of `graph_layer_create(path, config, NULL)`.
+In `bindings/nodejs/src/graph_layer.cc`, add an optional `subtree` option to the constructor. If provided, call `graph_layer_create(path, config, subtree_ptr, &error_code)` instead of `graph_layer_create(path, config, NULL, NULL)`.
+
+**Error handling:** When `graph_layer_create` returns `NULL` and `error_code` is non-zero, throw a JavaScript `Error` with a descriptive message:
+- `error_code = -1`: `"Failed to create GraphLayer: allocation error"`
+- `error_code = -2`: `"Failed to create GraphLayer: database open failed"`
+- `error_code = -3`: `"Failed to create GraphLayer: database already contains schema from a different layer type. Use a subtree to isolate this layer."`
 
 - [ ] **Step 4: Update GraphQLLayer constructor**
 
-In `bindings/nodejs/src/graphql_layer.cc`, add an optional `subtree` option. If provided, call `graphql_layer_create(path, config, subtree_ptr)`.
+In `bindings/nodejs/src/graphql_layer.cc`, add an optional `subtree` option. If provided, call `graphql_layer_create(path, config, subtree_ptr, &error_code)`.
+
+**Error handling:** Same pattern as GraphLayer — translate `error_code` into descriptive JavaScript `Error` messages:
+- `error_code = -1`: `"Failed to create GraphQLLayer: allocation error"`
+- `error_code = -2`: `"Failed to create GraphQLLayer: database open failed"`
+- `error_code = -3`: `"Failed to create GraphQLLayer: database already contains schema from a different layer type. Use a subtree to isolate this layer."`
 
 - [ ] **Step 5: Update binding.gyp**
 
@@ -745,6 +755,8 @@ Create `bindings/nodejs/test/subtree.test.js` with tests:
 - Put/get/delete via subtree
 - Verify cross-subtree isolation
 - Delete subtree data
+- Schema collision: create a GraphQLLayer on a database, then try to create a GraphLayer on the same database without a subtree — verify it throws a descriptive Error mentioning "different layer type"
+- Schema collision with subtree: create both layers on the same database with different subtrees — verify it succeeds
 
 - [ ] **Step 7: Build and run Node.js tests**
 
@@ -794,7 +806,12 @@ In `bindings/dart/lib/src/database.dart`:
 In `bindings/dart/lib/src/graph_layer.dart`:
 - Add `GraphLayerConfig` class with `path` and `dbConfig` fields
 - Update `GraphLayer` constructor to accept optional `subtree` parameter
-- Update FFI call to `graph_layer_create` with new signature
+- Update FFI call to `graph_layer_create` with new signature (includes `int* error_code`)
+
+**Error handling:** When `graph_layer_create` returns `NULL` and `error_code` is non-zero, throw a `WaveDBException` with a descriptive message:
+- `error_code = -1`: `"Failed to create GraphLayer: allocation error"`
+- `error_code = -2`: `"Failed to create GraphLayer: database open failed"`
+- `error_code = -3`: `"Failed to create GraphLayer: database already contains schema from a different layer type. Use a subtree to isolate this layer."`
 
 - [ ] **Step 5: Update GraphQLLayer class**
 
@@ -802,9 +819,14 @@ In `bindings/dart/lib/src/graphql_layer.dart`:
 - Update `GraphQLLayerConfig` to accept optional `subtree` parameter
 - Update `create()` method to pass subtree to `graphql_layer_create`
 
+**Error handling:** Same pattern — translate `error_code` into descriptive `WaveDBException` messages matching the Node.js error strings.
+
 - [ ] **Step 6: Write Dart test file**
 
-Create `bindings/dart/test/subtree_test.dart` with tests matching the Node.js test file.
+Create `bindings/dart/test/subtree_test.dart` with tests matching the Node.js test file:
+- Open a subtree, put/get/delete, verify isolation, delete
+- Schema collision: create a GraphQLLayer on a database, then try to create a GraphLayer on the same database without a subtree — verify it throws a `WaveDBException` with a message containing "different layer type"
+- Schema collision with subtree: create both layers on the same database with different subtrees — verify it succeeds
 
 - [ ] **Step 7: Build and run Dart tests**
 

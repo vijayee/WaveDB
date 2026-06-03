@@ -451,6 +451,22 @@ Both bindings must remain backward compatible:
 - `graph_layer_create` with `database_config_t*` must still work (we'll add a compatibility wrapper or update the binding to construct a `graph_layer_config_t` internally)
 - The `Subtree` class is additive — no existing API changes required
 
+#### Binding Error Handling
+
+Both bindings must translate C error codes into idiomatic errors in their respective languages.
+
+**Node.js** — throw `Error` objects with descriptive messages:
+
+| error_code | Message |
+|------------|---------|
+| -1 | `"Failed to create {GraphQL|Graph}Layer: allocation error"` |
+| -2 | `"Failed to create {GraphQL|Graph}Layer: database open failed"` |
+| -3 | `"Failed to create {GraphQL|Graph}Layer: database already contains schema from a different layer type. Use a subtree to isolate this layer."` |
+
+**Dart** — throw `WaveDBException` with the same messages as Node.js.
+
+Both bindings should use the same human-readable message format for consistency, with the layer name (GraphQL or Graph) substituted in the template.
+
 ### Thread Safety
 
 `database_subtree_t` is thread-safe to the same extent as `database_t` — the underlying database handles MVCC and locking. The subtree handle itself is immutable after creation (prefix doesn't change), so no additional locking is needed on the subtree struct.
