@@ -20,7 +20,10 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-# xxHash library
+# xxHash library — skip if already provided by the embedding parent
+# (e.g. liboffs via add_subdirectory(deps/xxHash)). Lets WaveDB build
+# standalone with its own xxhash and as a subproject without conflict.
+if(NOT TARGET xxhash)
 add_library(xxhash STATIC
     deps/xxhash/xxhash.c
 )
@@ -29,10 +32,12 @@ target_include_directories(xxhash
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+endif()
 
 # libcbor library - use libcbor's CMake build system
 # Disable LTO for cbor to avoid LLVM bitcode issues with static linking
 # Must set _RELEASE specifically because libcbor only checks that variable
+if(NOT TARGET cbor)
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF CACHE BOOL "Disable LTO in Release" FORCE)
 set(CBOR_PRETTY_PRINTER ON CACHE BOOL "Include a pretty-printing routine" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build as a shared library" FORCE)
@@ -40,6 +45,7 @@ set(WITH_TESTS OFF CACHE BOOL "Build unit tests" FORCE)
 set(WITH_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
 set(SANITIZE OFF CACHE BOOL "Disable sanitizers in libcbor" FORCE)
 add_subdirectory(deps/libcbor)
+endif()
 
 # WaveDB library sources
 set(WAVEDB_SOURCES
@@ -148,7 +154,10 @@ target_link_libraries(wavedb PUBLIC xxhash cbor)
 # Create namespaced alias for consumers
 add_library(WaveDB::wavedb ALIAS wavedb)
 
-# Hashmap library
+# Hashmap library — skip if already provided by the embedding parent
+# (e.g. liboffs via add_subdirectory(deps/hashmap)). Lets WaveDB build
+# standalone with its own hashmap and as a subproject without conflict.
+if(NOT TARGET hashmap)
 add_library(hashmap STATIC
     deps/hashmap/src/hashmap.c
 )
@@ -157,6 +166,7 @@ target_include_directories(hashmap
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+endif()
 
 # Link hashmap to wavedb
 target_link_libraries(wavedb PUBLIC hashmap)
