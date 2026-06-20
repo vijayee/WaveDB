@@ -54,7 +54,7 @@ import json
 from dataclasses import dataclass, field
 
 from ._errors import map_error
-from ._native import ffi, lib
+from ._native import ffi, lib, libc
 from .exceptions import WaveDBError
 
 
@@ -99,7 +99,7 @@ class GraphQLResult:
             raw = ffi.string(json_ptr).decode("utf-8", errors="replace")
             parsed = json.loads(raw)
         finally:
-            lib.free(json_ptr)
+            libc.free(json_ptr)
         # The C serializer emits {"data": ..., "errors": [...]} (errors
         # omitted when empty). Normalize so downstream code can rely on
         # both keys being present.
@@ -147,7 +147,7 @@ class GraphQLResult:
         try:
             return ffi.string(json_ptr).decode("utf-8", errors="replace")
         finally:
-            lib.free(json_ptr)
+            libc.free(json_ptr)
 
     def close(self) -> None:
         if self._ptr != ffi.NULL:
@@ -215,7 +215,7 @@ class GraphQLLayer:
         if rc != 0:
             if err_out[0] != ffi.NULL:
                 msg = ffi.string(err_out[0]).decode("utf-8", errors="replace")
-                lib.free(err_out[0])
+                libc.free(err_out[0])
             else:
                 msg = f"graphql_schema_parse failed (rc={rc})"
         return msg
