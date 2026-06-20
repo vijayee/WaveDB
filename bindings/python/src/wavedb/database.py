@@ -171,6 +171,43 @@ class WaveDB:
         """Delete the value at `key`. No-op if the key is absent."""
         self._raw_del(_normalize_key(key, self._delimiter))
 
+    def batch_sync(self, ops: list[dict]) -> None:
+        """Apply a list of put/del ops atomically in a single C batch call."""
+        self._check_open()
+        if not ops:
+            return
+
+        raw_ops = ffi.new(f"raw_op_t[{len(ops)}]")
+        # Hold references to encoded buffers so they outlive the C call
+        keep_alive = []
+        for i, op in enumerate(ops):
+            t = op.get("type")
+            if t not in ("put", "del"):
+                raise ValueError(f"op type must be 'put' or 'del', got {t!r}")
+            key_b = _normalize_key(op["key"], self._delimiter)
+            key_buf = ffi.from_buffer(key_b)
+            keep_alive.append(key_b)
+
+            raw_ops[i].key = key_buf
+            raw_ops[i].key_len = len(key_b)
+            raw_ops[i].type = 0 if t == "put" else 1
+
+            if t == "put":
+                val_b = _encode_value(op["value"])
+                val_buf = ffi.from_buffer(val_b)
+                keep_alive.append(val_b)
+                raw_ops[i].value = val_buf
+                raw_ops[i].value_len = len(val_b)
+            else:
+                raw_ops[i].value = ffi.NULL
+                raw_ops[i].value_len = 0
+
+        rc = lib.database_batch_sync_raw(
+            self._db, self._delimiter_byte, raw_ops, len(ops),
+        )
+        if rc != 0:
+            raise map_error(rc, "batch_sync failed")
+
     # ---- lifecycle ----
 
     def close(self) -> None:
