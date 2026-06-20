@@ -45,7 +45,7 @@ class CmakeBuildExt(build_ext):
                 "or set WAVEDB_LIB_PATH to point at a pre-built libwavedb.so."
             )
 
-        build_dir = self.build_temp / "wavedb-shared"
+        build_dir = Path(self.build_temp) / "wavedb-shared"
         build_dir.mkdir(parents=True, exist_ok=True)
         subprocess.check_call([
             "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
