@@ -314,6 +314,32 @@ class WaveDB:
         finally:
             lib.promise_destroy(promise)
 
+    def put_object_sync(self, key: "str | list[str]", obj: dict) -> None:
+        """Flatten `obj` into path/value pairs and write atomically via batch."""
+        from .object_ops import flatten_object
+        self.batch_sync(flatten_object(key, obj, self._delimiter))
+
+    def get_object_sync(self, key: "str | list[str]") -> dict:
+        """Scan everything under `key` and reconstruct the nested dict."""
+        from .object_ops import reconstruct_object
+        from .iterator import scan_sync_raw
+        prefix_b = _normalize_key(key, self._delimiter)
+        kvs = list(scan_sync_raw(self._db, self._delimiter_byte, prefix_b, None))
+        return reconstruct_object(key, kvs, self._delimiter)
+
+    async def put_object(self, key: "str | list[str]", obj: dict) -> None:
+        """Async counterpart of `put_object_sync`."""
+        from .object_ops import flatten_object
+        await self.batch(flatten_object(key, obj, self._delimiter))
+
+    async def get_object(self, key: "str | list[str]") -> dict:
+        """Async counterpart of `get_object_sync`."""
+        from .object_ops import reconstruct_object
+        from .iterator import scan_async_iter
+        prefix_b = _normalize_key(key, self._delimiter)
+        kvs = [kv async for kv in scan_async_iter(self._db, self._delimiter_byte, prefix_b, None)]
+        return reconstruct_object(key, kvs, self._delimiter)
+
     async def aclose(self) -> None:
         """Close the database, cancelling any in-flight async operations.
 
