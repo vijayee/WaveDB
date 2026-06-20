@@ -10,17 +10,15 @@ from ._native import ffi, lib
 def _strip_chunk_padding(key_bytes: bytes, delimiter_byte: bytes) -> bytes:
     """Strip trailing null padding from each subscript segment.
 
-    The C scan iterator (`build_identifier_from_chunks` in
-    `src/Database/database_iterator.c`) reconstructs each path identifier
-    from `nchunks * chunk_size` bytes, setting `id->length` to the padded
-    length rather than the original byte count. The last chunk of each
-    identifier is zero-padded, so the serialized key has null bytes
-    inside it (one run of nulls per subscript, before each delimiter).
+    DEPRECATED: No longer called by scan_sync_raw. The C layer now stores
+    exact byte lengths per subscript (path_meta with {chunk_count, byte_length})
+    and reconstructs keys without null padding. Binary keys with real
+    trailing nulls are preserved exactly.
 
-    To recover the original key we split on the delimiter, strip trailing
-    nulls from each segment, and rejoin. This is safe for UTF-8 string
-    keys (which never contain null bytes); binary keys with intentional
-    trailing nulls would be mangled, but the v1 API is string-keyed.
+    This function is retained for reference and could be used to clean up
+    old on-disk data written before the C fix (which falls back to the
+    legacy padded path). However, it would mangle binary keys with real
+    trailing nulls, so use with caution.
     """
     if not key_bytes:
         return key_bytes
@@ -67,8 +65,13 @@ def scan_sync_raw(
         for i in range(count[0]):
             r = results[0][i]
             key_raw = ffi.buffer(r.key, r.key_len)[:] if r.key != ffi.NULL else b""
-            key_bytes = _strip_chunk_padding(key_raw, delimiter_byte)
-            key = key_bytes.decode("utf-8", errors="replace")
+            # No padding stripping needed: the C iterator now stores exact
+            # byte lengths per subscript (path_meta) and reconstructs keys
+            # without null padding. Binary keys with real trailing nulls
+            # are preserved exactly. Old on-disk files without the 0x10 flag
+            # fall back to the legacy padded path in the C layer; users with
+            # such data should re-insert to get the fix.
+            key = key_raw.decode("utf-8", errors="replace")
             value = (
                 ffi.buffer(r.value, r.value_len)[:]
                 if r.value != ffi.NULL
