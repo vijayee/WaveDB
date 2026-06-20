@@ -2,18 +2,18 @@
 
 ## C-Level Limitations
 
-### Scan iterator pads keys with null bytes
+### ~~Scan iterator pads keys with null bytes~~ (FIXED)
 
-`database_scan_range_sync_raw` returns keys with per-subscript null padding
-(e.g., `users/u0` comes back as `b'users\x00\x00\x00/u0\x00\x00'`). The Python
-binding strips this padding in `iterator._strip_chunk_padding`, which works for
-UTF-8 string keys but would mangle binary keys with intentional trailing nulls.
+**Status: Fixed.** The C layer now stores per-subscript {chunk_count, byte_length}
+metadata (`path_meta` on `bnode_entry_t`, serialized via the V3 0x10 flag bit).
+The iterator reconstructs keys at their exact original byte length — no null
+padding. Binary keys with real trailing nulls are preserved exactly.
 
-**Root cause:** `build_identifier_from_chunks` in `src/Database/database_iterator.c`
-sets `id->length` to the padded size, not the original byte count.
+Old on-disk files written before the fix fall back to the legacy padded path.
+Users with such data should re-insert to get exact keys.
 
-**Workaround:** Use string keys. Binary keys with trailing nulls are not supported
-in v1.
+The Python binding's `_strip_chunk_padding` workaround has been removed from
+the scan path (the function is retained as deprecated reference only).
 
 ### GraphQL scan queries in subtree mode return wrong entity IDs
 
