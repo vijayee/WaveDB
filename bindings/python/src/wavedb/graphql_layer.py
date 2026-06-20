@@ -51,6 +51,7 @@ resolver is registered.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 
 from ._errors import map_error
 from ._native import ffi, lib
@@ -62,19 +63,13 @@ def _c_string(b: bytes) -> bytes:
     return b + b"\x00"
 
 
+@dataclass
 class GraphQLError:
     """Structured GraphQL error with message and optional path/locations."""
 
-    def __init__(self, message: str, path: str | None = None,
-                 locations: list[dict] | None = None) -> None:
-        self.message = message
-        self.path = path
-        self.locations = locations or []
-
-    def __repr__(self) -> str:
-        if self.path:
-            return f"GraphQLError(message={self.message!r}, path={self.path!r})"
-        return f"GraphQLError(message={self.message!r})"
+    message: str
+    path: list = field(default_factory=list)
+    locations: list = field(default_factory=list)
 
 
 class GraphQLResult:
@@ -108,6 +103,8 @@ class GraphQLResult:
         # The C serializer emits {"data": ..., "errors": [...]} (errors
         # omitted when empty). Normalize so downstream code can rely on
         # both keys being present.
+        if not isinstance(parsed, dict):
+            parsed = {"data": parsed, "errors": []}
         if "errors" not in parsed:
             parsed["errors"] = []
         self._parsed = parsed
@@ -122,17 +119,15 @@ class GraphQLResult:
     def errors(self) -> list[GraphQLError]:
         """List of `GraphQLError` objects produced by the operation."""
         parsed = self._ensure_parsed()
-        out: list[GraphQLError] = []
-        for e in parsed.get("errors", []):
-            if isinstance(e, dict):
-                out.append(GraphQLError(
-                    message=e.get("message", "") or "",
-                    path=e.get("path"),
-                    locations=e.get("locations") or [],
-                ))
-            else:
-                out.append(GraphQLError(message=str(e)))
-        return out
+        raw_errors = parsed.get("errors", [])
+        return [
+            GraphQLError(
+                message=e.get("message", ""),
+                path=e.get("path", []),
+                locations=e.get("locations", []),
+            )
+            for e in raw_errors
+        ]
 
     @property
     def success(self) -> bool:
