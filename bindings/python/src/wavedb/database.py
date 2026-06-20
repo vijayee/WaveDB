@@ -219,6 +219,54 @@ class WaveDB:
         if rc != 0:
             raise map_error(rc, "batch_sync failed")
 
+    # ---- read stream / iterator ----
+
+    def create_read_stream(
+        self,
+        *,
+        start: "str | None" = None,
+        end: "str | None" = None,
+        limit: "int | None" = None,
+    ):
+        """Synchronous generator yielding (key_str, value_bytes) tuples.
+
+        Scans the key range [`start`, `end`] using
+        `database_scan_range_sync_raw`. If `limit` is given, stops after
+        yielding that many pairs.
+        """
+        from .iterator import scan_sync_raw
+
+        start_b = start.encode("utf-8") if start is not None else None
+        end_b = end.encode("utf-8") if end is not None else None
+        count = 0
+        for kv in scan_sync_raw(self._db, self._delimiter_byte, start_b, end_b):
+            yield kv
+            count += 1
+            if limit is not None and count >= limit:
+                return
+
+    def create_read_stream_async(
+        self,
+        *,
+        start: "str | None" = None,
+        end: "str | None" = None,
+        limit: "int | None" = None,
+    ):
+        """Async iterator yielding (key_str, value_bytes) tuples.
+
+        The blocking C scan runs on a worker thread via
+        `loop.run_in_executor`; results are then yielded on the event loop
+        thread. If `limit` is given, stops after yielding that many pairs.
+        """
+        from .iterator import scan_async_iter
+
+        start_b = start.encode("utf-8") if start is not None else None
+        end_b = end.encode("utf-8") if end is not None else None
+        return _limited_async_iter(
+            scan_async_iter(self._db, self._delimiter_byte, start_b, end_b),
+            limit,
+        )
+
     # ---- public async API ----
     # `del` is a Python keyword, so the async delete method is named `delete`
     # (the sync counterpart is `del_sync`). All async methods dispatch C work
@@ -411,3 +459,13 @@ class WaveDB:
             self.close()
         except Exception:
             pass
+
+
+async def _limited_async_iter(it, limit: "int | None"):
+    """Wrap an async iterator, stopping after `limit` items if set."""
+    count = 0
+    async for kv in it:
+        yield kv
+        count += 1
+        if limit is not None and count >= limit:
+            return
