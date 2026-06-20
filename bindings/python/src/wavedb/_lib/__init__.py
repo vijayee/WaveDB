@@ -1,0 +1,1 @@
+"""Directory holding the bundled libwavedb shared library."""

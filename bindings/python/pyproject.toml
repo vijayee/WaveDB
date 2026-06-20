@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=64", "wheel", "cffi>=1.16"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wavedb"
+version = "0.1.0"
+description = "Python bindings for WaveDB - Hierarchical B+Trie Database"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Victor Morrow", email = "victor.j.morrow@gmail.com" }]
+dependencies = ["cffi>=1.16"]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4", "pytest-asyncio>=0.23"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wavedb = ["_lib/*.so", "_lib/*.dylib", "_lib/*.dll"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
