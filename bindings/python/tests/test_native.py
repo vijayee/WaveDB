@@ -7,13 +7,12 @@ def test_ffi_loaded():
 
 
 def test_database_t_declared():
-    # database_t is declared opaque (we only hold pointers from C). cffi ABI
-    # mode cannot compute sizeof for opaque structs, so verify the type is
-    # registered by checking that a function taking database_t* is bound.
-    assert lib.database_destroy is not None
-    assert lib.database_create_with_config is not None
-    # sanity: the destroy function is a real cffi function-pointer object
-    assert hasattr(lib.database_destroy, "__call__")
+    # Exercise the cdef->symbol->call path with a side-effect-free function.
+    cfg = lib.database_config_default()
+    try:
+        assert cfg != ffi.NULL
+    finally:
+        lib.database_config_destroy(cfg)
 
 
 def test_raw_op_t_layout():

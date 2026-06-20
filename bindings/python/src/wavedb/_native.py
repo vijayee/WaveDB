@@ -65,6 +65,7 @@ typedef struct {
 # void* here because we never call database_create from Python (we use
 # database_create_with_config) and the underlying struct types are opaque.
 ffi.cdef("""
+/* unused in v1 — Python uses database_create_with_config; kept for future direct-pool/wheel callers */
 database_t* database_create(const char* location, size_t lru_memory_mb,
     void* wal_config, uint8_t chunk_size, uint32_t btree_node_size,
     uint8_t enable_persist, void* pool, void* wheel, int* error_code);
@@ -89,7 +90,7 @@ void database_config_set_sync_only(database_config_t*, uint8_t);
 
 encrypted_database_config_t* encrypted_database_config_default(void);
 void encrypted_database_config_destroy(encrypted_database_config_t*);
-void encrypted_database_config_set_type(encrypted_database_config_t*, uint8_t);
+void encrypted_database_config_set_type(encrypted_database_config_t*, int);
 void encrypted_database_config_set_symmetric_key(encrypted_database_config_t*, const uint8_t*, size_t);
 void encrypted_database_config_set_asymmetric_private_key(encrypted_database_config_t*, const uint8_t*, size_t);
 void encrypted_database_config_set_asymmetric_public_key(encrypted_database_config_t*, const uint8_t*, size_t);
@@ -149,6 +150,7 @@ void error_destroy(async_error_t* error);
 # database_scan_range_sync_raw above. This block parses fine even though
 # path_t/identifier_t are opaque (we only hold pointers).
 ffi.cdef("""
+/* unused in v1 — Task 10 iterator uses database_scan_range_sync_raw (string-based); these path-typed iterators are kept for future migration */
 database_iterator_t* database_scan_start(database_t* db,
     path_t* start_path, path_t* end_path);
 int database_scan_next(database_iterator_t* iter,
