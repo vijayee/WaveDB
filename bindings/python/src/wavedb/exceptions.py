@@ -19,3 +19,7 @@ class IOError_(WaveDBError):
 
 class EncryptionError(WaveDBError):
     """Raised when encryption is required, unsupported, or the key is invalid."""
+
+
+class GraphQLLayerError(WaveDBError):
+    """Raised when GraphQL schema parsing or query execution fails."""

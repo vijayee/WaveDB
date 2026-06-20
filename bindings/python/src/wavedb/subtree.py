@@ -61,11 +61,18 @@ class Subtree:
         delimiter_byte: bytes,
         delimiter: str,
         bridge: AsyncBridge,
+        parent=None,
     ) -> None:
         self._delimiter = delimiter
         self._delimiter_byte = delimiter_byte
         self._closed = False
         self._bridge = bridge
+        # Back-reference to the owning WaveDB so close() can unregister
+        # itself from the parent's _open_subtrees set. May be None when
+        # the Subtree is constructed outside WaveDB.open_subtree (e.g. by
+        # tests or internal callers); in that case close() skips the
+        # unregister step.
+        self._parent = parent
         # database_subtree_open takes a null-terminated prefix (no prefix_len).
         # prefix_b is a UTF-8 bytes string with no embedded null bytes, so
         # ffi.from_buffer yields a NUL-terminated C string when the bytes
@@ -207,6 +214,8 @@ class Subtree:
         if self._st != ffi.NULL:
             lib.database_subtree_close(self._st)
             self._st = ffi.NULL
+        if self._parent is not None:
+            self._parent._unregister_subtree(self)
 
     def __enter__(self) -> "Subtree":
         return self

@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from wavedb import GraphQLLayer, WaveDB
+from wavedb import GraphQLLayer, GraphQLLayerError, WaveDB
 
 
 @pytest.fixture
@@ -29,8 +29,9 @@ def gql(db_path):
         age: Int
     }
     """
-    err = layer.schema_parse(schema)
-    assert err is None, err
+    # schema_parse raises GraphQLLayerError on failure; no return value
+    # to check.
+    layer.schema_parse(schema)
     # The default resolver looks up fields at <plural>/<id>/<field>,
     # i.e. Users/1/{id,name,age}. The subtree prefix "gql" is applied
     # by the subtree, so we write through the parent db with the full
@@ -120,9 +121,9 @@ def test_graphql_query_invalid_returns_errors(gql):
 
 def test_graphql_schema_parse_error(gql):
     layer, _ = gql
-    err = layer.schema_parse("type !Broken { }")
-    assert err is not None
-    assert "Broken" in err or "parse" in err.lower() or err
+    # schema_parse raises GraphQLLayerError on invalid SDL.
+    with pytest.raises(GraphQLLayerError):
+        layer.schema_parse("type !Broken { }")
 
 
 def test_graphql_result_to_json(gql):
@@ -146,8 +147,7 @@ def test_graphql_result_errors_structure(gql):
 def test_graphql_layer_context_manager(db_path):
     db = WaveDB(str(db_path))
     with GraphQLLayer("gql2", db) as layer:
-        err = layer.schema_parse("type User { name: String }")
-        assert err is None
+        layer.schema_parse("type User { name: String }")
         assert not layer._closed
     assert layer._closed
     db.close()

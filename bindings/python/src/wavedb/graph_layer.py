@@ -175,6 +175,11 @@ class GraphLayer:
             self._subtree = ffi.NULL
             raise map_error(err[0], "graph_layer_create failed")
 
+        # Register self with the parent WaveDB so close() can refuse to
+        # destroy the database while we still hold a subtree reference.
+        # Stored on the same _open_subtrees set used by Subtree.
+        db._open_subtrees.add(self)
+
     def insert_sync(self, s: str, p: str, o: str) -> None:
         self._check_open()
         rc = lib.graph_insert_sync(
@@ -206,6 +211,11 @@ class GraphLayer:
         if self._subtree != ffi.NULL:
             lib.database_subtree_close(self._subtree)
             self._subtree = ffi.NULL
+        # Drop self from the parent WaveDB's open-handle set so the
+        # parent can close cleanly. `_unregister_subtree` uses
+        # set.discard, so this is safe even if the parent is already gone.
+        if self._db is not None:
+            self._db._unregister_subtree(self)
 
     def __enter__(self) -> "GraphLayer":
         return self
