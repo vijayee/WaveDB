@@ -7,7 +7,7 @@ from ._async import AsyncBridge, decode_identifier_payload
 from ._errors import map_error
 from ._native import ffi, lib
 from .config import WaveDBConfig, WaveDBEncryption
-from .exceptions import InvalidPathError, WaveDBError
+from .exceptions import EncryptionError, InvalidPathError, WaveDBError
 
 
 def _c_string(b: bytes) -> bytes:
@@ -43,6 +43,24 @@ def _encode_value(value) -> bytes:
 
 
 _WAL_MODE_TO_U8 = {"debounced": 0, "immediate": 1, "none": 2}
+
+# Map user-facing encryption type strings to the C `encryption_type_t` enum
+# values defined in src/Storage/encryption.h:
+#   ENCRYPTION_NONE       = 0
+#   ENCRYPTION_SYMMETRIC  = 1  (AES-256-GCM with a 32-byte user key)
+#   ENCRYPTION_ASYMMETRIC = 2  (AES-256-GCM DEK wrapped by an EVP_PKEY)
+#
+# String keys are lowercase, hyphenated names a user would naturally write.
+# "aes-256-gcm" is the canonical symmetric alias (matches the C header's
+# description of SYMMETRIC mode). "asymmetric" covers the EVP_PKEY-wrapped
+# DEK flow; we also accept "rsa-aes-256-gcm" as a descriptive alias.
+_ENCRYPTION_TYPE_MAP = {
+    "none": 0,
+    "aes-256-gcm": 1,
+    "symmetric": 1,
+    "asymmetric": 2,
+    "rsa-aes-256-gcm": 2,
+}
 
 # Return codes from the C sync raw API. The C layer uses:
 #   0  -> success
@@ -81,10 +99,12 @@ class WaveDB:
         if encryption is not None:
             cfg = lib.encrypted_database_config_default()
             try:
-                # NOTE: encrypted_database_config_set_type mapping is deferred
-                # to Task 14 (encryption). We only wire up the key material
-                # here; the default type from encrypted_database_config_default
-                # is used until then.
+                type_code = _ENCRYPTION_TYPE_MAP.get(encryption.type)
+                if type_code is None:
+                    raise EncryptionError(
+                        f"unsupported encryption type: {encryption.type!r}"
+                    )
+                lib.encrypted_database_config_set_type(cfg, type_code)
                 if encryption.symmetric_key is not None:
                     buf = ffi.from_buffer(encryption.symmetric_key)
                     lib.encrypted_database_config_set_symmetric_key(
