@@ -10,6 +10,7 @@ from .exceptions import (
     WaveDBError,
 )
 from .graph_layer import GraphLayer, GraphQuery, GraphResult
+from .graphql_layer import GraphQLLayer, GraphQLError, GraphQLResult
 from .subtree import Subtree
 
 __version__ = "0.1.0"
@@ -19,6 +20,9 @@ __all__ = [
     "GraphLayer",
     "GraphQuery",
     "GraphResult",
+    "GraphQLError",
+    "GraphQLLayer",
+    "GraphQLResult",
     "IOError_",
     "InvalidPathError",
     "NotFoundError",

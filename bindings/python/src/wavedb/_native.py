@@ -234,7 +234,14 @@ void graphql_layer_destroy(graphql_layer_t* layer);
 int graphql_schema_parse(graphql_layer_t* layer, const char* sdl, char** error_out);
 graphql_result_t* graphql_query_sync(graphql_layer_t* layer, const char* query);
 void graphql_result_destroy(graphql_result_t* r);
-/* Result accessors - filled in once we read graphql_result.h in detail */
+/* Result serialization. graphql_result_to_json returns a malloc'd buffer
+   in standard GraphQL response format: {"data": <node>, "errors": [...]}.
+   Caller must free() the returned string. The only field-level accessor
+   exposed by the C API is this JSON serializer — the Node and Dart
+   bindings both use it to materialize results, so we do the same. */
+const char* graphql_result_to_json(graphql_result_t* result);
+/* libc free for the JSON buffer returned by graphql_result_to_json. */
+void free(void* ptr);
 """)
 
 
