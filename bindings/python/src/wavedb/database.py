@@ -233,7 +233,16 @@ class WaveDB:
         await self._async_del(_normalize_key(key, self._delimiter))
 
     async def aclose(self) -> None:
-        """Close the database. Cancels any pending async operations."""
+        """Close the database, cancelling any in-flight async operations.
+
+        NOTE: This does NOT await in-flight futures — it cancels them via
+        close() → cancel_all_pending() → database_destroy(). C operations
+        in flight when cancel_all_pending runs will still complete on the
+        C work pool (database_destroy drains the pool), but their results
+        are dropped. For get ops, the identifier_t* payload leaks in this
+        case (accepted, matches the Dart binding's behavior). To drain
+        without leaking, await each pending future before calling aclose.
+        """
         self.close()
 
     async def __aenter__(self) -> "WaveDB":
@@ -244,97 +253,104 @@ class WaveDB:
 
     # ---- private async ----
 
-    async def _async_put(self, key_b: bytes, value_b: bytes) -> None:
+    def _dispatch_raw(
+        self,
+        c_fn,
+        key_b: bytes,
+        op_type: str,
+        err_msg: str,
+        *extra_args,
+    ) -> tuple[asyncio.Future, Any]:
+        """Create a promise, register the pending op, call the C async function.
+
+        Returns (future, promise). Caller must promise_destroy in a finally
+        block after awaiting the future.
+
+        extra_args are passed between the delimiter and the promise in the
+        C function call (e.g., value_b, len(value_b) for put).
+        """
         self._check_open()
-        fut, op_id, op_id_ptr = self._bridge.new_future("put")
-        self._bridge.register_pending(fut, op_id, op_id_ptr, "put")
+        fut, op_id, op_id_ptr = self._bridge.new_future(op_type)
+        self._bridge.register_pending(fut, op_id, op_id_ptr, op_type)
         promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
         if promise == ffi.NULL:
             raise WaveDBError("promise_create failed")
         try:
-            rc = lib.database_put_raw(
-                self._db,
-                ffi.from_buffer(key_b), len(key_b), self._delimiter_byte,
-                ffi.from_buffer(value_b), len(value_b),
-                promise,
-            )
+            rc = c_fn(self._db, ffi.from_buffer(key_b), len(key_b), self._delimiter_byte, *extra_args, promise)
             if rc != 0:
-                raise map_error(rc, "async put failed")
-            # _database_put resolves with NULL on success and rejects on
-            # failure; the payload carries no data we need to read.
+                raise map_error(rc, err_msg)
+        except BaseException:
+            lib.promise_destroy(promise)
+            raise
+        return fut, promise
+
+    def _decode_get_payload(self, payload) -> "bytes | None":
+        """Decode the identifier_t* payload from database_get_raw.
+
+        Payload contract (verified in src/Database/database.c):
+          - `database_get_raw` enqueues `_raw_get_worker`, which calls
+            `_database_get`. On a hit, `_database_get` calls
+            `CONSUME(value)` then `promise_resolve(promise, consumed)`.
+            `CONSUME` sets `yield=1` on the identifier's refcounter and
+            returns the same pointer — so the payload is an
+            `identifier_t*` with count=1, yield=1.
+          - On a miss, `_database_get` resolves with NULL.
+          - `database_put_raw` / `database_delete_raw` always resolve
+            with NULL on the async path (sync_only mode is rejected
+            up front; sync_only would malloc an int* instead, but that
+            path is unreachable from the async API).
+
+        To free the identifier correctly we must:
+          1. REFERENCE (consumes the yield without incrementing count)
+          2. identifier_destroy (decrements count to 0 and frees)
+        Skipping the REFERENCE would leave yield=1; identifier_destroy
+        would consume the yield and return without freeing → a leak.
+        """
+        if payload == ffi.NULL:
+            return None
+        ident = ffi.cast("identifier_t*", payload)
+        try:
+            len_out = ffi.new("size_t*")
+            data_ptr = lib.identifier_get_data_copy(ident, len_out)
+            if data_ptr == ffi.NULL:
+                return None
+            try:
+                return ffi.buffer(data_ptr, len_out[0])[:]
+            finally:
+                lib.database_raw_value_free(data_ptr)
+        finally:
+            lib.refcounter_reference(ffi.cast("void*", ident))
+            lib.identifier_destroy(ident)
+
+    async def _async_put(self, key_b: bytes, value_b: bytes) -> None:
+        fut, promise = self._dispatch_raw(
+            lib.database_put_raw, key_b, "put", "async put failed",
+            ffi.from_buffer(value_b), len(value_b),
+        )
+        try:
             await fut
+            # database_put_raw resolves with NULL; nothing to decode.
         finally:
             lib.promise_destroy(promise)
 
-    async def _async_get(self, key_b: bytes):
-        self._check_open()
-        fut, op_id, op_id_ptr = self._bridge.new_future("get")
-        self._bridge.register_pending(fut, op_id, op_id_ptr, "get")
-        promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
-        if promise == ffi.NULL:
-            raise WaveDBError("promise_create failed")
+    async def _async_get(self, key_b: bytes) -> "bytes | None":
+        fut, promise = self._dispatch_raw(
+            lib.database_get_raw, key_b, "get", "async get failed",
+        )
         try:
-            rc = lib.database_get_raw(
-                self._db,
-                ffi.from_buffer(key_b), len(key_b), self._delimiter_byte,
-                promise,
-            )
-            if rc != 0:
-                raise map_error(rc, "async get failed")
             payload = await fut
-            # Payload contract (verified in src/Database/database.c):
-            #   - `database_get_raw` enqueues `_raw_get_worker`, which calls
-            #     `_database_get`. On a hit, `_database_get` calls
-            #     `CONSUME(value)` then `promise_resolve(promise, consumed)`.
-            #     `CONSUME` sets `yield=1` on the identifier's refcounter and
-            #     returns the same pointer — so the payload is an
-            #     `identifier_t*` with count=1, yield=1.
-            #   - On a miss, `_database_get` resolves with NULL.
-            #   - `database_put_raw` / `database_delete_raw` always resolve
-            #     with NULL on the async path (sync_only mode is rejected
-            #     up front; sync_only would malloc an int* instead, but that
-            #     path is unreachable from the async API).
-            #
-            # To free the identifier correctly we must:
-            #   1. REFERENCE (consumes the yield without incrementing count)
-            #   2. identifier_destroy (decrements count to 0 and frees)
-            # Skipping the REFERENCE would leave yield=1; identifier_destroy
-            # would consume the yield and return without freeing → a leak.
-            if payload == ffi.NULL:
-                return None
-            ident = ffi.cast("identifier_t*", payload)
-            try:
-                len_out = ffi.new("size_t*")
-                data_ptr = lib.identifier_get_data_copy(ident, len_out)
-                if data_ptr == ffi.NULL:
-                    return None
-                try:
-                    return ffi.buffer(data_ptr, len_out[0])[:]
-                finally:
-                    lib.database_raw_value_free(data_ptr)
-            finally:
-                lib.refcounter_reference(ffi.cast("void*", ident))
-                lib.identifier_destroy(ident)
+            return self._decode_get_payload(payload)
         finally:
             lib.promise_destroy(promise)
 
     async def _async_del(self, key_b: bytes) -> None:
-        self._check_open()
-        fut, op_id, op_id_ptr = self._bridge.new_future("del")
-        self._bridge.register_pending(fut, op_id, op_id_ptr, "del")
-        promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
-        if promise == ffi.NULL:
-            raise WaveDBError("promise_create failed")
+        # op_type is "del" to match database_delete_raw / del_sync naming.
+        fut, promise = self._dispatch_raw(
+            lib.database_delete_raw, key_b, "del", "async del failed",
+        )
         try:
-            rc = lib.database_delete_raw(
-                self._db,
-                ffi.from_buffer(key_b), len(key_b), self._delimiter_byte,
-                promise,
-            )
-            if rc != 0:
-                raise map_error(rc, "async del failed")
-            # _database_delete resolves with NULL; payload carries no data.
             await fut
+            # database_delete_raw resolves with NULL; nothing to decode.
         finally:
             lib.promise_destroy(promise)
 

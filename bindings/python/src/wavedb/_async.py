@@ -163,6 +163,11 @@ class AsyncBridge:
         # call_soon_threadsafe raises RuntimeError on a closed loop before
         # _deliver is invoked.
         if loop_closed or fut.done():
+            # Cancelled/closed before delivery. For get ops the payload is an
+            # identifier_t* with yield=1; dropping it leaks (accepted, matches
+            # Dart). To fix, dispatch on op_type from self._future_to_op_id and
+            # free the payload appropriately.
+            # TODO(task-followup): free cancelled get payloads via identifier_destroy.
             return
         fut.set_result(payload)
         self._unregister(fut)
