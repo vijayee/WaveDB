@@ -1,6 +1,8 @@
 """WaveDB database class."""
 from __future__ import annotations
 
+from typing import Any
+
 from ._async import AsyncBridge
 from ._errors import map_error
 from ._native import ffi, lib
@@ -174,62 +176,14 @@ class WaveDB:
         """Delete the value at `key`. No-op if the key is absent."""
         self._raw_del(_normalize_key(key, self._delimiter))
 
-    def batch_sync(self, ops: list[dict]) -> None:
-        """Apply a list of put/del ops atomically in a single C batch call."""
-        self._check_open()
-        if not ops:
-            return
+    def _build_raw_ops(self, ops: list[dict]) -> "tuple[Any, list[bytes]]":
+        """Build a raw_op_t array from a list of op dicts.
 
-        raw_ops = ffi.new(f"raw_op_t[{len(ops)}]")
-        # Hold references to encoded buffers so they outlive the C call
-        keep_alive = []
-        for i, op in enumerate(ops):
-            if "key" not in op:
-                raise ValueError("op missing required 'key' field")
-            t = op.get("type")
-            if t not in ("put", "del"):
-                raise ValueError(f"op type must be 'put' or 'del', got {t!r}")
-            key_b = _normalize_key(op["key"], self._delimiter)
-            key_buf = ffi.from_buffer(key_b)
-            keep_alive.append(key_b)
-
-            raw_ops[i].key = key_buf
-            raw_ops[i].key_len = len(key_b)
-            raw_ops[i].type = 0 if t == "put" else 1
-
-            if t == "put":
-                if "value" not in op:
-                    raise ValueError("put op missing required 'value' field")
-                val_b = _encode_value(op["value"])
-                val_buf = ffi.from_buffer(val_b)
-                keep_alive.append(val_b)
-                raw_ops[i].value = val_buf
-                raw_ops[i].value_len = len(val_b)
-            else:
-                raw_ops[i].value = ffi.NULL
-                raw_ops[i].value_len = 0
-
-        rc = lib.database_batch_sync_raw(
-            self._db, self._delimiter_byte, raw_ops, len(ops),
-        )
-        if rc != 0:
-            raise map_error(rc, "batch_sync failed")
-
-    async def batch(self, ops: list[dict]) -> None:
-        """Apply a list of put/del ops atomically via `database_batch_raw`.
-
-        Async counterpart of `batch_sync`. Does not use `_dispatch_raw`
-        because the C batch signature takes (delimiter, ops, count, promise)
-        rather than the (key, len, delimiter, *extra, promise) shape the
-        helper was built for.
+        Returns (raw_ops_cdata, keep_alive_list). The keep_alive list holds
+        references to the encoded key/value bytes so they outlive the C call.
         """
-        self._check_open()
-        if not ops:
-            return
-
         raw_ops = ffi.new(f"raw_op_t[{len(ops)}]")
-        # Hold references to encoded buffers so they outlive the C call
-        keep_alive = []
+        keep_alive: list[bytes] = []
         for i, op in enumerate(ops):
             if "key" not in op:
                 raise ValueError("op missing required 'key' field")
@@ -251,24 +205,19 @@ class WaveDB:
             else:
                 raw_ops[i].value = ffi.NULL
                 raw_ops[i].value_len = 0
+        return raw_ops, keep_alive
 
-        # Batch doesn't fit _dispatch_raw's signature (no key_b prefix), so
-        # inline the promise create/register/destroy pattern.
-        fut, op_id, op_id_ptr = self._bridge.new_future("batch")
-        self._bridge.register_pending(fut, op_id, op_id_ptr, "batch")
-        promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
-        if promise == ffi.NULL:
-            raise WaveDBError("promise_create failed")
-        try:
-            rc = lib.database_batch_raw(
-                self._db, self._delimiter_byte, raw_ops, len(ops), promise,
-            )
-            if rc != 0:
-                raise map_error(rc, "async batch failed")
-            await fut
-            # database_batch_raw resolves with NULL; nothing to decode.
-        finally:
-            lib.promise_destroy(promise)
+    def batch_sync(self, ops: list[dict]) -> None:
+        """Apply a list of put/del ops atomically in a single C batch call."""
+        self._check_open()
+        if not ops:
+            return
+        raw_ops, keep_alive = self._build_raw_ops(ops)
+        rc = lib.database_batch_sync_raw(
+            self._db, self._delimiter_byte, raw_ops, len(ops),
+        )
+        if rc != 0:
+            raise map_error(rc, "batch_sync failed")
 
     # ---- public async API ----
     # `del` is a Python keyword, so the async delete method is named `delete`
@@ -286,6 +235,36 @@ class WaveDB:
     async def delete(self, key: "str | list[str]") -> None:
         """Async delete. No-op if the key is absent."""
         await self._async_del(_normalize_key(key, self._delimiter))
+
+    async def batch(self, ops: list[dict]) -> None:
+        """Apply a list of put/del ops atomically via `database_batch_raw`.
+
+        Async counterpart of `batch_sync`. Does not use `_dispatch_raw`
+        because the C batch signature takes (delimiter, ops, count, promise)
+        rather than the (key, len, delimiter, *extra, promise) shape the
+        helper was built for.
+        """
+        self._check_open()
+        if not ops:
+            return
+        raw_ops, keep_alive = self._build_raw_ops(ops)
+        # Batch doesn't fit _dispatch_raw's (db, key, len, delim, *extra, promise)
+        # signature, so inline the promise create/register/destroy pattern.
+        fut, op_id, op_id_ptr = self._bridge.new_future("batch")
+        self._bridge.register_pending(fut, op_id, op_id_ptr, "batch")
+        promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
+        if promise == ffi.NULL:
+            raise WaveDBError("promise_create failed")
+        try:
+            rc = lib.database_batch_raw(
+                self._db, self._delimiter_byte, raw_ops, len(ops), promise,
+            )
+            if rc != 0:
+                raise map_error(rc, "async batch failed")
+            await fut
+            # database_batch_raw resolves with NULL; nothing to decode.
+        finally:
+            lib.promise_destroy(promise)
 
     async def aclose(self) -> None:
         """Close the database, cancelling any in-flight async operations.
