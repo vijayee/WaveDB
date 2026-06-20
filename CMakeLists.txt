@@ -544,15 +544,10 @@ if(BUILD_NODEJS_BINDINGS)
 endif()
 
 # Shared library for FFI-based bindings (Dart, Python)
-option(BUILD_SHARED_LIB "Build libwavedb.so/.dylib/.dll for FFI bindings" OFF)
 option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
 option(BUILD_PYTHON_BINDINGS "Build Python FFI shared library" OFF)
 
 if(BUILD_DART_BINDINGS OR BUILD_PYTHON_BINDINGS)
-  set(BUILD_SHARED_LIB ON)
-endif()
-
-if(BUILD_SHARED_LIB)
   add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
   # libatomic is not a separate library on MSYS2/UCRT64 or MSVC
   include(CheckLibraryExists)

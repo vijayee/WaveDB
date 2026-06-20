@@ -10,7 +10,6 @@ from setuptools.command.build_ext import build_ext
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIB_ENV = "WAVEDB_LIB_PATH"
-USE_SYSTEM_ENV = "WAVEDB_USE_SYSTEM_LIB"
 
 if sys.platform == "darwin":
     SUFFIX = ".dylib"
@@ -40,6 +39,12 @@ class CmakeBuildExt(build_ext):
                 shutil.copy(source_lib, canonical)
             return
 
+        if not shutil.which("cmake"):
+            raise RuntimeError(
+                "cmake not found on PATH. Install CMake (>=3.14) to build libwavedb, "
+                "or set WAVEDB_LIB_PATH to point at a pre-built libwavedb.so."
+            )
+
         build_dir = self.build_temp / "wavedb-shared"
         build_dir.mkdir(parents=True, exist_ok=True)
         subprocess.check_call([
@@ -55,7 +60,11 @@ class CmakeBuildExt(build_ext):
         candidates = list(build_dir.glob(f"libwavedb*{SUFFIX}")) + list(build_dir.glob(f"wavedb*{SUFFIX}"))
         if not candidates:
             raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
-        shutil.copy(candidates[0], ext_path)
+        # Prefer the unversioned libwavedb.<suffix> over versioned symlinks
+        # (libwavedb.so.0, libwavedb.so.0.1.0) for determinism.
+        candidates.sort(key=lambda p: len(p.name))
+        chosen = candidates[0]
+        shutil.copy(chosen, ext_path)
 
 
 setup(
