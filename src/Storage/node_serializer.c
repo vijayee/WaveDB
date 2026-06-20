@@ -681,6 +681,8 @@ static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serial
         if (entry->is_bnode_child) flags |= 0x02;
         if (entry->has_value && entry->has_versions) flags |= 0x04;
         if (entry->has_value && entry->trie_child != NULL) flags |= 0x08;
+        if (entry->has_value && entry->path_meta.data != NULL && entry->path_meta.length > 0
+            && entry->path_meta.length <= 255) flags |= 0x10;
         sbuf_write_uint8(sb, flags);
 
         if (entry->has_value) {
@@ -738,6 +740,17 @@ static void bnode_serialize_entries_v3(bnode_t* node, uint8_t chunk_size, serial
             // If this entry also has a trie_child, write its disk offset
             if (flags & 0x08) {
                 sbuf_write_uint64(sb, entry->child_disk_offset);
+            }
+            // Write path metadata (per-subscript {chunk_count, byte_length})
+            // if the 0x10 flag is set. Enables exact key reconstruction
+            // during iteration without null padding.
+            if (flags & 0x10) {
+                uint8_t num_ids = (uint8_t)entry->path_meta.length;
+                sbuf_write_uint8(sb, num_ids);
+                for (int j = 0; j < entry->path_meta.length; j++) {
+                    sbuf_write_uint32(sb, entry->path_meta.data[j].chunk_count);
+                    sbuf_write_uint32(sb, entry->path_meta.data[j].byte_length);
+                }
             }
         } else {
             // V3: All non-value entries (both is_bnode_child and hbtrie_node children)
@@ -827,6 +840,7 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
         entry.is_bnode_child = (flags & 0x02) != 0;
         entry.has_versions = (flags & 0x04) != 0;
         uint8_t has_trie_child = (flags & 0x08) != 0;
+        uint8_t has_path_meta = (flags & 0x10) != 0;
 
         if (entry.has_value) {
             if (entry.has_versions) {
@@ -915,6 +929,25 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                 entry.child_disk_offset = read_uint64(ptr);
                 *remaining -= 8;
                 (*locations)[i].offset = entry.child_disk_offset;
+            }
+            // Read path metadata (per-subscript {chunk_count, byte_length})
+            // if the 0x10 flag is set. Enables exact key reconstruction.
+            if (has_path_meta) {
+                if (*remaining < 1) goto fail;
+                uint8_t num_ids = read_uint8(ptr);
+                (*remaining)--;
+                if (num_ids > 0) {
+                    if (*remaining < (size_t)num_ids * 8) goto fail;
+                    path_subscript_meta_t* meta = malloc(num_ids * sizeof(path_subscript_meta_t));
+                    if (meta == NULL) goto fail;
+                    for (uint8_t j = 0; j < num_ids; j++) {
+                        meta[j].chunk_count = read_uint32(ptr);
+                        meta[j].byte_length = read_uint32(ptr);
+                    }
+                    *remaining -= (size_t)num_ids * 8;
+                    bnode_entry_set_path_meta(&entry, meta, num_ids);
+                    free(meta);
+                }
             }
         } else {
             // V3: All non-value entries store child_disk_offset (8 bytes)

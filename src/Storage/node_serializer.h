@@ -140,6 +140,15 @@ chunk_t* chunk_deserialize(uint8_t* buf, uint8_t chunk_size);
  * are stored as 8-byte file offsets (child_disk_offset) instead of
  * child_disk_offset + reserved pairs.
  *
+ * Flags byte per entry (V3): bit 0=has_value, bit 1=is_bnode_child,
+ * bit 2=has_versions, bit 3=has_trie_child, bit 4=has_path_meta.
+ * When bit 4 (0x10) is set on a leaf entry (has_value=1), after the
+ * value/version block and optional trie_child offset, a path metadata
+ * block follows: uint8 num_identifiers, then num_identifiers pairs of
+ * (uint32 chunk_count, uint32 byte_length) — per-subscript metadata
+ * for exact key reconstruction during iteration (no null padding).
+ * Old V3 files without bit 4 fall back to padded legacy reconstruction.
+ *
  * @param node        B+tree node to serialize
  * @param chunk_size  Size of each chunk in bytes
  * @param buf         Output: allocated buffer (caller must free)
