@@ -306,6 +306,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_persistence_phase2 wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_persistence_phase2 COMMAND test_persistence_phase2)
 
+    # Scan iterator padding fix tests
+    add_executable(test_scan_padding tests/test_scan_padding.cpp)
+    target_link_libraries(test_scan_padding wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_scan_padding COMMAND test_scan_padding)
+
     # Encryption module tests (require OpenSSL)
     if(OpenSSL_FOUND)
         add_executable(test_encryption tests/test_encryption.cpp)
