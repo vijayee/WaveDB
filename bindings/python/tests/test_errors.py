@@ -1,6 +1,6 @@
 import pytest
 from wavedb.exceptions import WaveDBError, NotFoundError, InvalidPathError, IOError_, EncryptionError
-from wavedb._errors import map_error
+from wavedb._errors import map_error, raise_on_error
 
 
 def test_not_found_from_string():
@@ -33,6 +33,11 @@ def test_encryption_key_invalid_from_code():
     assert isinstance(err, EncryptionError)
 
 
+def test_encryption_unsupported_from_code():
+    err = map_error(-102, "")
+    assert isinstance(err, EncryptionError)
+
+
 def test_generic_falls_back_to_wavedb_error():
     err = map_error(1, "something else")
     assert isinstance(err, WaveDBError)
@@ -42,3 +47,29 @@ def test_generic_falls_back_to_wavedb_error():
 def test_message_preserved():
     err = map_error(0, "NOT_FOUND: users/alice")
     assert "users/alice" in str(err)
+
+
+def test_raise_on_error_success_does_not_raise():
+    # code == 0 -> no exception, regardless of message argument
+    raise_on_error(0, "anything")
+
+
+def test_raise_on_error_callable_path():
+    with pytest.raises(NotFoundError):
+        raise_on_error(-1, lambda: "NOT_FOUND: x")
+
+
+def test_raise_on_error_string_path():
+    with pytest.raises(WaveDBError):
+        raise_on_error(1, "boom")
+
+
+def test_raise_on_error_does_not_call_factory_on_success():
+    called = []
+
+    def factory():
+        called.append(True)
+        return "should not be used"
+
+    raise_on_error(0, factory)
+    assert called == []

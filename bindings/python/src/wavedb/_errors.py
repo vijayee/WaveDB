@@ -1,6 +1,8 @@
 """Map C error codes and string markers to typed Python exceptions."""
 from __future__ import annotations
 
+from typing import Callable
+
 from .exceptions import (
     EncryptionError,
     IOError_,
@@ -25,6 +27,9 @@ def map_error(code: int, message: str) -> WaveDBError:
     if code == _DATABASE_ERR_ENCRYPTION_UNSUPPORTED:
         return EncryptionError(msg or "encryption unsupported")
 
+    # String markers below are a Python-side convention for surfacing error
+    # context; the C sync APIs return integer codes, not strings. Markers
+    # match what the Node.js C++ layer emits for parity.
     upper = msg.upper()
     if "NOT_FOUND" in upper or "KEY NOT FOUND" in upper:
         return NotFoundError(msg)
@@ -38,7 +43,7 @@ def map_error(code: int, message: str) -> WaveDBError:
     return WaveDBError(msg or f"WaveDB error (code {code})")
 
 
-def raise_on_error(code: int, message_factory) -> None:
+def raise_on_error(code: int, message_factory: "Callable[[], str] | str") -> None:
     """If code != 0, raise a mapped exception. message_factory is called only on error."""
     if code != 0:
         raise map_error(code, message_factory() if callable(message_factory) else str(message_factory))
