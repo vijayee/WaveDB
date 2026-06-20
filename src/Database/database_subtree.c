@@ -887,6 +887,9 @@ size_t database_subtree_count(database_subtree_t* st) {
 
 /* --- Scan/Iterator operations --- */
 
+/* Forward declaration — defined below, used by scan_start/range to set prefix_skip */
+static size_t subtree_prefix_component_count(database_subtree_t* st);
+
 database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
                                                   path_t* start_path,
                                                   path_t* end_path) {
@@ -919,6 +922,9 @@ database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
 
     database_iterator_t* iter = database_scan_start(st->db, prefixed_start, prefixed_end);
     /* database_scan_start takes ownership of prefixed_start and prefixed_end */
+    if (iter != NULL) {
+        iter->prefix_skip = subtree_prefix_component_count(st);
+    }
     return iter;
 }
 
@@ -952,6 +958,10 @@ database_iterator_t* database_subtree_scan_range(database_subtree_t* st,
 
     free(prefixed_start);
     free(prefixed_end);
+
+    if (iter != NULL) {
+        iter->prefix_skip = subtree_prefix_component_count(st);
+    }
 
     return iter;
 }

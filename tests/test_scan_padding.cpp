@@ -9,6 +9,8 @@
 extern "C" {
 #include "Database/database.h"
 #include "Database/database_config.h"
+#include "Database/database_subtree.h"
+#include "Database/database_iterator.h"
 #include "HBTrie/hbtrie.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
@@ -215,5 +217,67 @@ TEST_F(ScanPaddingTest, BinaryKeyWithRealNullsReopen) {
         << "Binary key with real trailing nulls must survive close/reopen";
 
     database_raw_results_free(results, count);
+    database_destroy(db);
+}
+
+// --- Subtree scan returns prefix-stripped paths ---
+
+TEST_F(ScanPaddingTest, SubtreeScanStripsPrefix) {
+    database_t* db = create_db();
+    ASSERT_NE(db, nullptr);
+
+    // Insert data under a prefix: gql/Users/1/name, gql/Users/2/name
+    ASSERT_EQ(0, database_put_sync_raw(db, "gql/Users/1/name", 16, '/', (const uint8_t*)"Alice", 5));
+    ASSERT_EQ(0, database_put_sync_raw(db, "gql/Users/2/name", 16, '/', (const uint8_t*)"Bob", 3));
+
+    // Open a subtree at "gql"
+    database_subtree_t* st = database_subtree_open(db, "gql", '/');
+    ASSERT_NE(st, nullptr);
+
+    // Scan via the subtree iterator — should yield subtree-relative paths
+    database_iterator_t* iter = database_subtree_scan_range(st, NULL, NULL);
+    ASSERT_NE(iter, nullptr);
+
+    path_t* out_path = NULL;
+    identifier_t* out_value = NULL;
+    int found = 0;
+    while (database_scan_next(iter, &out_path, &out_value) == 0) {
+        // The path should be subtree-relative: Users/1/name or Users/2/name
+        // (NOT gql/Users/1/name with the prefix still attached)
+        size_t path_len = path_length(out_path);
+        EXPECT_GE(path_len, 3u) << "Path should have at least 3 components (Users, id, field)";
+
+        // First component should be "Users", not "gql"
+        identifier_t* first = path_get(out_path, 0);
+        ASSERT_NE(first, nullptr);
+        buffer_t* first_buf = identifier_to_buffer(first);
+        if (first_buf) {
+            std::string first_str((char*)first_buf->data, first_buf->size);
+            EXPECT_EQ(first_str, "Users") << "First component should be 'Users', not 'gql'";
+            buffer_destroy(first_buf);
+        }
+
+        // Second component should be the entity ID ("1" or "2"), not "Users"
+        if (path_len >= 2) {
+            identifier_t* second = path_get(out_path, 1);
+            ASSERT_NE(second, nullptr);
+            buffer_t* second_buf = identifier_to_buffer(second);
+            if (second_buf) {
+                std::string second_str((char*)second_buf->data, second_buf->size);
+                EXPECT_TRUE(second_str == "1" || second_str == "2")
+                    << "Second component should be entity ID ('1' or '2'), got: " << second_str;
+                buffer_destroy(second_buf);
+            }
+        }
+
+        found++;
+        path_destroy(out_path);
+        identifier_destroy(out_value);
+    }
+
+    EXPECT_EQ(found, 2) << "Should find 2 entities";
+
+    database_scan_end(iter);
+    database_subtree_close(st);
     database_destroy(db);
 }

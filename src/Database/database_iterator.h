@@ -44,6 +44,11 @@ typedef struct database_iterator_t {
 
     transaction_id_t read_txn_id;      // Transaction ID for visibility check
     uint8_t finished;                  // 1 when iteration complete
+
+    // Number of leading path identifiers to skip when building result paths.
+    // Set by database_subtree_scan_start/range to strip the subtree prefix.
+    // 0 for non-subtree iterators (no stripping).
+    size_t prefix_skip;
 } database_iterator_t;
 
 /**

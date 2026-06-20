@@ -15,17 +15,22 @@ Users with such data should re-insert to get exact keys.
 The Python binding's `_strip_chunk_padding` workaround has been removed from
 the scan path (the function is retained as deprecated reference only).
 
-### GraphQL scan queries in subtree mode return wrong entity IDs
+### ~~GraphQL scan queries in subtree mode return wrong entity IDs~~ (FIXED)
 
-`{ User { name } }` (no `id` argument) in subtree mode returns wrong entity IDs
-because `database_subtree_scan_start` doesn't strip the subtree prefix from
-scanned paths.
+**Status: Fixed.** The subtree scan iterator now strips the prefix from result
+paths via a `prefix_skip` field on `database_iterator_t`. `database_subtree_scan_start`
+and `database_subtree_scan_range` set `prefix_skip` to the number of prefix
+components, and `database_scan_next` skips those identifiers when building
+result paths. The GraphQL resolver receives subtree-relative paths and
+extracts entity IDs correctly.
 
-**Root cause:** `database_subtree_scan_start` returns a plain iterator without
-prefix stripping; the GraphQL resolver expects prefix-stripped paths.
+The mutation-delete double-prefix bug (iterator yields prefixed paths,
+`database_subtree_delete_sync` prepends again) is also fixed — the iterator
+now yields stripped paths, so delete prepends once.
 
-**Workaround:** Use id-argument queries (`User(id: "1") { name }`) which bypass
-the scan path.
+Note: prefix stripping only works for entries with `path_meta` (new data
+written after the scan padding fix). Legacy entries without metadata still
+include the prefix in scan results.
 
 ### `enable_persist=False` does not disable WAL persistence
 

@@ -422,7 +422,10 @@ size_t database_subtree_count(database_subtree_t* st);
  *
  * Prepends the subtree prefix to start_path and end_path, then
  * delegates to database_scan_start. The returned iterator walks the
- * underlying database; result paths include the subtree prefix.
+ * underlying database but strips the subtree prefix from result paths
+ * (via prefix_skip). Callers receive subtree-relative paths.
+ * Note: prefix stripping only works for entries with path_meta (new data);
+ * legacy entries without metadata still include the prefix.
  *
  * @param st          Subtree to scan
  * @param start_path  Optional start bound (NULL = beginning). Ownership transferred.
