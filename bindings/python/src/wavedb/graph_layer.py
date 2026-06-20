@@ -54,7 +54,14 @@ class GraphResult:
         arr = lib.graph_result_vertices(self._ptr)
         if arr == ffi.NULL or count == 0:
             return []
-        return [ffi.string(arr[i]).decode("utf-8") for i in range(count)]
+        out = []
+        for i in range(count):
+            s = arr[i]
+            if s != ffi.NULL:
+                out.append(ffi.string(s).decode("utf-8", errors="replace"))
+            else:
+                out.append("")
+        return out
 
     @property
     def count(self) -> int:
@@ -75,8 +82,7 @@ class GraphResult:
 class GraphQuery:
     """Fluent builder for a graph query. Methods return `self` for chaining."""
 
-    def __init__(self, layer: "GraphLayer", ptr) -> None:
-        self._layer = layer
+    def __init__(self, ptr) -> None:
         self._ptr = ptr
 
     def vertex(self, id: str) -> "GraphQuery":
@@ -112,6 +118,8 @@ class GraphQuery:
         return self
 
     def execute_sync(self) -> GraphResult:
+        if self._ptr == ffi.NULL:
+            raise WaveDBError("GraphQuery already executed or closed")
         ptr = lib.graph_query_execute_sync(self._ptr)
         if ptr == ffi.NULL:
             raise WaveDBError("graph_query_execute_sync returned NULL")
@@ -180,7 +188,7 @@ class GraphLayer:
         q = lib.graph_query_create(self._ptr)
         if q == ffi.NULL:
             raise WaveDBError("graph_query_create failed")
-        return GraphQuery(self, q)
+        return GraphQuery(q)
 
     def _check_open(self) -> None:
         if self._closed or self._ptr == ffi.NULL:
