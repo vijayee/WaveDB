@@ -1,3 +1,7 @@
+# MANIFEST.in paths are relative to this file (bindings/python/).
+# The ../../../ prefixes reach the WaveDB repo root so the sdist can
+# rebuild libwavedb.so from source at install time. If the package is
+# ever moved out of bindings/python/, these paths must be updated.
 include README.md LICENSE
 recursive-include src *.py
 recursive-include ../../../src *.h *.c
