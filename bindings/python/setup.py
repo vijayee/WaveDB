@@ -8,7 +8,7 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LIB_ENV = "WAVEDB_LIB_PATH"
 
 if sys.platform == "darwin":
