@@ -39,18 +39,17 @@ True in-memory mode requires `location == NULL`, which the Python binding reject
 **Workaround:** Use a fresh `tmp_path` for each test if you need isolation. True
 in-memory mode is not supported in v1.
 
-## Binding Limitations
+## Async Error Messages Lack Source Location
 
-### Cancelled async get operations leak the result payload
+`async_error_t` carries `file`/`function`/`line` fields (see `src/Workers/error.h`),
+but the C API only exposes `error_get_message` — no accessors for the location
+fields. The binding's async error messages contain only the message string,
+not the C source location where the error originated.
 
-If `aclose()` is called while an async `get` is in flight, the C worker still
-resolves the promise with an `identifier_t*` payload. The async bridge drops the
-payload without freeing it (the future is already cancelled/done). This leaks
-the identifier.
+**Root cause:** Missing C accessors (`error_get_file`, `error_get_function`,
+`error_get_line`). Declaring `async_error_t` non-opaque in the cdef would
+require knowing `refcounter_t`'s layout, which is fragile across platforms.
 
-**Root cause:** `_deliver` in `_async.py` doesn't dispatch on `op_type` to free
-cancelled payloads.
-
-**Workaround:** Await all in-flight `get` operations before calling `aclose()`.
-The leak is small (one identifier per cancelled get) and matches the Dart
-binding's behavior.
+**Workaround:** The error message is sufficient for most debugging. For
+C-source-level tracing, use the sync API (which has integer error codes) or
+check the C logs.

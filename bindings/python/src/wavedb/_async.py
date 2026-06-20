@@ -138,6 +138,10 @@ class AsyncBridge:
         self.register_pending(fut, op_id, op_id_ptr, op_type)
         promise = lib.promise_create(self._resolve_cb, self._reject_cb, op_id_ptr)
         if promise == ffi.NULL:
+            # Clean up the orphaned pending op so it doesn't sit in _pending
+            # with a future that will never resolve.
+            self._pending.pop(op_id, None)
+            self._future_to_op_id.pop(fut, None)
             raise WaveDBError("promise_create failed")
         try:
             rc = c_fn(
@@ -200,10 +204,13 @@ class AsyncBridge:
         op = self._pending.get(op_id)
         if op is None:
             return
+        op_type = op.op_type
         try:
-            op.loop.call_soon_threadsafe(self._deliver, op.future, payload, False)
+            op.loop.call_soon_threadsafe(self._deliver, op.future, payload, False, op_type)
         except RuntimeError:
             _log.warning("_on_resolve on closed loop; dropping result for op %d", op_id)
+            # Loop is closed — free the payload if it's a get-type identifier.
+            _free_get_payload_if_applicable(payload, op_type)
 
     def _on_reject(self, ctx: Any, error: Any) -> None:
         if ctx == ffi.NULL:
@@ -220,12 +227,13 @@ class AsyncBridge:
             cmsg = lib.error_get_message(error)
             if cmsg != ffi.NULL:
                 msg = ffi.string(cmsg).decode("utf-8", errors="replace")
-            # TODO: async_error_t also carries file/function/line (see
+            # Limitation: async_error_t also carries file/function/line (see
             # src/Workers/error.h), but no C accessors (error_get_file,
             # error_get_function, error_get_line) are exposed, and the struct
             # is opaque in our cdef. Enriching the message with source location
-            # would require adding accessors — deferred until the C API exposes
-            # them.
+            # would require either adding accessors to the C API or declaring
+            # refcounter_t's layout (fragile across platforms). The error message
+            # alone is sufficient for most debugging.
             lib.error_destroy(error)
         if op is None:
             return
@@ -236,17 +244,16 @@ class AsyncBridge:
 
     # ---- internal: loop-thread delivery ----
 
-    def _deliver(self, fut: asyncio.Future, payload: Any, loop_closed: bool = False) -> None:
+    def _deliver(self, fut: asyncio.Future, payload: Any, loop_closed: bool = False, op_type: str = "unknown") -> None:
         # Runs on the loop thread (or directly in tests with loop_closed=True).
         # loop_closed is a test-only escape hatch; in production,
         # call_soon_threadsafe raises RuntimeError on a closed loop before
         # _deliver is invoked.
         if loop_closed or fut.done():
-            # Cancelled/closed before delivery. For get ops the payload is an
-            # identifier_t* with yield=1; dropping it leaks (accepted, matches
-            # Dart). To fix, dispatch on op_type from self._future_to_op_id and
-            # free the payload appropriately.
-            # TODO(task-followup): free cancelled get payloads via identifier_destroy.
+            # Cancelled/closed before delivery. Free the payload if it's a
+            # get-type op (identifier_t* with yield=1 from CONSUME). put/del/batch
+            # resolve with NULL, so there's nothing to free.
+            _free_get_payload_if_applicable(payload, op_type)
             return
         fut.set_result(payload)
         self._unregister(fut)
@@ -270,3 +277,25 @@ class AsyncBridge:
             del self._pending[op_id]
         # Do NOT free op_id_ptr — the bridge owns it via _all_op_id_ptrs
         # (see I-1) and keeps it alive until database_destroy has drained.
+
+
+# Op types whose promise payload is an identifier_t* (CONSUME'd by _database_get).
+# These need refcounter_reference + identifier_destroy to free when the future
+# is cancelled before delivery. put/del/batch resolve with NULL (nothing to free).
+_GET_OP_TYPES = frozenset({"get", "st_get"})
+
+
+def _free_get_payload_if_applicable(payload: Any, op_type: str) -> None:
+    """Free a cancelled get payload (identifier_t* with yield=1).
+
+    No-op for non-get op types (payload is NULL) or NULL payloads. Safe to call
+    from any thread (cffi callbacks hold the GIL).
+    """
+    if op_type not in _GET_OP_TYPES or payload == ffi.NULL:
+        return
+    try:
+        ident = ffi.cast("identifier_t*", payload)
+        lib.refcounter_reference(ffi.cast("void*", ident))
+        lib.identifier_destroy(ident)
+    except Exception:
+        _log.warning("failed to free cancelled get payload", exc_info=True)
