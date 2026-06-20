@@ -3,11 +3,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._async import AsyncBridge
+from ._async import AsyncBridge, decode_identifier_payload
 from ._errors import map_error
 from ._native import ffi, lib
 from .config import WaveDBConfig, WaveDBEncryption
 from .exceptions import InvalidPathError, WaveDBError
+
+
+def _c_string(b: bytes) -> bytes:
+    """Append a NUL terminator for C functions that take strlen-based prefixes.
+
+    `database_subtree_open` and `database_subtree_delete_prefix` expect a
+    null-terminated C string (no prefix_len parameter). Appending b"\\x00"
+    makes any NUL-free bytes object a valid C string.
+    """
+    return b + b"\x00"
 
 
 def _normalize_key(key, delimiter: str) -> bytes:
@@ -347,6 +357,8 @@ class WaveDB:
 
         Keys passed to the returned Subtree are automatically prefixed with
         `prefix{delimiter}`. The subtree shares this database's AsyncBridge.
+        Closing the parent database cancels in-flight subtree operations
+        (subtree async ops are dispatched on the parent's work pool).
         """
         from .subtree import Subtree
 
@@ -367,8 +379,9 @@ class WaveDB:
             raise InvalidPathError("delimiter must encode to a single byte")
         prefix_b = _normalize_key(prefix, delim)
         # database_subtree_delete_prefix takes a null-terminated prefix (no
-        # prefix_len). Appended NUL makes the buffer a valid C string.
-        prefix_z = prefix_b + b"\x00"
+        # prefix_len). _c_string appends the NUL that makes the buffer a
+        # valid C string.
+        prefix_z = _c_string(prefix_b)
         rc = lib.database_subtree_delete_prefix(
             self._db, ffi.from_buffer(prefix_z), delim_bytes,
         )
@@ -406,64 +419,16 @@ class WaveDB:
     ) -> tuple[asyncio.Future, Any]:
         """Create a promise, register the pending op, call the C async function.
 
-        Returns (future, promise). Caller must promise_destroy in a finally
-        block after awaiting the future.
-
-        extra_args are passed between the delimiter and the promise in the
-        C function call (e.g., value_b, len(value_b) for put).
+        Thin wrapper over `AsyncBridge.dispatch` that passes the database
+        handle and delimiter. Returns (future, promise); on error the
+        promise is destroyed and a mapped exception is raised. The caller
+        must `promise_destroy` in a finally block after awaiting.
         """
         self._check_open()
-        fut, op_id, op_id_ptr = self._bridge.new_future(op_type)
-        self._bridge.register_pending(fut, op_id, op_id_ptr, op_type)
-        promise = lib.promise_create(self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr)
-        if promise == ffi.NULL:
-            raise WaveDBError("promise_create failed")
-        try:
-            rc = c_fn(self._db, ffi.from_buffer(key_b), len(key_b), self._delimiter_byte, *extra_args, promise)
-            if rc != 0:
-                raise map_error(rc, err_msg)
-        except BaseException:
-            lib.promise_destroy(promise)
-            raise
-        return fut, promise
-
-    def _decode_get_payload(self, payload) -> "bytes | None":
-        """Decode the identifier_t* payload from database_get_raw.
-
-        Payload contract (verified in src/Database/database.c):
-          - `database_get_raw` enqueues `_raw_get_worker`, which calls
-            `_database_get`. On a hit, `_database_get` calls
-            `CONSUME(value)` then `promise_resolve(promise, consumed)`.
-            `CONSUME` sets `yield=1` on the identifier's refcounter and
-            returns the same pointer — so the payload is an
-            `identifier_t*` with count=1, yield=1.
-          - On a miss, `_database_get` resolves with NULL.
-          - `database_put_raw` / `database_delete_raw` always resolve
-            with NULL on the async path (sync_only mode is rejected
-            up front; sync_only would malloc an int* instead, but that
-            path is unreachable from the async API).
-
-        To free the identifier correctly we must:
-          1. REFERENCE (consumes the yield without incrementing count)
-          2. identifier_destroy (decrements count to 0 and frees)
-        Skipping the REFERENCE would leave yield=1; identifier_destroy
-        would consume the yield and return without freeing → a leak.
-        """
-        if payload == ffi.NULL:
-            return None
-        ident = ffi.cast("identifier_t*", payload)
-        try:
-            len_out = ffi.new("size_t*")
-            data_ptr = lib.identifier_get_data_copy(ident, len_out)
-            if data_ptr == ffi.NULL:
-                return None
-            try:
-                return ffi.buffer(data_ptr, len_out[0])[:]
-            finally:
-                lib.database_raw_value_free(data_ptr)
-        finally:
-            lib.refcounter_reference(ffi.cast("void*", ident))
-            lib.identifier_destroy(ident)
+        return self._bridge.dispatch(
+            c_fn, self._db, key_b, self._delimiter_byte,
+            op_type, err_msg, *extra_args,
+        )
 
     async def _async_put(self, key_b: bytes, value_b: bytes) -> None:
         fut, promise = self._dispatch_raw(
@@ -482,7 +447,7 @@ class WaveDB:
         )
         try:
             payload = await fut
-            return self._decode_get_payload(payload)
+            return decode_identifier_payload(payload)
         finally:
             lib.promise_destroy(promise)
 
