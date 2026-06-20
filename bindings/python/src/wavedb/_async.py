@@ -24,17 +24,27 @@ class PendingOp:
     future: asyncio.Future
     loop: asyncio.AbstractEventLoop
     op_type: str
-    op_id_ptr: Any  # cffi-allocated intptr_t*; freed in _deliver
+    op_id_ptr: Any  # cffi-allocated intptr_t*; bridge owns lifetime via _all_op_id_ptrs
     cancelled: bool = False
 
 
 class AsyncBridge:
     """Per-database bridge. One instance per WaveDB connection."""
 
+    # Class-level: op-ids grow monotonically across connections; only meaningful
+    # within a bridge's _pending dict.
     _id_counter = itertools.count(1)
 
     def __init__(self) -> None:
         self._pending: dict[int, PendingOp] = {}
+        # Reverse index for O(1) unregister by future.
+        self._future_to_op_id: dict[asyncio.Future, int] = {}
+        # The bridge owns op_id_ptr lifetime for safety across any calling
+        # pattern. Each entry is 8 bytes; the high-water mark of concurrent ops
+        # bounds the count. Never cleared — freed when the bridge is GC'd
+        # (after database_destroy has drained the work pool and all promises
+        # are destroyed).
+        self._all_op_id_ptrs: list[Any] = []
         # Shared cffi callbacks (kept alive at instance scope; never GC'd while
         # C holds a pointer).
         self._resolve_cb = ffi.callback("void(void*, void*)")(self._on_resolve)
@@ -52,6 +62,7 @@ class AsyncBridge:
         fut: asyncio.Future = loop.create_future()
         op_id = next(self._id_counter)
         op_id_ptr = ffi.new("intptr_t*", op_id)
+        self._all_op_id_ptrs.append(op_id_ptr)  # bridge owns the lifetime
         return fut, op_id, op_id_ptr
 
     def register_pending(self, fut: asyncio.Future, op_id: int, op_id_ptr: Any, op_type: str) -> None:
@@ -59,6 +70,7 @@ class AsyncBridge:
         self._pending[op_id] = PendingOp(
             op_id=op_id, future=fut, loop=loop, op_type=op_type, op_id_ptr=op_id_ptr,
         )
+        self._future_to_op_id[fut] = op_id
 
     @property
     def resolve_cb(self):
@@ -74,14 +86,15 @@ class AsyncBridge:
             if not op.future.done():
                 try:
                     op.future.cancel()
-                except Exception:
+                except (RuntimeError, asyncio.InvalidStateError):
                     pass
         self._pending.clear()
+        self._future_to_op_id.clear()
 
     # ---- test helpers (also usable for non-C scheduling) ----
 
     def schedule_resolve(self, fut: asyncio.Future, payload: Any) -> None:
-        """Schedule a resolve on the future's loop. Used by tests and by _on_resolve."""
+        """Schedule a resolve on the future's loop. Used by tests."""
         loop = fut.get_loop()
         try:
             loop.call_soon_threadsafe(self._deliver, fut, payload, False)
@@ -128,6 +141,12 @@ class AsyncBridge:
             cmsg = lib.error_get_message(error)
             if cmsg != ffi.NULL:
                 msg = ffi.string(cmsg).decode("utf-8", errors="replace")
+            # TODO: async_error_t also carries file/function/line (see
+            # src/Workers/error.h), but no C accessors (error_get_file,
+            # error_get_function, error_get_line) are exposed, and the struct
+            # is opaque in our cdef. Enriching the message with source location
+            # would require adding accessors — deferred until the C API exposes
+            # them.
             lib.error_destroy(error)
         if op is None:
             return
@@ -140,6 +159,9 @@ class AsyncBridge:
 
     def _deliver(self, fut: asyncio.Future, payload: Any, loop_closed: bool = False) -> None:
         # Runs on the loop thread (or directly in tests with loop_closed=True).
+        # loop_closed is a test-only escape hatch; in production,
+        # call_soon_threadsafe raises RuntimeError on a closed loop before
+        # _deliver is invoked.
         if loop_closed or fut.done():
             return
         fut.set_result(payload)
@@ -160,8 +182,8 @@ class AsyncBridge:
         self._unregister(fut)
 
     def _unregister(self, fut: asyncio.Future) -> None:
-        for op_id, op in list(self._pending.items()):
-            if op.future is fut:
-                del self._pending[op_id]
-                # op_id_ptr is cffi-managed; letting it go out of scope frees it.
-                break
+        op_id = self._future_to_op_id.pop(fut, None)
+        if op_id is not None:
+            del self._pending[op_id]
+        # Do NOT free op_id_ptr — the bridge owns it via _all_op_id_ptrs
+        # (see I-1) and keeps it alive until database_destroy has drained.
