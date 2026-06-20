@@ -11,7 +11,7 @@ def test_default_config():
     assert c.lru_shards == 0
     assert c.wal_sync_mode == "debounced"
     assert c.wal_debounce_ms == 250
-    assert c.worker_threads == 0
+    assert c.worker_threads == 4
     assert c.sync_only is False
 
 
