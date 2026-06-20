@@ -39,7 +39,23 @@ class CmakeBuildExt(build_ext):
                 shutil.copy(source_lib, canonical)
             return
 
+        # If the C source tree is unavailable (e.g. installing from an sdist
+        # that only bundles the pre-built shared lib), fall back to the .so
+        # shipped under src/wavedb/_lib/ rather than failing the build.
+        bundled = Path(__file__).resolve().parent / "src" / "wavedb" / "_lib" / f"libwavedb{SUFFIX}"
+        if not (REPO_ROOT / "CMakeLists.txt").exists():
+            if not bundled.exists():
+                raise RuntimeError(
+                    f"libwavedb{SUFFIX} not found and no C source tree to build from. "
+                    f"Set WAVEDB_LIB_PATH to point at a pre-built libwavedb{SUFFIX}."
+                )
+            shutil.copy(bundled, ext_path)
+            return
+
         if not shutil.which("cmake"):
+            if bundled.exists():
+                shutil.copy(bundled, ext_path)
+                return
             raise RuntimeError(
                 "cmake not found on PATH. Install CMake (>=3.14) to build libwavedb, "
                 "or set WAVEDB_LIB_PATH to point at a pre-built libwavedb.so."

@@ -267,3 +267,11 @@ def _find_library() -> str:
 
 
 lib = ffi.dlopen(_find_library())
+
+# `free` for malloc'd buffers returned by WaveDB (e.g. graphql_result_to_json)
+# must resolve through the same allocator the C library used. With LD_PRELOAD of
+# libasan, looking up `free` via the waveDB handle may resolve to libc's free
+# instead of ASAN's interceptor, corrupting the heap. dlopen(None) returns the
+# main program's global symbol table, which honors LD_PRELOAD, so `libc.free`
+# dispatches to the active allocator (ASAN's under LD_PRELOAD, libc's otherwise).
+libc = ffi.dlopen(None)
