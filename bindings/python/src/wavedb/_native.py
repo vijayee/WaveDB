@@ -59,6 +59,17 @@ typedef struct {
 } raw_result_t;
 """)
 
+# Identifier accessors + refcounter primitives used to decode the
+# `identifier_t*` payload that `database_get_raw` resolves with. The
+# payload arrives with yield=1 (the C worker called CONSUME before
+# promise_resolve), so we must REFERENCE then identifier_destroy to
+# decrement the count to zero and actually free the object.
+ffi.cdef("""
+uint8_t* identifier_get_data_copy(const identifier_t* id, size_t* out_len);
+void identifier_destroy(identifier_t* id);
+void* refcounter_reference(void* refcounter);
+""")
+
 # ---- Database lifecycle ----
 # NOTE: database_create takes typed pointers (wal_config_t*, work_pool_t*,
 # hierarchical_timing_wheel_t*) in the real header; we declare them as
