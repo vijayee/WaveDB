@@ -50,3 +50,18 @@ def test_batch_sync_missing_value_raises(db_path):
     with pytest.raises(ValueError, match="missing required 'value'"):
         db.batch_sync([{"type": "put", "key": "a"}])
     db.close()
+
+
+@pytest.mark.asyncio
+async def test_async_batch(db_path):
+    db = WaveDB(str(db_path))
+    await db.put("keep", "v1")
+    await db.batch([
+        {"type": "put", "key": "a", "value": "1"},
+        {"type": "put", "key": "b", "value": b"2"},
+        {"type": "del", "key": "keep"},
+    ])
+    assert await db.get("a") == b"1"
+    assert await db.get("b") == b"2"
+    assert await db.get("keep") is None
+    await db.aclose()
