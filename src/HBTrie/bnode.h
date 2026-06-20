@@ -30,6 +30,21 @@ struct hbtrie_node_t;
 struct bnode_t;
 
 /**
+ * path_subscript_meta_t - Per-subscript metadata for path reconstruction.
+ *
+ * Each path subscript (e.g., 'users', 'alice' in the path ['users', 'alice'])
+ * is split into fixed-size chunks for trie storage. The last chunk may be
+ * zero-padded. This struct records both the chunk count and the original
+ * byte length so the iterator can reconstruct the exact original key without
+ * padding. Stored on leaf bnode entries (has_value == 1) and serialized
+ * to disk via the 0x10 flag bit in the V3 format.
+ */
+typedef struct {
+    uint32_t chunk_count;   // Number of chunks this subscript occupies
+    uint32_t byte_length;   // Original byte count (before chunk padding)
+} path_subscript_meta_t;
+
+/**
  * version_entry_t - Version metadata for MVCC.
  *
  * Each entry stores multiple versions as a doubly-linked list.
@@ -59,8 +74,9 @@ typedef struct version_entry_t {
  * The key field always holds a valid chunk_t* reference for non-comparison
  * purposes (serialization, iteration, splitting).
  *
- * When has_value == 1 (leaf entry), path_chunk_counts stores the number of chunks
- * per identifier in the path, enabling path reconstruction during iteration.
+ * When has_value == 1 (leaf entry), path_meta stores per-subscript
+ * {chunk_count, byte_length} metadata, enabling exact path reconstruction
+ * (without null padding) during iteration.
  */
 typedef struct bnode_entry_t {
     // Hot fields: accessed during binary search and MVCC visibility checks
@@ -82,11 +98,13 @@ typedef struct bnode_entry_t {
     transaction_id_t value_txn_id;
 
     // Path metadata for iteration (valid when has_value == 1)
-    // Stores the number of chunks per identifier in the path
-    // NULL for entries inserted before this field was added (treat as single identifier)
-    // Example: path ['users', 'alice'] with chunk_size=4 might have chunk_counts = [2, 2]
-    //         meaning 'users' has 2 chunks, 'alice' has 2 chunks
-    vec_t(size_t) path_chunk_counts;
+    // Stores per-subscript {chunk_count, byte_length} for exact path reconstruction.
+    // NULL for entries inserted before this field was added or loaded from old
+    // V3 files without the 0x10 flag bit (treat as single identifier / padded).
+    // Example: path ['users', 'alice'] with chunk_size=4 might have
+    //   path_meta = [{2, 5}, {2, 5}]  meaning 'users' has 2 chunks / 5 bytes,
+    //   'alice' has 2 chunks / 5 bytes.
+    vec_t(path_subscript_meta_t) path_meta;
 
     // Child HBTrie node for entries that ALSO have a value.
     // When has_value==1 and a longer key shares this entry's chunk prefix,
@@ -446,37 +464,38 @@ int version_entry_add(version_entry_t** versions,
 size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_txn_id);
 
 // ============================================================================
-// Path Chunk Counts Functions
+// Path Metadata Functions
 // ============================================================================
 
 /**
- * Set path chunk counts on a bnode entry.
+ * Set path metadata on a bnode entry.
  *
- * Initializes the path_chunk_counts vector with the number of chunks
- * per identifier in the path. Used during insertion to enable
- * path reconstruction during iteration.
+ * Initializes the path_meta vector with per-subscript {chunk_count, byte_length}
+ * metadata. Used during insertion to enable exact path reconstruction
+ * (without null padding) during iteration.
  *
- * @param entry      Entry to modify (must have has_value == 1)
- * @param counts     Array of chunk counts (one per identifier)
- * @param count      Number of identifiers
+ * @param entry   Entry to modify (must have has_value == 1)
+ * @param meta    Array of path_subscript_meta_t (one per identifier)
+ * @param count   Number of identifiers
  * @return 0 on success, -1 on failure
  */
-int bnode_entry_set_path_chunk_counts(bnode_entry_t* entry,
-                                       const size_t* counts,
-                                       size_t count);
+int bnode_entry_set_path_meta(bnode_entry_t* entry,
+                               const path_subscript_meta_t* meta,
+                               size_t count);
 
 /**
- * Get path chunk counts from a bnode entry.
+ * Get path metadata from a bnode entry.
  *
- * Returns the stored chunk counts per identifier, or NULL if not set.
- * For entries inserted before path metadata was added, returns NULL.
+ * Returns the stored per-subscript metadata, or NULL if not set.
+ * For entries inserted before path metadata was added or loaded from
+ * old V3 files without the 0x10 flag bit, returns NULL (legacy fallback).
  *
  * @param entry      Entry to query
  * @param out_count  Output: number of identifiers (size of array)
- * @return Pointer to chunk counts array, or NULL if not set
+ * @return Pointer to path_subscript_meta_t array, or NULL if not set
  */
-const size_t* bnode_entry_get_path_chunk_counts(const bnode_entry_t* entry,
-                                                size_t* out_count);
+const path_subscript_meta_t* bnode_entry_get_path_meta(const bnode_entry_t* entry,
+                                                        size_t* out_count);
 
 #ifdef __cplusplus
 }

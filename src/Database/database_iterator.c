@@ -83,31 +83,43 @@ static int within_bounds(database_iterator_t* iter, path_t* path) {
  * Build an identifier from an array of chunks.
  *
  * Creates an identifier by concatenating chunk data.
- * Note: This reconstructs the identifier from chunks, which may include
- * padding in the last chunk. The actual data length is chunk_size * nchunks
- * minus any padding, but we don't know the original length during iteration.
+ * If byte_length is provided (>0), builds a buffer of exactly that size,
+ * copying only the real bytes from each chunk (no null padding). This
+ * produces an identifier with the exact original length.
+ * If byte_length is 0 or exceeds nchunks*chunk_size, falls back to padded
+ * behavior (legacy compatibility).
  */
-static identifier_t* build_identifier_from_chunks(chunk_t** chunks, size_t nchunks, uint8_t chunk_size) {
+static identifier_t* build_identifier_from_chunks(chunk_t** chunks, size_t nchunks,
+                                                    uint8_t chunk_size, size_t byte_length) {
     if (chunks == NULL || nchunks == 0) {
         return identifier_create_empty(chunk_size);
     }
 
-    // Calculate total size
-    size_t total_size = nchunks * chunk_size;
+    // Determine the real data length
+    size_t total_padded = nchunks * chunk_size;
+    size_t real_length = total_padded;
 
-    // Allocate buffer for concatenated data
-    buffer_t* buf = buffer_create(total_size);
+    // Use byte_length if it's valid (non-zero and within the padded range)
+    if (byte_length > 0 && byte_length <= total_padded) {
+        real_length = byte_length;
+    }
+
+    // Allocate buffer for concatenated data (exact size, no padding)
+    buffer_t* buf = buffer_create(real_length);
     if (buf == NULL) {
         return NULL;
     }
 
-    // Copy chunk data
+    // Copy chunk data, only up to real_length bytes
     size_t offset = 0;
-    for (size_t i = 0; i < nchunks; i++) {
+    size_t remaining = real_length;
+    for (size_t i = 0; i < nchunks && remaining > 0; i++) {
         if (chunks[i] != NULL) {
-            memcpy(buf->data + offset, chunks[i]->data, chunk_size);
+            size_t to_copy = (remaining < chunk_size) ? remaining : chunk_size;
+            memcpy(buf->data + offset, chunks[i]->data, to_copy);
+            offset += to_copy;
+            remaining -= to_copy;
         }
-        offset += chunk_size;
     }
 
     identifier_t* id = identifier_create(buf, chunk_size);
@@ -270,12 +282,12 @@ int database_scan_next(database_iterator_t* iter,
                 }
 
                 if (value) {
-                    // Build path from stack using path_chunk_counts metadata
-                    // The leaf entry stores how many chunks each identifier has
+                    // Build path from stack using path_meta metadata
+                    // The leaf entry stores per-subscript {chunk_count, byte_length}
 
-                    // Get path chunk counts from the leaf entry
+                    // Get path metadata from the leaf entry
                     size_t num_identifiers = 0;
-                    const size_t* chunk_counts = bnode_entry_get_path_chunk_counts(entry, &num_identifiers);
+                    const path_subscript_meta_t* path_meta = bnode_entry_get_path_meta(entry, &num_identifiers);
 
                     // Collect chunks from the stack
                     size_t nchunks = 0;
@@ -318,13 +330,14 @@ int database_scan_next(database_iterator_t* iter,
                         return -2;
                     }
 
-                    if (chunk_counts != NULL && num_identifiers > 0) {
-                        // Use metadata to split chunks into identifiers
+                    if (path_meta != NULL && num_identifiers > 0) {
+                        // Use metadata to split chunks into identifiers with exact lengths
                         size_t chunk_offset = 0;
                         for (size_t i = 0; i < num_identifiers; i++) {
-                            size_t id_chunks = chunk_counts[i];
+                            size_t id_chunks = path_meta[i].chunk_count;
+                            size_t id_byte_length = path_meta[i].byte_length;
                             identifier_t* id = build_identifier_from_chunks(
-                                chunks + chunk_offset, id_chunks, chunk_size);
+                                chunks + chunk_offset, id_chunks, chunk_size, id_byte_length);
                             if (id == NULL) {
                                 if (chunks) free(chunks);
                                 path_destroy(result_path);
@@ -342,8 +355,8 @@ int database_scan_next(database_iterator_t* iter,
                             chunk_offset += id_chunks;
                         }
                     } else {
-                        // Legacy entry without metadata - treat as single identifier
-                        identifier_t* key_id = build_identifier_from_chunks(chunks, nchunks, chunk_size);
+                        // Legacy entry without metadata - treat as single identifier (padded)
+                        identifier_t* key_id = build_identifier_from_chunks(chunks, nchunks, chunk_size, 0);
                         if (key_id == NULL) {
                             if (chunks) free(chunks);
                             path_destroy(result_path);

@@ -84,9 +84,9 @@ void bnode_deinit(bnode_t* node) {
         // Legacy: single value
         identifier_destroy(entry->value);
       }
-      // Free path chunk counts
-      if (entry->path_chunk_counts.data != NULL) {
-        vec_deinit(&entry->path_chunk_counts);
+      // Free path metadata
+      if (entry->path_meta.data != NULL) {
+        vec_deinit(&entry->path_meta);
       }
     } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
       // Internal B+tree child - do NOT destroy here (handled by bnode_destroy_tree)
@@ -123,9 +123,9 @@ void bnode_destroy(bnode_t* node) {
           // Legacy: single value
           identifier_destroy(entry->value);
         }
-        // Free path chunk counts
-        if (entry->path_chunk_counts.data != NULL) {
-          vec_deinit(&entry->path_chunk_counts);
+        // Free path metadata
+        if (entry->path_meta.data != NULL) {
+          vec_deinit(&entry->path_meta);
         }
       } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
         // Internal B+tree child - do NOT destroy here (handled by bnode_destroy_tree)
@@ -449,11 +449,11 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
       new_entry.child = src->child;
     }
 
-    // Copy path chunk counts if present
-    if (src->has_value && src->path_chunk_counts.data != NULL) {
-      bnode_entry_set_path_chunk_counts(&new_entry,
-          src->path_chunk_counts.data,
-          (size_t)src->path_chunk_counts.length);
+    // Copy path metadata if present
+    if (src->has_value && src->path_meta.data != NULL) {
+      bnode_entry_set_path_meta(&new_entry,
+          src->path_meta.data,
+          (size_t)src->path_meta.length);
     }
 
     // Copy storage location fields
@@ -483,10 +483,10 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     entry->child = NULL;
     entry->child_bnode = NULL;
     entry->trie_child = NULL;
-    // Free path_chunk_counts data (right node's copy has its own allocation)
-    if (entry->path_chunk_counts.data != NULL) {
-      vec_deinit(&entry->path_chunk_counts);
-      entry->path_chunk_counts.data = NULL;
+    // Free path_meta data (right node's copy has its own allocation)
+    if (entry->path_meta.data != NULL) {
+      vec_deinit(&entry->path_meta);
+      entry->path_meta.data = NULL;
     }
   }
 
@@ -682,49 +682,49 @@ size_t version_entry_gc(version_entry_t** versions, transaction_id_t min_active_
 // Path Chunk Counts Functions
 // ============================================================================
 
-int bnode_entry_set_path_chunk_counts(bnode_entry_t* entry,
-                                       const size_t* counts,
-                                       size_t count) {
+int bnode_entry_set_path_meta(bnode_entry_t* entry,
+                               const path_subscript_meta_t* meta,
+                               size_t count) {
   if (entry == NULL) return -1;
   if (!entry->has_value) return -1;  // Only valid for leaf entries
 
   // Initialize the vector if needed
-  if (entry->path_chunk_counts.data == NULL) {
-    vec_init(&entry->path_chunk_counts);
+  if (entry->path_meta.data == NULL) {
+    vec_init(&entry->path_meta);
   }
 
   // Reserve exact capacity to avoid overallocation
-  if (vec_reserve(&entry->path_chunk_counts, (int)count) != 0) {
+  if (vec_reserve(&entry->path_meta, (int)count) != 0) {
     return -1;
   }
 
-  // Copy the counts
-  vec_clear(&entry->path_chunk_counts);
+  // Copy the metadata
+  vec_clear(&entry->path_meta);
   for (size_t i = 0; i < count; i++) {
-    vec_push(&entry->path_chunk_counts, counts[i]);
+    vec_push(&entry->path_meta, meta[i]);
   }
 
   return 0;
 }
 
-const size_t* bnode_entry_get_path_chunk_counts(const bnode_entry_t* entry,
-                                                size_t* out_count) {
+const path_subscript_meta_t* bnode_entry_get_path_meta(const bnode_entry_t* entry,
+                                                        size_t* out_count) {
   if (entry == NULL || !entry->has_value) {
     if (out_count) *out_count = 0;
     return NULL;
   }
 
-  if (entry->path_chunk_counts.data == NULL || entry->path_chunk_counts.length == 0) {
+  if (entry->path_meta.data == NULL || entry->path_meta.length == 0) {
     // Legacy entry - treat as single identifier
     if (out_count) *out_count = 0;
     return NULL;
   }
 
   if (out_count) {
-    *out_count = (size_t)entry->path_chunk_counts.length;
+    *out_count = (size_t)entry->path_meta.length;
   }
 
-  return entry->path_chunk_counts.data;
+  return entry->path_meta.data;
 }
 
 // ============================================================================
