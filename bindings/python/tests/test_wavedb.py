@@ -1,5 +1,6 @@
 import pytest
 from wavedb import WaveDB, WaveDBError, InvalidPathError
+from wavedb.config import WaveDBConfig
 
 
 def test_put_get_sync_string_key(db_path):
@@ -62,3 +63,16 @@ def test_context_manager(db_path):
     with WaveDB(str(db_path)) as db:
         db.put_sync("k", "v")
         assert db.get_sync("k") == b"v"
+
+
+def test_explicit_default_config(db_path):
+    # WaveDBConfig() with all defaults should produce a usable database
+    db = WaveDB(str(db_path), config=WaveDBConfig())
+    db.put_sync("k", "v")
+    assert db.get_sync("k") == b"v"
+    db.close()
+
+
+def test_multibyte_delimiter_raises(db_path):
+    with pytest.raises(InvalidPathError):
+        WaveDB(str(db_path), delimiter="é")

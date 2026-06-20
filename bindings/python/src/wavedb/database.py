@@ -51,13 +51,13 @@ class WaveDB:
     ) -> None:
         if not path:
             raise InvalidPathError("path must be non-empty")
-        if len(delimiter) != 1:
-            raise InvalidPathError("delimiter must be a single character")
-
+        delimiter_bytes = delimiter.encode("utf-8")
+        if len(delimiter_bytes) != 1:
+            raise InvalidPathError("delimiter must encode to a single byte")
         self._delimiter = delimiter
         # cffi's ABI mode requires a bytes object of length 1 for the `char`
         # delimiter parameter — an int (from ord()) is rejected.
-        self._delimiter_byte = delimiter.encode("utf-8")
+        self._delimiter_byte = delimiter_bytes
         self._path = str(path)
         self._closed = False
         self._db = ffi.NULL
@@ -93,35 +93,16 @@ class WaveDB:
         else:
             cfg = lib.database_config_default()
             try:
-                # Only override C defaults when the caller passes an explicit
-                # config. The WaveDBConfig dataclass defaults (worker_threads=0,
-                # sync_only=False) are not by themselves sufficient to bring up
-                # a concurrent database — database_create_with_config requires
-                # either worker_threads > 0 or sync_only=True. The C
-                # database_config_default() sets worker_threads=4 and
-                # timer_resolution_ms=10, which is the right baseline when the
-                # user does not customize anything.
-                if config is not None:
-                    c = config
-                    lib.database_config_set_chunk_size(cfg, c.chunk_size)
-                    lib.database_config_set_btree_node_size(
-                        cfg, c.btree_node_size
-                    )
-                    lib.database_config_set_enable_persist(
-                        cfg, 1 if c.enable_persist else 0
-                    )
-                    lib.database_config_set_lru_memory_mb(cfg, c.lru_memory_mb)
-                    lib.database_config_set_lru_shards(cfg, c.lru_shards)
-                    lib.database_config_set_wal_sync_mode(
-                        cfg, _WAL_MODE_TO_U8[c.wal_sync_mode]
-                    )
-                    lib.database_config_set_wal_debounce_ms(
-                        cfg, c.wal_debounce_ms
-                    )
-                    lib.database_config_set_worker_threads(cfg, c.worker_threads)
-                    lib.database_config_set_sync_only(
-                        cfg, 1 if c.sync_only else 0
-                    )
+                c = config or WaveDBConfig()
+                lib.database_config_set_chunk_size(cfg, c.chunk_size)
+                lib.database_config_set_btree_node_size(cfg, c.btree_node_size)
+                lib.database_config_set_enable_persist(cfg, 1 if c.enable_persist else 0)
+                lib.database_config_set_lru_memory_mb(cfg, c.lru_memory_mb)
+                lib.database_config_set_lru_shards(cfg, c.lru_shards)
+                lib.database_config_set_wal_sync_mode(cfg, _WAL_MODE_TO_U8[c.wal_sync_mode])
+                lib.database_config_set_wal_debounce_ms(cfg, c.wal_debounce_ms)
+                lib.database_config_set_worker_threads(cfg, c.worker_threads)
+                lib.database_config_set_sync_only(cfg, 1 if c.sync_only else 0)
                 self._db = lib.database_create_with_config(path_b, cfg, err)
             finally:
                 lib.database_config_destroy(cfg)
@@ -155,6 +136,8 @@ class WaveDB:
             value_out, len_out,
         )
         if rc == 0:
+            # Defensive: C contract is rc=-2 for not-found, but guard against
+            # rc=0 + NULL in case of future changes.
             if value_out[0] == ffi.NULL:
                 return None
             try:

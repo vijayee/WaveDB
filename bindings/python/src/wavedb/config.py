@@ -16,7 +16,7 @@ class WaveDBConfig:
     lru_shards: int = 0
     wal_sync_mode: str = "debounced"
     wal_debounce_ms: int = 250
-    worker_threads: int = 0
+    worker_threads: int = 4  # C default; 0 requires sync_only=True
     sync_only: bool = False
 
     def __post_init__(self) -> None:
