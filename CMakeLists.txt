@@ -543,10 +543,16 @@ if(BUILD_NODEJS_BINDINGS)
   add_subdirectory(bindings/nodejs)
 endif()
 
-# Dart FFI shared library
+# Shared library for FFI-based bindings (Dart, Python)
+option(BUILD_SHARED_LIB "Build libwavedb.so/.dylib/.dll for FFI bindings" OFF)
 option(BUILD_DART_BINDINGS "Build Dart FFI shared library" OFF)
-if(BUILD_DART_BINDINGS)
-  # Build shared library for Dart FFI
+option(BUILD_PYTHON_BINDINGS "Build Python FFI shared library" OFF)
+
+if(BUILD_DART_BINDINGS OR BUILD_PYTHON_BINDINGS)
+  set(BUILD_SHARED_LIB ON)
+endif()
+
+if(BUILD_SHARED_LIB)
   add_library(wavedb_shared SHARED ${WAVEDB_SOURCES})
   # libatomic is not a separate library on MSYS2/UCRT64 or MSVC
   include(CheckLibraryExists)
@@ -573,7 +579,7 @@ if(BUILD_DART_BINDINGS)
       ${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include
       ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcbor/src
   )
-  # Set output name to match Dart FFI expectations
+  # Set output name to match FFI expectations
   set_target_properties(wavedb_shared PROPERTIES
     OUTPUT_NAME "wavedb"
     VERSION ${PROJECT_VERSION}

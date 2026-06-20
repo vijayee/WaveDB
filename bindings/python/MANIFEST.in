@@ -1,0 +1,6 @@
+include README.md LICENSE
+recursive-include src *.py
+recursive-include ../../../src *.h *.c
+recursive-include ../../../deps *.h *.c CMakeLists.txt
+include ../../../CMakeLists.txt
+graft ../../../cmake

@@ -1,0 +1,9 @@
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+src/wavedb/_lib/*.so
+src/wavedb/_lib/*.dylib
+src/wavedb/_lib/*.dll
+.eggs/
