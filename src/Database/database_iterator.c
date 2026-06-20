@@ -333,7 +333,15 @@ int database_scan_next(database_iterator_t* iter,
                     if (path_meta != NULL && num_identifiers > 0) {
                         // Use metadata to split chunks into identifiers with exact lengths
                         size_t chunk_offset = 0;
-                        for (size_t i = 0; i < num_identifiers; i++) {
+                        // Skip prefix identifiers (subtree prefix components).
+                        // prefix_skip is 0 for non-subtree iterators.
+                        size_t skip = iter->prefix_skip;
+                        if (skip > num_identifiers) skip = num_identifiers;
+                        for (size_t i = 0; i < skip; i++) {
+                            chunk_offset += path_meta[i].chunk_count;
+                        }
+                        // Build remaining identifiers (post-prefix)
+                        for (size_t i = skip; i < num_identifiers; i++) {
                             size_t id_chunks = path_meta[i].chunk_count;
                             size_t id_byte_length = path_meta[i].byte_length;
                             identifier_t* id = build_identifier_from_chunks(
