@@ -737,11 +737,11 @@ static bnode_t* bnode_tree_copy(bnode_t* root) {
         new_entry.value = (identifier_t*)refcounter_reference((refcounter_t*)entry->value);
         new_entry.value_txn_id = entry->value_txn_id;
       }
-      // Copy path chunk counts
-      if (entry->path_chunk_counts.data != NULL && entry->path_chunk_counts.length > 0) {
-        bnode_entry_set_path_chunk_counts(&new_entry,
-            entry->path_chunk_counts.data,
-            (size_t)entry->path_chunk_counts.length);
+      // Copy path metadata
+      if (entry->path_meta.data != NULL && entry->path_meta.length > 0) {
+        bnode_entry_set_path_meta(&new_entry,
+            entry->path_meta.data,
+            (size_t)entry->path_meta.length);
       }
       // Copy trie_child (set to NULL; caller fills in via hbtrie_node_copy)
       new_entry.trie_child = NULL;
@@ -2220,10 +2220,10 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
   vec_t(mvcc_path_item_t) path_stack;
   vec_init(&path_stack);
 
-  // Track chunk counts per identifier for path metadata
-  vec_t(size_t) identifier_chunk_counts;
-  vec_init(&identifier_chunk_counts);
-  vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
+  // Track per-subscript metadata {chunk_count, byte_length} for path reconstruction
+  vec_t(path_subscript_meta_t) identifier_path_meta;
+  vec_init(&identifier_path_meta);
+  vec_reserve(&identifier_path_meta, (int)path_len_ids);
 
   // Acquire write lock on root node and mark as writing
   spinlock_lock(&current->write_lock);
@@ -2236,12 +2236,13 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
       atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
       spinlock_unlock(&current->write_lock);
       vec_deinit(&path_stack);
-      vec_deinit(&identifier_chunk_counts);
+      vec_deinit(&identifier_path_meta);
       return -1;
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
-    vec_push(&identifier_chunk_counts, nchunk);
+    path_subscript_meta_t meta = {(uint32_t)nchunk, (uint32_t)identifier->length};
+    vec_push(&identifier_path_meta, meta);
 
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
@@ -2249,7 +2250,7 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
         spinlock_unlock(&current->write_lock);
         vec_deinit(&path_stack);
-        vec_deinit(&identifier_chunk_counts);
+        vec_deinit(&identifier_path_meta);
         return -1;
       }
 
@@ -2261,7 +2262,7 @@ retry_chunk_insert:;
         atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
         spinlock_unlock(&current->write_lock);
         vec_deinit(&path_stack);
-        vec_deinit(&identifier_chunk_counts);
+        vec_deinit(&identifier_path_meta);
         return -1;
       }
       bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
@@ -2291,16 +2292,16 @@ retry_chunk_insert:;
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             spinlock_unlock(&current->write_lock);
             vec_deinit(&path_stack);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
           // Set path chunk counts on the newly inserted entry
           bnode_entry_t* inserted = bnode_get(leaf, index);
           if (inserted != NULL) {
-            bnode_entry_set_path_chunk_counts(inserted,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(inserted,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
           }
 
           // Check if leaf bnode needs splitting after insert
@@ -2324,9 +2325,9 @@ retry_chunk_insert:;
             entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
             entry->value_txn_id = txn_id;  // Store transaction ID
             // Set path chunk counts
-            bnode_entry_set_path_chunk_counts(entry,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(entry,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
             mark_dirty(current, leaf);
           } else if (entry->has_versions) {
             // Already has version chain - add new version
@@ -2336,13 +2337,13 @@ retry_chunk_insert:;
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
               vec_deinit(&path_stack);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             // Set path chunk counts
-            bnode_entry_set_path_chunk_counts(entry,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(entry,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
             mark_dirty(current, leaf);
           } else {
             // Legacy single value - upgrade to version chain
@@ -2357,7 +2358,7 @@ retry_chunk_insert:;
             if (old_version == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2375,7 +2376,7 @@ retry_chunk_insert:;
               entry->versions = NULL;
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2390,7 +2391,7 @@ retry_chunk_insert:;
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             spinlock_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             vec_deinit(&path_stack);
             return -1;
           }
@@ -2405,7 +2406,7 @@ retry_chunk_insert:;
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             spinlock_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             vec_deinit(&path_stack);
             return -1;
           }
@@ -2456,7 +2457,7 @@ retry_chunk_insert:;
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2504,7 +2505,7 @@ retry_chunk_insert:;
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2525,7 +2526,7 @@ retry_chunk_insert:;
           if (child == NULL) {
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             spinlock_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             vec_deinit(&path_stack);
             return -1;
           }
@@ -2540,7 +2541,7 @@ retry_chunk_insert:;
             hbtrie_node_destroy(child);
             atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
             spinlock_unlock(&current->write_lock);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             vec_deinit(&path_stack);
             return -1;
           }
@@ -2591,7 +2592,7 @@ retry_chunk_insert:;
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2639,7 +2640,7 @@ retry_chunk_insert:;
             if (child == NULL) {
               atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
               spinlock_unlock(&current->write_lock);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               vec_deinit(&path_stack);
               return -1;
             }
@@ -2661,7 +2662,7 @@ retry_chunk_insert:;
 
   atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
   spinlock_unlock(&current->write_lock);
-  vec_deinit(&identifier_chunk_counts);
+  vec_deinit(&identifier_path_meta);
   vec_deinit(&path_stack);
   return 0;
 }
@@ -2684,26 +2685,27 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
     return -1;
   }
 
-  // Track chunk counts per identifier for path metadata
-  vec_t(size_t) identifier_chunk_counts;
-  vec_init(&identifier_chunk_counts);
-  vec_reserve(&identifier_chunk_counts, (int)path_len_ids);
+  // Track per-subscript metadata {chunk_count, byte_length} for path reconstruction
+  vec_t(path_subscript_meta_t) identifier_path_meta;
+  vec_init(&identifier_path_meta);
+  vec_reserve(&identifier_path_meta, (int)path_len_ids);
 
   // Traverse/create path (no write lock in sync-only mode)
   for (size_t i = 0; i < path_len_ids; i++) {
     identifier_t* identifier = path_get(path, i);
     if (identifier == NULL) {
-      vec_deinit(&identifier_chunk_counts);
+      vec_deinit(&identifier_path_meta);
       return -1;
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
-    vec_push(&identifier_chunk_counts, nchunk);
+    path_subscript_meta_t meta = {(uint32_t)nchunk, (uint32_t)identifier->length};
+    vec_push(&identifier_path_meta, meta);
 
     for (size_t j = 0; j < nchunk; j++) {
       chunk_t* chunk = identifier_get_chunk(identifier, j);
       if (chunk == NULL) {
-        vec_deinit(&identifier_chunk_counts);
+        vec_deinit(&identifier_path_meta);
         return -1;
       }
 
@@ -2711,7 +2713,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
       btree_path_t bnode_path = {0};
       bnode_t* leaf = ensure_btree_loaded(current, chunk, &bnode_path, trie);
       if (leaf == NULL) {
-        vec_deinit(&identifier_chunk_counts);
+        vec_deinit(&identifier_path_meta);
         return -1;
       }
       bnode_entry_t* entry = bnode_find(leaf, chunk, &index);
@@ -2732,16 +2734,16 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
 
           if (bnode_insert(leaf, &new_entry) != 0) {
             bnode_entry_destroy_key(&new_entry);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
           // Set path chunk counts on the newly inserted entry
           bnode_entry_t* inserted = bnode_get(leaf, index);
           if (inserted != NULL) {
-            bnode_entry_set_path_chunk_counts(inserted,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(inserted,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
           }
 
           // Check if leaf bnode needs splitting after insert
@@ -2765,22 +2767,22 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
             entry->value = (identifier_t*)refcounter_reference((refcounter_t*)value);
             entry->value_txn_id = txn_id;  // Store transaction ID
             // Set path chunk counts
-            bnode_entry_set_path_chunk_counts(entry,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(entry,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
             mark_dirty(current, leaf);
           } else if (entry->has_versions) {
             // Already has version chain - add new version
             identifier_t* new_value_ref = (identifier_t*)refcounter_reference((refcounter_t*)value);
             if (version_entry_add(&entry->versions, txn_id, new_value_ref, 0) != 0) {
               identifier_destroy(new_value_ref);
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             // Set path chunk counts
-            bnode_entry_set_path_chunk_counts(entry,
-                identifier_chunk_counts.data,
-                (size_t)identifier_chunk_counts.length);
+            bnode_entry_set_path_meta(entry,
+                identifier_path_meta.data,
+                (size_t)identifier_path_meta.length);
             mark_dirty(current, leaf);
           } else {
             // Legacy single value - upgrade to version chain
@@ -2793,7 +2795,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
                 0
             );
             if (old_version == NULL) {
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
 
@@ -2808,7 +2810,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
               version_entry_destroy(old_version);
               entry->has_versions = 0;
               entry->versions = NULL;
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             mark_dirty(current, leaf);
@@ -2820,7 +2822,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
           // Create child node
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
@@ -2832,7 +2834,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
           if (bnode_insert(leaf, &new_entry) != 0) {
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
@@ -2866,7 +2868,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
             // First time descending through this entry - create trie_child
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             entry->trie_child = child;
@@ -2897,7 +2899,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             entry->child = child;
@@ -2910,7 +2912,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
         if (entry == NULL) {
           hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
           if (child == NULL) {
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
@@ -2922,7 +2924,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
           if (bnode_insert(leaf, &new_entry) != 0) {
             bnode_entry_destroy_key(&new_entry);
             hbtrie_node_destroy(child);
-            vec_deinit(&identifier_chunk_counts);
+            vec_deinit(&identifier_path_meta);
             return -1;
           }
 
@@ -2956,7 +2958,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
             // First time descending through this entry - create trie_child
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             entry->trie_child = child;
@@ -2987,7 +2989,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
             // Child was serialized as null (empty node), create a new one
             hbtrie_node_t* child = hbtrie_node_create(trie->btree_node_size);
             if (child == NULL) {
-              vec_deinit(&identifier_chunk_counts);
+              vec_deinit(&identifier_path_meta);
               return -1;
             }
             entry->child = child;
@@ -3000,7 +3002,7 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
   }
 
 
-  vec_deinit(&identifier_chunk_counts);
+  vec_deinit(&identifier_path_meta);
   return 0;
 }
 
@@ -3531,9 +3533,9 @@ size_t hbtrie_gc(hbtrie_t* trie, transaction_id_t min_active_txn_id) {
               // Legacy single value - dereference
               identifier_destroy(removed.value);
             }
-            // Free path_chunk_counts data if present
-            if (removed.path_chunk_counts.data != NULL) {
-              vec_deinit(&removed.path_chunk_counts);
+            // Free path_meta data if present
+            if (removed.path_meta.data != NULL) {
+              vec_deinit(&removed.path_meta);
             }
             total_removed++;
             mark_dirty(node, bn);
@@ -3623,8 +3625,8 @@ size_t hbtrie_gc_unsafe(hbtrie_t* trie) {
             } else if (removed_entry.value != NULL) {
               identifier_destroy(removed_entry.value);
             }
-            if (removed_entry.path_chunk_counts.data != NULL) {
-              vec_deinit(&removed_entry.path_chunk_counts);
+            if (removed_entry.path_meta.data != NULL) {
+              vec_deinit(&removed_entry.path_meta);
             }
             total_removed++;
           }
