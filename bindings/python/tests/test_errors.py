@@ -1,0 +1,44 @@
+import pytest
+from wavedb.exceptions import WaveDBError, NotFoundError, InvalidPathError, IOError_, EncryptionError
+from wavedb._errors import map_error
+
+
+def test_not_found_from_string():
+    err = map_error(0, "NOT_FOUND: users/alice")
+    assert isinstance(err, NotFoundError)
+
+
+def test_invalid_path_from_string():
+    err = map_error(0, "INVALID_PATH: empty")
+    assert isinstance(err, InvalidPathError)
+
+
+def test_io_error_from_string():
+    err = map_error(0, "IO_ERROR: disk full")
+    assert isinstance(err, IOError_)
+
+
+def test_database_closed_treated_as_io():
+    err = map_error(0, "DATABASE_CLOSED")
+    assert isinstance(err, IOError_)
+
+
+def test_encryption_required_from_code():
+    err = map_error(-100, "")
+    assert isinstance(err, EncryptionError)
+
+
+def test_encryption_key_invalid_from_code():
+    err = map_error(-101, "")
+    assert isinstance(err, EncryptionError)
+
+
+def test_generic_falls_back_to_wavedb_error():
+    err = map_error(1, "something else")
+    assert isinstance(err, WaveDBError)
+    assert not isinstance(err, (NotFoundError, InvalidPathError, IOError_, EncryptionError))
+
+
+def test_message_preserved():
+    err = map_error(0, "NOT_FOUND: users/alice")
+    assert "users/alice" in str(err)
