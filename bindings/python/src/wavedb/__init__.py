@@ -1,6 +1,7 @@
 """WaveDB Python bindings."""
 
 from .config import WaveDBConfig, WaveDBEncryption
+from .database import WaveDB
 from .exceptions import (
     EncryptionError,
     IOError_,
@@ -16,6 +17,7 @@ __all__ = [
     "IOError_",
     "InvalidPathError",
     "NotFoundError",
+    "WaveDB",
     "WaveDBError",
     "WaveDBConfig",
     "WaveDBEncryption",
