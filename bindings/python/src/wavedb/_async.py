@@ -12,10 +12,51 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from ._errors import map_error
 from ._native import ffi, lib
+from .exceptions import WaveDBError
 
 
 _log = logging.getLogger("wavedb.async")
+
+
+def decode_identifier_payload(payload) -> "bytes | None":
+    """Decode the identifier_t* payload from database_get_raw /
+    database_subtree_get_raw.
+
+    Payload contract (verified against src/Database/database.c):
+      - Hit: identifier_t* with count=1, yield=1 (CONSUME'd by _database_get
+        before promise_resolve).
+      - Miss: NULL.
+
+    Decoding sequence:
+      1. identifier_get_data_copy -> malloc'd uint8_t* (freed with
+         database_raw_value_free).
+      2. Copy to Python bytes.
+      3. refcounter_reference -> consumes the yield without incrementing
+         count.
+      4. identifier_destroy -> decrements count to 0 and frees the
+         identifier.
+
+    REFERENCE is mandatory before destroy: identifier_destroy calls
+    refcounter_dereference which consumes the yield first — without
+    REFERENCE, the identifier would be leaked.
+    """
+    if payload == ffi.NULL:
+        return None
+    ident = ffi.cast("identifier_t*", payload)
+    try:
+        len_out = ffi.new("size_t*")
+        data_ptr = lib.identifier_get_data_copy(ident, len_out)
+        if data_ptr == ffi.NULL:
+            return None
+        try:
+            return ffi.buffer(data_ptr, len_out[0])[:]
+        finally:
+            lib.database_raw_value_free(data_ptr)
+    finally:
+        lib.refcounter_reference(ffi.cast("void*", ident))
+        lib.identifier_destroy(ident)
 
 
 @dataclass
@@ -71,6 +112,44 @@ class AsyncBridge:
             op_id=op_id, future=fut, loop=loop, op_type=op_type, op_id_ptr=op_id_ptr,
         )
         self._future_to_op_id[fut] = op_id
+
+    def dispatch(
+        self,
+        c_fn,
+        handle_ptr: Any,
+        key_b: bytes,
+        delimiter_byte: bytes,
+        op_type: str,
+        err_msg: str,
+        *extra_args,
+    ) -> tuple[asyncio.Future, Any]:
+        """Create a promise, register the pending op, call the C async function.
+
+        `handle_ptr` is the C handle (database_t* or database_subtree_t*) that
+        the C function is invoked on. `extra_args` are passed between the
+        delimiter and the promise in the C function call (e.g.,
+        value_b, len(value_b) for put).
+
+        Returns (fut, promise). On error the promise is destroyed and the
+        mapped exception is raised. On success the caller must promise_destroy
+        in a finally block after awaiting the future.
+        """
+        fut, op_id, op_id_ptr = self.new_future(op_type)
+        self.register_pending(fut, op_id, op_id_ptr, op_type)
+        promise = lib.promise_create(self._resolve_cb, self._reject_cb, op_id_ptr)
+        if promise == ffi.NULL:
+            raise WaveDBError("promise_create failed")
+        try:
+            rc = c_fn(
+                handle_ptr, ffi.from_buffer(key_b), len(key_b),
+                delimiter_byte, *extra_args, promise,
+            )
+            if rc != 0:
+                raise map_error(rc, err_msg)
+        except BaseException:
+            lib.promise_destroy(promise)
+            raise
+        return fut, promise
 
     @property
     def resolve_cb(self):
@@ -175,7 +254,6 @@ class AsyncBridge:
     def _deliver_error(self, fut: asyncio.Future, message: str) -> None:
         if fut.done():
             return
-        from ._errors import map_error
         fut.set_exception(map_error(0, message))
         self._unregister(fut)
 

@@ -1,9 +1,7 @@
 """Subtree: scoped view of the database under a prefix."""
 from __future__ import annotations
 
-from typing import Any
-
-from ._async import AsyncBridge
+from ._async import AsyncBridge, decode_identifier_payload
 from ._errors import map_error
 from ._native import ffi, lib
 from .exceptions import InvalidPathError, WaveDBError
@@ -29,6 +27,16 @@ def _encode_value(value) -> bytes:
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
     raise TypeError(f"value must be str or bytes, got {type(value).__name__}")
+
+
+def _c_string(b: bytes) -> bytes:
+    """Append a NUL terminator for C functions that take strlen-based prefixes.
+
+    `database_subtree_open` expects a null-terminated C string (no
+    prefix_len parameter). Appending b"\\x00" makes any NUL-free bytes
+    object a valid C string.
+    """
+    return b + b"\x00"
 
 
 # Return codes from the C sync raw API. The C layer uses:
@@ -61,9 +69,9 @@ class Subtree:
         # database_subtree_open takes a null-terminated prefix (no prefix_len).
         # prefix_b is a UTF-8 bytes string with no embedded null bytes, so
         # ffi.from_buffer yields a NUL-terminated C string when the bytes
-        # object is NUL-free. We append an explicit NUL to be safe regardless
-        # of how the caller built prefix_b.
-        prefix_z = prefix_b + b"\x00"
+        # object is NUL-free. _c_string appends an explicit NUL to be safe
+        # regardless of how the caller built prefix_b.
+        prefix_z = _c_string(prefix_b)
         self._st = lib.database_subtree_open(
             db_ptr, ffi.from_buffer(prefix_z), delimiter_byte,
         )
@@ -108,6 +116,10 @@ class Subtree:
             lib.database_raw_value_free(v_out[0])
 
     def del_sync(self, key) -> None:
+        """Delete the value at `key` within the subtree.
+
+        Deleting a non-existent key is a no-op (no exception raised).
+        """
         self._check_open()
         k = _normalize_key(key, self._delimiter)
         rc = lib.database_subtree_delete_sync_raw(
@@ -125,8 +137,9 @@ class Subtree:
         self._check_open()
         k = _normalize_key(key, self._delimiter)
         v = _encode_value(value)
-        fut, promise = self._dispatch(
-            lib.database_subtree_put_raw, k, "st_put", "subtree put failed",
+        fut, promise = self._bridge.dispatch(
+            lib.database_subtree_put_raw, self._st, k, self._delimiter_byte,
+            "st_put", "subtree put failed",
             ffi.from_buffer(v), len(v),
         )
         try:
@@ -138,20 +151,22 @@ class Subtree:
     async def get(self, key):
         self._check_open()
         k = _normalize_key(key, self._delimiter)
-        fut, promise = self._dispatch(
-            lib.database_subtree_get_raw, k, "st_get", "subtree get failed",
+        fut, promise = self._bridge.dispatch(
+            lib.database_subtree_get_raw, self._st, k, self._delimiter_byte,
+            "st_get", "subtree get failed",
         )
         try:
             payload = await fut
-            return self._decode_get_payload(payload)
+            return decode_identifier_payload(payload)
         finally:
             lib.promise_destroy(promise)
 
     async def delete(self, key) -> None:
         self._check_open()
         k = _normalize_key(key, self._delimiter)
-        fut, promise = self._dispatch(
-            lib.database_subtree_delete_raw, k, "st_del", "subtree del failed",
+        fut, promise = self._bridge.dispatch(
+            lib.database_subtree_delete_raw, self._st, k, self._delimiter_byte,
+            "st_del", "subtree del failed",
         )
         try:
             await fut
@@ -159,70 +174,33 @@ class Subtree:
         finally:
             lib.promise_destroy(promise)
 
-    # ---- private ----
-
-    def _dispatch(
-        self,
-        c_fn,
-        key_b: bytes,
-        op_type: str,
-        err_msg: str,
-        *extra_args,
-    ) -> tuple[Any, Any]:
-        """Create a promise + register pending + call the C async function.
-
-        Returns (fut, promise). Caller must promise_destroy in a finally
-        block after awaiting the future.
-
-        extra_args are passed between the delimiter and the promise in the
-        C function call (e.g., value_b, len(value_b) for put).
-        """
-        fut, op_id, op_id_ptr = self._bridge.new_future(op_type)
-        self._bridge.register_pending(fut, op_id, op_id_ptr, op_type)
-        promise = lib.promise_create(
-            self._bridge.resolve_cb, self._bridge.reject_cb, op_id_ptr,
-        )
-        if promise == ffi.NULL:
-            raise WaveDBError("promise_create failed")
-        try:
-            rc = c_fn(
-                self._st, ffi.from_buffer(key_b), len(key_b),
-                self._delimiter_byte, *extra_args, promise,
-            )
-            if rc != 0:
-                raise map_error(rc, err_msg)
-        except BaseException:
-            lib.promise_destroy(promise)
-            raise
-        return fut, promise
-
-    def _decode_get_payload(self, payload):
-        """Decode the identifier_t* payload from database_subtree_get_raw.
-
-        Same contract as WaveDB._decode_get_payload (see that method for the
-        CONSUME/REFERENCE/destroy rationale). Duplicated here to keep the
-        Subtree self-contained; a future refactor could extract it to a
-        shared helper if more consumers need it.
-        """
-        if payload == ffi.NULL:
-            return None
-        ident = ffi.cast("identifier_t*", payload)
-        try:
-            len_out = ffi.new("size_t*")
-            data_ptr = lib.identifier_get_data_copy(ident, len_out)
-            if data_ptr == ffi.NULL:
-                return None
-            try:
-                return ffi.buffer(data_ptr, len_out[0])[:]
-            finally:
-                lib.database_raw_value_free(data_ptr)
-        finally:
-            lib.refcounter_reference(ffi.cast("void*", ident))
-            lib.identifier_destroy(ident)
-
     # ---- lifecycle ----
 
     def close(self) -> None:
+        """Close the subtree handle.
+
+        `database_subtree_close` decrements the subtree's refcounter and
+        frees it when the count reaches zero. It does NOT drain in-flight
+        async operations — subtree async ops (`put`/`get`/`delete`) are
+        delegated to the parent database's work pool, and the C close call
+        returns immediately without waiting for that pool.
+
+        Behavior:
+          - Safe to call while async ops are in flight on this subtree, as
+            long as the parent `WaveDB` stays alive. The in-flight ops
+            complete on the parent's work pool and their promises resolve
+            (or reject) normally; their results are delivered to the
+            awaiting futures.
+          - If the parent `WaveDB` is closed (or `aclose`'d) while subtree
+            ops are in flight, the parent's `database_destroy` drains the
+            work pool, but in-flight futures are cancelled via
+            `cancel_all_pending` and their payloads are dropped (matching
+            `WaveDB.aclose` semantics).
+          - To observe every in-flight result before close, `await` each
+            pending future first.
+
+        Closing twice is a no-op.
+        """
         if self._closed:
             return
         self._closed = True
