@@ -4,6 +4,7 @@ from .config import WaveDBConfig, WaveDBEncryption
 from .database import WaveDB
 from .exceptions import (
     EncryptionError,
+    GraphQLLayerError,
     IOError_,
     InvalidPathError,
     NotFoundError,
@@ -22,6 +23,7 @@ __all__ = [
     "GraphResult",
     "GraphQLError",
     "GraphQLLayer",
+    "GraphQLLayerError",
     "GraphQLResult",
     "IOError_",
     "InvalidPathError",

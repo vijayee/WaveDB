@@ -144,6 +144,11 @@ class WaveDB:
             raise map_error(err[0], f"database_create failed for {self._path}")
 
         self._bridge = AsyncBridge()
+        # Open child handles (Subtree, GraphLayer, GraphQLLayer) register
+        # here so close() can refuse to run database_destroy while they
+        # still hold subtree references — destroying the parent database
+        # first would leave dangling pointers (UAF).
+        self._open_subtrees: set = set()
 
     # ---- private helpers ----
 
@@ -388,7 +393,15 @@ class WaveDB:
         if len(delim_bytes) != 1:
             raise InvalidPathError("delimiter must encode to a single byte")
         prefix_b = _normalize_key(prefix, delim)
-        return Subtree(self._db, prefix_b, delim_bytes, delim, self._bridge)
+        st = Subtree(self._db, prefix_b, delim_bytes, delim, self._bridge, self)
+        self._open_subtrees.add(st)
+        return st
+
+    def _unregister_subtree(self, st) -> None:
+        """Called by Subtree/GraphLayer/GraphQLLayer.close() to drop itself
+        from the set of open child handles. Discard is idempotent so a
+        double-close is safe."""
+        self._open_subtrees.discard(st)
 
     def delete_subtree(self, prefix, delimiter: "str | None" = None) -> None:
         """Delete all keys matching `prefix{delimiter}*` from the database."""
@@ -487,6 +500,11 @@ class WaveDB:
     def close(self) -> None:
         if self._closed:
             return
+        if self._open_subtrees:
+            raise WaveDBError(
+                f"DATABASE_CLOSED: cannot close while "
+                f"{len(self._open_subtrees)} subtree(s) are still open"
+            )
         self._closed = True
         if hasattr(self, "_bridge"):
             self._bridge.cancel_all_pending()

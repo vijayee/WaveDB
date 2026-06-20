@@ -134,3 +134,9 @@ asyncio.run(main())
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Known Limitations
+
+See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for a list of C-level and binding
+limitations, including: scan key padding, GraphQL subtree scan queries,
+`enable_persist` vs WAL, and cancelled async get leaks.

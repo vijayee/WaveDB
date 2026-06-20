@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 
 from ._errors import map_error
 from ._native import ffi, lib, libc
-from .exceptions import WaveDBError
+from .exceptions import GraphQLLayerError, WaveDBError
 
 
 def _c_string(b: bytes) -> bytes:
@@ -199,26 +199,35 @@ class GraphQLLayer:
             self._subtree = ffi.NULL
             raise map_error(err[0], "graphql_layer_create failed")
 
-    def schema_parse(self, sdl: str) -> str | None:
-        """Parse a GraphQL SDL string and register types.
+        # Register self with the parent WaveDB so close() can refuse to
+        # destroy the database while we still hold a subtree reference.
+        db._open_subtrees.add(self)
 
-        Returns ``None`` on success, or the error message string on
-        failure. The error string is allocated by the C layer and freed
-        here (the C contract is: caller must ``free()`` ``error_out``).
+    def schema_parse(self, sdl: str) -> None:
+        """Parse and install a GraphQL schema. Raises ``GraphQLLayerError``
+        on failure.
+
+        The C layer allocates the error message via ``malloc`` and exposes
+        it through the ``error_out`` out-parameter; we free it here after
+        copying the message into the Python exception (the C contract is:
+        caller must ``free()`` ``error_out``).
         """
         self._check_open()
         err_out = ffi.new("char**")
         rc = lib.graphql_schema_parse(
             self._ptr, sdl.encode("utf-8"), err_out
         )
-        msg: str | None = None
         if rc != 0:
             if err_out[0] != ffi.NULL:
                 msg = ffi.string(err_out[0]).decode("utf-8", errors="replace")
                 libc.free(err_out[0])
             else:
                 msg = f"graphql_schema_parse failed (rc={rc})"
-        return msg
+            raise GraphQLLayerError(msg)
+        # Defensive: the C contract is error_out is NULL on success, but
+        # free whatever is there if not.
+        if err_out[0] != ffi.NULL:
+            libc.free(err_out[0])
 
     def query_sync(self, query: str) -> GraphQLResult:
         """Execute a GraphQL query synchronously.
@@ -248,6 +257,11 @@ class GraphQLLayer:
         if self._subtree != ffi.NULL:
             lib.database_subtree_close(self._subtree)
             self._subtree = ffi.NULL
+        # Drop self from the parent WaveDB's open-handle set so the
+        # parent can close cleanly. `_unregister_subtree` uses
+        # set.discard, so this is safe even if the parent is already gone.
+        if self._db is not None:
+            self._db._unregister_subtree(self)
 
     def __enter__(self) -> "GraphQLLayer":
         return self
