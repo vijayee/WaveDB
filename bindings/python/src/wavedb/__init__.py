@@ -9,12 +9,16 @@ from .exceptions import (
     NotFoundError,
     WaveDBError,
 )
+from .graph_layer import GraphLayer, GraphQuery, GraphResult
 from .subtree import Subtree
 
 __version__ = "0.1.0"
 
 __all__ = [
     "EncryptionError",
+    "GraphLayer",
+    "GraphQuery",
+    "GraphResult",
     "IOError_",
     "InvalidPathError",
     "NotFoundError",
