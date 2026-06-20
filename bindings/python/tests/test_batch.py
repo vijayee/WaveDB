@@ -36,3 +36,17 @@ def test_batch_sync_list_keys(db_path):
     ])
     assert db.get_sync(["x", "y"]) == b"v"
     db.close()
+
+
+def test_batch_sync_missing_key_raises(db_path):
+    db = WaveDB(str(db_path))
+    with pytest.raises(ValueError, match="missing required 'key'"):
+        db.batch_sync([{"type": "put", "value": "1"}])
+    db.close()
+
+
+def test_batch_sync_missing_value_raises(db_path):
+    db = WaveDB(str(db_path))
+    with pytest.raises(ValueError, match="missing required 'value'"):
+        db.batch_sync([{"type": "put", "key": "a"}])
+    db.close()

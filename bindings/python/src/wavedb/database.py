@@ -181,6 +181,8 @@ class WaveDB:
         # Hold references to encoded buffers so they outlive the C call
         keep_alive = []
         for i, op in enumerate(ops):
+            if "key" not in op:
+                raise ValueError("op missing required 'key' field")
             t = op.get("type")
             if t not in ("put", "del"):
                 raise ValueError(f"op type must be 'put' or 'del', got {t!r}")
@@ -193,6 +195,8 @@ class WaveDB:
             raw_ops[i].type = 0 if t == "put" else 1
 
             if t == "put":
+                if "value" not in op:
+                    raise ValueError("put op missing required 'value' field")
                 val_b = _encode_value(op["value"])
                 val_buf = ffi.from_buffer(val_b)
                 keep_alive.append(val_b)
