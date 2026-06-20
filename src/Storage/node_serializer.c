@@ -943,6 +943,13 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                     for (uint8_t j = 0; j < num_ids; j++) {
                         meta[j].chunk_count = read_uint32(ptr);
                         meta[j].byte_length = read_uint32(ptr);
+                        // Validate invariant: chunk_count * chunk_size >= byte_length.
+                        // Catches corrupt/truncated files where the metadata is
+                        // inconsistent with the chunk capacity.
+                        if ((size_t)meta[j].chunk_count * chunk_size < meta[j].byte_length) {
+                            free(meta);
+                            goto fail;
+                        }
                     }
                     *remaining -= (size_t)num_ids * 8;
                     bnode_entry_set_path_meta(&entry, meta, num_ids);
