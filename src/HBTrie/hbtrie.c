@@ -2241,6 +2241,19 @@ int hbtrie_insert(hbtrie_t* trie, path_t* path, identifier_t* value, transaction
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
+    // Guard: chunk_count and byte_length must fit in uint32_t (storage width
+    // in path_subscript_meta_t and on-disk serialization). Also verify the
+    // invariant: nchunks * chunk_size >= byte_length (the chunk array can
+    // hold at least the original byte count). This constrains metadata
+    // memory growth to representable values and catches corruption early.
+    if (nchunk > 0xFFFFFFFF || identifier->length > 0xFFFFFFFF
+        || nchunk * (size_t)trie->chunk_size < identifier->length) {
+      atomic_fetch_add(&current->seq, 1);  // seq becomes even (stable)
+      spinlock_unlock(&current->write_lock);
+      vec_deinit(&path_stack);
+      vec_deinit(&identifier_path_meta);
+      return -1;
+    }
     path_subscript_meta_t meta = {(uint32_t)nchunk, (uint32_t)identifier->length};
     vec_push(&identifier_path_meta, meta);
 
@@ -2699,6 +2712,16 @@ int hbtrie_insert_unsafe(hbtrie_t* trie, path_t* path, identifier_t* value, tran
     }
 
     size_t nchunk = identifier_chunk_count(identifier);
+    // Guard: chunk_count and byte_length must fit in uint32_t (storage width
+    // in path_subscript_meta_t and on-disk serialization). Also verify the
+    // invariant: nchunks * chunk_size >= byte_length (the chunk array can
+    // hold at least the original byte count). This constrains metadata
+    // memory growth to representable values and catches corruption early.
+    if (nchunk > 0xFFFFFFFF || identifier->length > 0xFFFFFFFF
+        || nchunk * (size_t)trie->chunk_size < identifier->length) {
+      vec_deinit(&identifier_path_meta);
+      return -1;
+    }
     path_subscript_meta_t meta = {(uint32_t)nchunk, (uint32_t)identifier->length};
     vec_push(&identifier_path_meta, meta);
 
