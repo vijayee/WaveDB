@@ -340,6 +340,41 @@ class WaveDB:
         kvs = [kv async for kv in scan_async_iter(self._db, self._delimiter_byte, prefix_b, None)]
         return reconstruct_object(key, kvs, self._delimiter)
 
+    # ---- subtree ----
+
+    def open_subtree(self, prefix, delimiter: "str | None" = None) -> "Subtree":
+        """Open a scoped view of the database under `prefix`.
+
+        Keys passed to the returned Subtree are automatically prefixed with
+        `prefix{delimiter}`. The subtree shares this database's AsyncBridge.
+        """
+        from .subtree import Subtree
+
+        self._check_open()
+        delim = delimiter if delimiter is not None else self._delimiter
+        delim_bytes = delim.encode("utf-8")
+        if len(delim_bytes) != 1:
+            raise InvalidPathError("delimiter must encode to a single byte")
+        prefix_b = _normalize_key(prefix, delim)
+        return Subtree(self._db, prefix_b, delim_bytes, delim, self._bridge)
+
+    def delete_subtree(self, prefix, delimiter: "str | None" = None) -> None:
+        """Delete all keys matching `prefix{delimiter}*` from the database."""
+        self._check_open()
+        delim = delimiter if delimiter is not None else self._delimiter
+        delim_bytes = delim.encode("utf-8")
+        if len(delim_bytes) != 1:
+            raise InvalidPathError("delimiter must encode to a single byte")
+        prefix_b = _normalize_key(prefix, delim)
+        # database_subtree_delete_prefix takes a null-terminated prefix (no
+        # prefix_len). Appended NUL makes the buffer a valid C string.
+        prefix_z = prefix_b + b"\x00"
+        rc = lib.database_subtree_delete_prefix(
+            self._db, ffi.from_buffer(prefix_z), delim_bytes,
+        )
+        if rc != 0:
+            raise map_error(rc, "delete_subtree failed")
+
     async def aclose(self) -> None:
         """Close the database, cancelling any in-flight async operations.
 

@@ -9,6 +9,7 @@ from .exceptions import (
     NotFoundError,
     WaveDBError,
 )
+from .subtree import Subtree
 
 __version__ = "0.1.0"
 
@@ -17,6 +18,7 @@ __all__ = [
     "IOError_",
     "InvalidPathError",
     "NotFoundError",
+    "Subtree",
     "WaveDB",
     "WaveDBError",
     "WaveDBConfig",
