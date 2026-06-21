@@ -707,7 +707,13 @@ static void database_eviction_task_execute(void* ctx) {
             atomic_fetch_add(&db->eviction_in_flight, 1);
             refcounter_yield((refcounter_t*) task);
             if (work_pool_enqueue(db->pool, task) != 0) {
-                work_destroy(task);  // Pool stopped, undo the increment
+                // Pool stopped — must consume the yield credit AND decrement
+                // count. A single work_destroy only consumes the yield (refcounter
+                // consumes yield first, returns early without decrementing count).
+                // Call work_destroy twice: first consumes yield, second decrements
+                // count to 0 and frees the work_t.
+                work_destroy(task);
+                work_destroy(task);
                 atomic_fetch_sub(&db->eviction_in_flight, 1);
             }
         }
@@ -995,7 +1001,12 @@ database_t* database_create_with_config(const char* location,
                         if (task != NULL) {
                             atomic_fetch_add(&db->eviction_in_flight, 1);
                             refcounter_yield((refcounter_t*) task);
-                            work_pool_enqueue(db->pool, task);
+                            if (work_pool_enqueue(db->pool, task) != 0) {
+                                // Pool stopped — consume yield + decrement count
+                                work_destroy(task);
+                                work_destroy(task);
+                                atomic_fetch_sub(&db->eviction_in_flight, 1);
+                            }
                         }
                     }
                 }
