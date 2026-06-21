@@ -227,13 +227,13 @@ class AsyncBridge:
             cmsg = lib.error_get_message(error)
             if cmsg != ffi.NULL:
                 msg = ffi.string(cmsg).decode("utf-8", errors="replace")
-            # Limitation: async_error_t also carries file/function/line (see
-            # src/Workers/error.h), but no C accessors (error_get_file,
-            # error_get_function, error_get_line) are exposed, and the struct
-            # is opaque in our cdef. Enriching the message with source location
-            # would require either adding accessors to the C API or declaring
-            # refcounter_t's layout (fragile across platforms). The error message
-            # alone is sufficient for most debugging.
+            # Enrich with C source location (file:function:line) for debugging
+            cfile = lib.error_get_file(error)
+            cfunc = lib.error_get_function(error)
+            line = lib.error_get_line(error)
+            if cfile != ffi.NULL and cfunc != ffi.NULL:
+                loc = f" ({ffi.string(cfile).decode('utf-8', errors='replace')}:{line} in {ffi.string(cfunc).decode('utf-8', errors='replace')})"
+                msg = f"{msg}{loc}"
             lib.error_destroy(error)
         if op is None:
             return
