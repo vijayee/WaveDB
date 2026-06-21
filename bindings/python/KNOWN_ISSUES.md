@@ -32,17 +32,15 @@ Note: prefix stripping only works for entries with `path_meta` (new data
 written after the scan padding fix). Legacy entries without metadata still
 include the prefix in scan results.
 
-### `enable_persist=False` does not disable WAL persistence
+### ~~`enable_persist=False` does not disable WAL persistence~~ (FIXED)
 
-Setting `WaveDBConfig(enable_persist=False)` does NOT prevent data from surviving
-close/reopen. The C layer gates WAL on `location != NULL`, not on `enable_persist`.
-True in-memory mode requires `location == NULL`, which the Python binding rejects
-(via `InvalidPathError` on empty paths).
+**Status: Fixed.** Added `in_memory: bool = False` to `WaveDBConfig`. When `True`,
+the binding passes `location=NULL` to `database_create_with_config`, which sets
+`is_memory_only=true` in the C layer — no WAL, no page file, no config save.
+Data is truly ephemeral and lost on close.
 
-**Root cause:** `enable_persist` only controls the page-file layer, not WAL.
-
-**Workaround:** Use a fresh `tmp_path` for each test if you need isolation. True
-in-memory mode is not supported in v1.
+`enable_persist=False` retains its original meaning (skip page-file setup, WAL
+still active). Use `in_memory=True` for true ephemeral mode.
 
 ## ~~Async Error Messages Lack Source Location~~ (FIXED)
 
