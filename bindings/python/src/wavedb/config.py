@@ -18,6 +18,7 @@ class WaveDBConfig:
     wal_debounce_ms: int = 250
     worker_threads: int = 4  # C default; 0 requires sync_only=True
     sync_only: bool = False
+    in_memory: bool = False  # True = pass location=NULL to C (no WAL, no page file, truly ephemeral)
 
     def __post_init__(self) -> None:
         if self.wal_sync_mode not in _VALID_WAL_MODES:

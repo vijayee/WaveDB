@@ -94,7 +94,13 @@ class WaveDB:
         self._db = ffi.NULL
 
         err = ffi.new("int*")
-        path_b = self._path.encode("utf-8")
+        c = config or WaveDBConfig()
+        # When in_memory=True, pass NULL location to C for truly ephemeral mode
+        # (no WAL, no page file, no config save — data lost on close).
+        if c.in_memory:
+            path_b = ffi.NULL
+        else:
+            path_b = self._path.encode("utf-8")
 
         if encryption is not None:
             cfg = lib.encrypted_database_config_default()
@@ -126,7 +132,6 @@ class WaveDB:
         else:
             cfg = lib.database_config_default()
             try:
-                c = config or WaveDBConfig()
                 lib.database_config_set_chunk_size(cfg, c.chunk_size)
                 lib.database_config_set_btree_node_size(cfg, c.btree_node_size)
                 lib.database_config_set_enable_persist(cfg, 1 if c.enable_persist else 0)
