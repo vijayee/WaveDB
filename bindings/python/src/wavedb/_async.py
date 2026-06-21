@@ -203,6 +203,11 @@ class AsyncBridge:
         op_id = int(op_id_ptr[0])
         op = self._pending.get(op_id)
         if op is None:
+            # Op was cancelled before C fired the callback. Free the payload
+            # if non-NULL — get ops resolve with identifier_t* (leaks if not
+            # freed); put/del/batch always resolve with NULL (no-op).
+            if payload != ffi.NULL:
+                _free_get_payload_if_applicable(payload, "get")
             return
         op_type = op.op_type
         try:
