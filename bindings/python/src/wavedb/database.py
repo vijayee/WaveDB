@@ -80,7 +80,10 @@ class WaveDB:
         config: "WaveDBConfig | None" = None,
         encryption: "WaveDBEncryption | None" = None,
     ) -> None:
-        if not path:
+        c = config or WaveDBConfig()
+        # When in_memory=True, the path is ignored (NULL location passed to C).
+        # Skip path validation so users can pass "" or any placeholder.
+        if not path and not c.in_memory:
             raise InvalidPathError("path must be non-empty")
         delimiter_bytes = delimiter.encode("utf-8")
         if len(delimiter_bytes) != 1:
@@ -94,7 +97,6 @@ class WaveDB:
         self._db = ffi.NULL
 
         err = ffi.new("int*")
-        c = config or WaveDBConfig()
         # When in_memory=True, pass NULL location to C for truly ephemeral mode
         # (no WAL, no page file, no config save — data lost on close).
         if c.in_memory:
