@@ -81,6 +81,7 @@ static char* parse_string(parser_t* p) {
     vec_char_t buf;
     vec_init(&buf);
 
+    int found_close = 0;
     while (p->pos < p->len) {
         if (p->input[p->pos] == '\\') {
             // Escape sequence: consume backslash + next char
@@ -94,11 +95,18 @@ static char* parse_string(parser_t* p) {
             p->pos++;
         } else if (p->input[p->pos] == '"') {
             p->pos++; // skip closing quote
+            found_close = 1;
             break;
         } else {
             vec_push(&buf, p->input[p->pos]);
             p->pos++;
         }
+    }
+
+    if (!found_close) {
+        vec_deinit(&buf);
+        set_error(p, "Unterminated string literal");
+        return NULL;
     }
 
     vec_push(&buf, '\0');
