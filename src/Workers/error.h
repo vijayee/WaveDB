@@ -27,6 +27,9 @@ void error_destroy(async_error_t* error);
  * Returns NULL if error is NULL or message is NULL.
  */
 const char* error_get_message(async_error_t* error);
+const char* error_get_file(async_error_t* error);
+const char* error_get_function(async_error_t* error);
+int error_get_line(async_error_t* error);
 
 #ifdef ERROR
 #undef ERROR

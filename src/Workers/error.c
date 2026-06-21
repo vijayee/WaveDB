@@ -34,3 +34,18 @@ const char* error_get_message(async_error_t* error) {
   if (error == NULL) return NULL;
   return error->message;
 }
+
+const char* error_get_file(async_error_t* error) {
+  if (error == NULL) return NULL;
+  return error->file;
+}
+
+const char* error_get_function(async_error_t* error) {
+  if (error == NULL) return NULL;
+  return error->function;
+}
+
+int error_get_line(async_error_t* error) {
+  if (error == NULL) return 0;
+  return error->line;
+}

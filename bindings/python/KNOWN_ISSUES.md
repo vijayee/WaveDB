@@ -44,17 +44,9 @@ True in-memory mode requires `location == NULL`, which the Python binding reject
 **Workaround:** Use a fresh `tmp_path` for each test if you need isolation. True
 in-memory mode is not supported in v1.
 
-## Async Error Messages Lack Source Location
+## ~~Async Error Messages Lack Source Location~~ (FIXED)
 
-`async_error_t` carries `file`/`function`/`line` fields (see `src/Workers/error.h`),
-but the C API only exposes `error_get_message` — no accessors for the location
-fields. The binding's async error messages contain only the message string,
-not the C source location where the error originated.
-
-**Root cause:** Missing C accessors (`error_get_file`, `error_get_function`,
-`error_get_line`). Declaring `async_error_t` non-opaque in the cdef would
-require knowing `refcounter_t`'s layout, which is fragile across platforms.
-
-**Workaround:** The error message is sufficient for most debugging. For
-C-source-level tracing, use the sync API (which has integer error codes) or
-check the C logs.
+**Status: Fixed.** Added `error_get_file`, `error_get_function`, `error_get_line`
+accessors to the C API (`src/Workers/error.h`/`.c`). The Python binding's
+`_async.py:_on_reject` now enriches async error messages with C source location:
+`message (file:line in function)`.
