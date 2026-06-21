@@ -8,7 +8,13 @@ from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# Source tree locator: prefer vendored c_src/ (populated by scripts/copy_sources.py
+# at publish time, included in sdists). Fall back to the monorepo root for dev
+# checkouts. This makes pip-install from an extracted sdist work without the
+# surrounding repo.
+HERE = Path(__file__).resolve().parent
+VENDOR = HERE / "c_src"
+REPO_ROOT = VENDOR if (VENDOR / "CMakeLists.txt").exists() else HERE.parent.parent.parent
 LIB_ENV = "WAVEDB_LIB_PATH"
 
 if sys.platform == "darwin":
@@ -66,6 +72,7 @@ class CmakeBuildExt(build_ext):
         subprocess.check_call([
             "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
             "-DBUILD_PYTHON_BINDINGS=ON",
+            "-DBUILD_TESTS=OFF",
             "-DCMAKE_BUILD_TYPE=Release",
         ])
         subprocess.check_call([
