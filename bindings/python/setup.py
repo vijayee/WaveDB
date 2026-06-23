@@ -36,58 +36,63 @@ class CmakeBuildExt(build_ext):
         lib_dir = ext_path.parent
         lib_dir.mkdir(parents=True, exist_ok=True)
 
+        # ---- Step 1: Get libwavedb.so into lib_dir ----
+
         source_lib = os.environ.get(LIB_ENV)
         if source_lib:
             shutil.copy(source_lib, lib_dir / Path(source_lib).name)
-            # Ensure a canonical libwavedb.<suffix> exists for cffi dlopen.
             canonical = lib_dir / f"libwavedb{SUFFIX}"
             if Path(source_lib).name != canonical.name and not canonical.exists():
                 shutil.copy(source_lib, canonical)
-            return
+        elif (REPO_ROOT / "CMakeLists.txt").exists() and shutil.which("cmake"):
+            build_dir = Path(self.build_temp) / "wavedb-shared"
+            build_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.check_call([
+                "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
+                "-DBUILD_PYTHON_BINDINGS=ON",
+                "-DBUILD_TESTS=OFF",
+                "-DCMAKE_BUILD_TYPE=Release",
+            ])
+            subprocess.check_call([
+                "cmake", "--build", str(build_dir), "--config", "Release",
+                "--target", "wavedb_shared", "--", "-j", str(os.cpu_count() or 2),
+            ])
 
-        # If the C source tree is unavailable (e.g. installing from an sdist
-        # that only bundles the pre-built shared lib), fall back to the .so
-        # shipped under src/wavedb/_lib/ rather than failing the build.
-        bundled = Path(__file__).resolve().parent / "src" / "wavedb" / "_lib" / f"libwavedb{SUFFIX}"
-        if not (REPO_ROOT / "CMakeLists.txt").exists():
+            candidates = list(build_dir.glob(f"libwavedb*{SUFFIX}")) + list(build_dir.glob(f"wavedb*{SUFFIX}"))
+            if not candidates:
+                raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
+            candidates.sort(key=lambda p: len(p.name))
+            shutil.copy(candidates[0], ext_path)
+        else:
+            # Fall back to bundled .so
+            bundled = HERE / "src" / "wavedb" / "_lib" / f"libwavedb{SUFFIX}"
             if not bundled.exists():
                 raise RuntimeError(
                     f"libwavedb{SUFFIX} not found and no C source tree to build from. "
                     f"Set WAVEDB_LIB_PATH to point at a pre-built libwavedb{SUFFIX}."
                 )
             shutil.copy(bundled, ext_path)
-            return
 
-        if not shutil.which("cmake"):
-            if bundled.exists():
-                shutil.copy(bundled, ext_path)
-                return
-            raise RuntimeError(
-                "cmake not found on PATH. Install CMake (>=3.14) to build libwavedb, "
-                "or set WAVEDB_LIB_PATH to point at a pre-built libwavedb.so."
-            )
-
-        build_dir = Path(self.build_temp) / "wavedb-shared"
-        build_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call([
-            "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
-            "-DBUILD_PYTHON_BINDINGS=ON",
-            "-DBUILD_TESTS=OFF",
-            "-DCMAKE_BUILD_TYPE=Release",
-        ])
-        subprocess.check_call([
-            "cmake", "--build", str(build_dir), "--config", "Release",
-            "--target", "wavedb_shared", "--", "-j", str(os.cpu_count() or 2),
-        ])
-
-        candidates = list(build_dir.glob(f"libwavedb*{SUFFIX}")) + list(build_dir.glob(f"wavedb*{SUFFIX}"))
-        if not candidates:
-            raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
-        # Prefer the unversioned libwavedb.<suffix> over versioned symlinks
-        # (libwavedb.so.0, libwavedb.so.0.1.0) for determinism.
-        candidates.sort(key=lambda p: len(p.name))
-        chosen = candidates[0]
-        shutil.copy(chosen, ext_path)
+        # ---- Step 2: Compile cffi out-of-line extension ----
+        # Links against libwavedb.so in lib_dir. Rpath ($ORIGIN/_lib or
+        # @loader_path/_lib) ensures the extension finds the .so at runtime.
+        try:
+            src_dir = HERE / "src"
+            sys.path.insert(0, str(src_dir))
+            from wavedb._cffi_build import ffibuilder, configure
+            # Use absolute path for library_dir so the linker finds libwavedb.so
+            configure(library_dir=str(lib_dir.resolve()))
+            cffi_tmp = Path(self.build_temp) / "cffi"
+            cffi_tmp.mkdir(parents=True, exist_ok=True)
+            compiled_path = ffibuilder.compile(tmpdir=str(cffi_tmp), verbose=True)
+            # Copy the compiled extension to the package directory
+            if compiled_path:
+                shutil.copy(compiled_path, lib_dir)
+        except Exception as e:
+            # If cffi compilation fails, the binding falls back to ABI mode
+            # (_native.py tries _native_ext, then _native_abi on ImportError).
+            print(f"Warning: cffi out-of-line compilation failed ({e}); "
+                  f"falling back to ABI mode")
 
 
 setup(
