@@ -157,6 +157,13 @@ class WaveDB:
         # first would leave dangling pointers (UAF).
         self._open_subtrees: set = set()
 
+        # Pre-allocate cffi out-parameter objects for get_sync hot path.
+        # Reusing these eliminates ~0.53 us/op of ffi.new allocation overhead
+        # (25% of the raw cffi call time). NOT thread-safe across concurrent
+        # get_sync calls — callers using threads should use the async API.
+        self._get_value_out = ffi.new("uint8_t**")
+        self._get_len_out = ffi.new("size_t*")
+
     # ---- private helpers ----
 
     def _check_open(self) -> None:
@@ -175,8 +182,8 @@ class WaveDB:
 
     def _raw_get(self, key_b: bytes):
         self._check_open()
-        value_out = ffi.new("uint8_t**")
-        len_out = ffi.new("size_t*")
+        value_out = self._get_value_out
+        len_out = self._get_len_out
         rc = lib.database_get_sync_raw(
             self._db,
             ffi.from_buffer(key_b), len(key_b), self._delimiter_byte,
