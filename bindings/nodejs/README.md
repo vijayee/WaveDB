@@ -85,7 +85,7 @@ const db = new WaveDB(path, options);
 | `lruMemoryMb` | `50` | LRU cache size in MB |
 | `lruShards` | `64` | LRU shard count (0 = auto-scale) |
 | `workerThreads` | `4` | Worker pool size |
-| `wal.syncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
+| `wal.syncMode` | `'immediate'` | `'immediate'`, `'debounced'`, or `'async'` |
 | `wal.debounceMs` | `250` | fsync debounce window (ms) |
 | `wal.maxFileSize` | `131072` | Max WAL file size before sealing |
 | `encryption` | — | Encryption configuration (see below) |
@@ -516,25 +516,25 @@ Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALI
 
 ## Performance
 
-Benchmarks on Linux x86_64, Node.js v26, 50MB LRU cache, default config (4 worker threads).
+Benchmarks on Linux x86_64, Node.js v26, 50MB LRU cache, default config (immediate WAL, 4 worker threads). The C default `wal_sync_mode` is `WAL_SYNC_IMMEDIATE` (fsync per write) — that's why individual `put`/`putSync` are ~1.3K ops/sec. Set `wal: { syncMode: "debounced" }` or `"async"` for 50-300x higher write throughput at lower durability.
 
 ### Sync Operations
 
 | Operation | Throughput |
 |-----------|------------|
-| `putSync` | 1.3K ops/sec (WAL-bound) |
-| `getSync` | 304K ops/sec |
+| `putSync` | 1.3K ops/sec (WAL-fsync-bound) |
+| `getSync` | 647K ops/sec |
 
 ### Async Operations
 
 | Operation | Throughput |
 |-----------|------------|
 | `put` (sequential) | 1.3K ops/sec |
-| `get` (sequential) | 118K ops/sec |
+| `get` (sequential) | 96K ops/sec |
 | `putMany` (1000/batch) | **190K ops/sec (150x vs put)** |
-| `getMany` (concurrent 1000) | **285K ops/sec (2.4x vs get)** |
+| `getMany` (concurrent 1000) | **285K ops/sec (3.0x vs get)** |
 | `deleteMany` (1000/batch) | 160K ops/sec |
-| `batch` (1000/batch) | 211K ops/sec |
+| `batch` (1000/batch) | 232K ops/sec |
 
 The `150x` for `putMany`/`deleteMany` is real but specific to WAL-bound
 workloads: individual `put`/`del` fsync per op (~1.3K ops/sec), while
@@ -548,9 +548,9 @@ fsync amortization.
 
 | Concurrency | `put` | `get` |
 |-------------|-------|-------|
-| 1 | 1.2K ops/sec | 45K ops/sec |
-| 4 | 2.6K ops/sec | 106K ops/sec |
-| 32 | 2.2K ops/sec | 114K ops/sec |
+| 1 | 1.3K ops/sec | 94K ops/sec |
+| 4 | 3.0K ops/sec | 191K ops/sec |
+| 32 | 2.3K ops/sec | 225K ops/sec |
 
 **Tips:** Use `putMany`/`getMany`/`deleteMany` for throughput-sensitive workloads. Scale concurrency to 4-8 for best concurrent throughput. Sync puts are WAL-bound; sync gets are memory-speed.
 

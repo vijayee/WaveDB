@@ -151,10 +151,8 @@ async def main():
 
         # get_many fires N concurrent get() calls (there is no batched C
         # get API). It's a concurrency helper, not an atomic batch — the
-        # speedup depends on whether the C work pool has spare parallelism.
-        # On in-memory workloads where individual get() is already fast,
-        # get_many shows little to no benefit; on WAL-bound workloads it
-        # can be 2-3x.
+        # speedup over sequential get is bounded by C work-pool parallelism
+        # and varies with cache state (typically 1-3x).
         results = await db.get_many(["k1", "k2", "k3"])
 
 asyncio.run(main())
@@ -166,23 +164,23 @@ Benchmark results (in-memory, `in_memory=True`, BATCH_SIZE=1000):
 
 | Operation | ops/sec | us/op |
 |-----------|---------|-------|
-| sync put | 161K | 6.2 |
-| sync get | 469K | 2.1 |
-| async put (sequential) | 22K | 46 |
-| async get (sequential) | 35K | 29 |
-| async put_many (1000/batch) | 316K | 3.2 |
-| async get_many (concurrent) | 35K | 29 |
-| async delete_many (1000/batch) | 432K | 2.3 |
-| batch (1000/batch) | 399K | 2.5 |
-| stream scan | 793K entries/sec | |
+| sync put | 195K | 5.1 |
+| sync get | 576K | 1.7 |
+| async put (sequential) | 19K | 52 |
+| async get (sequential) | 14K | 74 |
+| async put_many (1000/batch) | 231K | 4.3 |
+| async get_many (concurrent) | 37K | 27 |
+| async delete_many (1000/batch) | 419K | 2.4 |
+| batch (1000/batch) | 417K | 2.4 |
+| stream scan | 801K entries/sec | |
 
-Note that `async get_many` matches `async get (sequential)` on this
-in-memory workload — individual get is fast enough that the asyncio
-callback marshaling (single loop thread, `call_soon_threadsafe` per
-result) is the bottleneck, so firing 1000 concurrent gets just queues
-1000 callbacks that drain serially. `get_many` helps on WAL-bound
-workloads where individual get is slower and leaves the C work pool
-with parallelism headroom to exploit.
+`put_many`/`delete_many` are ~12-30x faster than individual `put`/`del`
+because they forward to a single atomic C batch call. `get_many` is
+~2.6x faster than sequential `get` here — it has no batched C
+equivalent, just `asyncio.gather` over individual `get()`s, so the
+speedup is bounded by C work-pool parallelism and varies with cache
+state (1-3x is typical). Numbers vary run-to-run by ~30% due to
+tree-size and LRU-cache effects; reproduce with `python benchmark.py`.
 
 Run `python benchmark.py` with `WAVEDB_LIB_PATH` set to reproduce.
 
