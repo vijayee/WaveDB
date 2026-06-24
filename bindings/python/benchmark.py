@@ -154,14 +154,11 @@ async def main() -> None:
 
     base = tempfile.mkdtemp(prefix="wavedb_bench_")
 
-    # In-memory — use wal_sync_mode="none" (OS cache, no fsync) instead of
-    # in_memory=True because async ops + in_memory=True is not yet supported
-    # (C worker threads try to access WAL which doesn't exist in in-memory mode).
-    # wal_sync_mode="none" gives close-to-in-memory performance with WAL enabled.
+    # In-memory (truly ephemeral — no WAL, no page file)
     print(f"\n{'=' * 50}")
-    print("MODE: In-Memory (wal_sync_mode=none, OS cache)")
+    print("MODE: In-Memory (in_memory=True)")
     print("=" * 50)
-    await run_benchmarks(f"{base}/mem", WaveDBConfig(wal_sync_mode="none"), "in-memory")
+    await run_benchmarks(f"{base}/mem", WaveDBConfig(in_memory=True), "in-memory")
 
     # Debounced WAL
     print(f"\n{'=' * 50}")
