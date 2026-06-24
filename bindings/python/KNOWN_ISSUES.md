@@ -51,6 +51,17 @@ and a segfault when accessing `node->btree`. Fix: added `bnode_t*` support
 to `iterator_frame_t` with `push_bnode_frame()` for descending through
 multi-level B+trees. Verified with scans up to 40K keys.
 
+### ~~Memory pool corruption with multiple database lifecycles~~ (FIXED)
+
+**Status: Fixed.** `hbtrie_null_entries_by_offset` called `free()` on
+`hbtrie_combined_t` blocks that were allocated via `memory_pool_alloc`. The
+blocks live in the memory pool's static BSS arrays — calling `free()` on a
+BSS pointer corrupts glibc's free list metadata, which overwrites adjacent
+pool blocks' `next` pointers. Fix: replaced `free(evicted)` with
+`memory_pool_free(container_of(evicted, hbtrie_combined_t, node),
+sizeof(hbtrie_combined_t))` at both call sites. Verified: full benchmark
+(4 WAL modes) completes under ASAN with zero crashes.
+
 ## ~~Async Error Messages Lack Source Location~~ (FIXED)
 
 **Status: Fixed.** Added `error_get_file`, `error_get_function`, `error_get_line`
@@ -58,14 +69,6 @@ accessors to the C API (`src/Workers/error.h`/`.c`). The Python binding's
 `_async.py:_on_reject` now enriches async error messages with C source location:
 `message (file:line in function)`.
 
-## Remaining Issues
+## All Known Issues Resolved
 
-### Memory pool SEGV under ASAN with multiple database lifecycles
-
-When creating and destroying multiple databases sequentially in the same
-process (e.g., the benchmark's 4 WAL modes), the memory pool may crash
-in `memory_pool_class_alloc` during batch operations in the second or
-later database. This only manifests under ASAN (`-fsanitize=address`) and
-does not affect normal (non-ASAN) builds. Likely a pool lifecycle issue
-where TLS cache draining during `database_destroy` leaves the pool in an
-inconsistent state for the next `database_create_with_config`.
+No remaining known issues.
