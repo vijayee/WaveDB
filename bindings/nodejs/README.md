@@ -45,7 +45,11 @@ await db.batch([
   { type: 'del', key: 'users/bob/name' }
 ]);
 
-// Batched helpers — 150x faster than individual async puts
+// Batched helpers — putMany/deleteMany forward to a single atomic C batch
+// call (~150x faster than individual puts, which are WAL-fsync-bound).
+// getMany is a concurrency helper, not a batched C call: it fires N
+// concurrent get()s via Promise.all. Speedup over individual get is ~2-3x
+// (bounded by C work-pool parallelism, not fsync amortization).
 await db.putMany([['k1', 'v1'], ['k2', 'v2'], ['k3', 'v3']]);
 const results = await db.getMany(['k1', 'k2', 'k3']);
 await db.deleteMany(['k1', 'k2']);
@@ -182,9 +186,9 @@ await db.put(key, value)           // Store a value
 const val = await db.get(key)      // Retrieve (null if not found)
 await db.del(key)                   // Delete
 await db.batch(operations)          // Atomic batch of put/del
-await db.putMany(items)             // Batch-put key-value pairs (150x faster)
-const vals = await db.getMany(keys) // Concurrent get (100x faster)
-await db.deleteMany(keys)           // Batch-delete keys (150x faster)
+await db.putMany(items)             // Batch-put key-value pairs (150x vs individual put)
+const vals = await db.getMany(keys) // Concurrent get (2-3x vs individual get)
+await db.deleteMany(keys)           // Batch-delete keys (150x vs individual del)
 await db.putObject(key, obj)        // Store nested object as flattened paths
 const obj = await db.getObject(key) // Reconstruct nested object
 ```
@@ -526,9 +530,19 @@ Benchmarks on Linux x86_64, Node.js v26, 50MB LRU cache, default config (4 worke
 | Operation | Throughput |
 |-----------|------------|
 | `put` (sequential) | 1.3K ops/sec |
-| `putMany` (5000/batch) | **189K ops/sec (150x)** |
-| `getMany` (concurrent 5000) | **134K ops/sec (100x)** |
-| `batch` (5000/batch) | 237K ops/sec |
+| `get` (sequential) | 118K ops/sec |
+| `putMany` (1000/batch) | **190K ops/sec (150x vs put)** |
+| `getMany` (concurrent 1000) | **285K ops/sec (2.4x vs get)** |
+| `deleteMany` (1000/batch) | 160K ops/sec |
+| `batch` (1000/batch) | 211K ops/sec |
+
+The `150x` for `putMany`/`deleteMany` is real but specific to WAL-bound
+workloads: individual `put`/`del` fsync per op (~1.3K ops/sec), while
+`putMany`/`deleteMany` batch 1000 ops into one C call with one fsync, so
+the amortization is enormous. `getMany` has no batched C equivalent —
+it's `Promise.all` over individual `get()`s — so its speedup over
+individual `get` is bounded by C work-pool parallelism (~2-3x), not by
+fsync amortization.
 
 ### Concurrent Throughput
 
