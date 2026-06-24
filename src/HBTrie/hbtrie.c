@@ -3707,7 +3707,13 @@ size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
                         evicted->btree = NULL;
                     }
                     spinlock_destroy(&evicted->write_lock);
-                    free(evicted);
+                    // evicted is the first field of hbtrie_combined_t (zero offset),
+                    // so container_of gives the combined allocation. It was
+                    // pool-allocated via memory_pool_alloc — must use
+                    // memory_pool_free, NOT free(). Calling free() on a BSS
+                    // pool pointer corrupts glibc's free list.
+                    hbtrie_combined_t* combined = container_of(evicted, hbtrie_combined_t, node);
+                    memory_pool_free(combined, sizeof(hbtrie_combined_t));
                     entry->child = NULL;
                     nulled++;
                 }
@@ -3722,7 +3728,8 @@ size_t hbtrie_null_entries_by_offset(hbtrie_t* trie, uint64_t offset) {
                         evicted->btree = NULL;
                     }
                     spinlock_destroy(&evicted->write_lock);
-                    free(evicted);
+                    hbtrie_combined_t* combined = container_of(evicted, hbtrie_combined_t, node);
+                    memory_pool_free(combined, sizeof(hbtrie_combined_t));
                     entry->trie_child = NULL;
                     nulled++;
                 }
