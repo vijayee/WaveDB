@@ -137,35 +137,52 @@ async def main():
 asyncio.run(main())
 ```
 
-### Batched Helpers (8x throughput)
+### Batched Helpers
 
-For throughput-sensitive workloads, use the batched helpers which amortize
-the promise/callback overhead across all items:
+For throughput-sensitive workloads, use the batched helpers:
 
 ```python
 async def main():
     async with WaveDB("/path/to/db") as db:
-        # 8x faster than individual await db.put() calls
+        # put_many / delete_many forward to a single C batch call — atomic,
+        # ~16x faster than individual await db.put() calls.
         await db.put_many([("k1", "v1"), ("k2", "v2"), ("k3", "v3")])
-        results = await db.get_many(["k1", "k2", "k3"])
         await db.delete_many(["k1", "k2"])
+
+        # get_many fires N concurrent get() calls (there is no batched C
+        # get API). It's a concurrency helper, not an atomic batch — the
+        # speedup depends on whether the C work pool has spare parallelism.
+        # On in-memory workloads where individual get() is already fast,
+        # get_many shows little to no benefit; on WAL-bound workloads it
+        # can be 2-3x.
+        results = await db.get_many(["k1", "k2", "k3"])
 
 asyncio.run(main())
 ```
 
 ## Performance
 
-Benchmark results (in-memory, `in_memory=True`):
+Benchmark results (in-memory, `in_memory=True`, BATCH_SIZE=1000):
 
 | Operation | ops/sec | us/op |
 |-----------|---------|-------|
 | sync put | 161K | 6.2 |
 | sync get | 469K | 2.1 |
 | async put (sequential) | 22K | 46 |
-| async put_many (100/batch) | 200K | 5.0 |
+| async get (sequential) | 35K | 29 |
+| async put_many (1000/batch) | 316K | 3.2 |
 | async get_many (concurrent) | 35K | 29 |
-| batch | 321K | 3.1 |
+| async delete_many (1000/batch) | 432K | 2.3 |
+| batch (1000/batch) | 399K | 2.5 |
 | stream scan | 793K entries/sec | |
+
+Note that `async get_many` matches `async get (sequential)` on this
+in-memory workload — individual get is fast enough that the asyncio
+callback marshaling (single loop thread, `call_soon_threadsafe` per
+result) is the bottleneck, so firing 1000 concurrent gets just queues
+1000 callbacks that drain serially. `get_many` helps on WAL-bound
+workloads where individual get is slower and leaves the C work pool
+with parallelism headroom to exploit.
 
 Run `python benchmark.py` with `WAVEDB_LIB_PATH` set to reproduce.
 
