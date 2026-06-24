@@ -126,6 +126,10 @@ class WaveDB implements Finalizable {
   // Unique instance id to scope pending ops
   final int _instanceId;
   static int _nextInstanceId = 1;
+  // Number of live WaveDB instances in this isolate. When this reaches 0,
+  // the static NativeCallable.listener callbacks are closed so the Dart VM
+  // can release its internal "DartWorker" threads and the process can exit.
+  static int _instanceCount = 0;
 
   WaveDB(String path, {String delimiter = '/', WaveDBConfig? config, WaveDBEncryption? encryption})
       : _path = path,
@@ -162,6 +166,7 @@ class WaveDB implements Finalizable {
 
     _finalizer.attach(this, _db!.cast(), detach: this);
     _ensureCallbacksRegistered();
+    _instanceCount++;
   }
 
   /// Create an encrypted database using the FFI encrypted config API
@@ -241,6 +246,20 @@ class WaveDB implements Finalizable {
         _cRejectCallback,
       );
     }
+  }
+
+  /// Release the static NativeCallable.listener callbacks.
+  ///
+  /// The callbacks are registered lazily on the first async operation and
+  /// kept alive for the isolate's lifetime because they're static. Dart's
+  /// NativeCallback.listener keeps internal VM worker threads ("DartWorker")
+  /// alive until the callable is closed, which prevents process exit even
+  /// after main() returns. Call this when finished with all WaveDB instances.
+  static void shutdown() {
+    _resolveCallable?.close();
+    _rejectCallable?.close();
+    _resolveCallable = null;
+    _rejectCallable = null;
   }
 
   /// C resolve callback — called from the C worker pool thread.
@@ -954,6 +973,14 @@ class WaveDB implements Finalizable {
       WaveDBNative.databaseDestroy(_db!);
       _db = null;
       _isClosed = true;
+      _instanceCount--;
+      if (_instanceCount == 0) {
+        // Last instance closed — release the static NativeCallable.listener
+        // callbacks so the Dart VM can release its "DartWorker" threads
+        // and the process can exit. _ensureCallbacksRegistered will lazily
+        // re-register them if a new WaveDB is created after this.
+        shutdown();
+      }
     }
   }
 }
