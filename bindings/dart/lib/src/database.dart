@@ -580,7 +580,8 @@ class WaveDB implements Finalizable {
   /// spare capacity. Returns values in the same order as [keys].
   Future<List<Uint8List?>> getMany(List<dynamic> keys) async {
     if (keys.isEmpty) return [];
-    return Future.wait(keys.map((k) => get(k)));
+    final results = await Future.wait(keys.map((k) => get(k)));
+    return results.cast<Uint8List?>();
   }
 
   /// Retrieve a nested object from paths
