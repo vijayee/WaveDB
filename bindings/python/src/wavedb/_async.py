@@ -150,6 +150,7 @@ class AsyncBridge:
                 raise map_error(rc, err_msg)
         except BaseException:
             lib.promise_destroy(promise)
+            self._pending.pop(op_id, None)
             raise
         return fut, promise
 
