@@ -41,6 +41,11 @@ async def main():
     name = await db.get("users/bob/name")
 asyncio.run(main())
 
+# Batched async — 8x faster than individual puts
+await db.put_many([("users/alice/name", "Alice"), ("users/bob/name", "Bob")])
+results = await db.get_many(["users/alice/name", "users/bob/name"])
+await db.delete_many(["users/alice/name"])
+
 # Object operations (nested dict <-> flattened paths)
 db.put_object_sync("users/alice", {"name": "Alice", "age": "30"})
 user = db.get_object_sync("users/alice")
@@ -82,7 +87,8 @@ db = WaveDB(
 |---------|---------|-------------|
 | `chunk_size` | `4` | HBTrie chunk size (immutable) |
 | `btree_node_size` | `4096` | B+tree node size (immutable) |
-| `enable_persist` | `True` | Persist to disk (immutable) |
+| `enable_persist` | `True` | Persist to disk (immutable, page-file only) |
+| `in_memory` | `False` | True ephemeral mode (no WAL, no page file) |
 | `lru_memory_mb` | `50` | LRU cache size in MB |
 | `lru_shards` | `0` | LRU shard count (0 = auto) |
 | `wal_sync_mode` | `"debounced"` | `debounced` / `immediate` / `none` |
@@ -131,12 +137,38 @@ async def main():
 asyncio.run(main())
 ```
 
+### Batched Helpers (8x throughput)
+
+For throughput-sensitive workloads, use the batched helpers which amortize
+the promise/callback overhead across all items:
+
+```python
+async def main():
+    async with WaveDB("/path/to/db") as db:
+        # 8x faster than individual await db.put() calls
+        await db.put_many([("k1", "v1"), ("k2", "v2"), ("k3", "v3")])
+        results = await db.get_many(["k1", "k2", "k3"])
+        await db.delete_many(["k1", "k2"])
+
+asyncio.run(main())
+```
+
+## Performance
+
+Benchmark results (in-memory, `in_memory=True`):
+
+| Operation | ops/sec | us/op |
+|-----------|---------|-------|
+| sync put | 161K | 6.2 |
+| sync get | 469K | 2.1 |
+| async put (sequential) | 22K | 46 |
+| async put_many (100/batch) | 200K | 5.0 |
+| async get_many (concurrent) | 35K | 29 |
+| batch | 321K | 3.1 |
+| stream scan | 793K entries/sec | |
+
+Run `python benchmark.py` with `WAVEDB_LIB_PATH` set to reproduce.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Known Limitations
-
-See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for a list of C-level and binding
-limitations, including: scan key padding, GraphQL subtree scan queries,
-`enable_persist` vs WAL, and cancelled async get leaks.

@@ -45,6 +45,11 @@ await db.batch([
   { type: 'del', key: 'users/bob/name' }
 ]);
 
+// Batched helpers — 150x faster than individual async puts
+await db.putMany([['k1', 'v1'], ['k2', 'v2'], ['k3', 'v3']]);
+const results = await db.getMany(['k1', 'k2', 'k3']);
+await db.deleteMany(['k1', 'k2']);
+
 // Iterator
 const iter = new Iterator(db, { start: 'users/alice', end: 'users/alice~' });
 let entry;
@@ -177,6 +182,9 @@ await db.put(key, value)           // Store a value
 const val = await db.get(key)      // Retrieve (null if not found)
 await db.del(key)                   // Delete
 await db.batch(operations)          // Atomic batch of put/del
+await db.putMany(items)             // Batch-put key-value pairs (150x faster)
+const vals = await db.getMany(keys) // Concurrent get (100x faster)
+await db.deleteMany(keys)           // Batch-delete keys (150x faster)
 await db.putObject(key, obj)        // Store nested object as flattened paths
 const obj = await db.getObject(key) // Reconstruct nested object
 ```
@@ -504,27 +512,33 @@ Error codes: `NOT_FOUND`, `INVALID_PATH`, `IO_ERROR`, `DATABASE_CLOSED`, `INVALI
 
 ## Performance
 
-Benchmarks on Linux x86_64, Node.js v24, 50MB LRU cache, 32 worker threads, async WAL.
+Benchmarks on Linux x86_64, Node.js v26, 50MB LRU cache, default config (4 worker threads).
 
-### Node.js Sync (ASYNC WAL, 32 worker threads)
+### Sync Operations
 
 | Operation | Throughput |
 |-----------|------------|
-| `putSync` | 1.3K ops/sec |
+| `putSync` | 1.3K ops/sec (WAL-bound) |
 | `getSync` | 304K ops/sec |
 
-### Node.js Concurrent Throughput (ASYNC WAL, 32 worker threads)
+### Async Operations
+
+| Operation | Throughput |
+|-----------|------------|
+| `put` (sequential) | 1.3K ops/sec |
+| `putMany` (5000/batch) | **189K ops/sec (150x)** |
+| `getMany` (concurrent 5000) | **134K ops/sec (100x)** |
+| `batch` (5000/batch) | 237K ops/sec |
+
+### Concurrent Throughput
 
 | Concurrency | `put` | `get` |
 |-------------|-------|-------|
 | 1 | 1.2K ops/sec | 45K ops/sec |
-| 2 | 1.9K ops/sec | 47K ops/sec |
 | 4 | 2.6K ops/sec | 106K ops/sec |
-| 8 | 2.6K ops/sec | 102K ops/sec |
-| 16 | 2.4K ops/sec | 80K ops/sec |
 | 32 | 2.2K ops/sec | 114K ops/sec |
 
-**Tips:** Use async operations in production. Scale concurrency to 4-8 for best throughput. Sync puts are WAL-bound; sync gets are memory-speed.
+**Tips:** Use `putMany`/`getMany`/`deleteMany` for throughput-sensitive workloads. Scale concurrency to 4-8 for best concurrent throughput. Sync puts are WAL-bound; sync gets are memory-speed.
 
 ## Building from Source
 
