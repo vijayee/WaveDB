@@ -115,11 +115,14 @@ async def bench_concurrent(db: WaveDB) -> None:
 def bench_stream(db: WaveDB) -> None:
     print("\nStream Operations:")
     print("-" * 50)
-    # NOTE: scan with 50+ keys triggers a pre-existing C-level segfault in
-    # bnode_count during trie traversal (not related to path_meta changes).
-    # Skip the stream benchmark until that crash is fixed. The segfault
-    # can't be caught by Python exception handling.
-    print("  stream: SKIPPED (pre-existing scan crash with 50+ keys)")
+    count = 0
+    t0 = perf_ns()
+    for _ in db.create_read_stream():
+        count += 1
+    elapsed = perf_ns() - t0
+    elapsed_s = elapsed / 1e9
+    eps = count / elapsed_s if elapsed_s > 0 else 0
+    print(f"  {'stream':20s} {eps:>10.0f} entries/sec  ({count} entries)")
 
 
 async def run_benchmarks(db_path: str, config: WaveDBConfig, label: str) -> None:

@@ -32,8 +32,38 @@ static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t pat
     REFERENCE(node, hbtrie_node_t);
 
     iter->stack[iter->stack_depth].node = node;
+    iter->stack[iter->stack_depth].bnode = NULL;
     iter->stack[iter->stack_depth].entry_index = 0;
     iter->stack[iter->stack_depth].path_index = path_index;
+    iter->stack[iter->stack_depth].is_bnode_frame = 0;
+    iter->stack_depth++;
+
+    return 0;
+}
+
+/**
+ * Push a B+tree internal node frame onto the iterator stack.
+ * Used when descending through multi-level B+trees (is_bnode_child=1 entries).
+ */
+static int push_bnode_frame(database_iterator_t* iter, bnode_t* bnode, size_t path_index) {
+    if (iter->stack_depth >= iter->stack_size) {
+        size_t new_size = iter->stack_size * 2;
+        iterator_frame_t* new_stack = realloc(iter->stack,
+                                               new_size * sizeof(iterator_frame_t));
+        if (new_stack == NULL) {
+            return -1;
+        }
+        iter->stack = new_stack;
+        iter->stack_size = new_size;
+    }
+
+    REFERENCE(bnode, bnode_t);
+
+    iter->stack[iter->stack_depth].node = NULL;
+    iter->stack[iter->stack_depth].bnode = bnode;
+    iter->stack[iter->stack_depth].entry_index = 0;
+    iter->stack[iter->stack_depth].path_index = path_index;
+    iter->stack[iter->stack_depth].is_bnode_frame = 1;
     iter->stack_depth++;
 
     return 0;
@@ -45,9 +75,14 @@ static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t pat
 static void pop_frame(database_iterator_t* iter) {
     if (iter->stack_depth > 0) {
         iter->stack_depth--;
-        // Dereference the node
-        if (iter->stack[iter->stack_depth].node) {
-            DEREFERENCE(iter->stack[iter->stack_depth].node);
+        if (iter->stack[iter->stack_depth].is_bnode_frame) {
+            if (iter->stack[iter->stack_depth].bnode) {
+                DEREFERENCE(iter->stack[iter->stack_depth].bnode);
+            }
+        } else {
+            if (iter->stack[iter->stack_depth].node) {
+                DEREFERENCE(iter->stack[iter->stack_depth].node);
+            }
         }
     }
 }
@@ -193,8 +228,14 @@ void database_scan_end(database_iterator_t* iter) {
 
         // Dereference all nodes on stack
         for (size_t i = 0; i < iter->stack_depth; i++) {
-            if (iter->stack[i].node) {
-                DEREFERENCE(iter->stack[i].node);
+            if (iter->stack[i].is_bnode_frame) {
+                if (iter->stack[i].bnode) {
+                    DEREFERENCE(iter->stack[i].bnode);
+                }
+            } else {
+                if (iter->stack[i].node) {
+                    DEREFERENCE(iter->stack[i].node);
+                }
             }
         }
 
@@ -227,15 +268,26 @@ int database_scan_next(database_iterator_t* iter,
     while (iter->stack_depth > 0) {
         // Get current frame
         iterator_frame_t* frame = &iter->stack[iter->stack_depth - 1];
-        hbtrie_node_t* node = frame->node;
 
-        if (node == NULL || node->btree == NULL) {
-            pop_frame(iter);
-            continue;
+        // Determine the bnode to iterate based on frame type
+        bnode_t* btree = NULL;
+        if (frame->is_bnode_frame) {
+            // B+tree internal node frame — descend through multi-level B+tree
+            btree = frame->bnode;
+            if (btree == NULL) {
+                pop_frame(iter);
+                continue;
+            }
+        } else {
+            // Trie-level frame — get btree from the hbtrie_node
+            hbtrie_node_t* node = frame->node;
+            if (node == NULL || node->btree == NULL) {
+                pop_frame(iter);
+                continue;
+            }
+            btree = node->btree;
         }
 
-        // Get current entry
-        bnode_t* btree = node->btree;
         size_t count = bnode_count(btree);
 
         // Track if we pushed a child frame (if so, don't pop this frame)
@@ -294,7 +346,9 @@ int database_scan_next(database_iterator_t* iter,
                     for (size_t i = 0; i < iter->stack_depth; i++) {
                         iterator_frame_t* f = &iter->stack[i];
                         if (f->entry_index > 0) {
-                            bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
+                            bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
+                            if (f_btree == NULL) continue;
+                            bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
                             if (e != NULL && e->key != NULL) {
                                 nchunks++;
                             }
@@ -314,7 +368,9 @@ int database_scan_next(database_iterator_t* iter,
                         for (size_t i = 0; i < iter->stack_depth; i++) {
                             iterator_frame_t* f = &iter->stack[i];
                             if (f->entry_index > 0) {
-                                bnode_entry_t* e = bnode_get(f->node->btree, f->entry_index - 1);
+                                bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
+                                if (f_btree == NULL) continue;
+                                bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
                                 if (e != NULL && e->key != NULL) {
                                     chunks[idx++] = e->key;
                                 }
@@ -403,16 +459,25 @@ int database_scan_next(database_iterator_t* iter,
                     *out_value = value;
                     return 0;  // Success
                 }
-            } else if (entry->child) {
-                // Entry has a child node - push it for deeper traversal
-                // Increment entry_index before pushing so we don't revisit this entry
+            } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                // Internal B+tree node — push a bnode frame to descend
+                // through the multi-level B+tree. child_bnode is a bnode_t*,
+                // NOT an hbtrie_node_t* — pushing it as a trie frame would
+                // cause type confusion (node->btree reads garbage).
                 frame->entry_index++;
-                pushed_child = 1;  // Mark that we pushed a child
-                // Push child frame
-                if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) {
-                    return -2;  // Error
+                pushed_child = 1;
+                if (push_bnode_frame(iter, entry->child_bnode, iter->stack_depth - 1) < 0) {
+                    return -2;
                 }
-                break;  // Will continue with child on next iteration
+                break;
+            } else if (entry->child) {
+                // Trie child (hbtrie_node_t*) — push for deeper traversal
+                frame->entry_index++;
+                pushed_child = 1;
+                if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                break;
             } else if (entry->trie_child || entry->child_disk_offset != 0) {
                 // Lazy-load trie_child if needed
                 if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
