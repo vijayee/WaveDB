@@ -29,19 +29,39 @@ function run(cmd) {
 
 function ensureCSources() {
   const cSrcDir = path.join(nodejsDir, 'c_src');
-  if (fs.existsSync(path.join(cSrcDir, 'src', 'HBTrie', 'hbtrie.h'))) {
-    console.log('c_src/ already populated, skipping copy-sources');
+  const copyScript = path.join(scriptDir, 'copy-sources.js');
+  const marker = path.join(cSrcDir, 'src', 'HBTrie', 'hbtrie.h');
+
+  if (fs.existsSync(copyScript)) {
+    // In a repo checkout — always refresh c_src/ from the current src/.
+    // Skipping this when c_src/ already exists left stale vendored C source
+    // in place after C-level fixes, producing a Node addon built against
+    // out-of-date C code. copy-sources.js walks up to find the WaveDB root;
+    // if it can't (e.g. installing from an npm tarball that ships only c_src/
+    // and not the parent source tree), it exits 1 and we fall back to the
+    // bundled c_src/ rather than failing the install.
+    try {
+      console.log('Refreshing c_src/ from current src/...');
+      run(`node "${copyScript}"`);
+      return;
+    } catch (e) {
+      if (fs.existsSync(marker)) {
+        console.log('copy-sources.js could not locate the source tree; using pre-populated c_src/.');
+        return;
+      }
+      console.error('copy-sources.js failed and c_src/ is empty.');
+      process.exit(1);
+    }
+  }
+
+  if (fs.existsSync(marker)) {
+    console.log('No copy-sources.js; using pre-populated c_src/.');
     return;
   }
-  const copyScript = path.join(scriptDir, 'copy-sources.js');
-  if (fs.existsSync(copyScript)) {
-    console.log('Running copy-sources.js...');
-    run(`node "${copyScript}"`);
-  } else {
-    console.error('Cannot find copy-sources.js and c_src/ is empty.');
-    console.error('If installing from npm, the c_src/ directory should be included in the package.');
-    process.exit(1);
-  }
+
+  console.error('c_src/ is empty and copy-sources.js is missing.');
+  console.error('If installing from npm, the c_src/ directory should be included in the package.');
+  process.exit(1);
 }
 
 function findFiles(dir, ext) {
