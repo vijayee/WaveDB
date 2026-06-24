@@ -19,9 +19,11 @@ extern "C" {
  * Iterator stack frame - tracks position in HBTrie traversal
  */
 typedef struct {
-    hbtrie_node_t* node;      // Current HBTrie node
+    hbtrie_node_t* node;      // Current HBTrie node (for trie-level frames)
+    bnode_t* bnode;           // Current B+tree internal node (for bnode frames)
     size_t entry_index;        // Current entry index in B+tree
     size_t path_index;         // Index in path for this frame
+    uint8_t is_bnode_frame;   // 1 = bnode frame (descend B+tree), 0 = trie frame
 } iterator_frame_t;
 
 /**
