@@ -78,8 +78,6 @@ class AsyncBridge:
 
     def __init__(self) -> None:
         self._pending: dict[int, PendingOp] = {}
-        # Reverse index for O(1) unregister by future.
-        self._future_to_op_id: dict[asyncio.Future, int] = {}
         # The bridge owns op_id_ptr lifetime for safety across any calling
         # pattern. Each entry is 8 bytes; the high-water mark of concurrent ops
         # bounds the count. Never cleared — freed when the bridge is GC'd
@@ -111,7 +109,8 @@ class AsyncBridge:
         self._pending[op_id] = PendingOp(
             op_id=op_id, future=fut, loop=loop, op_type=op_type, op_id_ptr=op_id_ptr,
         )
-        self._future_to_op_id[fut] = op_id
+        # Store op_id on the future for O(1) unregister without a reverse dict.
+        fut._wavedb_op_id = op_id  # type: ignore[attr-defined]
 
     def dispatch(
         self,
@@ -141,7 +140,6 @@ class AsyncBridge:
             # Clean up the orphaned pending op so it doesn't sit in _pending
             # with a future that will never resolve.
             self._pending.pop(op_id, None)
-            self._future_to_op_id.pop(fut, None)
             raise WaveDBError("promise_create failed")
         try:
             rc = c_fn(
@@ -172,7 +170,6 @@ class AsyncBridge:
                 except (RuntimeError, asyncio.InvalidStateError):
                     pass
         self._pending.clear()
-        self._future_to_op_id.clear()
 
     # ---- test helpers (also usable for non-C scheduling) ----
 
@@ -277,9 +274,9 @@ class AsyncBridge:
         self._unregister(fut)
 
     def _unregister(self, fut: asyncio.Future) -> None:
-        op_id = self._future_to_op_id.pop(fut, None)
+        op_id = getattr(fut, '_wavedb_op_id', None)
         if op_id is not None:
-            del self._pending[op_id]
+            self._pending.pop(op_id, None)
         # Do NOT free op_id_ptr — the bridge owns it via _all_op_id_ptrs
         # (see I-1) and keeps it alive until database_destroy has drained.
 
