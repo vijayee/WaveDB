@@ -82,7 +82,6 @@ static void* memory_pool_class_alloc(memory_pool_class_t* cls) {
     platform_lock(&cls->lock);
 
     if (cls->free_list == NULL) {
-        // Pool exhausted
         platform_unlock(&cls->lock);
         return NULL;
     }
@@ -91,6 +90,21 @@ static void* memory_pool_class_alloc(memory_pool_class_t* cls) {
     memory_pool_block_t* block = cls->free_list;
     cls->free_list = block->next;
     cls->free_blocks--;
+
+    // Validate the next pointer is either NULL or within the pool's range.
+    // Catches free-list corruption from double-free or use-after-free
+    // during database destruction — resets the class to prevent crash.
+    if (cls->free_list != NULL) {
+        uint8_t* start = cls->pool_start;
+        uint8_t* end = start + cls->block_size * cls->total_blocks;
+        if ((uint8_t*)cls->free_list < start || (uint8_t*)cls->free_list >= end) {
+            log_warn("memory_pool: corrupted free list detected, resetting class "
+                     "(free_list=%p, range=[%p, %p))",
+                     (void*)cls->free_list, (void*)start, (void*)end);
+            cls->free_list = NULL;
+            cls->free_blocks = 0;
+        }
+    }
 
     platform_unlock(&cls->lock);
 
@@ -107,10 +121,19 @@ static int memory_pool_class_free(memory_pool_class_t* cls, void* ptr) {
         return 0;  // Not in this pool
     }
 
+    // Check for double-free: if the block's next pointer already points to
+    // the current free_list, it was likely already freed. Skip to prevent
+    // corrupting the free list with a cycle.
+    memory_pool_block_t* block = (memory_pool_block_t*)ptr;
+    if (block->next == cls->free_list && cls->free_list != NULL) {
+        // Likely double-free — block already at head of free list
+        log_warn("memory_pool: possible double-free detected (ptr=%p)", ptr);
+        return 1;  // Pretend success to prevent caller from calling free()
+    }
+
     platform_lock(&cls->lock);
 
     // Push to free list
-    memory_pool_block_t* block = (memory_pool_block_t*)ptr;
     block->next = cls->free_list;
     cls->free_list = block;
     cls->free_blocks++;
