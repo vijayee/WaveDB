@@ -84,7 +84,7 @@ final db = WaveDB(
 | `lruMemoryMb` | `50` | LRU cache size in MB |
 | `lruShards` | `64` | LRU shard count (0 = auto-scale) |
 | `workerThreads` | `4` | Worker pool size |
-| `walSyncMode` | `'debounced'` | `'immediate'`, `'debounced'`, or `'async'` |
+| `walSyncMode` | `'immediate'` | `'immediate'`, `'debounced'`, or `'async'` |
 | `walDebounceMs` | `250` | fsync debounce window (ms) |
 | `walMaxFileSize` | `131072` | Max WAL file size before sealing |
 | `encryption` | — | Encryption configuration (see below) |
@@ -443,36 +443,35 @@ await graph.del('clip_abc', 'tagged_with', 'gaming');
 
 ## Performance
 
-Benchmarks on Linux x86_64, Dart 3.11, 50MB LRU cache, 32 worker threads, async WAL.
+Benchmarks on Linux x86_64, Dart 3.12, 50MB LRU cache, 32 worker threads, async WAL.
 
 ### Dart FFI Sync (ASYNC WAL, 32 worker threads)
 
 | Operation | Throughput |
 |-----------|------------|
-| `putSync` | 127K ops/sec |
-| `getSync` | 417K ops/sec |
+| `putSync` | 193K ops/sec |
+| `getSync` | 667K ops/sec |
 
 ### Dart Concurrent Throughput (ASYNC WAL, 32 worker threads)
 
 | Concurrency | `put` | `get` |
 |-------------|-------|-------|
-| 1 | 28K ops/sec | 41K ops/sec |
-| 2 | 43K ops/sec | 64K ops/sec |
-| 4 | 65K ops/sec | 81K ops/sec |
-| 8 | 80K ops/sec | 101K ops/sec |
-| 16 | 88K ops/sec | 92K ops/sec |
-| 32 | 86K ops/sec | 78K ops/sec |
+| 1 | 45K ops/sec | 65K ops/sec |
+| 2 | 84K ops/sec | 107K ops/sec |
+| 4 | 111K ops/sec | 141K ops/sec |
+| 8 | 135K ops/sec | 157K ops/sec |
+| 16 | 142K ops/sec | 143K ops/sec |
 
 ### Comparison with Node.js (ASYNC WAL, 32 worker threads)
 
 | Operation | Dart FFI | Node.js N-API | Ratio |
 |-----------|-----------|---------------|-------|
-| `putSync` | 127K ops/sec | 1.3K ops/sec | Dart 98x |
-| `getSync` | 417K ops/sec | 304K ops/sec | Dart 1.4x |
-| `put` (c=32) | 86K ops/sec | 2.2K ops/sec | Dart 39x |
-| `get` (c=32) | 78K ops/sec | 114K ops/sec | Node 1.5x |
+| `putSync` | 193K ops/sec | 155K ops/sec | Dart 1.2x |
+| `getSync` | 667K ops/sec | 927K ops/sec | Node 1.4x |
+| `put` (c=16) | 142K ops/sec | 222K ops/sec | Node 1.6x |
+| `get` (c=16) | 143K ops/sec | 295K ops/sec | Node 2.1x |
 
-Dart's FFI avoids N-API's per-call overhead, giving dramatically higher sync and async put throughput. Node.js async gets scale better at high concurrency due to its event-loop architecture.
+Dart's FFI avoids N-API's per-call overhead, giving higher sync put throughput. Node.js async gets scale better at high concurrency due to its event-loop architecture.
 
 ## Testing
 
