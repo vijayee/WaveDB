@@ -69,6 +69,5 @@ Future<void> main() async {
     report('get (c=$c)', iterations, sw.elapsedMicroseconds);
   }
 
-  print('done');
-  exit(0);
+  db.close();
 }

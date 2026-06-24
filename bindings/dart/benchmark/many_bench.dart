@@ -83,7 +83,6 @@ Future<void> main() async {
   sw.stop();
   report('deleteMany ($batchSize/batch)', iterations, sw.elapsedMicroseconds);
 
-  // db.close() hangs in this build; exit() is the workaround. See #3 in the
-  // commit that added this file.
-  exit(0);
+  db.close();
+  await base.delete(recursive: true);
 }
