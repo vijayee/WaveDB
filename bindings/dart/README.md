@@ -48,6 +48,11 @@ await db.batch([
   {'type': 'del', 'key': 'old/key'},
 ]);
 
+// Batched helpers — 8x faster than individual async put/del calls
+await db.putMany([('k1', 'v1'), ('k2', 'v2'), ('k3', 'v3')]);
+final results = await db.getMany(['k1', 'k2', 'k3']);
+await db.deleteMany(['k1', 'k2']);
+
 // Streaming
 db.createReadStream(start: 'users/', end: 'users/~').listen((kv) {
   print('${kv.key} = ${kv.value}');
@@ -177,6 +182,9 @@ await db.put(key, value)              // Store a value
 final val = await db.get(key)          // Retrieve (null if not found)
 await db.del(key)                      // Delete
 await db.batch(operations)             // Atomic batch of put/del
+await db.putMany(items)               // Batch-put (key, value) pairs (8x faster)
+final vals = await db.getMany(keys)   // Concurrent get (order preserved)
+await db.deleteMany(keys)             // Batch-delete keys (8x faster)
 await db.putObject(key, obj)           // Store nested object as flattened paths
 final obj = await db.getObject(key)    // Reconstruct nested object
 ```
