@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="https://raw.githubusercontent.com/vijayee/WaveDB/master/wave_fuji.svg" alt="WaveDB Logo" width="200"/>
+</div>
+
 # WaveDB Python Bindings
 
 Python bindings for [WaveDB](../../README.md) — a hierarchical key-value
