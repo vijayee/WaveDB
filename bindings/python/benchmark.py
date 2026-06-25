@@ -21,7 +21,7 @@ import time
 from wavedb import WaveDB, WaveDBConfig
 
 ITERATIONS = 5000
-WARMUP = 100
+WARMUP = 2000
 BATCH_SIZE = 1000
 FANOUTS = [1, 2, 4, 8, 16, 32]
 
@@ -87,6 +87,35 @@ async def bench_batch(db: WaveDB) -> None:
     report(f"batch ({BATCH_SIZE}/batch)", ITERATIONS, perf_ns() - t0)
 
 
+async def bench_many(db: WaveDB) -> None:
+    print("\nBatched Helpers:")
+    print("-" * 50)
+    batches = ITERATIONS // BATCH_SIZE
+    # put_many — same C path as batch(); measures per-key helper overhead.
+    put_items = [(f"m{i%BATCH_SIZE}", f"v{i}") for i in range(ITERATIONS)]
+    t0 = perf_ns()
+    for i in range(batches):
+        await db.put_many(put_items[i*BATCH_SIZE:(i+1)*BATCH_SIZE])
+    report(f"put_many ({BATCH_SIZE}/batch)", ITERATIONS, perf_ns() - t0)
+
+    # delete_many — same C path as batch(del ops); keys populated by put_many above.
+    del_keys = [f"m{i%BATCH_SIZE}" for i in range(ITERATIONS)]
+    t0 = perf_ns()
+    for i in range(batches):
+        await db.delete_many(del_keys[i*BATCH_SIZE:(i+1)*BATCH_SIZE])
+    report(f"delete_many ({BATCH_SIZE}/batch)", ITERATIONS, perf_ns() - t0)
+
+    # get_many — asyncio.gather over individual get() (no batched C equivalent).
+    get_keys = [f"g{i}" for i in range(BATCH_SIZE)]
+    await db.put_many([(k, "x") for k in get_keys])
+    gets_per_call = BATCH_SIZE
+    calls = max(1, ITERATIONS // gets_per_call)
+    t0 = perf_ns()
+    for _ in range(calls):
+        await db.get_many(get_keys)
+    report(f"get_many ({gets_per_call}/call)", calls * gets_per_call, perf_ns() - t0)
+
+
 async def bench_concurrent(db: WaveDB) -> None:
     print("\nConcurrent Async:")
     print("-" * 50)
@@ -133,6 +162,7 @@ async def run_benchmarks(db_path: str, config: WaveDBConfig, label: str) -> None
     await bench_sequential_async(db)
     bench_sync(db)
     await bench_batch(db)
+    await bench_many(db)
     await bench_concurrent(db)
     bench_stream(db)
 
