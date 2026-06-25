@@ -145,14 +145,15 @@ For throughput-sensitive workloads, use the batched helpers:
 async def main():
     async with WaveDB("/path/to/db") as db:
         # put_many / delete_many forward to a single C batch call — atomic,
-        # ~16x faster than individual await db.put() calls.
+        # ~15-25x faster than individual await db.put() / db.delete() calls.
         await db.put_many([("k1", "v1"), ("k2", "v2"), ("k3", "v3")])
         await db.delete_many(["k1", "k2"])
 
         # get_many fires N concurrent get() calls (there is no batched C
         # get API). It's a concurrency helper, not an atomic batch — the
         # speedup over sequential get is bounded by C work-pool parallelism
-        # and varies with cache state (typically 1-3x).
+        # and varies with cache state (typically 1-3x, but ~1x in
+        # in-memory mode where asyncio marshalling dominates).
         results = await db.get_many(["k1", "k2", "k3"])
 
 asyncio.run(main())
@@ -160,29 +161,59 @@ asyncio.run(main())
 
 ## Performance
 
-Benchmark results (in-memory, `in_memory=True`, BATCH_SIZE=1000):
+Best-of-three runs of `benchmark.py` on Linux x86_64, Python 3.10+,
+C work pool at 4 workers, BATCH_SIZE=1000. Variance across runs is
+high (~10x range) when competing CPU load is present; reproduce on
+an idle machine with `WAVEDB_LIB_PATH=../../build-release/libwavedb.so python benchmark.py`.
+
+### In-Memory (`in_memory=True`)
 
 | Operation | ops/sec | us/op |
 |-----------|---------|-------|
-| sync put | 195K | 5.1 |
-| sync get | 576K | 1.7 |
-| async put (sequential) | 19K | 52 |
-| async get (sequential) | 14K | 74 |
-| async put_many (1000/batch) | 231K | 4.3 |
-| async get_many (concurrent) | 37K | 27 |
-| async delete_many (1000/batch) | 419K | 2.4 |
-| batch (1000/batch) | 417K | 2.4 |
-| stream scan | 801K entries/sec | |
+| `put_sync` | 178K | 5.6 |
+| `get_sync` | 484K | 2.1 |
+| `batch` (1000/batch) | 268K | 3.7 |
+| `put_many` (1000/batch) | 299K | 3.4 |
+| `delete_many` (1000/batch) | 213K | 4.7 |
+| `get_many` (1000/call) | 33K | 30.5 |
+| async `put` (sequential) | 13K | 75 |
+| async `get` (sequential) | 26K | 38 |
+| stream scan | 516K entries/sec | |
 
-`put_many`/`delete_many` are ~12-30x faster than individual `put`/`del`
-because they forward to a single atomic C batch call. `get_many` is
-~2.6x faster than sequential `get` here — it has no batched C
-equivalent, just `asyncio.gather` over individual `get()`s, so the
-speedup is bounded by C work-pool parallelism and varies with cache
-state (1-3x is typical). Numbers vary run-to-run by ~30% due to
-tree-size and LRU-cache effects; reproduce with `python benchmark.py`.
+### Async WAL (`wal_sync_mode="none"`)
 
-Run `python benchmark.py` with `WAVEDB_LIB_PATH` set to reproduce.
+| Operation | ops/sec | us/op |
+|-----------|---------|-------|
+| `put_sync` | 92K | 10.8 |
+| `get_sync` | 403K | 2.5 |
+| `batch` (1000/batch) | 134K | 7.5 |
+| `put_many` (1000/batch) | 173K | 5.8 |
+| `delete_many` (1000/batch) | 144K | 6.9 |
+| `get_many` (1000/call) | 24K | 41 |
+| async `put` (sequential) | 17K | 58 |
+| async `get` (sequential) | 17K | 58 |
+
+### Immediate WAL (`wal_sync_mode="immediate"`, fsync per write)
+
+| Operation | ops/sec | us/op |
+|-----------|---------|-------|
+| `put_sync` | 93K | 10.7 |
+| `get_sync` | 305K | 3.3 |
+| `batch` (1000/batch) | 124K | 8.1 |
+| `put_many` (1000/batch) | 127K | 7.9 |
+| `delete_many` (1000/batch) | 103K | 9.7 |
+| `get_many` (1000/call) | 20K | 51 |
+
+### Notes
+
+`put_many` and `delete_many` forward to a single atomic C batch call
+and are 15-25x faster than individual `await db.put()` calls. They
+share the same C path as `batch()` — the small per-call overhead
+difference is Python-side dict construction. `get_many` has no
+batched C equivalent; it is `asyncio.gather` over individual `get()`s,
+so its speedup over sequential `await db.get()` is bounded by C
+work-pool parallelism (typically 1-3x) and drops to ~1x in in-memory
+mode where the asyncio marshalling loop dominates over C work.
 
 ## License
 
