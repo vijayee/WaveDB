@@ -65,7 +65,11 @@ class CmakeBuildExt(build_ext):
                 "--target", "wavedb_shared", "--", *parallel_args,
             ])
 
-            candidates = list(build_dir.glob(f"libwavedb*{SUFFIX}")) + list(build_dir.glob(f"wavedb*{SUFFIX}"))
+            # The VS generator is multi-config: it emits the DLL under a nested
+            # Release/ subdir (e.g. build_dir/Release/wavedb.dll), so search
+            # recursively. A non-recursive glob finds nothing and aborts with
+            # "libwavedb.dll not found" even though the build succeeded.
+            candidates = list(build_dir.rglob(f"libwavedb*{SUFFIX}")) + list(build_dir.rglob(f"wavedb*{SUFFIX}"))
             if not candidates:
                 raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
             candidates.sort(key=lambda p: len(p.name))
