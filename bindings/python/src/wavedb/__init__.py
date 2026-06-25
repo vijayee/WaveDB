@@ -14,7 +14,7 @@ from .graph_layer import GraphLayer, GraphQuery, GraphResult
 from .graphql_layer import GraphQLLayer, GraphQLError, GraphQLResult
 from .subtree import Subtree
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "EncryptionError",
