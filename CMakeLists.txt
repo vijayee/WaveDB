@@ -557,11 +557,23 @@ if(BUILD_DART_BINDINGS)
   target_link_libraries(wavedb_shared PUBLIC xxhash cbor hashmap)
   if(WIN32)
     target_compile_definitions(wavedb_shared PRIVATE _WIN32)
+    # MSVC deprecates POSIX names; use underscore versions
+    target_compile_definitions(wavedb_shared PRIVATE _CRT_NONSTDC_NO_WARNINGS)
     target_link_libraries(wavedb_shared PUBLIC ws2_32)
+    # Export the FFI surface on Windows. MSVC does not export symbols by
+    # default (no __declspec(dllexport) on the C API), so pass the module
+    # definition file to the linker. CMake recognizes a .def file listed as a
+    # target source on the MSVC generator and forwards it to the linker,
+    # making the symbols resolvable via DynamicLibrary.lookup/lookupFunction
+    # from the Dart/Python FFI.
+    target_sources(wavedb_shared PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/wavedb.def)
   endif()
   find_package(OpenSSL)
   if(OpenSSL_FOUND)
     target_link_libraries(wavedb_shared PUBLIC OpenSSL::Crypto)
+  else()
+    # Provide stub implementations when OpenSSL is not available
+    target_compile_definitions(wavedb_shared PRIVATE WAVEDB_NO_OPENSSL)
   endif()
   target_link_libraries(wavedb_shared PUBLIC Threads::Threads)
   target_include_directories(wavedb_shared
