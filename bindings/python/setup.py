@@ -53,10 +53,9 @@ class CmakeBuildExt(build_ext):
                 "-DBUILD_TESTS=OFF",
                 "-DCMAKE_BUILD_TYPE=Release",
             ])
-            # Parallel build flag: make/ninja uses "-j N"; MSBuild (Windows /
-            # VS generator) uses "/m:N". cmake forwards everything after "--"
-            # to the underlying build tool verbatim. MSBuild rejects "-j" with
-            # MSB1001, so pick the flag by platform.
+            # Parallel build flag: make uses "-j N"; MSBuild (Windows / VS
+            # generator) uses "/m:N". cmake forwards everything after "--"
+            # to the underlying build tool verbatim.
             if sys.platform == "win32":
                 parallel_args = [f"/m:{os.cpu_count() or 2}"]
             else:
@@ -66,11 +65,7 @@ class CmakeBuildExt(build_ext):
                 "--target", "wavedb_shared", "--", *parallel_args,
             ])
 
-            # The VS generator is multi-config: it emits the DLL under a nested
-            # Release/ subdir (e.g. build_dir/Release/wavedb.dll), so search
-            # recursively. A non-recursive glob finds nothing and aborts with
-            # "libwavedb.dll not found" even though the build succeeded.
-            candidates = list(build_dir.rglob(f"libwavedb*{SUFFIX}")) + list(build_dir.rglob(f"wavedb*{SUFFIX}"))
+            candidates = list(build_dir.glob(f"libwavedb*{SUFFIX}")) + list(build_dir.glob(f"wavedb*{SUFFIX}"))
             if not candidates:
                 raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
             candidates.sort(key=lambda p: len(p.name))

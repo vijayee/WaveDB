@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wavedb"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python bindings for WaveDB - Hierarchical B+Trie Database"
 readme = "README.md"
 license = { file = "LICENSE" }
