@@ -252,10 +252,20 @@ def _find_library() -> str:
     env_path = os.environ.get("WAVEDB_LIB_PATH")
     if env_path and Path(env_path).exists():
         return env_path
+    # Candidate names per platform. setup.py builds the shared lib as
+    # libwavedb.<suffix> (MSVC output is libwavedb.dll). The sdist also ships a
+    # bundled Linux libwavedb.so as a fallback, so checking .so first on
+    # Windows would dlopen the Linux image and fail with error 0xc1.
+    if os.name == "nt":
+        candidates = ("libwavedb.dll", "wavedb.dll")
+    elif sys.platform == "darwin":
+        candidates = ("libwavedb.dylib",)
+    else:
+        candidates = ("libwavedb.so",)
     try:
         from importlib.resources import files
         pkg_dir = Path(files("wavedb._lib"))
-        for name in ("libwavedb.so", "libwavedb.dylib", "wavedb.dll"):
+        for name in candidates:
             p = pkg_dir / name
             if p.exists():
                 return str(p)
@@ -277,4 +287,10 @@ lib = ffi.dlopen(_find_library())
 # instead of ASAN's interceptor, corrupting the heap. dlopen(None) returns the
 # main program's global symbol table, which honors LD_PRELOAD, so `libc.free`
 # dispatches to the active allocator (ASAN's under LD_PRELOAD, libc's otherwise).
-libc = ffi.dlopen(None)
+# On Windows, dlopen(None) is unsupported for Python 3 (bpo-23606); load the
+# Universal CRT explicitly so free() resolves through the same allocator the
+# C core links against (ucrtbase), matching the Linux/macOS global-table path.
+if os.name == "nt":
+    libc = ffi.dlopen("ucrtbase")
+else:
+    libc = ffi.dlopen(None)

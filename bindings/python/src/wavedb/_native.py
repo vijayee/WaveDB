@@ -13,4 +13,7 @@ except ImportError:
 
 # ASAN-safe free: use the main program's global symbol table so
 # LD_PRELOAD=libasan.so routes free() through ASAN's interceptor.
-libc = ffi.dlopen(None)
+# On Windows, dlopen(None) is unsupported for Python 3 (bpo-23606); load the
+# Universal CRT so free() resolves through the same allocator the C core uses.
+import os as _os
+libc = ffi.dlopen("ucrtbase") if _os.name == "nt" else ffi.dlopen(None)
