@@ -47,6 +47,7 @@ EXPORTS
     database_raw_value_free
     database_scan_end
     database_scan_next
+    database_scan_range_sync_raw
     database_scan_start
     database_scan_sync_raw
     database_subtree_batch_sync_raw
@@ -70,6 +71,9 @@ EXPORTS
     encrypted_database_config_set_symmetric_key
     encrypted_database_config_set_type
     error_destroy
+    error_get_file
+    error_get_function
+    error_get_line
     error_get_message
     graph_delete
     graph_delete_sync
@@ -81,6 +85,16 @@ EXPORTS
     graph_parse_count
     graph_parse_execute
     graph_parse_execute_async
+    graph_query_create
+    graph_query_destroy
+    graph_query_execute_sync
+    graph_query_has
+    graph_query_in
+    graph_query_intersect
+    graph_query_limit
+    graph_query_out
+    graph_query_union
+    graph_query_vertex
     graph_result_count
     graph_result_destroy
     graph_result_vertices
@@ -98,6 +112,7 @@ EXPORTS
     graphql_schema_parse
     identifier_create
     identifier_destroy
+    identifier_get_data_copy
     identifier_to_buffer
     path_append
     path_create
@@ -106,6 +121,8 @@ EXPORTS
     path_length
     promise_create
     promise_destroy
+    promise_reject
+    promise_resolve
     refcounter_count
     refcounter_dereference
     refcounter_reference
