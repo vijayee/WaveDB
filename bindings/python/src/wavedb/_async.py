@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ._errors import map_error
-from ._native import ffi, lib
+from ._native import ffi, lib, libc
 from .exceptions import WaveDBError
 
 
@@ -284,21 +284,31 @@ class AsyncBridge:
 
 # Op types whose promise payload is an identifier_t* (CONSUME'd by _database_get).
 # These need refcounter_reference + identifier_destroy to free when the future
-# is cancelled before delivery. put/del/batch resolve with NULL (nothing to free).
+# is cancelled before delivery. Batch resolves with malloc'd int* (the result
+# code) which must be freed with libc.free on cancellation.
 _GET_OP_TYPES = frozenset({"get", "st_get"})
+_BATCH_OP_TYPES = frozenset({"batch"})
 
 
 def _free_get_payload_if_applicable(payload: Any, op_type: str) -> None:
-    """Free a cancelled get payload (identifier_t* with yield=1).
+    """Free a cancelled op payload (identifier_t* for get, int* for batch).
 
-    No-op for non-get op types (payload is NULL) or NULL payloads. Safe to call
-    from any thread (cffi callbacks hold the GIL).
+    No-op for op types with NULL payloads. Safe to call from any thread
+    (cffi callbacks hold the GIL).
     """
-    if op_type not in _GET_OP_TYPES or payload == ffi.NULL:
+    if payload == ffi.NULL:
         return
-    try:
-        ident = ffi.cast("identifier_t*", payload)
-        lib.refcounter_reference(ffi.cast("void*", ident))
-        lib.identifier_destroy(ident)
-    except Exception:
-        _log.warning("failed to free cancelled get payload", exc_info=True)
+    if op_type in _GET_OP_TYPES:
+        try:
+            ident = ffi.cast("identifier_t*", payload)
+            lib.refcounter_reference(ffi.cast("void*", ident))
+            lib.identifier_destroy(ident)
+        except Exception:
+            _log.warning("failed to free cancelled get payload", exc_info=True)
+        return
+    if op_type in _BATCH_OP_TYPES:
+        try:
+            libc.free(payload)
+        except Exception:
+            _log.warning("failed to free cancelled batch payload", exc_info=True)
+        return
