@@ -41,6 +41,10 @@
 #elif defined(_MSC_VER)
   // MSVC C mode: <stdatomic.h> requires /std:c11 which conflicts with
   // /std:c++20 that node-gyp adds globally. Use Interlocked functions instead.
+  // Include winsock2.h before windows.h to avoid the legacy winsock.h
+  // redefinition conflict (see Util/windows_compat.h for the ordering rule).
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
   #include <windows.h>
   #include <string.h>
 
