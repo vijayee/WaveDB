@@ -6,7 +6,7 @@ from typing import Any
 
 from ._async import AsyncBridge, decode_identifier_payload
 from ._errors import map_error
-from ._native import ffi, lib
+from ._native import ffi, lib, libc
 from .config import WaveDBConfig, WaveDBEncryption
 from .exceptions import EncryptionError, InvalidPathError, WaveDBError
 
@@ -402,8 +402,18 @@ class WaveDB:
             )
             if rc != 0:
                 raise map_error(rc, "async batch failed")
-            await fut
-            # database_batch_raw resolves with NULL; nothing to decode.
+            payload = await fut
+            # database_write_batch resolves the promise with int* pointing to
+            # the batch result code (0 = success, negative = error). Check it
+            # and raise so callers see failures instead of silently losing data.
+            if payload != ffi.NULL:
+                try:
+                    result_ptr = ffi.cast("int*", payload)
+                    result_code = result_ptr[0]
+                    if result_code != 0:
+                        raise map_error(result_code, "async batch failed")
+                finally:
+                    libc.free(payload)
         finally:
             lib.promise_destroy(promise)
 

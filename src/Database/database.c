@@ -2381,20 +2381,20 @@ int database_write_batch_sync(database_t* db, batch_t* batch) {
         return -1;
     }
 
-    // Write to thread-local WAL
+    // Write to thread-local WAL. Skip if there's no WAL manager (e.g.
+    // in_memory mode where location=NULL) — mirrors the sync_only fast path
+    // above. The trie apply below still happens, so the batch is visible
+    // in-memory for the lifetime of the database.
     thread_wal_t* twal = get_thread_wal(db->wal_manager);
-    if (twal == NULL) {
+    if (twal != NULL) {
+        int result = thread_wal_write(twal, txn->txn_id, WAL_BATCH, data);
         buffer_destroy(data);
-        txn_desc_destroy(txn);
-        return -1;
-    }
-
-    int result = thread_wal_write(twal, txn->txn_id, WAL_BATCH, data);
-    buffer_destroy(data);
-
-    if (result != 0) {
-        txn_desc_destroy(txn);
-        return result;
+        if (result != 0) {
+            txn_desc_destroy(txn);
+            return result;
+        }
+    } else {
+        buffer_destroy(data);
     }
 
     // Apply to trie with MVCC (acquire per-key shard lock per operation)
