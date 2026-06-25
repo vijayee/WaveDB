@@ -86,6 +86,20 @@ uint8_t buffer_set_index(buffer_t* buf, size_t index, uint8_t value) {
   return buf->data[index] = value;
 }
 
+const uint8_t* buffer_get_data(const buffer_t* buf) {
+  if (buf == NULL) {
+    return NULL;
+  }
+  return buf->data;
+}
+
+size_t buffer_get_size(const buffer_t* buf) {
+  if (buf == NULL) {
+    return 0;
+  }
+  return buf->size;
+}
+
 buffer_t* buffer_slice(buffer_t* buf, size_t start, size_t end) {
   if (start > end) {
     return NULL;

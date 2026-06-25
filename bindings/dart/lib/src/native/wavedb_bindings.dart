@@ -812,6 +812,22 @@ typedef BufferDestroyC = Void Function(Pointer<buffer_t> buf);
 /// Dart signature for buffer_destroy
 typedef BufferDestroy = void Function(Pointer<buffer_t> buf);
 
+/// C signature: const uint8_t* buffer_get_data(const buffer_t* buf)
+/// ABI-safe accessor: reads the buffer's data pointer via a C function call
+/// so FFI consumers do not depend on the layout of buffer_t (whose embedded
+/// refcounter_t is 16 bytes on Linux/macOS but 8 bytes on MSVC/Windows).
+typedef BufferGetDataC = Pointer<Uint8> Function(Pointer<buffer_t> buf);
+
+/// Dart signature for buffer_get_data
+typedef BufferGetData = Pointer<Uint8> Function(Pointer<buffer_t> buf);
+
+/// C signature: size_t buffer_get_size(const buffer_t* buf)
+/// ABI-safe accessor for the buffer's size (see buffer_get_data).
+typedef BufferGetSizeC = UintPtr Function(Pointer<buffer_t> buf);
+
+/// Dart signature for buffer_get_size
+typedef BufferGetSize = int Function(Pointer<buffer_t> buf);
+
 // ============================================================
 // C TYPEDEFS - Identifier Operations
 // ============================================================
@@ -1476,6 +1492,13 @@ class WaveDBNative {
 
   static late final BufferDestroy _bufferDestroy = WaveDBLibrary.load()
       .lookupFunction<BufferDestroyC, BufferDestroy>('buffer_destroy');
+
+  // ABI-safe buffer field accessors (see BufferGetData/BufferGetSize docs).
+  static late final BufferGetData _bufferGetData = WaveDBLibrary.load()
+      .lookupFunction<BufferGetDataC, BufferGetData>('buffer_get_data');
+
+  static late final BufferGetSize _bufferGetSize = WaveDBLibrary.load()
+      .lookupFunction<BufferGetSizeC, BufferGetSize>('buffer_get_size');
 
   // Identifier operations
   static late final IdentifierCreate _identifierCreate = WaveDBLibrary.load()
@@ -2327,6 +2350,19 @@ class WaveDBNative {
   /// [buf] - Buffer handle to destroy
   static void bufferDestroy(Pointer<buffer_t> buf) {
     _bufferDestroy(buf);
+  }
+
+  /// ABI-safe accessor for a buffer's data pointer. Prefer this over reading
+  /// `buffer.ref.data` directly: buffer_t embeds refcounter_t, whose size
+  /// differs across platforms (16 bytes on Linux/macOS, 8 bytes on MSVC),
+  /// so the struct-mirror field offset is wrong on Windows.
+  static Pointer<Uint8> bufferGetData(Pointer<buffer_t> buf) {
+    return _bufferGetData(buf);
+  }
+
+  /// ABI-safe accessor for a buffer's size. See [bufferGetData].
+  static int bufferGetSize(Pointer<buffer_t> buf) {
+    return _bufferGetSize(buf);
   }
 
   // ============================================================

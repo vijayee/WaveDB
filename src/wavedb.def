@@ -6,6 +6,8 @@ EXPORTS
     batch_destroy
     buffer_create_from_pointer_copy
     buffer_destroy
+    buffer_get_data
+    buffer_get_size
     chunk_data_const
     database_batch_raw
     database_batch_sync_raw

@@ -95,8 +95,12 @@ class IdentifierConverter {
     }
 
     try {
-      final dataPtr = buffer.ref.data;
-      final size = buffer.ref.size;
+      // Read data/size via C accessors, not the buffer_t struct mirror:
+      // buffer_t embeds refcounter_t (16 bytes on Linux/macOS, 8 bytes on
+      // MSVC), so buffer.ref.data / buffer.ref.size land at the wrong offsets
+      // on Windows and yield an invalid pointer -> access violation.
+      final dataPtr = WaveDBNative.bufferGetData(buffer);
+      final size = WaveDBNative.bufferGetSize(buffer);
 
       if (dataPtr == nullptr || size == 0) {
         return [];

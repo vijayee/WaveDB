@@ -30,6 +30,15 @@ buffer_t* buffer_concat(buffer_t* buf1, buffer_t* buf2);
 void buffer_destroy(buffer_t* buf);
 uint8_t buffer_get_index(buffer_t* buf, size_t index);
 uint8_t buffer_set_index(buffer_t* buf, size_t index, uint8_t value);
+
+/// Access the buffer's data pointer and size without depending on the
+/// layout of buffer_t (whose embedded refcounter_t differs in size across
+/// platforms: 16 bytes on Linux/macOS, 8 bytes on MSVC). FFI consumers
+/// (e.g. the Dart binding) must use these accessors instead of reading
+/// the struct fields directly, so the ABI mismatch does not corrupt the
+/// data pointer / size on Windows.
+const uint8_t* buffer_get_data(const buffer_t* buf);
+size_t buffer_get_size(const buffer_t* buf);
 buffer_t* buffer_xor(buffer_t* buf1, buffer_t* buf2);
 buffer_t* buffer_or(buffer_t* buf1, buffer_t* buf2);
 buffer_t* buffer_and(buffer_t* buf1, buffer_t* buf2);
