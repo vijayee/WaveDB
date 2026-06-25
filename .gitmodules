@@ -6,7 +6,7 @@
 	url = https://github.com/google/googletest.git
 [submodule "deps/hashmap"]
 	path = deps/hashmap
-	url = https://github.com/DavidLeeds/hashmap
+	url = https://github.com/vijayee/hashmap
 [submodule "deps/libcbor"]
 	path = deps/libcbor
 	url = https://github.com/PJK/libcbor.git
