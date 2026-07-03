@@ -205,6 +205,9 @@ graph_layer_t* graph_layer_create(const char* path,
     int* error_code);
 void graph_layer_destroy(graph_layer_t* layer);
 int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o);
+size_t graph_triple_expand_ops(graph_layer_t* layer,
+    const char* s, const char* p, const char* o,
+    int type, raw_op_t* out_ops, size_t max_ops);
 graph_query_t* graph_query_create(graph_layer_t* layer);
 void graph_query_destroy(graph_query_t* q);
 int graph_query_vertex(graph_query_t* q, const char* id);

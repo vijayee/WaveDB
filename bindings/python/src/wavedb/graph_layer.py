@@ -26,7 +26,7 @@ length comes from `graph_result_count`. It is NOT NULL-terminated.
 from __future__ import annotations
 
 from ._errors import map_error
-from ._native import ffi, lib
+from ._native import ffi, lib, libc
 from .exceptions import WaveDBError
 
 
@@ -187,6 +187,54 @@ class GraphLayer:
         )
         if rc != 0:
             raise map_error(rc, "graph_insert_sync failed")
+
+    def expand_triple(self, s: str, p: str, o: str, *, delete: bool = False) -> list[dict]:
+        """Expand triple ``(s, p, o)`` into op dicts for a single atomic batch.
+
+        Returns a list of ``{"type": "put"|"del", "key": <str>, "value": ""}``
+        dicts — one per graph index the layer writes (SPO/POS/OSP/PSO) — with
+        keys already addressed in the *root* database namespace (the subtree
+        prefix prepended by the C helper). Splice them into a
+        ``WaveDB.batch_sync`` call alongside content ops so a triple's index
+        updates share one atomic transaction with the rest of the write::
+
+            ops = content_ops + graph.expand_triple(s, p, o)
+            db.batch_sync(ops)   # content + graph indices atomic together
+
+        This is the batch equivalent of ``insert_sync`` (or ``delete_sync``
+        when ``delete=True``): once the batch commits, the triple is queryable
+        exactly as if ``insert_sync`` had been called. The returned ops are
+        root-namespace keys — pass them to ``WaveDB.batch_sync``, NOT to a
+        subtree batch (which would prepend the prefix a second time).
+        """
+        self._check_open()
+        ops_arr = ffi.new("raw_op_t[4]")
+        type_int = 1 if delete else 0
+        count = lib.graph_triple_expand_ops(
+            self._ptr,
+            s.encode("utf-8"), p.encode("utf-8"), o.encode("utf-8"),
+            type_int, ops_arr, 4,
+        )
+        out: list[dict] = []
+        t = "del" if delete else "put"
+        try:
+            for i in range(count):
+                key_b = ffi.buffer(ops_arr[i].key, ops_arr[i].key_len)[:]
+                # put ops carry an empty value (the graph index presence marker);
+                # del ops omit it, matching WaveDB.batch_sync's del-op convention.
+                op: dict = {"type": t, "key": key_b.decode("utf-8")}
+                if t == "put":
+                    op["value"] = ""
+                out.append(op)
+        finally:
+            # The C helper malloc'd each key; copy them into Python first (above),
+            # then free the C allocations. Free in finally so a decode error
+            # can't leak the keys we already consumed.
+            for i in range(count):
+                if ops_arr[i].key != ffi.NULL:
+                    libc.free(ffi.cast("void*", ops_arr[i].key))
+                    ops_arr[i].key = ffi.NULL
+        return out
 
     def query(self) -> GraphQuery:
         self._check_open()

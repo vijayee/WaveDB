@@ -355,6 +355,96 @@ int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const 
     return rc;
 }
 
+/* ── Triple expansion for cross-subtree atomic batches ── */
+
+/* Build one full-database-path raw_op_t for a single index of (s, p, o).
+   `idx` is the index name ("spo"/"pos"/"osp"/"pso"); c1/c2/c3 are the
+   components in that index's key order. In subtree mode the subtree prefix
+   is prepended via database_subtree_prepend_key so the key is a full root
+   database path; in own-database mode the relative index key IS the full
+   key. `type` is 0 (put: empty presence marker) or 1 (delete). On success
+   fills *op with a newly allocated key the caller must free() and returns
+   0; returns -1 on allocation failure (nothing allocated, *op untouched). */
+static int graph_expand_one(graph_layer_t* layer, const char* idx,
+                            const char* c1, const char* c2, const char* c3,
+                            int type, raw_op_t* op) {
+    vec_char_t v;
+    vec_init(&v);
+    build_path_vec(&v, idx, c1, c2, c3);
+    /* build_path_vec emits a leading "/" before the index name. Strip it so
+       the subtree prepend yields "prefix/index/..." (one delimiter) rather
+       than "prefix//index/...". Both forms normalize to the same on-disk key
+       via the path layer, but the single-slash form is canonical — it is
+       what insert_sync leaves on disk and what callers see in the returned
+       op dicts — so we emit it directly instead of relying on empty-component
+       collapsing. v.length counts the trailing NUL, so rel_len drops both the
+       NUL and the leading "/". */
+    const char* rel = v.data + 1;
+    size_t rel_len = v.length - 2;
+
+    char* full = NULL;
+    size_t full_len = 0;
+    if (layer->subtree) {
+        full = database_subtree_prepend_key(layer->subtree, rel, rel_len, &full_len);
+    } else {
+        full = (char*)get_memory(rel_len ? rel_len : 1);
+        if (full) { memcpy(full, rel, rel_len); full_len = rel_len; }
+    }
+    vec_deinit(&v);
+    if (!full) return -1;
+
+    /* static so the pointer is valid after this function returns — the
+       caller runs the batch later, unlike graph_insert_sync which consumes
+       its stack empty_val synchronously before returning. */
+    static const uint8_t empty_val = 0;
+    op->key = full;
+    op->key_len = full_len;
+    op->value = (type == 0) ? (const uint8_t*)&empty_val : NULL;
+    op->value_len = 0;
+    op->type = type;
+    return 0;
+}
+
+size_t graph_triple_expand_ops(graph_layer_t* layer,
+                               const char* s, const char* p, const char* o,
+                               int type,
+                               raw_op_t* out_ops, size_t max_ops) {
+    if (!layer || !s || !p || !o || !out_ops) return 0;
+    if (!layer->db) return 0;
+    if (type != 0 && type != 1) return 0;
+
+    platform_rw_lock_r(&layer->lock);
+
+    int need_spo = graph_schema_needs_index(layer, p, GRAPH_INDEX_SPO);
+    int need_pos = graph_schema_needs_index(layer, p, GRAPH_INDEX_POS);
+    int need_osp = graph_schema_needs_index(layer, p, GRAPH_INDEX_OSP);
+    int need_pso = graph_schema_needs_index(layer, p, GRAPH_INDEX_PSO);
+    size_t needed = (size_t)(need_spo + need_pos + need_osp + need_pso);
+
+    /* Nothing to write, or caller buffer too small: bail before allocating. */
+    if (needed == 0 || max_ops < needed) {
+        platform_rw_unlock_r(&layer->lock);
+        return 0;
+    }
+
+    size_t count = 0;
+    if (need_spo) { if (graph_expand_one(layer, "spo", s, p, o, type, &out_ops[count]) != 0) goto fail; count++; }
+    if (need_pos) { if (graph_expand_one(layer, "pos", p, o, s, type, &out_ops[count]) != 0) goto fail; count++; }
+    if (need_osp) { if (graph_expand_one(layer, "osp", o, s, p, type, &out_ops[count]) != 0) goto fail; count++; }
+    if (need_pso) { if (graph_expand_one(layer, "pso", p, s, o, type, &out_ops[count]) != 0) goto fail; count++; }
+
+    platform_rw_unlock_r(&layer->lock);
+    return count;
+
+fail:
+    for (size_t i = 0; i < count; i++) {
+        free((void*)out_ops[i].key);
+        out_ops[i].key = NULL;
+    }
+    platform_rw_unlock_r(&layer->lock);
+    return 0;
+}
+
 /* ── Triple operations (async) ── */
 
 typedef struct {

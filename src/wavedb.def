@@ -79,6 +79,7 @@ EXPORTS
     graph_delete_sync
     graph_insert
     graph_insert_sync
+    graph_triple_expand_ops
     graph_layer_create
     graph_layer_destroy
     graph_morphism_define

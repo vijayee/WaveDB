@@ -66,6 +66,25 @@ database_t* graph_layer_get_db(graph_layer_t* layer);
 int graph_insert_sync(graph_layer_t* layer, const char* s, const char* p, const char* o);
 int graph_delete_sync(graph_layer_t* layer, const char* s, const char* p, const char* o);
 
+/* ── Triple expansion for cross-subtree atomic batches ── */
+
+/* Expand a single triple into full-database-path raw_op_t entries — one per
+   index the layer's schema requires (SPO/POS/OSP/PSO) — so they can be
+   merged into a single root database_batch_sync_raw call alongside ops from
+   other subtrees (e.g. content writes), giving the triple's index updates
+   and those writes shared atomicity in one transaction/WAL record.
+
+   `out_ops` is a caller-allocated array of capacity `max_ops` (pass >= 4).
+   `type` is 0 (put: empty-valued presence marker) or 1 (delete). Each filled
+   entry's `key` is a newly allocated full-db-path string the caller MUST
+   free() after the batch completes. Returns the number of entries filled
+   (0..4); 0 if no indices are needed, inputs are invalid, or `max_ops` is
+   too small (nothing is allocated in those cases). */
+size_t graph_triple_expand_ops(graph_layer_t* layer,
+                               const char* s, const char* p, const char* o,
+                               int type,
+                               raw_op_t* out_ops, size_t max_ops);
+
 /* ── Triple operations (async) ── */
 
 void graph_insert(graph_layer_t* layer, const char* s, const char* p, const char* o, promise_t* promise);
