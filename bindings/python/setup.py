@@ -25,6 +25,39 @@ else:
     SUFFIX = ".so"
 
 
+def _find_prebuilt_lib() -> "Path | None":
+    """Locate a pre-built libwavedb shared lib under the repo's build dirs.
+
+    Dev checkouts accumulate CMake build outputs under ``REPO_ROOT/build*/``
+    (e.g. ``build-msvc12/Release/wavedb.dll`` from a VS-generator build, or
+    ``build/Release/wavedb.dll`` from a Ninja/make build). The in-sandbox CMake
+    build pip would otherwise run can fail to detect the MSVC ABI on Windows
+    (vcvars isn't always inherited by pip's isolated build subprocess), so
+    reusing a DLL the developer has already built makes
+    ``pip install <repo>/bindings/python`` work without ``WAVEDB_LIB_PATH``.
+
+    Returns the newest-matching candidate so a freshly rebuilt DLL wins over
+    stale ones from older build dirs. ``WAVEDB_LIB_PATH`` still takes priority
+    when a specific DLL must be pinned.
+    """
+    if not (REPO_ROOT / "CMakeLists.txt").exists():
+        return None
+    patterns = [f"libwavedb*{SUFFIX}", f"wavedb*{SUFFIX}"]
+    candidates: list[Path] = []
+    for build_dir in REPO_ROOT.glob("build*/"):
+        if not build_dir.is_dir():
+            continue
+        for pat in patterns:
+            candidates.extend(build_dir.rglob(pat))
+    if not candidates:
+        return None
+    # Prefer the canonical unprefixed name (libwavedb.so) over a stripped
+    # build artifact name, then the newest by mtime as the tie-breaker — a
+    # developer's most recent `cmake --build` is the DLL they want to ship.
+    candidates.sort(key=lambda p: (p.name != f"libwavedb{SUFFIX}", -p.stat().st_mtime))
+    return candidates[0]
+
+
 class CmakeBuildExt(build_ext):
     def get_ext_filename(self, ext_name: str) -> str:
         # Map the extension module name to a plain shared-lib filename
@@ -44,45 +77,52 @@ class CmakeBuildExt(build_ext):
             canonical = lib_dir / f"libwavedb{SUFFIX}"
             if Path(source_lib).name != canonical.name and not canonical.exists():
                 shutil.copy(source_lib, canonical)
-        elif (REPO_ROOT / "CMakeLists.txt").exists() and shutil.which("cmake"):
-            build_dir = Path(self.build_temp) / "wavedb-shared"
-            build_dir.mkdir(parents=True, exist_ok=True)
-            subprocess.check_call([
-                "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
-                "-DBUILD_PYTHON_BINDINGS=ON",
-                "-DBUILD_TESTS=OFF",
-                "-DCMAKE_BUILD_TYPE=Release",
-            ])
-            # Parallel build flag: make uses "-j N"; MSBuild (Windows / VS
-            # generator) uses "/m:N". cmake forwards everything after "--"
-            # to the underlying build tool verbatim.
-            if sys.platform == "win32":
-                parallel_args = [f"/m:{os.cpu_count() or 2}"]
-            else:
-                parallel_args = ["-j", str(os.cpu_count() or 2)]
-            subprocess.check_call([
-                "cmake", "--build", str(build_dir), "--config", "Release",
-                "--target", "wavedb_shared", "--", *parallel_args,
-            ])
-
-            # The VS generator is multi-config: it emits the DLL under a nested
-            # Release/ subdir (e.g. build_dir/Release/wavedb.dll), so search
-            # recursively. A non-recursive glob finds nothing and aborts with
-            # "libwavedb.dll not found" even though the build succeeded.
-            candidates = list(build_dir.rglob(f"libwavedb*{SUFFIX}")) + list(build_dir.rglob(f"wavedb*{SUFFIX}"))
-            if not candidates:
-                raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
-            candidates.sort(key=lambda p: len(p.name))
-            shutil.copy(candidates[0], ext_path)
         else:
-            # Fall back to bundled .so
-            bundled = HERE / "src" / "wavedb" / "_lib" / f"libwavedb{SUFFIX}"
-            if not bundled.exists():
-                raise RuntimeError(
-                    f"libwavedb{SUFFIX} not found and no C source tree to build from. "
-                    f"Set WAVEDB_LIB_PATH to point at a pre-built libwavedb{SUFFIX}."
-                )
-            shutil.copy(bundled, ext_path)
+            prebuilt = _find_prebuilt_lib()
+            if prebuilt is not None:
+                shutil.copy(prebuilt, ext_path)
+                canonical = lib_dir / f"libwavedb{SUFFIX}"
+                if prebuilt.name != canonical.name and not canonical.exists():
+                    shutil.copy(prebuilt, canonical)
+            elif (REPO_ROOT / "CMakeLists.txt").exists() and shutil.which("cmake"):
+                build_dir = Path(self.build_temp) / "wavedb-shared"
+                build_dir.mkdir(parents=True, exist_ok=True)
+                subprocess.check_call([
+                    "cmake", "-S", str(REPO_ROOT), "-B", str(build_dir),
+                    "-DBUILD_PYTHON_BINDINGS=ON",
+                    "-DBUILD_TESTS=OFF",
+                    "-DCMAKE_BUILD_TYPE=Release",
+                ])
+                # Parallel build flag: make uses "-j N"; MSBuild (Windows / VS
+                # generator) uses "/m:N". cmake forwards everything after "--"
+                # to the underlying build tool verbatim.
+                if sys.platform == "win32":
+                    parallel_args = [f"/m:{os.cpu_count() or 2}"]
+                else:
+                    parallel_args = ["-j", str(os.cpu_count() or 2)]
+                subprocess.check_call([
+                    "cmake", "--build", str(build_dir), "--config", "Release",
+                    "--target", "wavedb_shared", "--", *parallel_args,
+                ])
+
+                # The VS generator is multi-config: it emits the DLL under a nested
+                # Release/ subdir (e.g. build_dir/Release/wavedb.dll), so search
+                # recursively. A non-recursive glob finds nothing and aborts with
+                # "libwavedb.dll not found" even though the build succeeded.
+                candidates = list(build_dir.rglob(f"libwavedb*{SUFFIX}")) + list(build_dir.rglob(f"wavedb*{SUFFIX}"))
+                if not candidates:
+                    raise RuntimeError(f"libwavedb{SUFFIX} not found in {build_dir}")
+                candidates.sort(key=lambda p: len(p.name))
+                shutil.copy(candidates[0], ext_path)
+            else:
+                # Fall back to bundled .so
+                bundled = HERE / "src" / "wavedb" / "_lib" / f"libwavedb{SUFFIX}"
+                if not bundled.exists():
+                    raise RuntimeError(
+                        f"libwavedb{SUFFIX} not found and no C source tree to build from. "
+                        f"Set WAVEDB_LIB_PATH to point at a pre-built libwavedb{SUFFIX}."
+                    )
+                shutil.copy(bundled, ext_path)
 
         # ---- Step 2: Compile cffi out-of-line extension ----
         # Links against libwavedb.so in lib_dir. Rpath ($ORIGIN/_lib or
