@@ -341,7 +341,13 @@ int database_scan_next(database_iterator_t* iter,
                     size_t num_identifiers = 0;
                     const path_subscript_meta_t* path_meta = bnode_entry_get_path_meta(entry, &num_identifiers);
 
-                    // Collect chunks from the stack
+                    // Collect chunks from the stack. Count exactly one chunk per
+                    // HBTrie level: a multi-level B+tree (btree overflows at scale)
+                    // pushes extra is_bnode_child routing frames whose key is a
+                    // B+tree separator, NOT an identifier chunk. Counting those
+                    // would over-count by (btree_depth - 1) per split level and
+                    // misalign the collected chunks vs path_meta.chunk_count,
+                    // producing NUL-padded, mis-split keys on scan. Skip them.
                     size_t nchunks = 0;
                     for (size_t i = 0; i < iter->stack_depth; i++) {
                         iterator_frame_t* f = &iter->stack[i];
@@ -349,7 +355,7 @@ int database_scan_next(database_iterator_t* iter,
                             bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
                             if (f_btree == NULL) continue;
                             bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
-                            if (e != NULL && e->key != NULL) {
+                            if (e != NULL && e->key != NULL && !e->is_bnode_child) {
                                 nchunks++;
                             }
                         }
@@ -371,7 +377,7 @@ int database_scan_next(database_iterator_t* iter,
                                 bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
                                 if (f_btree == NULL) continue;
                                 bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
-                                if (e != NULL && e->key != NULL) {
+                                if (e != NULL && e->key != NULL && !e->is_bnode_child) {
                                     chunks[idx++] = e->key;
                                 }
                             }
