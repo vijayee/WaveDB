@@ -6,6 +6,7 @@
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
 #include <cctype>
+#include <cstdlib>
 #include <node_api.h>
 
 // Extract JS key (string or array) into a std::string (no truncation).
@@ -135,37 +136,35 @@ std::string PathToJS(path_t* path, char delimiter) {
 
     identifier_t* id = path->identifiers.data[i];
 
-    // Extract identifier bytes to string
-    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-      chunk_t* chunk = id->chunks.data[j];
-      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->size;
-
+    // Use identifier_get_data_copy which returns exactly id->length bytes
+    // (the original byte count, with per-subscript chunk padding already
+    // stripped by the C layer). Iterating id->chunks instead would re-emit
+    // the per-chunk NUL padding as hex-encoded garbage — see the comment
+    // below PathToJS for why.
+    size_t id_len = 0;
+    uint8_t* id_data = identifier_get_data_copy(id, &id_len);
+    if (id_data) {
       // Check if all bytes are printable ASCII
       bool printable = true;
-      for (size_t k = 0; k < size; k++) {
-        if (!isprint(data[k]) && data[k] != '\t' && data[k] != '\n' && data[k] != '\r') {
+      for (size_t k = 0; k < id_len; k++) {
+        if (!isprint(id_data[k]) && id_data[k] != '\t' && id_data[k] != '\n' && id_data[k] != '\r') {
           printable = false;
           break;
         }
       }
 
       if (printable) {
-        result += std::string(reinterpret_cast<const char*>(data), size);
+        result += std::string(reinterpret_cast<const char*>(id_data), id_len);
       } else {
         // Non-printable: represent as hex
         char hex[3];
-        for (size_t k = 0; k < size; k++) {
-          snprintf(hex, 3, "%02x", data[k]);
+        for (size_t k = 0; k < id_len; k++) {
+          snprintf(hex, 3, "%02x", id_data[k]);
           result += hex;
         }
       }
+      free(id_data);
     }
-  }
-
-  // Strip trailing null characters and whitespace (chunk padding)
-  while (!result.empty() && (result.back() == '\0' || result.back() == ' ')) {
-    result.pop_back();
   }
 
   return result;
@@ -178,37 +177,32 @@ Napi::Array PathToArrayJS(Napi::Env env, path_t* path, char delimiter) {
   for (size_t i = 0; i < static_cast<size_t>(path->identifiers.length); i++) {
     identifier_t* id = path->identifiers.data[i];
 
-    // Extract identifier as string
+    // Use identifier_get_data_copy (returns id->length bytes, padding
+    // already stripped) — see PathToJS for why chunk iteration is wrong.
     std::string part;
-    for (size_t j = 0; j < static_cast<size_t>(id->chunks.length); j++) {
-      chunk_t* chunk = id->chunks.data[j];
-      const uint8_t* data = static_cast<const uint8_t*>(chunk_data_const(chunk));
-      size_t size = chunk->size;
-
+    size_t id_len = 0;
+    uint8_t* id_data = identifier_get_data_copy(id, &id_len);
+    if (id_data) {
       // Check if all bytes are printable ASCII
       bool printable = true;
-      for (size_t k = 0; k < size; k++) {
-        if (!isprint(data[k]) && data[k] != '\t' && data[k] != '\n' && data[k] != '\r') {
+      for (size_t k = 0; k < id_len; k++) {
+        if (!isprint(id_data[k]) && id_data[k] != '\t' && id_data[k] != '\n' && id_data[k] != '\r') {
           printable = false;
           break;
         }
       }
 
       if (printable) {
-        part += std::string(reinterpret_cast<const char*>(data), size);
+        part = std::string(reinterpret_cast<const char*>(id_data), id_len);
       } else {
         // Non-printable: represent as hex
         char hex[3];
-        for (size_t k = 0; k < size; k++) {
-          snprintf(hex, 3, "%02x", data[k]);
+        for (size_t k = 0; k < id_len; k++) {
+          snprintf(hex, 3, "%02x", id_data[k]);
           part += hex;
         }
       }
-    }
-
-    // Strip trailing null characters and whitespace (chunk padding)
-    while (!part.empty() && (part.back() == '\0' || part.back() == ' ')) {
-      part.pop_back();
+      free(id_data);
     }
 
     arr.Set(i, Napi::String::New(env, part));

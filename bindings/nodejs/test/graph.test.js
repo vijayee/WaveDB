@@ -1,7 +1,10 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const { GraphLayer, g, Query, setDefaultGraph } = require('../lib/graph');
+const { WaveDB } = require('../lib/wavedb');
 
 describe('GraphLayer', function() {
   this.timeout(10000);
@@ -285,4 +288,128 @@ describe('GraphLayer', function() {
       assert.strictEqual(result[0], 'c');
     });
   });
+
 });
+  // ── expandTriple: cross-subtree atomic batches ──
+
+  describe('expandTriple', function() {
+    // NOTE: do not name this `xgraph` — the outer describe's beforeEach/afterEach
+    // owns that variable and closes it on teardown. Shadowing it leaks the
+    // outer in-memory GraphLayer and corrupts process-exit cleanup.
+    let xdb;
+    let xgraph;
+    let xtempDir;
+
+    beforeEach(function() {
+      xtempDir = fs.mkdtempSync('/tmp/wavedb-graph-expand-');
+      xdb = new WaveDB(xtempDir);
+      // Open a subtree at "xgraph" so the GraphLayer shares the xdb. expandTriple
+      // emits keys in the ROOT xdb namespace (subtree prefix already prepended
+      // by the C helper), so we feed the returned ops to xdb.batchSync (NOT
+      // subtree.batchSync, which would re-prefix).
+      const subtree = xdb.openSubtree('graph');
+      xgraph = new GraphLayer(null, { subtree });
+      subtree.close();
+    });
+
+    afterEach(function() {
+      if (xgraph && !xgraph.isClosed) xgraph.close();
+      if (xdb) xdb.close();
+      if (xtempDir) fs.rmSync(xtempDir, { recursive: true, force: true });
+    });
+
+    it('returns one canonical root-namespace op per xgraph index', function() {
+      const ops = xgraph.expandTriple('alice', 'knows', 'bob');
+      assert.strictEqual(ops.length, 4);
+      assert.ok(ops.every(op => op.type === 'put'));
+      assert.ok(ops.every(op => op.value === ''));
+      // Keys live in the ROOT xdb namespace: subtree prefix + delimiter + the
+      // index key → "xgraph/spo/..." (single delimiter; the leading slash
+      // from the xgraph key builder is stripped by the C helper). Pass these
+      // to xdb.batchSync, NOT to a subtree batch (which would re-prefix).
+      assert.ok(ops.every(op => op.key.startsWith('graph/')));
+      const keys = ops.map(op => op.key);
+      assert.ok(keys.includes('graph/spo/alice/knows/bob'));
+    });
+
+    it('is atomic-equivalent to insertSync when spliced into a root batch', function() {
+      // One atomic batch: a content write in the root namespace plus a xgraph
+      // triple expanded into root-namespace index ops.
+      const ops = [
+        { type: 'put', key: 'content/ep1/summary', value: 'alice met bob' },
+      ].concat(xgraph.expandTriple('alice', 'knows', 'bob'));
+      xdb.batchSync(ops);
+
+      assert.strictEqual(xdb.getSync('content/ep1/summary').toString(),
+                         'alice met bob');
+      const result = xgraph.exec(g.V('alice').Out('knows').toString());
+      assert.ok(result.includes('bob'));
+    });
+
+    it('delete=True yields del ops that remove the triple', function() {
+      xgraph.insertSync('alice', 'knows', 'bob');
+      assert.ok(xgraph.exec(g.V('alice').Out('knows').toString()).includes('bob'));
+
+      xdb.batchSync(xgraph.expandTriple('alice', 'knows', 'bob', { delete: true }));
+      assert.strictEqual(
+        xgraph.exec(g.V('alice').Out('knows').toString()).includes('bob'),
+        false);
+    });
+
+    it('stores the exact same index keys as insertSync', async function() {
+      // Write via expandTriple+batchSync in one db, via insertSync in another.
+      // The two write paths must be fully interchangeable — same on-disk keys.
+      const dir1 = fs.mkdtempSync('/tmp/wavedb-graph-cmp-ins-');
+      const db1 = new WaveDB(dir1);
+      const st1 = db1.openSubtree('graph');
+      const g1 = new GraphLayer(null, { subtree: st1 });
+      g1.insertSync('alice', 'knows', 'bob');
+      const insertKeys = new Set(await collectKeys(db1, 'graph/'));
+      g1.close();
+      st1.close();
+      db1.close();
+      fs.rmSync(dir1, { recursive: true, force: true });
+
+      const dir2 = fs.mkdtempSync('/tmp/wavedb-graph-cmp-exp-');
+      const db2 = new WaveDB(dir2);
+      const st2 = db2.openSubtree('graph');
+      const g2 = new GraphLayer(null, { subtree: st2 });
+      db2.batchSync(g2.expandTriple('alice', 'knows', 'bob'));
+      const expandKeys = new Set(await collectKeys(db2, 'graph/'));
+      g2.close();
+      st2.close();
+      db2.close();
+      fs.rmSync(dir2, { recursive: true, force: true });
+
+      // Both write paths produce the same on-disk keys, and that set contains
+      // the four expected SPO/POS/OSP/PSO index keys.
+      assert.deepStrictEqual([...insertKeys].sort(), [...expandKeys].sort());
+      const expected = new Set([
+        'graph/spo/alice/knows/bob',
+        'graph/pos/knows/bob/alice',
+        'graph/osp/bob/alice/knows',
+        'graph/pso/knows/alice/bob',
+      ]);
+      for (const k of expected) {
+        assert.ok(insertKeys.has(k), `missing expected key: ${k}`);
+      }
+    });
+  });
+
+// Helper: collect all keys under `prefix` via a createReadStream.
+// Returns a Promise that resolves to the array of keys once the stream ends.
+function collectKeys(db, prefix) {
+  return new Promise((resolve, reject) => {
+    const stream = db.createReadStream({ start: prefix });
+    const keys = [];
+    stream.on('data', (entry) => {
+      if (typeof entry.key === 'string') {
+        keys.push(entry.key);
+      } else if (Buffer.isBuffer(entry.key)) {
+        keys.push(entry.key.toString('utf-8'));
+      }
+    });
+    stream.on('end', () => resolve(keys));
+    stream.on('error', reject);
+  });
+}

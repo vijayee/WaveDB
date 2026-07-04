@@ -35,6 +35,7 @@ private:
   Napi::Value DeleteSync(const Napi::CallbackInfo& info);
   Napi::Value ParseSchema(const Napi::CallbackInfo& info);
   Napi::Value DefineMorphism(const Napi::CallbackInfo& info);
+  Napi::Value ExpandTriple(const Napi::CallbackInfo& info);
   Napi::Value Close(const Napi::CallbackInfo& info);
 
   // Helper: create an AsyncOpContext with a JS Promise and optional callback
@@ -57,6 +58,7 @@ Napi::Object GraphLayer::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("deleteSync", &GraphLayer::DeleteSync),
     InstanceMethod("parseSchema", &GraphLayer::ParseSchema),
     InstanceMethod("defineMorphism", &GraphLayer::DefineMorphism),
+    InstanceMethod("expandTriple", &GraphLayer::ExpandTriple),
     InstanceMethod("close", &GraphLayer::Close),
   });
 
@@ -532,6 +534,87 @@ Napi::Value GraphLayer::DefineMorphism(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+Napi::Value GraphLayer::ExpandTriple(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!layer_) {
+    Napi::Error::New(env, "GRAPH_CLOSED: GraphLayer is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsString()) {
+    Napi::TypeError::New(env, "s, p, o strings required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string s = info[0].As<Napi::String>().Utf8Value();
+  std::string p = info[1].As<Napi::String>().Utf8Value();
+  std::string o = info[2].As<Napi::String>().Utf8Value();
+
+  bool is_delete = false;
+  if (info.Length() >= 4 && info[3].IsObject()) {
+    Napi::Object opts = info[3].As<Napi::Object>();
+    if (opts.Has("delete")) {
+      is_delete = opts.Get("delete").As<Napi::Boolean>().Value();
+    }
+  }
+
+  // The C helper fills at most 4 entries (SPO/POS/OSP/PSO). Each filled
+  // entry's `key` is malloc'd by the helper; the caller MUST free() it
+  // after the batch runs. We copy the bytes into JS strings here and free
+  // the C keys immediately, so the JS caller never touches C memory.
+  raw_op_t ops_buf[4];
+  int type_int = is_delete ? 1 : 0;
+  size_t count = graph_triple_expand_ops(
+    layer_, s.c_str(), p.c_str(), o.c_str(), type_int, ops_buf, 4);
+
+  Napi::Array result = Napi::Array::New(env, count);
+  // Free every C-allocated key in a finally-style guard so a Napi exception
+  // can't leak them. We've already copied bytes into std::strings by the
+  // time we free, so the JS objects remain valid.
+  bool threw = false;
+  for (size_t i = 0; i < count; i++) {
+    Napi::Object op = Napi::Object::New(env);
+    try {
+      op.Set("type", is_delete ? Napi::String::New(env, "del")
+                                : Napi::String::New(env, "put"));
+      // The C key is a raw byte buffer of length key_len; copy into a
+      // std::string first so we can free the C allocation before constructing
+      // the JS string (Utf8Value would copy again, but we want the free to
+      // happen regardless of JS-side success).
+      std::string key_copy(ops_buf[i].key, ops_buf[i].key_len);
+      op.Set("key", Napi::String::New(env, key_copy));
+      if (!is_delete) {
+        // The graph index presence marker is an empty value (the C helper
+        // sets value to a static empty byte and value_len to 0). batchSync's
+        // put path requires a value, so emit "" — matching the Python binding.
+        op.Set("value", Napi::String::New(env, ""));
+      }
+      result.Set(static_cast<uint32_t>(i), op);
+    } catch (...) {
+      threw = true;
+      break;
+    }
+  }
+
+  // Always free the C-allocated keys, even on the exception path.
+  for (size_t i = 0; i < count; i++) {
+    if (ops_buf[i].key != nullptr) {
+      // raw_op_t.key is const char*; the C helper malloc'd it. Cast away
+      // const to free, matching the C helper's `free()` contract.
+      free(const_cast<char*>(ops_buf[i].key));
+      ops_buf[i].key = nullptr;
+    }
+  }
+
+  if (threw) {
+    Napi::Error::New(env, "Failed to build expandTriple result").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  return result;
+}
+
 Napi::Value GraphLayer::Close(const Napi::CallbackInfo& info) {
   if (layer_) {
     if (!syncOnly_) {
@@ -548,4 +631,6 @@ Napi::Object InitGraph(Napi::Env env, Napi::Object exports) {
   return GraphLayer::Init(env, exports);
 }
 
-NODE_API_MODULE(wavedb_graph, InitGraph)
+// NODE_API_MODULE removed — InitGraph is now called from binding.cpp's Init
+// (single wavedb.node addon). See binding.cpp for why all native addons are
+// combined into one .node file.

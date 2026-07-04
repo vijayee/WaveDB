@@ -1,6 +1,6 @@
 'use strict';
 
-const { GraphLayer: GraphLayerNative } = require('../build/Release/graph.node');
+const { GraphLayer: GraphLayerNative } = require('../build/Release/wavedb.node');
 
 let _defaultGraph = null;
 
@@ -129,6 +129,29 @@ class GraphLayer {
   defineMorphism(name, dsl) {
     if (this._closed) throw new Error('GraphLayer is closed');
     this._layer.defineMorphism(name, dsl);
+  }
+
+  /**
+   * Expand a triple (s, p, o) into op objects for a single atomic batch.
+   *
+   * Returns an array of `{ type: 'put'|'del', key: <string>, value: '' }`
+   * objects — one per graph index the layer writes (SPO/POS/OSP/PSO) — with
+   * keys already addressed in the *root* database namespace (the subtree
+   * prefix prepended by the C helper). Splice them into a `db.batchSync()`
+   * call alongside content ops so a triple's index updates share one atomic
+   * transaction with the rest of the write:
+   *
+   *     const ops = contentOps.concat(graph.expandTriple('alice', 'knows', 'bob'));
+   *     db.batchSync(ops);   // content + graph indices atomic together
+   *
+   * This is the batch equivalent of `insertSync` (or `deleteSync` when
+   * `{delete: true}`). The returned ops are root-namespace keys — pass them
+   * to `db.batchSync()`, NOT to a subtree batch (which would re-prepend the
+   * prefix).
+   */
+  expandTriple(s, p, o, opts = {}) {
+    if (this._closed) throw new Error('GraphLayer is closed');
+    return this._layer.expandTriple(s, p, o, opts);
   }
 
   close() {

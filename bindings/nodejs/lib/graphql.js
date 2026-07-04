@@ -1,6 +1,6 @@
 'use strict';
 
-const { GraphQLLayer: GraphQLLayerNative } = require('../build/Release/graphql.node');
+const { GraphQLLayer: GraphQLLayerNative } = require('../build/Release/wavedb.node');
 
 /**
  * GraphQL layer for WaveDB

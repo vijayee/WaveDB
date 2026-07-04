@@ -311,6 +311,14 @@ if(BUILD_TESTS)
     target_link_libraries(test_scan_padding wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_scan_padding COMMAND test_scan_padding)
 
+    add_executable(test_batch_scan_padding tests/test_batch_scan_padding.cpp)
+    target_link_libraries(test_batch_scan_padding wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_batch_scan_padding COMMAND test_batch_scan_padding)
+
+    add_executable(test_subtree_close_crash tests/test_subtree_close_crash.cpp)
+    target_link_libraries(test_subtree_close_crash wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_subtree_close_crash COMMAND test_subtree_close_crash)
+
     # Encryption module tests (require OpenSSL)
     if(OpenSSL_FOUND)
         add_executable(test_encryption tests/test_encryption.cpp)

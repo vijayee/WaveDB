@@ -337,4 +337,6 @@ Napi::Object InitModule(Napi::Env env, Napi::Object exports) {
   return GraphQLLayer::Init(env, exports);
 }
 
-NODE_API_MODULE(graphql, InitModule)
+// NODE_API_MODULE removed — InitModule is now called from binding.cpp's Init
+// (single wavedb.node addon). See binding.cpp for why all native addons are
+// combined into one .node file.
