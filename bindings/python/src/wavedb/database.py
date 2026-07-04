@@ -191,10 +191,14 @@ class WaveDB:
             value_out, len_out,
         )
         if rc == 0:
-            # Defensive: C contract is rc=-2 for not-found, but guard against
-            # rc=0 + NULL in case of future changes.
-            if value_out[0] == ffi.NULL:
-                return None
+            # A stored empty value is distinct from not-found (rc=-2 -> None).
+            # identifier_get_data_copy returns a NULL pointer for a zero-length
+            # value, so distinguish by length: len 0 means an empty value was
+            # found and should round-trip as b"", not None.
+            if len_out[0] == 0:
+                if value_out[0] != ffi.NULL:
+                    lib.database_raw_value_free(value_out[0])
+                return b""
             try:
                 return ffi.buffer(value_out[0], len_out[0])[:]
             finally:

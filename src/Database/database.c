@@ -2487,7 +2487,12 @@ int database_get_sync_raw(database_t* db,
     if (rc == 0 && result) {
         *value_out = identifier_get_data_copy(result, value_len_out);
         identifier_destroy(result);
-        if (!*value_out) return -1;
+        // identifier_get_data_copy returns NULL for a valid empty value
+        // (length 0, with *value_len_out set to 0) — that is success, not a
+        // copy failure. Only treat a NULL pointer as failure when a non-empty
+        // value failed to allocate. Conflating the two made get_sync raise on
+        // every empty-valued key (e.g. graph index SPO/POS/OSP entries).
+        if (!*value_out && *value_len_out > 0) return -1;
         return 0;
     }
 

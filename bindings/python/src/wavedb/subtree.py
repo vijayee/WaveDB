@@ -113,14 +113,19 @@ class Subtree:
         )
         if rc == _GET_NOT_FOUND_RC:
             return None
-        if rc == 0 and v_out[0] == ffi.NULL:
-            return None
-        if rc != 0:
-            raise map_error(rc, "subtree get_sync failed")
-        try:
-            return ffi.buffer(v_out[0], len_out[0])[:]
-        finally:
-            lib.database_raw_value_free(v_out[0])
+        if rc == 0:
+            # A stored empty value (len 0) is found, not missing — round-trip as
+            # b"" so it is distinct from not-found (None). The C layer returns a
+            # NULL pointer for a zero-length copy.
+            if len_out[0] == 0:
+                if v_out[0] != ffi.NULL:
+                    lib.database_raw_value_free(v_out[0])
+                return b""
+            try:
+                return ffi.buffer(v_out[0], len_out[0])[:]
+            finally:
+                lib.database_raw_value_free(v_out[0])
+        raise map_error(rc, "subtree get_sync failed")
 
     def del_sync(self, key) -> None:
         """Delete the value at `key` within the subtree.
