@@ -116,6 +116,8 @@ db = WaveDB(
 
 ## Graph and GraphQL
 
+### Graph (triples)
+
 ```python
 from wavedb import WaveDB, GraphLayer
 
@@ -125,6 +127,70 @@ g.insert_sync("alice", "knows", "bob")
 result = g.query().vertex("alice").out("knows").execute_sync()
 print(result.vertices)  # ["bob"]
 ```
+
+### Atomic cross-subtree batches
+
+`GraphLayer.expand_triple` expands a triple into op dicts addressed in the
+*root* database namespace, so a triple's index updates can share one atomic
+transaction with content writes:
+
+```python
+db = WaveDB("/path/to/db")
+g = GraphLayer("graph", db)
+
+# One atomic batch: a content write in the root namespace plus a graph
+# triple expanded into root-namespace index ops.
+ops = [
+    {"type": "put", "key": "content/ep1/summary", "value": "alice met bob"},
+] + g.expand_triple("alice", "knows", "bob")
+db.batch_sync(ops)
+
+assert db.get_sync("content/ep1/summary") == b"alice met bob"
+assert "bob" in g.query().vertex("alice").out("knows").execute_sync().vertices
+
+# delete via batch is the batch equivalent of g.delete_sync(...):
+db.batch_sync(g.expand_triple("alice", "knows", "bob", delete=True))
+```
+
+### GraphQL
+
+```python
+from wavedb import WaveDB, GraphQLLayer
+
+db = WaveDB("/path/to/db")
+gql = GraphQLLayer("gql", db)
+
+# Define a schema. The default resolver stores entity data under the
+# type's plural path prefix: gql/Users/<id>/<field>.
+gql.schema_parse("""
+    type User {
+        id: ID!
+        name: String
+        age: Int
+    }
+""")
+
+# Write entity data via the parent db (the subtree prefix "gql" is applied
+# by the subtree, so we write through the parent db with the full key).
+db.put_sync("gql/Users/1/id", "1")
+db.put_sync("gql/Users/1/name", "Alice")
+db.put_sync("gql/Users/1/age", "30")
+
+# Query by id — the default resolver looks up <plural>/<id>/<field>.
+result = gql.query_sync('{ User(id: "1") { id name age } }')
+print(result.success)             # True
+print(result.data["User"][0])     # {'id': '1', 'name': 'Alice', 'age': 30}
+print(result.to_json())           # raw GraphQL JSON response string
+
+gql.close()
+db.close()
+```
+
+The result object exposes `data` (parsed JSON), `errors` (list of
+`GraphQLError` with `message`/`path`/`locations`), `success` (True when
+`errors` is empty), and `to_json()` (raw response string). Call
+`result.close()` to free the underlying C result, or use `GraphQLLayer` as
+a context manager.
 
 ## Async Model
 

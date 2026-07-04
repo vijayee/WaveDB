@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:test/test.dart';
 import 'package:wavedb/wavedb.dart';
 
@@ -258,4 +259,123 @@ void main() {
       expect(results[0], 'c');
     });
   });
+
+  // ── expandTriple: cross-subtree atomic batches ──
+
+  group('expandTriple', () {
+    late Directory tempDir;
+    late WaveDB db;
+    late GraphLayer graph;
+
+    setUp(() async {
+      tempDir = await Directory.systemTemp.createTemp('wavedb_graph_expand_');
+      db = WaveDB(tempDir.path);
+      // Open a subtree at "graph" so the GraphLayer shares the db. expandTriple
+      // emits keys in the ROOT db namespace (subtree prefix already prepended
+      // by the C helper), so we feed the returned ops to db.batchSync (NOT
+      // subtree.batchSync, which would re-prefix).
+      final subtree = db.openSubtree('graph');
+      graph = GraphLayer(null, subtree);
+      subtree.close();
+    });
+
+    tearDown(() async {
+      await graph.close();
+      db.close();
+      try {
+        await tempDir.delete(recursive: true);
+      } catch (_) {}
+    });
+
+    test('returns one canonical root-namespace op per graph index', () {
+      final ops = graph.expandTriple('alice', 'knows', 'bob');
+      expect(ops, hasLength(4));
+      expect(ops.every((op) => op['type'] == 'put'), isTrue);
+      expect(ops.every((op) => op['value'] == ''), isTrue);
+      // Keys live in the ROOT db namespace: subtree prefix + delimiter + the
+      // index key → "graph/spo/..." (single delimiter; the leading slash from
+      // the graph key builder is stripped by the C helper). Pass these to
+      // db.batchSync, NOT to a subtree batch (which would re-prefix).
+      expect(ops.every((op) => (op['key'] as String).startsWith('graph/')),
+             isTrue);
+      final keys = ops.map((op) => op['key'] as String).toSet();
+      expect(keys, contains('graph/spo/alice/knows/bob'));
+    });
+
+    test('is atomic-equivalent to insertSync when spliced into a root batch', () {
+      // One atomic batch: a content write in the root namespace plus a graph
+      // triple expanded into root-namespace index ops.
+      final ops = [
+        {'type': 'put', 'key': 'content/ep1/summary', 'value': 'alice met bob'},
+        ...graph.expandTriple('alice', 'knows', 'bob'),
+      ];
+      db.batchSync(ops);
+
+      expect(db.getSync('content/ep1/summary'), 'alice met bob');
+      final result = graph.exec(g().V('alice').Out('knows'));
+      expect(result, contains('bob'));
+    });
+
+    test('delete=true yields del ops that remove the triple', () {
+      graph.insertSync('alice', 'knows', 'bob');
+      expect(graph.exec(g().V('alice').Out('knows')), contains('bob'));
+
+      db.batchSync(graph.expandTriple('alice', 'knows', 'bob', delete: true));
+      expect(graph.exec(g().V('alice').Out('knows')), isNot(contains('bob')));
+    });
+
+    test('stores the exact same index keys as insertSync', () async {
+      // Write via expandTriple+batchSync in one db, via insertSync in another.
+      // The two write paths must be fully interchangeable — same on-disk keys.
+      final expected = {
+        'graph/spo/alice/knows/bob',
+        'graph/pos/knows/bob/alice',
+        'graph/osp/bob/alice/knows',
+        'graph/pso/knows/alice/bob',
+      };
+
+      final dir1 = await Directory.systemTemp.createTemp('wavedb_graph_cmp_ins_');
+      final db1 = WaveDB(dir1.path);
+      final st1 = db1.openSubtree('graph');
+      final g1 = GraphLayer(null, st1);
+      g1.insertSync('alice', 'knows', 'bob');
+      final insertKeys = await collectKeys(db1, 'graph/');
+      await g1.close();
+      st1.close();
+      db1.close();
+      await dir1.delete(recursive: true);
+
+      final dir2 = await Directory.systemTemp.createTemp('wavedb_graph_cmp_exp_');
+      final db2 = WaveDB(dir2.path);
+      final st2 = db2.openSubtree('graph');
+      final g2 = GraphLayer(null, st2);
+      db2.batchSync(g2.expandTriple('alice', 'knows', 'bob'));
+      final expandKeys = await collectKeys(db2, 'graph/');
+      await g2.close();
+      st2.close();
+      db2.close();
+      await dir2.delete(recursive: true);
+
+      // Both write paths produce the same on-disk keys, and that set contains
+      // the four expected SPO/POS/OSP/PSO index keys.
+      expect(insertKeys.toSet(), equals(expandKeys.toSet()));
+      for (final k in expected) {
+        expect(insertKeys, contains(k));
+      }
+    });
+  });
+}
+
+// Helper: collect all keys under `prefix` via createReadStream.
+Future<List<String>> collectKeys(WaveDB db, String prefix) async {
+  final keys = <String>[];
+  await for (final entry in db.createReadStream(start: prefix)) {
+    final k = entry.key;
+    if (k is String) {
+      keys.add(k);
+    } else if (k is List<int>) {
+      keys.add(String.fromCharCodes(k));
+    }
+  }
+  return keys;
 }

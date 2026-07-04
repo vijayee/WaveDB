@@ -2,6 +2,8 @@
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'native/types.dart';
 import 'native/wavedb_bindings.dart';
@@ -295,6 +297,77 @@ class GraphLayer implements Finalizable {
   void parseSchema(String sdl) {
     _checkOpen();
     WaveDBNative.graphSchemaParse(_layer!, sdl);
+  }
+
+  /// Expand a triple `(s, p, o)` into op maps for a single atomic batch.
+  ///
+  /// Returns a list of `{"type": "put"|"del", "key": <String>, "value": ""}`
+  /// maps — one per graph index the layer writes (SPO/POS/OSP/PSO) — with
+  /// keys already addressed in the *root* database namespace (the subtree
+  /// prefix prepended by the C helper). Splice them into a
+  /// `db.batchSync()` call alongside content ops so a triple's index updates
+  /// share one atomic transaction with the rest of the write::
+  ///
+  ///     final ops = [...contentOps, ...graph.expandTriple('alice', 'knows', 'bob')];
+  ///     db.batchSync(ops); // content + graph indices atomic together
+  ///
+  /// This is the batch equivalent of [insertSync] (or [deleteSync] when
+  /// `delete: true`). The returned ops are root-namespace keys — pass them
+  /// to `db.batchSync()`, NOT to a subtree batch (which would prepend the
+  /// prefix a second time).
+  List<Map<String, dynamic>> expandTriple(
+    String s, String p, String o, {
+    bool delete = false,
+  }) {
+    _checkOpen();
+    final opsPtr = calloc<RawOp>(4);
+    try {
+      final typeInt = delete ? 1 : 0;
+      final count = WaveDBNative.graphTripleExpandOps(
+        _layer!, s, p, o, typeInt, opsPtr, 4,
+      );
+      final out = <Map<String, dynamic>>[];
+      final t = delete ? 'del' : 'put';
+      try {
+        for (var i = 0; i < count; i++) {
+          final keyPtr = opsPtr[i].key;
+          final keyLen = opsPtr[i].keyLen;
+          // Copy the C key bytes into a Dart String first, then free the C
+          // allocation. Free in finally so a decode error can't leak the keys
+          // we already consumed.
+          String key;
+          if (keyPtr == nullptr || keyLen == 0) {
+            key = '';
+          } else {
+            final bytes = Uint8List.fromList(
+              keyPtr.asTypedList(keyLen),
+            );
+            key = utf8.decode(bytes, allowMalformed: true);
+          }
+          final op = <String, dynamic>{'type': t, 'key': key};
+          if (!delete) {
+            // The graph index presence marker is an empty value (the C
+            // helper sets value to a static empty byte and value_len to 0).
+            // batchSync's put path requires a value, so emit "" — matching
+            // the Python binding.
+            op['value'] = '';
+          }
+          out.add(op);
+        }
+      } finally {
+        // Free every C-allocated key, even on the exception path.
+        for (var i = 0; i < count; i++) {
+          final keyPtr = opsPtr[i].key;
+          if (keyPtr != nullptr) {
+            malloc.free(keyPtr);
+            opsPtr[i].key = nullptr;
+          }
+        }
+      }
+      return out;
+    } finally {
+      calloc.free(opsPtr);
+    }
   }
 
   /// Define a named morphism (reusable traversal path).

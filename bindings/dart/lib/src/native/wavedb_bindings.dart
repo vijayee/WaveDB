@@ -1112,6 +1112,35 @@ typedef GraphDeleteSync = int Function(
   Pointer<Utf8> o,
 );
 
+/// C signature: size_t graph_triple_expand_ops(graph_layer_t* layer,
+///   const char* s, const char* p, const char* o, int type,
+///   raw_op_t* out_ops, size_t max_ops)
+///
+/// Fills `out_ops` (caller-allocated, capacity `max_ops`, pass >= 4) with
+/// root-namespace raw_op_t entries — one per graph index the layer's schema
+/// requires (SPO/POS/OSP/PSO). Each filled entry's `key` is malloc'd by the
+/// C helper; the caller MUST free() it after the batch runs. Returns the
+/// number of entries filled (0..4); 0 if no indices are needed, inputs are
+/// invalid, or `max_ops` is too small (nothing is allocated in those cases).
+typedef GraphTripleExpandOpsC = Size Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+  Int32 type,
+  Pointer<RawOp> outOps,
+  Size maxOps,
+);
+typedef GraphTripleExpandOps = int Function(
+  Pointer<graph_layer_t> layer,
+  Pointer<Utf8> s,
+  Pointer<Utf8> p,
+  Pointer<Utf8> o,
+  int type,
+  Pointer<RawOp> outOps,
+  int maxOps,
+);
+
 /// C signature: graph_result_t* graph_parse_execute(
 ///   const char* dsl,
 ///   graph_layer_t* layer,
@@ -1583,6 +1612,10 @@ class WaveDBNative {
 
   static late final GraphDeleteSync _graphDeleteSync = WaveDBLibrary.load()
       .lookupFunction<GraphDeleteSyncC, GraphDeleteSync>('graph_delete_sync');
+
+  static late final GraphTripleExpandOps _graphTripleExpandOps =
+      WaveDBLibrary.load().lookupFunction<GraphTripleExpandOpsC,
+          GraphTripleExpandOps>('graph_triple_expand_ops');
 
   static late final GraphParseExecute _graphParseExecute = WaveDBLibrary.load()
       .lookupFunction<GraphParseExecuteC, GraphParseExecute>('graph_parse_execute');
@@ -2700,6 +2733,38 @@ class WaveDBNative {
     final oPtr = o.toNativeUtf8();
     try {
       return _graphDeleteSync(layer, sPtr.cast(), pPtr.cast(), oPtr.cast());
+    } finally {
+      calloc.free(sPtr);
+      calloc.free(pPtr);
+      calloc.free(oPtr);
+    }
+  }
+
+  /// Expand a triple into raw_op_t entries for cross-subtree atomic batches.
+  ///
+  /// `outOps` is a caller-allocated `Pointer<RawOp>` of capacity `maxOps`
+  /// (pass >= 4). `type` is 0 (put: empty presence marker) or 1 (delete).
+  ///
+  /// Each filled entry's `key` is malloc'd by the C helper — the caller
+  /// MUST `malloc.free` each `outOps[i].key` after the batch runs. Returns
+  /// the number of entries filled (0..4); 0 if no indices are needed,
+  /// inputs are invalid, or `maxOps` is too small (nothing is allocated in
+  /// those cases).
+  static int graphTripleExpandOps(
+    Pointer<graph_layer_t> layer,
+    String s, String p, String o,
+    int type,
+    Pointer<RawOp> outOps,
+    int maxOps,
+  ) {
+    final sPtr = s.toNativeUtf8();
+    final pPtr = p.toNativeUtf8();
+    final oPtr = o.toNativeUtf8();
+    try {
+      return _graphTripleExpandOps(
+        layer, sPtr.cast(), pPtr.cast(), oPtr.cast(),
+        type, outOps, maxOps,
+      );
     } finally {
       calloc.free(sPtr);
       calloc.free(pPtr);
