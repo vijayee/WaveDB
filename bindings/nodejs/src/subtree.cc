@@ -171,7 +171,15 @@ Napi::Value Subtree::GetSync(const Napi::CallbackInfo& info) {
   int rc = database_subtree_get_sync_raw(st_, key_str.c_str(), key_str.size(), delimiter_,
                                            &value, &value_len);
 
-  if (rc == 0 && value != nullptr) {
+  if (rc == 0) {
+    // rc == 0 with value == nullptr and value_len == 0 is a valid empty value
+    // (database_subtree_get_sync_raw returns NULL from identifier_get_data_copy
+    // for zero-length values — that's success, not a copy failure). Distinguish
+    // from not-found (rc == -2 -> null) by the return code.
+    if (value == nullptr) {
+      return Napi::String::New(env, "");
+    }
+
     // Strip trailing null bytes (chunk padding from identifier serialization)
     while (value_len > 0 && value[value_len - 1] == '\0') {
       value_len--;
@@ -194,6 +202,7 @@ Napi::Value Subtree::GetSync(const Napi::CallbackInfo& info) {
     database_raw_value_free(value);
     return result;
   } else if (rc == -2) {
+    if (value != nullptr) database_raw_value_free(value);
     return env.Null();
   } else {
     if (value != nullptr) database_raw_value_free(value);

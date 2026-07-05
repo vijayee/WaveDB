@@ -693,7 +693,11 @@ class WaveDB implements Finalizable {
 
       final valuePtr = valueOutPtr.value;
       final valueLen = valueLenPtr.value;
-      if (valuePtr == nullptr || valueLen == 0) return null;
+      // rc == 0 with valuePtr == nullptr and valueLen == 0 is a valid empty
+      // value (database_get_sync_raw returns NULL from identifier_get_data_copy
+      // for zero-length values — that's success, not a copy failure). Return
+      // an empty string, distinct from not-found (rc == -2 -> null).
+      if (valuePtr == nullptr || valueLen == 0) return '';
 
       try {
         // databaseGetSyncRaw returns exact-length data, no chunk padding
