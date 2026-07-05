@@ -308,7 +308,8 @@ int database_scan_next(database_iterator_t* iter,
                 frame->entry_index++;  // Move past this entry since we're processing it
 
                 // If entry also has a trie_child, push it for later traversal
-                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
                     bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
                                                      iter->db->trie->chunk_size,
                                                      iter->db->trie->btree_node_size);
@@ -320,20 +321,47 @@ int database_scan_next(database_iterator_t* iter,
                 }
 
                 identifier_t* value = NULL;
+                int has_visible_value = 0;
 
                 // Get visible value from version chain
                 if (entry->has_versions && entry->versions) {
                     version_entry_t* visible = version_entry_find_visible(
                         entry->versions, iter->read_txn_id);
-                    if (visible && !visible->is_deleted && visible->value) {
-                        value = REFERENCE(visible->value, identifier_t);
+                    if (visible && !visible->is_deleted) {
+                        has_visible_value = 1;
+                        if (visible->value) {
+                            value = REFERENCE(visible->value, identifier_t);
+                        }
                     }
-                } else if (entry->value) {
-                    // Legacy single value
-                    value = REFERENCE(entry->value, identifier_t);
+                } else if (entry->has_value) {
+                    // Legacy single value. Note: a 0-length presence marker
+                    // (e.g. graph SPO/POS/OSP/PSO index entries) is inserted
+                    // in-memory as a non-NULL empty identifier, but the V3
+                    // deserializer restores it as entry->value == NULL with
+                    // has_value == 1. Treat has_value==1 as "the leaf exists"
+                    // so such leaves are still emitted on a reopened database,
+                    // matching fresh-db scan behavior.
+                    has_visible_value = 1;
+                    if (entry->value) {
+                        value = REFERENCE(entry->value, identifier_t);
+                    }
                 }
 
-                if (value) {
+                // has_value leaf whose (possibly empty) value deserialized to
+                // a NULL pointer: synthesize a non-NULL empty identifier so
+                // downstream callers (which hand out_value to
+                // identifier_get_data_copy / identifier_destroy) see a valid
+                // 0-length value instead of an uninitialized one.
+                if (has_visible_value && value == NULL) {
+                    uint8_t cs = iter->db->trie ? iter->db->trie->chunk_size
+                                                : DEFAULT_CHUNK_SIZE;
+                    value = identifier_create_empty(cs);
+                    if (value == NULL) {
+                        has_visible_value = 0;  // OOM — skip this leaf
+                    }
+                }
+
+                if (has_visible_value) {
                     // Build path from stack using path_meta metadata
                     // The leaf entry stores per-subscript {chunk_count, byte_length}
 
@@ -465,19 +493,52 @@ int database_scan_next(database_iterator_t* iter,
                     *out_value = value;
                     return 0;  // Success
                 }
-            } else if (entry->is_bnode_child && entry->child_bnode != NULL) {
+            } else if (entry->is_bnode_child) {
                 // Internal B+tree node — push a bnode frame to descend
                 // through the multi-level B+tree. child_bnode is a bnode_t*,
                 // NOT an hbtrie_node_t* — pushing it as a trie frame would
                 // cause type confusion (node->btree reads garbage).
+                // On a reopened database the in-memory child_bnode pointer
+                // is NULL and only child_disk_offset is set; lazy-load it
+                // from the page file before descending (mirrors hbtrie.c's
+                // descent paths, e.g. bnode_entry_lazy_load_bnode_child).
+                if (entry->child_bnode == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_bnode_child(entry, iter->db->trie->fcache,
+                                                      iter->db->trie->chunk_size,
+                                                      iter->db->trie->btree_node_size);
+                }
+                if (entry->child_bnode == NULL) {
+                    // Child unavailable (not in memory, not on disk) — skip
+                    frame->entry_index++;
+                    continue;
+                }
                 frame->entry_index++;
                 pushed_child = 1;
                 if (push_bnode_frame(iter, entry->child_bnode, iter->stack_depth - 1) < 0) {
                     return -2;
                 }
                 break;
-            } else if (entry->child) {
-                // Trie child (hbtrie_node_t*) — push for deeper traversal
+            } else if (entry->child != NULL || entry->child_disk_offset != 0) {
+                // Trie child (hbtrie_node_t*) — push for deeper traversal.
+                // On a reopened database the in-memory child pointer is NULL
+                // and only child_disk_offset is set; lazy-load it from the
+                // page file before descending (mirrors hbtrie.c's descent
+                // path, e.g. bnode_entry_lazy_load_hbtrie_child). Without
+                // this the iterator never reached value-bearing leaves on a
+                // reopened trie, so scans returned 0 results (and, with
+                // different heap layout, segfaulted during result rebuild).
+                if (entry->child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_hbtrie_child(entry, iter->db->trie->fcache,
+                                                       iter->db->trie->chunk_size,
+                                                       iter->db->trie->btree_node_size);
+                }
+                if (entry->child == NULL) {
+                    // Child not loadable — skip
+                    frame->entry_index++;
+                    continue;
+                }
                 frame->entry_index++;
                 pushed_child = 1;
                 if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) {
@@ -486,7 +547,8 @@ int database_scan_next(database_iterator_t* iter,
                 break;
             } else if (entry->trie_child || entry->child_disk_offset != 0) {
                 // Lazy-load trie_child if needed
-                if (entry->trie_child == NULL && entry->child_disk_offset != 0 && iter->db->trie->fcache != NULL) {
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
                     bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
                                                      iter->db->trie->chunk_size,
                                                      iter->db->trie->btree_node_size);
