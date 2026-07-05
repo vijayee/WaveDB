@@ -50,7 +50,7 @@ static void* compaction_thread_func(void* arg) {
         }
 
         if (should_compact) {
-            compact_wal_files(compactor->manager);
+            compact_wal_files(compactor->manager, 0);
             compactor->last_compact_time = now;
         }
     }
@@ -121,5 +121,5 @@ void wal_compactor_signal_write(wal_compactor_t* compactor) {
 }
 
 int wal_compactor_force_compact(wal_compactor_t* compactor) {
-    return compact_wal_files(compactor->manager);
+    return compact_wal_files(compactor->manager, 0);
 }

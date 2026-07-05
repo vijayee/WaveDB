@@ -369,6 +369,25 @@ bnode_cache_item_t* bnode_cache_read(file_bnode_cache_t* fcache, uint64_t offset
     return item;
 }
 
+bnode_cache_item_t* bnode_cache_peek(file_bnode_cache_t* fcache, uint64_t offset) {
+    if (fcache == NULL) return NULL;
+
+    size_t shard_idx = (size_t)(offset % fcache->num_shards);
+    bnode_cache_shard_t* shard = &fcache->shards[shard_idx];
+
+    platform_lock(&shard->lock);
+
+    /* Look up in hash map only — NO disk I/O on miss. */
+    bnode_cache_item_t* item = shard_find(shard, offset);
+    if (item != NULL) {
+        item->ref_count++;
+        lru_move_to_front(shard, item);
+    }
+
+    platform_unlock(&shard->lock);
+    return item;  /* NULL if not resident */
+}
+
 int bnode_cache_write(file_bnode_cache_t* fcache, uint64_t offset, const uint8_t* data, size_t data_len) {
     if (fcache == NULL || data == NULL || data_len == 0) return -1;
 

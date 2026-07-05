@@ -181,9 +181,18 @@ int thread_wal_seal(thread_wal_t* twal);
 int wal_manager_recover(wal_manager_t* manager, void* db);
 
 /**
- * Compact sealed WAL files
+ * Compact sealed WAL files.
+ *
+ * mark_compacted: when nonzero, the caller has just checkpointed every sealed
+ * entry into the page file (see database_destroy: database_persist runs before
+ * wal_manager_seal_and_compact). In that case the compacted result is marked
+ * WAL_FILE_COMPACTED so wal_manager_recover() skips it on the next open —
+ * replaying it on top of the page file would double-apply the entries and
+ * corrupt the trie. When zero (mid-life space-reclaim compaction), the data
+ * is NOT yet checkpointed, so the compacted result stays WAL_FILE_SEALED and
+ * remains replayable on crash recovery.
  */
-int compact_wal_files(wal_manager_t* manager);
+int compact_wal_files(wal_manager_t* manager, int mark_compacted);
 
 /**
  * Seal all active thread-local WALs and compact all sealed WALs.

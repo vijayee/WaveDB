@@ -41,10 +41,18 @@ static void wal_fsync_callback(void* ctx) {
 static int wal_open_file(wal_t* wal, const char* path, int create) {
     if (create) {
         // Create new file for writing
-        wal->fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        wal->fd = open(path, O_WRONLY | O_CREAT | O_TRUNC
+#if _WIN32
+            | O_BINARY
+#endif
+            , 0644);
     } else {
         // Open existing file for reading
-        wal->fd = open(path, O_RDONLY);
+        wal->fd = open(path, O_RDONLY
+#if _WIN32
+            | O_BINARY
+#endif
+            );
     }
 
     if (wal->fd < 0) {

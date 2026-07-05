@@ -75,14 +75,19 @@ class CmakeBuildExt(build_ext):
         if source_lib:
             shutil.copy(source_lib, lib_dir / Path(source_lib).name)
             canonical = lib_dir / f"libwavedb{SUFFIX}"
-            if Path(source_lib).name != canonical.name and not canonical.exists():
+            if Path(source_lib).name != canonical.name:
                 shutil.copy(source_lib, canonical)
         else:
             prebuilt = _find_prebuilt_lib()
             if prebuilt is not None:
                 shutil.copy(prebuilt, ext_path)
                 canonical = lib_dir / f"libwavedb{SUFFIX}"
-                if prebuilt.name != canonical.name and not canonical.exists():
+                # Always (re)write canonical from the fresh prebuilt. The previous
+                # `not canonical.exists()` guard skipped the copy when a stale
+                # libwavedb.dll from an earlier build already sat in a reused build
+                # dir, which shipped an out-of-date shared lib next to the freshly
+                # built extension module.
+                if prebuilt.name != canonical.name:
                     shutil.copy(prebuilt, canonical)
             elif (REPO_ROOT / "CMakeLists.txt").exists() and shutil.which("cmake"):
                 build_dir = Path(self.build_temp) / "wavedb-shared"

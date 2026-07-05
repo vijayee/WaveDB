@@ -72,16 +72,61 @@ static bnode_t* btree_descend_with_path(bnode_t* root, chunk_t* key, btree_path_
   return current;
 }
 
+// Attach entry->child_bnode from the bnode cache WITHOUT disk I/O.
+// Succeeds (returns 0) only when the bnode is already resident in the cache
+// (i.e. the cache was warmed by load_bnode_child_from_cache outside the lock).
+// Returns 0 if already attached or newly attached from a cache hit; returns -1
+// if the bnode is not in cache (caller should warm the cache and retry). This
+// keeps disk I/O out of the per-node write lock on the write path.
+static int bnode_entry_attach_if_cached(bnode_entry_t* entry,
+                                          file_bnode_cache_t* fcache,
+                                          uint8_t chunk_size,
+                                          uint32_t btree_node_size) {
+  if (entry == NULL) return -1;
+  if (entry->child_bnode != NULL) return 0;  // Already attached
+  if (entry->child_disk_offset == 0 || fcache == NULL) return -1;
+
+  bnode_cache_item_t* item = bnode_cache_peek(fcache, entry->child_disk_offset);
+  if (item == NULL) return -1;  // Not resident — caller warms cache + retries
+
+  node_location_t* locations = NULL;
+  size_t num_locations = 0;
+  bnode_t* child = bnode_deserialize_v3(item->data + 4, item->data_len - 4,
+                                         chunk_size, btree_node_size,
+                                         &locations, &num_locations);
+  bnode_cache_release(fcache, item);
+
+  if (child == NULL) {
+    free(locations);
+    return -1;
+  }
+
+  for (size_t i = 0; i < num_locations && i < child->entries.length; i++) {
+    child->entries.data[i].child_disk_offset = locations[i].offset;
+  }
+  child->disk_offset = entry->child_disk_offset;
+  child->is_dirty = 0;
+
+  entry->child_bnode = child;
+  free(locations);
+  return 0;
+}
+
 // Check if a B+tree descent requires lazy loading of any child bnode.
-// Walks from root toward the leaf, checking if any internal bnode entry
-// has child_disk_offset != 0 but child_bnode == NULL (needs loading).
+// Walks from root toward the leaf, attaching child bnodes that are already
+// resident in the cache (no disk I/O) and reporting the first offset that
+// needs warming.
 //
 // Returns:
-//   0  = all bnodes loaded, descent can proceed without I/O
-//   1  = needs lazy load (*out_disk_offset set to the offset that needs loading)
+//   0  = all bnodes on the path are loaded (or attached from cache), descent
+//        can proceed without further I/O
+//   1  = needs lazy load (*out_disk_offset set to the offset that needs warming)
 //   -1 = can't descend (missing child with no disk offset)
 static int btree_descent_needs_load(bnode_t* root, chunk_t* key,
                                      btree_path_t* path,
+                                     file_bnode_cache_t* fcache,
+                                     uint8_t chunk_size,
+                                     uint32_t btree_node_size,
                                      uint64_t* out_disk_offset) {
   if (out_disk_offset) *out_disk_offset = 0;
   if (root == NULL || key == NULL) return -1;
@@ -103,9 +148,13 @@ static int btree_descent_needs_load(bnode_t* root, chunk_t* key,
     bnode_t* next = NULL;
 
     if (entry != NULL && entry->is_bnode_child) {
+      // Attach from cache if warmed (cache hit — no disk I/O).
+      if (entry->child_bnode == NULL && entry->child_disk_offset != 0) {
+        bnode_entry_attach_if_cached(entry, fcache, chunk_size, btree_node_size);
+      }
       if (entry->child_bnode == NULL && entry->child_disk_offset != 0) {
         *out_disk_offset = entry->child_disk_offset;
-        return 1;  // Needs lazy load
+        return 1;  // Needs warming (not in cache)
       }
       if (entry->child_bnode != NULL) {
         next = entry->child_bnode;
@@ -117,8 +166,11 @@ static int btree_descent_needs_load(bnode_t* root, chunk_t* key,
         bnode_entry_t* first = &current->entries.data[0];
         if (first->is_bnode_child) {
           if (first->child_bnode == NULL && first->child_disk_offset != 0) {
+            bnode_entry_attach_if_cached(first, fcache, chunk_size, btree_node_size);
+          }
+          if (first->child_bnode == NULL && first->child_disk_offset != 0) {
             *out_disk_offset = first->child_disk_offset;
-            return 1;  // Needs lazy load
+            return 1;  // Needs warming
           }
           if (first->child_bnode != NULL) {
             next = first->child_bnode;
@@ -128,8 +180,11 @@ static int btree_descent_needs_load(bnode_t* root, chunk_t* key,
         bnode_entry_t* prev = &current->entries.data[index - 1];
         if (prev->is_bnode_child) {
           if (prev->child_bnode == NULL && prev->child_disk_offset != 0) {
+            bnode_entry_attach_if_cached(prev, fcache, chunk_size, btree_node_size);
+          }
+          if (prev->child_bnode == NULL && prev->child_disk_offset != 0) {
             *out_disk_offset = prev->child_disk_offset;
-            return 1;  // Needs lazy load
+            return 1;  // Needs warming
           }
           if (prev->child_bnode != NULL) {
             next = prev->child_bnode;
@@ -230,7 +285,8 @@ static bnode_t* ensure_btree_loaded(hbtrie_node_t* node, chunk_t* chunk,
   for (;;) {
     uint64_t disk_offset = 0;
     int result = btree_descent_needs_load(node->btree, chunk, bnode_path,
-                                           &disk_offset);
+                                           trie->fcache, trie->chunk_size,
+                                           trie->btree_node_size, &disk_offset);
     if (result == 0) {
       // All bnodes loaded — proceed with normal descent
       return btree_descend_with_path_lazy(node->btree, chunk, bnode_path,

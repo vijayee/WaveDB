@@ -306,7 +306,11 @@ static int compare_recovery_entries(const void* a, const void* b) {
 
 // Read entries from a single WAL file
 static int read_wal_file(const char* path, recovery_entry_t** entries, size_t* count, encryption_t* encryption) {
-    int fd = open(path, O_RDONLY);
+    int fd = open(path, O_RDONLY
+#if _WIN32
+        | O_BINARY
+#endif
+        );
     if (fd < 0) {
         return -1;
     }
@@ -515,7 +519,11 @@ int read_manifest(wal_manager_t* manager, manifest_entry_t** entries, size_t* co
     platform_lock(&manager->manifest_lock);
 
     // Open manifest file for reading
-    int fd = open(manager->manifest_path, O_RDONLY);
+    int fd = open(manager->manifest_path, O_RDONLY
+#if _WIN32
+        | O_BINARY
+#endif
+        );
     if (fd < 0) {
         platform_unlock(&manager->manifest_lock);
         return WAL_ERROR_IO;
@@ -648,7 +656,11 @@ thread_wal_t* create_thread_wal(wal_manager_t* manager, uint64_t thread_id) {
     twal->newest_txn_id = (transaction_id_t){0, 0, 0};
 
     // Open file with O_APPEND for atomic writes
-    twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND
+#if _WIN32
+        | O_BINARY
+#endif
+        , 0644);
     if (twal->fd < 0) {
         log_error("Failed to create WAL file: %s (errno=%d)", twal->file_path, errno);
         free(twal->file_path);
@@ -724,7 +736,11 @@ wal_manager_t* wal_manager_create(const char* location, wal_config_t* config,
     manager->encryption = encryption;
 
     // Create manifest file
-    manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    manager->manifest_fd = open(manager->manifest_path, O_WRONLY | O_CREAT | O_APPEND
+#if _WIN32
+        | O_BINARY
+#endif
+        , 0644);
     if (manager->manifest_fd < 0) {
         free(manager->location);
         free(manager->manifest_path);
@@ -1119,7 +1135,11 @@ static int thread_wal_rotate(thread_wal_t* twal) {
     if (rc != 0) {
         log_error("Failed to write SEALED manifest entry for %s", old_file_path);
         // Attempt rollback: reopen old file
-        twal->fd = open(old_file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        twal->fd = open(old_file_path, O_WRONLY | O_CREAT | O_APPEND
+#if _WIN32
+            | O_BINARY
+#endif
+            , 0644);
         if (twal->fd < 0) {
             log_error("Rollback failed: cannot reopen old WAL file %s", old_file_path);
         }
@@ -1146,7 +1166,11 @@ static int thread_wal_rotate(thread_wal_t* twal) {
     }
 
     // Open new file
-    twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    twal->fd = open(twal->file_path, O_WRONLY | O_CREAT | O_APPEND
+#if _WIN32
+        | O_BINARY
+#endif
+        , 0644);
     if (twal->fd < 0) {
         log_error("Failed to create rotated WAL file: %s (errno=%d)", twal->file_path, errno);
         free(twal->file_path);
@@ -1246,7 +1270,7 @@ int thread_wal_write(thread_wal_t* twal, transaction_id_t txn_id,
         size_t max_sealed = twal->manager->config.max_sealed_wals;
         if (max_sealed > 0 && twal->manager->sealed_count >= max_sealed) {
             platform_unlock(&twal->lock);
-            int compact_rc = compact_wal_files(twal->manager);
+            int compact_rc = compact_wal_files(twal->manager, 0);
             platform_lock(&twal->lock);
             if (compact_rc != 0 || twal->manager->sealed_count >= max_sealed) {
                 log_warn("WAL sealed limit reached (%zu/%zu), compaction failed or insufficient",
@@ -1855,11 +1879,14 @@ int wal_manager_seal_and_compact(wal_manager_t* manager) {
     }
     platform_unlock(&manager->threads_lock);
 
-    // Compact all sealed WAL files
-    return compact_wal_files(manager);
+    // Compact all sealed WAL files. Called only from database_destroy after
+    // database_persist checkpointed every entry into the page file, so mark
+    // the result COMPACTED (skipped by wal_manager_recover) — see the
+    // contract on compact_wal_files.
+    return compact_wal_files(manager, 1);
 }
 
-int compact_wal_files(wal_manager_t* manager) {
+int compact_wal_files(wal_manager_t* manager, int mark_compacted) {
     if (manager == NULL) {
         return WAL_ERROR_INVALID_ARG;
     }
@@ -1882,6 +1909,46 @@ int compact_wal_files(wal_manager_t* manager) {
     if (sealed_count == 0) {
         free(entries);
         return 0;  // Nothing to compact
+    }
+
+    // Close path: every sealed entry has already been checkpointed into the
+    // page file by database_persist (which runs immediately before
+    // wal_manager_seal_and_compact in database_destroy). Drop the sealed WAL
+    // files entirely — mark them WAL_FILE_COMPACTED (skipped by
+    // wal_manager_recover) and delete them — and write NO replacement file.
+    // Writing a SEALED compacted file here would cause recover to replay the
+    // entries on top of the page file, double-applying them and corrupting
+    // the trie (observed as a segfault on the post-reopen flush).
+    if (mark_compacted) {
+        platform_lock(&manager->manifest_lock);
+        size_t compacted_count = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (entries[i].status == WAL_FILE_SEALED) {
+                int wrc = write_manifest_entry(manager, entries[i].thread_id,
+                                      entries[i].file_path, WAL_FILE_COMPACTED,
+                                      &entries[i].newest_txn_id);
+                if (wrc != 0) {
+                    log_warn("Failed to write COMPACTED manifest entry for %s",
+                             entries[i].file_path);
+                }
+                compacted_count++;
+            }
+        }
+        if (manager->sealed_count >= compacted_count) {
+            manager->sealed_count -= compacted_count;
+        } else {
+            manager->sealed_count = 0;
+        }
+        platform_unlock(&manager->manifest_lock);
+
+        // Delete the now-obsolete sealed files.
+        for (size_t i = 0; i < count; i++) {
+            if (entries[i].status == WAL_FILE_SEALED) {
+                unlink(entries[i].file_path);
+            }
+        }
+        free(entries);
+        return 0;
     }
 
     // Read all entries from sealed files
@@ -1936,7 +2003,11 @@ int compact_wal_files(wal_manager_t* manager) {
     snprintf(compacted_path, sizeof(compacted_path),
              "%s/compacted_%lu.wal", manager->location, (unsigned long)time(NULL));
 
-    int fd = open(compacted_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int fd = open(compacted_path, O_WRONLY | O_CREAT | O_APPEND
+#if _WIN32
+        | O_BINARY
+#endif
+        , 0644);
     if (fd < 0) {
         for (size_t i = 0; i < entry_count; i++) {
             buffer_destroy(all_entries[i].data);

@@ -74,6 +74,11 @@ file_bnode_cache_t* bnode_cache_create_file_cache(bnode_cache_mgr_t* mgr, page_f
 void bnode_cache_destroy_file_cache(file_bnode_cache_t* fcache);
 
 bnode_cache_item_t* bnode_cache_read(file_bnode_cache_t* fcache, uint64_t offset);
+// Peek the cache without disk I/O. Returns the cached item (ref-counted, call
+// bnode_cache_release) or NULL if not resident. Used by write-path descent to
+// attach a child bnode only when it's already warm, so disk I/O stays out of
+// the per-node write lock (the caller warms the cache outside the lock).
+bnode_cache_item_t* bnode_cache_peek(file_bnode_cache_t* fcache, uint64_t offset);
 int bnode_cache_write(file_bnode_cache_t* fcache, uint64_t offset, const uint8_t* data, size_t data_len);
 void bnode_cache_release(file_bnode_cache_t* fcache, bnode_cache_item_t* item);
 int bnode_cache_flush_dirty(file_bnode_cache_t* fcache);

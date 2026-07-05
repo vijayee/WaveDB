@@ -1344,6 +1344,15 @@ void database_destroy(database_t* db) {
         {
             int persist_rc = database_persist(db);
             if (persist_rc == 0 && db->wal_manager != NULL) {
+                // Durably commit the page-file checkpoint BEFORE discarding
+                // the WAL. seal_and_compact below drops every sealed WAL
+                // entry (mark_compacted=1) on the assumption that the
+                // checkpoint is on disk; without this fsync a crash in the
+                // window between persist and WAL-drop could lose both the
+                // not-yet-flushed page file writes and the dropped WAL.
+                if (db->page_file != NULL && db->page_file->fd >= 0) {
+                    fsync(db->page_file->fd);
+                }
                 // Seal and compact WAL so entries already captured in the
                 // snapshot are not replayed on next database creation.
                 wal_manager_seal_and_compact(db->wal_manager);
