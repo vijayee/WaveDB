@@ -379,13 +379,27 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
             bids_count++;
         }
 
-        // Write IndexBlkMeta at the end of this block if we used space in it
-        // Only if we've consumed data or the block is "full"
+        // Write IndexBlkMeta at the end of this block if we used space in it.
+        // Sub-block packing: a single-block bnode (bids_count == 1) does NOT
+        // consume a full 4KB block — it leaves cur_offset partway through the
+        // block so the next bnode packs into the remaining data area. We only
+        // write the trailing IndexBlkMeta + advance to a fresh block when:
+        //   (a) the block is actually full (remaining_space <= INDEX_BLK_META_SIZE),
+        //       which also covers multi-block bnode intermediate blocks; OR
+        //   (b) a multi-block bnode (bids_count > 1) has finished — its chain
+        //       needs a terminating IndexBlkMeta (next_bid = BLK_NOT_FOUND) and
+        //       we advance so no later multi-block bnode shares this tail block
+        //       (one IndexBlkMeta per block can only terminate one chain).
+        // Single-block bnodes (the common sparse-leaf case) read back via
+        // disk_offset + 4-byte size prefix and never consult IndexBlkMeta, so
+        // leaving a block without a trailing IndexBlkMeta is read-safe; it gets
+        // written when the block eventually fills or a multi-block bnode ends here.
         if (pf->cur_offset > 0 || written >= total_len) {
             // Check if we need to move to the next block (current block is full)
             uint64_t remaining_space = pf->block_size - pf->cur_offset;
 
-            if (remaining_space <= INDEX_BLK_META_SIZE || written >= total_len) {
+            if (remaining_space <= INDEX_BLK_META_SIZE ||
+                (written >= total_len && bids_count > 1)) {
                 // Write IndexBlkMeta at the end of this block
                 index_blk_meta_t meta;
                 memset(&meta, 0, sizeof(meta));
