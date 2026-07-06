@@ -492,10 +492,68 @@ static void collect_dirty_bnodes_from_hbnode(
 {
     if (hbnode == NULL) return;
 
-    // Collect dirty bnodes from this hbtrie_node (even if it's clean,
-    // we still need to recurse into child hbtrie_nodes which may be dirty)
+    // PHASE 1 — Recurse into child hbtrie_nodes and propagate dirty UPWARD
+    // across hbtrie boundaries BEFORE collecting this hbnode's own bnodes.
+    //
+    // In a multi-level B+tree, hbtrie child pointers live in leaf bnodes,
+    // not the root, so we walk the whole btree to find every leaf entry.
+    // When a child hbtrie_node is dirty, the leaf bnode (`bn`) holding the
+    // pointer to it must be re-serialized after the child is CoW'd (its
+    // child_disk_offset changes). We mark `bn` and this `hbnode` dirty NOW,
+    // so the collection phase below (which runs `propagate_dirty_upward` +
+    // walks the btree for dirty bnodes) picks `bn` up in THIS pass.
+    //
+    // Recursing before marking makes this post-order: each child's marking
+    // completes before we test `entry->child->is_dirty` here, so a dirty
+    // grandchild propagates up through every ancestor hbtrie level in a
+    // single collect. Without this ordering the parent leaf bnode would be
+    // marked dirty only AFTER the btree walk passed it, and — because the
+    // parent hbtrie_node is usually already dirty at scale (it has other
+    // dirty children) and gets its `is_dirty` cleared at end-of-pass — the
+    // loop would never re-collect it, leaving the on-disk parent blob with
+    // a stale child_disk_offset and losing the child subtree on reopen.
+    vec_t(bnode_t*) leaf_stack;
+    vec_init(&leaf_stack);
+    vec_push(&leaf_stack, hbnode->btree);
+
+    while (leaf_stack.length > 0) {
+        bnode_t* bn = vec_pop(&leaf_stack);
+
+        for (size_t i = 0; i < bn->entries.length; i++) {
+            bnode_entry_t* entry = &bn->entries.data[i];
+
+            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                // Internal node — descend further within this btree
+                vec_push(&leaf_stack, entry->child_bnode);
+            } else {
+                // Leaf entry — recurse into hbtrie children, then mark.
+                if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
+                    collect_dirty_bnodes_from_hbnode(entry->child, bn, i, hbtrie_depth + 1, dirty_list);
+                    if (entry->child->is_dirty) {
+                        bn->is_dirty = 1;
+                        hbnode->is_dirty = 1;
+                    }
+                }
+                if (entry->trie_child != NULL) {
+                    collect_dirty_bnodes_from_hbnode(entry->trie_child, bn, i, hbtrie_depth + 1, dirty_list);
+                    if (entry->trie_child->is_dirty) {
+                        bn->is_dirty = 1;
+                        hbnode->is_dirty = 1;
+                    }
+                }
+            }
+        }
+    }
+
+    vec_deinit(&leaf_stack);
+
+    // PHASE 2 — Collect dirty bnodes from this hbtrie_node. By now any leaf
+    // bnode holding a pointer to a dirty child hbtrie_node has already been
+    // marked dirty above, so it is collected here in the same pass.
     if (hbnode->is_dirty) {
-        // Propagate dirty upward within this hbnode's btree
+        // Propagate dirty upward within this hbnode's btree (child bnode
+        // dirty -> parent internal bnode dirty, so the parent's
+        // child_disk_offset gets re-serialized too).
         propagate_dirty_upward(hbnode->btree);
 
         // Walk all bnodes in this hbtrie_node's btree using DFS with parent tracking
@@ -539,36 +597,6 @@ static void collect_dirty_bnodes_from_hbnode(
 
         vec_deinit(&stack);
     }
-
-    // Recurse into child hbtrie_nodes from ALL leaf bnodes (not just root)
-    // In a multi-level B+tree, hbtrie child pointers live in leaf bnodes,
-    // not the root. We must walk the tree to find all leaf entries.
-    vec_t(bnode_t*) leaf_stack;
-    vec_init(&leaf_stack);
-    vec_push(&leaf_stack, hbnode->btree);
-
-    while (leaf_stack.length > 0) {
-        bnode_t* bn = vec_pop(&leaf_stack);
-
-        for (size_t i = 0; i < bn->entries.length; i++) {
-            bnode_entry_t* entry = &bn->entries.data[i];
-
-            if (entry->is_bnode_child && entry->child_bnode != NULL) {
-                // Internal node — descend further
-                vec_push(&leaf_stack, entry->child_bnode);
-            } else {
-                // Leaf entry — check for hbtrie children
-                if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
-                    collect_dirty_bnodes_from_hbnode(entry->child, bn, i, hbtrie_depth + 1, dirty_list);
-                }
-                if (entry->trie_child != NULL) {
-                    collect_dirty_bnodes_from_hbnode(entry->trie_child, bn, i, hbtrie_depth + 1, dirty_list);
-                }
-            }
-        }
-    }
-
-    vec_deinit(&leaf_stack);
 }
 
 int database_flush_dirty_bnodes(database_t* db) {
@@ -577,78 +605,94 @@ int database_flush_dirty_bnodes(database_t* db) {
     hbtrie_node_t* root = atomic_load_ptr(&db->trie->root, hbtrie_node_t*);
     if (root == NULL) return 0;
 
-    // 1. Collect all dirty bnodes (including child hbtrie_nodes)
-    vec_t(dirty_bnode_info_t) dirty_list;
-    vec_init(&dirty_list);
-    collect_dirty_bnodes_from_hbnode(root, NULL, 0, 0, &dirty_list);
+    // Iterate collect -> sort -> flush until a full pass collects zero dirty
+    // bnodes. collect_dirty_bnodes_from_hbnode now propagates dirty upward
+    // across hbtrie boundaries in post-order BEFORE collecting, so a single
+    // collect pass gathers every ancestor of every dirty hbtrie_node. The
+    // loop still serves a purpose: when a cross-hbtrie parent leaf bnode and
+    // the child hbtrie_node's root bnode sit at the SAME bnode level, the
+    // level-sort may flush the parent before the child; the child's flush
+    // then re-points the parent entry's child_disk_offset and marks the
+    // parent dirty again, so the next pass re-flushes the parent with the
+    // updated offset. Convergence is bounded by hbtrie depth.
+    for (;;) {
+        // 1. Collect all dirty bnodes (including child hbtrie_nodes)
+        vec_t(dirty_bnode_info_t) dirty_list;
+        vec_init(&dirty_list);
+        collect_dirty_bnodes_from_hbnode(root, NULL, 0, 0, &dirty_list);
 
-    if (dirty_list.length == 0) {
-        vec_deinit(&dirty_list);
-        root->is_dirty = 0;
-        return 0;
-    }
+        if (dirty_list.length == 0) {
+            vec_deinit(&dirty_list);
+            break;
+        }
 
-    // 2. Sort by level (leaves first, root last)
-    qsort(dirty_list.data, dirty_list.length, sizeof(dirty_bnode_info_t),
-          compare_dirty_by_level);
+        // 2. Sort by level (leaves first, root last)
+        qsort(dirty_list.data, dirty_list.length, sizeof(dirty_bnode_info_t),
+              compare_dirty_by_level);
 
-    // 3. Flush each dirty bnode
-    for (size_t i = 0; i < dirty_list.length; i++) {
-        dirty_bnode_info_t* info = &dirty_list.data[i];
-        bnode_t* bn = info->bnode;
+        // 3. Flush each dirty bnode
+        for (size_t i = 0; i < dirty_list.length; i++) {
+            dirty_bnode_info_t* info = &dirty_list.data[i];
+            bnode_t* bn = info->bnode;
 
-        // Serialize with V3 format
-        uint8_t* buf = NULL;
-        size_t len = 0;
-        int rc = bnode_serialize_v3(bn, db->trie->chunk_size, &buf, &len);
-        if (rc != 0) {
+            // Serialize with V3 format
+            uint8_t* buf = NULL;
+            size_t len = 0;
+            int rc = bnode_serialize_v3(bn, db->trie->chunk_size, &buf, &len);
+            if (rc != 0) {
+                free(buf);
+                vec_deinit(&dirty_list);
+                return -1;
+            }
+
+            // Write to page file at new offset (CoW)
+            uint64_t new_offset = 0;
+            uint64_t bids[64] = {0};
+            size_t num_bids = 0;
+            rc = page_file_write_node(db->page_file, buf, len,
+                                       &new_offset, bids, 64, &num_bids);
             free(buf);
-            vec_deinit(&dirty_list);
-            return -1;
+            if (rc != 0) {
+                vec_deinit(&dirty_list);
+                return -1;
+            }
+
+            // Mark old offset as stale (if previously persisted)
+            if (bn->disk_offset != UINT64_MAX) {
+                page_file_mark_stale(db->page_file, bn->disk_offset, len);
+            }
+
+            // Update bnode's disk_offset
+            bn->disk_offset = new_offset;
+            bn->is_dirty = 0;
+
+            // Update parent entry's child_disk_offset
+            if (info->parent_bnode != NULL && info->parent_entry_index < info->parent_bnode->entries.length) {
+                bnode_entry_t* parent_entry = &info->parent_bnode->entries.data[info->parent_entry_index];
+                parent_entry->child_disk_offset = new_offset;
+                // Parent is now dirty (its entry changed)
+                info->parent_bnode->is_dirty = 1;
+            }
         }
 
-        // Write to page file at new offset (CoW)
-        uint64_t new_offset = 0;
-        uint64_t bids[64] = {0};
-        size_t num_bids = 0;
-        rc = page_file_write_node(db->page_file, buf, len,
-                                   &new_offset, bids, 64, &num_bids);
-        free(buf);
-        if (rc != 0) {
-            vec_deinit(&dirty_list);
-            return -1;
+        // 4. Clear is_dirty on every hbtrie_node that had a bnode collected
+        //    this pass. A hbtrie_node re-marked dirty during the flush (step 3
+        //    set a parent bnode dirty after re-pointing its child_disk_offset)
+        //    is NOT in this pass's list under that re-marking, so it stays dirty
+        //    and the next pass re-collects it — this is what drives the loop.
+        for (size_t i = 0; i < dirty_list.length; i++) {
+            hbtrie_node_t* hn = dirty_list.data[i].hbnode;
+            if (hn != NULL) hn->is_dirty = 0;
         }
 
-        // Mark old offset as stale (if previously persisted)
-        if (bn->disk_offset != UINT64_MAX) {
-            page_file_mark_stale(db->page_file, bn->disk_offset, len);
-        }
-
-        // Update bnode's disk_offset
-        bn->disk_offset = new_offset;
-        bn->is_dirty = 0;
-
-        // Update parent entry's child_disk_offset
-        if (info->parent_bnode != NULL && info->parent_entry_index < info->parent_bnode->entries.length) {
-            bnode_entry_t* parent_entry = &info->parent_bnode->entries.data[info->parent_entry_index];
-            parent_entry->child_disk_offset = new_offset;
-            // Parent is now dirty (its entry changed)
-            info->parent_bnode->is_dirty = 1;
-        }
-    }
-
-    // 4. Clear is_dirty on all hbtrie_nodes that had dirty bnodes flushed
-    //    (root + any child hbtrie_nodes)
-    for (size_t i = 0; i < dirty_list.length; i++) {
-        hbtrie_node_t* hn = dirty_list.data[i].hbnode;
-        if (hn != NULL) hn->is_dirty = 0;
+        vec_deinit(&dirty_list);
     }
 
     // 5. Update root hbtrie_node disk_offset
     root->disk_offset = root->btree->disk_offset;
     root->is_dirty = 0;
 
-    // 5. Write superblock with new root offset and transaction ID
+    // 6. Write superblock with new root offset and transaction ID
     transaction_id_t last_txn;
     if (db->tx_manager != NULL) {
         last_txn = tx_manager_get_last_committed(db->tx_manager);
@@ -659,11 +703,9 @@ int database_flush_dirty_bnodes(database_t* db) {
     }
     int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0, &last_txn);
     if (sb_rc != 0) {
-        vec_deinit(&dirty_list);
         return -1;
     }
 
-    vec_deinit(&dirty_list);
     return 0;
 }
 

@@ -415,6 +415,17 @@ int bnode_split(bnode_t* node, bnode_t** right_out, chunk_t** split_key) {
     *split_key = NULL;
     return -1;
   }
+  // A freshly-split right bnode always holds entries that must be persisted
+  // (they were just moved out of the left bnode). bnode_create_with_level
+  // zero-initializes the struct, so is_dirty starts at 0; without marking it
+  // here, the flush collector (collect_dirty_bnodes_from_hbnode) skips it —
+  // only dirty bnodes are collected — and the right sibling is never
+  // serialized. On reopen the parent's entry for the right child has
+  // child_disk_offset == 0 (a dead pointer) and the right subtree is lost.
+  // Marking the right sibling dirty at birth fixes the insertion-order-
+  // dependent key loss (sorted insertion only "accidentally" saved it because
+  // a later insert would descend into it and mark it dirty before flush).
+  right->is_dirty = 1;
 
   // Move entries from mid to end to right node
   // The entry at 'mid' becomes the first entry of right node
