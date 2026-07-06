@@ -16,6 +16,13 @@
 #ifndef WAVEDB_ATOMIC_COMPAT_H
 #define WAVEDB_ATOMIC_COMPAT_H
 
+// size_t and NULL are used by the typedefs/macro expansions below and by every
+// includer (e.g. refcounter.c uses NULL). <stdatomic.h>/<atomic> do not
+// reliably expose them in global namespace on GCC/Clang (MSVC pulls them in
+// transitively, which masked this on Windows). <stddef.h> defines both in
+// global namespace for C and C++ mode, so include it unconditionally first.
+#include <stddef.h>
+
 #ifdef __cplusplus
   // C++ mode: use std::atomic (works with /std:c++20)
   #include <atomic>
