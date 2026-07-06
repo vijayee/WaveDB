@@ -30,7 +30,11 @@ typedef SSIZE_T ssize_t;
 #define close     _close
 #define read      _read
 #define write     _write
-#define lseek     _lseek
+/* Use _lseeki64 (64-bit) not _lseek (32-bit): off_t/long is 32-bit on MSVC,
+ * so _lseek truncates file sizes/offsets > 2 GB. _lseeki64 takes and returns
+ * __int64, which is correct for large DB files. Callers that cast offsets to
+ * off_t must use int64_t instead (see page_file.c / wal.c). */
+#define lseek     _lseeki64
 #define open      _open
 #define unlink    _unlink
 #define rmdir     _rmdir
@@ -98,8 +102,10 @@ typedef SSIZE_T ssize_t;
 /* fsync mapping */
 #define fsync(fd) _commit(fd)
 
-/* ftruncate mapping */
-#define ftruncate(fd, length) _chsize(fd, length)
+/* ftruncate mapping: use _chsize_s (64-bit size) not _chsize (32-bit long),
+ * so files can be extended past 2 GB. _chsize_s returns errno_t (0 = success),
+ * matching the `if (ftruncate(...) != 0)` usage at the call sites. */
+#define ftruncate(fd, length) _chsize_s(fd, length)
 
 /* mkstemp: create and open a unique temp file — MSVC lacks this */
 static inline int mkstemp(char* tmpl) {

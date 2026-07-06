@@ -377,7 +377,7 @@ int wal_read(wal_t* wal, transaction_id_t* txn_id, wal_type_e* type, buffer_t** 
     platform_lock(&wal->lock);
 
     // Seek to cursor position
-    if (lseek(wal->fd, (off_t)*cursor, SEEK_SET) < 0) {
+    if (lseek(wal->fd, (int64_t)*cursor, SEEK_SET) < 0) {
         platform_unlock(&wal->lock);
         return -1;
     }

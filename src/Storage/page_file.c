@@ -7,6 +7,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/types.h>
@@ -16,7 +17,10 @@
 #if _WIN32
 #include "Util/unistd_compat.h"
 #define open _open
-#define ftruncate _chsize
+/* _chsize_s (64-bit) not _chsize (32-bit long) — see Util/unistd_compat.h.
+ * unistd_compat.h already maps ftruncate to _chsize_s, but page_file.c also
+ * pulls <fcntl.h> which can re-introduce symbols, so set it explicitly here. */
+#define ftruncate(fd, length) _chsize_s(fd, length)
 #define fsync _commit
 #define O_RDONLY _O_RDONLY
 #define O_RDWR _O_RDWR
@@ -155,7 +159,7 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
 #endif
 
     // Check file size
-    off_t file_size = lseek(pf->fd, 0, SEEK_END);
+    int64_t file_size = lseek(pf->fd, 0, SEEK_END);
     if (file_size < 0) {
         close(pf->fd);
         pf->fd = -1;
@@ -165,7 +169,7 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
     if (file_size == 0 && writable) {
         // New file: extend to fit superblocks and write initial superblocks
         uint64_t required_size = pf->num_superblocks * pf->block_size;
-        if (ftruncate(pf->fd, (off_t)required_size) != 0) {
+        if (ftruncate(pf->fd, (int64_t)required_size) != 0) {
             close(pf->fd);
             pf->fd = -1;
             return -1;
@@ -187,7 +191,7 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
         serialize_superblock(&sb, blk_buf, pf->block_size);
 
         for (uint64_t i = 0; i < pf->num_superblocks; i++) {
-            ssize_t written = pwrite(pf->fd, blk_buf, pf->block_size, (off_t)(i * pf->block_size));
+            ssize_t written = pwrite(pf->fd, blk_buf, pf->block_size, (int64_t)(i * pf->block_size));
             if (written != (ssize_t)pf->block_size) {
                 free(blk_buf);
                 close(pf->fd);
@@ -237,14 +241,14 @@ uint64_t page_file_alloc_block(page_file_t* pf) {
 
     // Ensure file is large enough
     uint64_t required_end = (bid + 1) * pf->block_size;
-    off_t current_size = lseek(pf->fd, 0, SEEK_END);
+    int64_t current_size = lseek(pf->fd, 0, SEEK_END);
     if (current_size < 0) {
         platform_unlock(&pf->lock);
         return BLK_NOT_FOUND;
     }
 
     if ((uint64_t)current_size < required_end) {
-        if (ftruncate(pf->fd, (off_t)required_end) != 0) {
+        if (ftruncate(pf->fd, (int64_t)required_end) != 0) {
             platform_unlock(&pf->lock);
             return BLK_NOT_FOUND;
         }
@@ -318,7 +322,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
         }
 
         // Write data to current position
-        off_t write_pos = (off_t)(pf->cur_bid * pf->block_size + pf->cur_offset);
+        int64_t write_pos = (int64_t)(pf->cur_bid * pf->block_size + pf->cur_offset);
 
         // If we haven't written the size prefix yet, prepend it
         if (written < 4) {
@@ -339,7 +343,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
             usable -= prefix_to_write;
 
             // Update write position for remaining data
-            write_pos = (off_t)(pf->cur_bid * pf->block_size + pf->cur_offset);
+            write_pos = (int64_t)(pf->cur_bid * pf->block_size + pf->cur_offset);
 
             if (usable == 0) {
                 // Write IndexBlkMeta and continue to next block
@@ -407,7 +411,7 @@ int page_file_write_node(page_file_t* pf, const uint8_t* data, size_t data_len,
                 meta.revnum_hash = (uint16_t)(pf->revision & 0xFFFF);
                 meta.marker = 0xFF;
 
-                off_t meta_pos = (off_t)((pf->cur_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
+                int64_t meta_pos = (int64_t)((pf->cur_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
                 ssize_t w = pwrite(pf->fd, &meta, INDEX_BLK_META_SIZE, meta_pos);
                 if (w != INDEX_BLK_META_SIZE) {
                     platform_unlock(&pf->lock);
@@ -445,7 +449,7 @@ uint8_t* page_file_read_node(page_file_t* pf, uint64_t offset, size_t* out_len) 
     uint8_t* block_buf = (uint8_t*)malloc(pf->block_size);
     if (block_buf == NULL) return NULL;
 
-    ssize_t rd = pread(pf->fd, block_buf, (size_t)pf->block_size, (off_t)block_start);
+    ssize_t rd = pread(pf->fd, block_buf, (size_t)pf->block_size, (int64_t)block_start);
     if (rd < 0) {
         free(block_buf);
         return NULL;
@@ -581,17 +585,17 @@ static uint8_t* page_file_read_node_multiblock(page_file_t* pf, uint64_t offset,
         // Size prefix spans block boundary
         uint8_t size_buf[4];
         size_t can_read = (size_t)(first_data_len - data_offset_in_block);
-        ssize_t rd = pread(pf->fd, size_buf, can_read, (off_t)offset);
+        ssize_t rd = pread(pf->fd, size_buf, can_read, (int64_t)offset);
         if (rd < (ssize_t)can_read) return NULL;
         index_blk_meta_t meta;
-        rd = pread(pf->fd, &meta, sizeof(meta), (off_t)((first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE));
+        rd = pread(pf->fd, &meta, sizeof(meta), (int64_t)((first_bid + 1) * pf->block_size - INDEX_BLK_META_SIZE));
         if (rd != sizeof(meta) || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) return NULL;
         uint64_t next_data_start = meta.next_bid * pf->block_size;
-        rd = pread(pf->fd, size_buf + can_read, 4 - can_read, (off_t)next_data_start);
+        rd = pread(pf->fd, size_buf + can_read, 4 - can_read, (int64_t)next_data_start);
         if (rd < (ssize_t)(4 - can_read)) return NULL;
         memcpy(&node_size, size_buf, 4);
     } else {
-        ssize_t rd = pread(pf->fd, &node_size, 4, (off_t)offset);
+        ssize_t rd = pread(pf->fd, &node_size, 4, (int64_t)offset);
         if (rd < 4) return NULL;
     }
 
@@ -619,7 +623,7 @@ static uint8_t* page_file_read_node_multiblock(page_file_t* pf, uint64_t offset,
             return NULL;
         }
 
-        ssize_t rd = pread(pf->fd, result + total_read, can_read, (off_t)read_offset);
+        ssize_t rd = pread(pf->fd, result + total_read, can_read, (int64_t)read_offset);
         if (rd != (ssize_t)can_read) {
             free(result);
             return NULL;
@@ -629,7 +633,7 @@ static uint8_t* page_file_read_node_multiblock(page_file_t* pf, uint64_t offset,
 
         if (total_read < total) {
             index_blk_meta_t meta;
-            off_t meta_pos = (off_t)((bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
+            int64_t meta_pos = (int64_t)((bid + 1) * pf->block_size - INDEX_BLK_META_SIZE);
             rd = pread(pf->fd, &meta, INDEX_BLK_META_SIZE, meta_pos);
             if (rd != INDEX_BLK_META_SIZE || meta.next_bid == BLK_NOT_FOUND || meta.marker != 0xFF) {
                 free(result);
@@ -712,7 +716,7 @@ int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t r
     uint8_t* blk_buf = get_clear_memory(pf->block_size);
     serialize_superblock(&sb, blk_buf, pf->block_size);
 
-    ssize_t written = pwrite(pf->fd, blk_buf, pf->block_size, (off_t)slot_offset);
+    ssize_t written = pwrite(pf->fd, blk_buf, pf->block_size, (int64_t)slot_offset);
     free(blk_buf);
 
     if (written != (ssize_t)pf->block_size) {
@@ -737,7 +741,7 @@ int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb) {
     int found = 0;
 
     for (uint64_t i = 0; i < pf->num_superblocks; i++) {
-        off_t offset = (off_t)(i * pf->block_size);
+        int64_t offset = (int64_t)(i * pf->block_size);
         ssize_t rd = pread(pf->fd, blk_buf, pf->block_size, offset);
         if (rd != (ssize_t)pf->block_size) {
             continue;
