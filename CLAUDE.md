@@ -75,7 +75,7 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 - `database_vacuum(db)` — manual trigger; returns `-EBUSY` if cursors open, `0` on success/no-op
 - `database_vacuum_auto(db)` — internal; used by snapshot threshold + background worker; waits on `cursor_cvar` for cursors to close
 - `database_vacuum_status(db, &st)` — introspection; returns file_size, stale_bytes, stale_ratio, vacuum_in_progress, open_cursor_count, would_trigger
-- `database_flush_dirty_bnodes(db)` — must be called before vacuum in sync_only mode for the page file to have stale bytes to reclaim
+- `database_flush_dirty_bnodes(db)` — vacuum auto-flushes internally before the rewrite; calling it manually is optional (useful for forcing a flush without vacuuming)
 - `vacuum_config_t` — configurable via `database_config_t.vacuum_config`; persisted in CBOR config
 - Modes: `VACUUM_MODE_MANUAL_ONLY` (0), `VACUUM_MODE_STRICT` (1, default), `VACUUM_MODE_ADAPTIVE` (2)
 - Writers block on `db->vacuum_cvar` during vacuum; resume when vacuum clears
@@ -86,6 +86,4 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 
 ### Known Limitations
 
-- Background vacuum worker test (`VacuumAsyncTest.BackgroundWorkerAutoVacuums`) is flaky — hangs intermittently due to timing-dependent interaction between background vacuum blocking writers and the test's put loop. Pre-existing, not caused by the vacuum implementation itself.
 - Eviction task can free an `hbtrie_node_t` during the vacuum walk (small race window, mitigated by `vacuum_in_progress` check at top of eviction task but not fully closed). A refcount or quiescence barrier would close it fully.
-- Calling `database_vacuum` on a DB with unflushed dirty bnodes can cause `database_destroy` to hang in `database_persist`. Call `database_flush_dirty_bnodes` before vacuum in sync_only mode.
