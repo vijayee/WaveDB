@@ -21,7 +21,7 @@ extern "C" {
 #define PAGE_FILE_DEFAULT_BLOCK_SIZE 4096
 #define PAGE_FILE_DEFAULT_NUM_SUPERBLOCKS 2
 #define INDEX_BLK_META_SIZE 16
-#define PAGE_FILE_SUPERBLOCK_SIZE 72  // magic(4)+version(2)+root_offset(8)+root_size(8)+revnum(8)+last_txn(24)+crc32(4)+padding
+#define PAGE_FILE_SUPERBLOCK_SIZE 88  // magic(4)+version(2)+root_offset(8)+root_size(8)+revnum(8)+last_txn(24)+stale_region(16)+crc32(4)
 
 typedef struct {
     uint8_t magic[4];         // "WDBP"
@@ -32,6 +32,8 @@ typedef struct {
     uint64_t last_txn_time;    // Last committed transaction time
     uint64_t last_txn_nanos;   // Last committed transaction nanos
     uint64_t last_txn_count;   // Last committed transaction count
+    uint64_t stale_region_offset;   // Byte offset of stale_region blob within superblock's block (0 = none)
+    uint64_t stale_region_size;     // Byte length of stale_region blob
     uint32_t crc32;            // CRC32 of all preceding fields
 } page_superblock_t;
 
@@ -93,8 +95,9 @@ uint64_t* page_file_get_reusable_blocks(page_file_t* pf, double threshold_ratio,
 int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t root_size,
                                const transaction_id_t* last_txn_id);
 
-// Read the latest valid superblock
-int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb);
+// Read the latest valid superblock. out_slot may be NULL; if not, returns the
+// block index of the winning superblock slot.
+int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb, uint64_t* out_slot);
 
 // Get total file size
 uint64_t page_file_size(page_file_t* pf);

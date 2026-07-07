@@ -82,7 +82,7 @@ TEST_F(PageFileTest, WriteReadSuperblock) {
     EXPECT_EQ(rc, 0);
 
     page_superblock_t sb;
-    rc = page_file_read_superblock(pf, &sb);
+    rc = page_file_read_superblock(pf, &sb, NULL);
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(sb.magic[0], 'W');
     EXPECT_EQ(sb.magic[1], 'D');
@@ -280,7 +280,7 @@ TEST_F(PageFileTest, SuperblockRevisionIncrements) {
 
     // Read latest superblock
     page_superblock_t sb;
-    rc = page_file_read_superblock(pf, &sb);
+    rc = page_file_read_superblock(pf, &sb, NULL);
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(sb.revision, 2u);
     EXPECT_EQ(sb.root_offset, 200u);
@@ -313,7 +313,7 @@ TEST_F(PageFileTest, CloseReopenPersist) {
     EXPECT_EQ(rc, 0);
 
     page_superblock_t sb;
-    rc = page_file_read_superblock(pf2, &sb);
+    rc = page_file_read_superblock(pf2, &sb, NULL);
     EXPECT_EQ(rc, 0);
     EXPECT_EQ(sb.revision, 1u);
     EXPECT_EQ(sb.root_offset, 12345u);
@@ -387,5 +387,45 @@ TEST_F(PageFileTest, StaleRatioHalf) {
 
     free(data1);
     free(data2);
+    page_file_destroy(pf);
+}
+
+// 11. Stale region persists across reopen via superblock
+TEST_F(PageFileTest, StaleRegionPersistsAcrossReopen) {
+    char path[512];
+    make_path(path, sizeof(path), "data.wdbp");
+
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_EQ(page_file_open(pf, 1), 0);
+
+    // Write a fake node so we have something to mark stale
+    uint8_t data[100] = {0};
+    uint64_t off; uint64_t bids[16]; size_t nbids;
+    ASSERT_EQ(page_file_write_node(pf, data, 100, &off, bids, 16, &nbids), 0);
+
+    // Mark it stale
+    page_file_mark_stale(pf, off, 100);
+
+    // Write a fresh "live" node at a new offset (simulating CoW)
+    uint8_t data2[100] = {0};
+    uint64_t off2; uint64_t bids2[16]; size_t nbids2;
+    ASSERT_EQ(page_file_write_node(pf, data2, 100, &off2, bids2, 16, &nbids2), 0);
+
+    // Write superblock (persists stale mgr)
+    ASSERT_EQ(page_file_write_superblock(pf, off2, 0, NULL), 0);
+
+    double ratio_before = page_file_stale_ratio(pf);
+    EXPECT_GT(ratio_before, 0.0);
+
+    page_file_destroy(pf);
+
+    // Reopen — stale mgr should be restored from superblock
+    pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_EQ(page_file_open(pf, 0), 0);
+
+    double ratio_after = page_file_stale_ratio(pf);
+    EXPECT_NEAR(ratio_after, ratio_before, 0.001)
+        << "stale ratio should persist across reopen";
+
     page_file_destroy(pf);
 }

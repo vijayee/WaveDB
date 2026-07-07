@@ -73,9 +73,11 @@ static void serialize_superblock(const page_superblock_t* sb, uint8_t* buf, uint
     memcpy(buf + 30, &sb->last_txn_time, 8);
     memcpy(buf + 38, &sb->last_txn_nanos, 8);
     memcpy(buf + 46, &sb->last_txn_count, 8);
-    // Compute CRC over the first 54 bytes
-    uint32_t crc = XXH32(buf, 54, 0);
-    memcpy(buf + 54, &crc, 4);
+    memcpy(buf + 54, &sb->stale_region_offset, 8);
+    memcpy(buf + 62, &sb->stale_region_size, 8);
+    // CRC over the first 70 bytes
+    uint32_t crc = XXH32(buf, 70, 0);
+    memcpy(buf + 70, &crc, 4);
 }
 
 // Read a superblock from a buffer, returns 0 on success, -1 on CRC failure
@@ -88,10 +90,12 @@ static int deserialize_superblock(const uint8_t* buf, page_superblock_t* out_sb)
     memcpy(&out_sb->last_txn_time, buf + 30, 8);
     memcpy(&out_sb->last_txn_nanos, buf + 38, 8);
     memcpy(&out_sb->last_txn_count, buf + 46, 8);
-    memcpy(&out_sb->crc32, buf + 54, 4);
+    memcpy(&out_sb->stale_region_offset, buf + 54, 8);
+    memcpy(&out_sb->stale_region_size, buf + 62, 8);
+    memcpy(&out_sb->crc32, buf + 70, 4);
 
     // Verify CRC
-    uint32_t computed = XXH32(buf, 54, 0);
+    uint32_t computed = XXH32(buf, 70, 0);
     if (computed != out_sb->crc32) {
         return -1;
     }
@@ -207,8 +211,31 @@ int page_file_open(page_file_t* pf, uint8_t writable) {
     } else if (file_size > 0) {
         // Existing file: read latest superblock to get revision
         page_superblock_t sb;
-        if (page_file_read_superblock(pf, &sb) == 0) {
+        uint64_t winning_slot = 0;
+        if (page_file_read_superblock(pf, &sb, &winning_slot) == 0) {
             pf->revision = sb.revision;
+
+            // Load persisted stale_region blob
+            if (sb.stale_region_offset != 0 && sb.stale_region_size > 0) {
+                uint8_t* blob = get_clear_memory(sb.stale_region_size);
+                int64_t blob_pos;
+                if (sb.stale_region_offset < pf->block_size) {
+                    // inline in superblock's block
+                    blob_pos = (int64_t)(winning_slot * pf->block_size + sb.stale_region_offset);
+                } else {
+                    // standalone block at EOF
+                    blob_pos = (int64_t)sb.stale_region_offset;
+                }
+                ssize_t br = pread(pf->fd, blob, sb.stale_region_size, blob_pos);
+                if (br == (ssize_t)sb.stale_region_size) {
+                    stale_region_mgr_t* loaded = stale_region_deserialize(blob, sb.stale_region_size);
+                    if (loaded != NULL) {
+                        stale_region_mgr_destroy(pf->stale_mgr);
+                        pf->stale_mgr = loaded;
+                    }
+                }
+                free(blob);
+            }
         }
 
         // Set cur_bid/cur_offset to end of file
@@ -714,7 +741,61 @@ int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t r
     uint64_t slot_offset = slot * pf->block_size;
 
     uint8_t* blk_buf = get_clear_memory(pf->block_size);
+    // Initial serialize to compute CRC over current fields (stale_region_* still 0)
     serialize_superblock(&sb, blk_buf, pf->block_size);
+
+    // Serialize the stale_region_mgr and store it inline in the superblock's block
+    size_t blob_len = 0;
+    uint8_t* stale_blob = stale_region_serialize(pf->stale_mgr, &blob_len);
+
+    if (stale_blob != NULL && blob_len > 0) {
+        // Inline case: blob fits in the slack space after the fixed superblock.
+        // Fixed superblock = 4+2+8+8+8+8+8+8+8+8+4 = 74 bytes; padding to 88 for alignment.
+        uint64_t inline_offset = 88;
+        if (inline_offset + blob_len <= pf->block_size) {
+            sb.stale_region_offset = inline_offset;
+            sb.stale_region_size = blob_len;
+            // Re-serialize superblock to pick up the new fields + recomputed CRC
+            serialize_superblock(&sb, blk_buf, pf->block_size);
+            // Copy the blob into the superblock's block buffer so a single
+            // pwrite of blk_buf carries both the superblock and the blob
+            // (writing the blob separately first would be overwritten by the
+            // block-sized pwrite below).
+            memcpy(blk_buf + inline_offset, stale_blob, blob_len);
+            free(stale_blob);
+        } else {
+            // Fallback: write blob to a fresh block at EOF
+            int64_t eof = lseek(pf->fd, 0, SEEK_END);
+            uint64_t blob_block = ((uint64_t)eof + pf->block_size - 1) / pf->block_size;
+            uint64_t blob_offset = blob_block * pf->block_size;
+            if (ftruncate(pf->fd, (int64_t)(blob_offset + pf->block_size)) != 0) {
+                free(stale_blob);
+                free(blk_buf);
+                pf->revision--;
+                platform_unlock(&pf->lock);
+                return -1;
+            }
+            ssize_t bw = pwrite(pf->fd, stale_blob, blob_len, (int64_t)blob_offset);
+            free(stale_blob);
+            if (bw != (ssize_t)blob_len) {
+                free(blk_buf);
+                pf->revision--;
+                platform_unlock(&pf->lock);
+                return -1;
+            }
+            sb.stale_region_offset = blob_offset;
+            sb.stale_region_size = blob_len;
+            serialize_superblock(&sb, blk_buf, pf->block_size);
+        }
+    } else {
+        // No stale regions (empty mgr) — stale_region_serialize never returns
+        // NULL for a non-NULL mgr (it always emits at least the 16-byte header),
+        // but be defensive: leave offset/size at 0 and free any blob if present.
+        sb.stale_region_offset = 0;
+        sb.stale_region_size = 0;
+        serialize_superblock(&sb, blk_buf, pf->block_size);
+        if (stale_blob) free(stale_blob);
+    }
 
     ssize_t written = pwrite(pf->fd, blk_buf, pf->block_size, (int64_t)slot_offset);
     free(blk_buf);
@@ -730,14 +811,17 @@ int page_file_write_superblock(page_file_t* pf, uint64_t root_offset, uint64_t r
     return 0;
 }
 
-int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb) {
+int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb, uint64_t* out_slot) {
     if (pf == NULL || out_sb == NULL) return -1;
+
+    if (out_slot) *out_slot = 0;
 
     memset(out_sb, 0, sizeof(page_superblock_t));
 
     uint8_t* blk_buf = get_clear_memory(pf->block_size);
     page_superblock_t best_sb;
     memset(&best_sb, 0, sizeof(best_sb));
+    uint64_t best_slot = 0;
     int found = 0;
 
     for (uint64_t i = 0; i < pf->num_superblocks; i++) {
@@ -765,6 +849,7 @@ int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb) {
 
         if (!found || candidate.revision > best_sb.revision) {
             best_sb = candidate;
+            best_slot = i;
             found = 1;
         }
     }
@@ -776,6 +861,7 @@ int page_file_read_superblock(page_file_t* pf, page_superblock_t* out_sb) {
     }
 
     *out_sb = best_sb;
+    if (out_slot) *out_slot = best_slot;
     return 0;
 }
 

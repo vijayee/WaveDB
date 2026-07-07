@@ -325,7 +325,7 @@ TEST_F(PageCacheIntegrationTest, SuperblockUpdateCycle) {
 
     /* Read the superblock and verify it points to root v1 */
     page_superblock_t sb;
-    rc = page_file_read_superblock(pf, &sb);
+    rc = page_file_read_superblock(pf, &sb, NULL);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(sb.root_offset, root_offset_v1);
     EXPECT_EQ(sb.root_size, root_size_v1);
@@ -364,7 +364,7 @@ TEST_F(PageCacheIntegrationTest, SuperblockUpdateCycle) {
     ASSERT_EQ(rc, 0);
 
     /* Read latest superblock — should point to root v2 */
-    rc = page_file_read_superblock(pf, &sb);
+    rc = page_file_read_superblock(pf, &sb, NULL);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(sb.root_offset, root_offset_v2);
     EXPECT_EQ(sb.root_size, root_size_v2);
@@ -499,7 +499,7 @@ TEST_F(PageCacheIntegrationTest, CrashRecoverySimulation) {
 
     /* The latest superblock should point to root v1 (which was flushed) */
     page_superblock_t sb;
-    rc = page_file_read_superblock(pf, &sb);
+    rc = page_file_read_superblock(pf, &sb, NULL);
     ASSERT_EQ(rc, 0);
     EXPECT_EQ(sb.root_offset, root_offset_v1);
     EXPECT_EQ(sb.root_size, root_size_v1);

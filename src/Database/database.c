@@ -958,7 +958,7 @@ database_t* database_create_with_config(const char* location,
             if (pf_rc == 0) {
                 // Try to load root from superblock
                 page_superblock_t sb;
-                int sb_rc = page_file_read_superblock(db->page_file, &sb);
+                int sb_rc = page_file_read_superblock(db->page_file, &sb, NULL);
                 if (sb_rc == 0 && sb.root_offset != 0) {
                     // Root exists on disk — load it
                     size_t root_len = 0;
