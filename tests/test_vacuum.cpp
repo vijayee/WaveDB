@@ -328,3 +328,56 @@ TEST_F(VacuumAsyncTest, VacuumWithConcurrentWriter) {
         EXPECT_EQ(get("k/" + std::to_string(i)), expected);
     }
 }
+
+TEST_F(VacuumTest, SnapshotThresholdTriggersVacuum) {
+    const int N = 500;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    database_flush_dirty_bnodes(db);
+    uint64_t after_initial = file_size();
+
+    // Overwrite enough to cross the 30% threshold (default)
+    for (int rep = 0; rep < 10; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        database_flush_dirty_bnodes(db);
+    }
+    uint64_t before = file_size();
+    EXPECT_GT(before, after_initial * 2);
+
+    ASSERT_EQ(database_snapshot(db), 0);
+    uint64_t after = file_size();
+    EXPECT_LT(after, before) << "snapshot should have triggered vacuum";
+
+    // Keys still readable
+    for (int i = 0; i < N; i++) {
+        EXPECT_EQ(get("k/" + std::to_string(i)), "v9");
+    }
+}
+
+TEST_F(VacuumTest, ManualOnlyModeSkipsAutoVacuum) {
+    // Tear down the default db and recreate with MANUAL_ONLY mode
+    database_destroy(db);
+    db = nullptr;
+
+    database_config_t* cfg = database_config_default();
+    database_config_set_sync_only(cfg, 1);
+    cfg->vacuum_config.mode = VACUUM_MODE_MANUAL_ONLY;
+    cfg->vacuum_config.min_file_size_bytes = 0;
+    cfg->vacuum_config.min_stale_bytes = 0;
+    std::string path = test_dir;  // location is a directory
+    db = database_create_with_config(path.c_str(), cfg, NULL);
+    database_config_destroy(cfg);
+    ASSERT_NE(db, nullptr);
+
+    const int N = 500;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    database_flush_dirty_bnodes(db);
+    for (int rep = 0; rep < 10; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        database_flush_dirty_bnodes(db);
+    }
+    uint64_t before = file_size();
+
+    ASSERT_EQ(database_snapshot(db), 0);
+    uint64_t after = file_size();
+    EXPECT_EQ(after, before) << "MANUAL_ONLY mode: snapshot should not auto-vacuum";
+}

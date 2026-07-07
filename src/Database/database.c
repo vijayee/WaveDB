@@ -1906,6 +1906,25 @@ int database_snapshot(database_t* db) {
 
     // Save index to disk
     if (db->page_file != NULL) {
+        // Vacuum threshold check (only if mode allows auto-trigger).
+        // STRICT: always auto-vacuums when threshold crossed.
+        // ADAPTIVE: snapshot-triggered vacuum runs even though background
+        //   vacuum is disabled — the caller already paid for the snapshot,
+        //   so this is a cheap opportunity to reclaim space.
+        // MANUAL_ONLY: never auto-vacuums; falls through to flush.
+        vacuum_mode_t mode = VACUUM_MODE_STRICT;  // default
+        double threshold = 0.30;  // default
+        if (db->active_config != NULL) {
+            mode = db->active_config->vacuum_config.mode;
+            threshold = db->active_config->vacuum_config.stale_threshold;
+        }
+        if (mode == VACUUM_MODE_STRICT || mode == VACUUM_MODE_ADAPTIVE) {
+            double ratio = page_file_stale_ratio(db->page_file);
+            if (ratio >= threshold) {
+                // Snapshot-triggered vacuum waits for cursors if any are open.
+                return database_vacuum_auto(db);
+            }
+        }
         return database_flush_dirty_bnodes(db);
     }
     return save_index(db);
