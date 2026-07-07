@@ -152,7 +152,7 @@ int database_config_save(const char* location, const database_config_t* config) 
     snprintf(config_path, path_len, "%s/.config", location);
 
     // Create CBOR map
-    cbor_item_t* root = cbor_new_definite_map(15);
+    cbor_item_t* root = cbor_new_definite_map(16);
     if (root == NULL) {
         free(config_path);
         return -1;
@@ -245,6 +245,54 @@ int database_config_save(const char* location, const database_config_t* config) 
         .value = cbor_move(cbor_build_uint16(config->timer_resolution_ms))
     });
 
+    // Add vacuum config as nested map
+    cbor_item_t* vacuum = cbor_new_definite_map(10);
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("mode")),
+        .value = cbor_move(cbor_build_uint8((uint8_t)config->vacuum_config.mode))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("stale_threshold")),
+        .value = cbor_move(cbor_build_float8(config->vacuum_config.stale_threshold))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("min_file_size_bytes")),
+        .value = cbor_move(cbor_build_uint64(config->vacuum_config.min_file_size_bytes))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("min_stale_bytes")),
+        .value = cbor_move(cbor_build_uint64(config->vacuum_config.min_stale_bytes))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("background_interval_ms")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.background_interval_ms))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("drain_timeout_ms")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.drain_timeout_ms))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("cursor_close_wait_ms")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.cursor_close_wait_ms))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("max_runtime_ms")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.max_runtime_ms))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("writer_block_timeout_ms")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.writer_block_timeout_ms))
+    });
+    cbor_map_add(vacuum, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("adaptive_busy_threshold")),
+        .value = cbor_move(cbor_build_uint32(config->vacuum_config.adaptive_busy_threshold))
+    });
+
+    cbor_map_add(root, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("vacuum_config")),
+        .value = cbor_move(vacuum)
+    });
+
     // Add encryption settings
     cbor_map_add(root, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("encryption_type")),
@@ -311,6 +359,37 @@ static uint64_t get_map_uint(cbor_item_t* map, const char* key, uint64_t default
 
     if (cbor_isa_uint(value)) {
         return cbor_get_int(value);
+    }
+    return default_val;
+}
+
+// Helper to get float from CBOR map
+static double get_map_float(cbor_item_t* map, const char* key, double default_val) {
+    cbor_item_t* key_item = cbor_build_string(key);
+    cbor_item_t* value = NULL;
+
+    for (size_t i = 0; i < cbor_map_size(map); i++) {
+        struct cbor_pair pair = cbor_map_handle(map)[i];
+        if (cbor_isa_string(pair.key) &&
+            cbor_string_length(pair.key) == strlen(key) &&
+            memcmp(cbor_string_handle(pair.key), key, strlen(key)) == 0) {
+            value = pair.value;
+            break;
+        }
+    }
+    cbor_decref(&key_item);
+
+    if (value == NULL) {
+        return default_val;
+    }
+    if (cbor_isa_float_ctrl(value)) {
+        if (cbor_float_get_width(value) == CBOR_FLOAT_32) {
+            return (double)cbor_float_get_float4(value);
+        } else if (cbor_float_get_width(value) == CBOR_FLOAT_64) {
+            return cbor_float_get_float8(value);
+        } else if (cbor_float_get_width(value) == CBOR_FLOAT_16) {
+            return (double)cbor_float_get_float2(value);
+        }
     }
     return default_val;
 }
@@ -447,6 +526,33 @@ database_config_t* database_config_load(const char* location) {
         config->wal_config.max_file_size = (size_t)get_map_uint(wal_map, "max_file_size", WAL_DEFAULT_MAX_FILE_SIZE);
     }
 
+    // Read vacuum config from nested map
+    cbor_item_t* vacuum_key = cbor_build_string("vacuum_config");
+    cbor_item_t* vacuum_map = NULL;
+    for (size_t i = 0; i < cbor_map_size(root); i++) {
+        struct cbor_pair pair = cbor_map_handle(root)[i];
+        if (cbor_isa_string(pair.key) &&
+            cbor_string_length(pair.key) == 13 &&
+            memcmp(cbor_string_handle(pair.key), "vacuum_config", 13) == 0) {
+            vacuum_map = pair.value;
+            break;
+        }
+    }
+    cbor_decref(&vacuum_key);
+
+    if (vacuum_map != NULL && cbor_isa_map(vacuum_map)) {
+        config->vacuum_config.mode = (vacuum_mode_t)get_map_uint(vacuum_map, "mode", VACUUM_MODE_STRICT);
+        config->vacuum_config.stale_threshold = get_map_float(vacuum_map, "stale_threshold", 0.30);
+        config->vacuum_config.min_file_size_bytes = get_map_uint(vacuum_map, "min_file_size_bytes", 64ull * 1024 * 1024);
+        config->vacuum_config.min_stale_bytes = get_map_uint(vacuum_map, "min_stale_bytes", 16ull * 1024 * 1024);
+        config->vacuum_config.background_interval_ms = (uint32_t)get_map_uint(vacuum_map, "background_interval_ms", 60000);
+        config->vacuum_config.drain_timeout_ms = (uint32_t)get_map_uint(vacuum_map, "drain_timeout_ms", 5000);
+        config->vacuum_config.cursor_close_wait_ms = (uint32_t)get_map_uint(vacuum_map, "cursor_close_wait_ms", 60000);
+        config->vacuum_config.max_runtime_ms = (uint32_t)get_map_uint(vacuum_map, "max_runtime_ms", 30000);
+        config->vacuum_config.writer_block_timeout_ms = (uint32_t)get_map_uint(vacuum_map, "writer_block_timeout_ms", 0);
+        config->vacuum_config.adaptive_busy_threshold = (uint32_t)get_map_uint(vacuum_map, "adaptive_busy_threshold", 32);
+    }
+
     // Read encryption settings
     config->encryption.type = (encryption_type_t)get_map_uint(root, "encryption_type", DATABASE_CONFIG_DEFAULT_ENCRYPTION_TYPE);
 
@@ -531,6 +637,7 @@ database_config_t* database_config_merge(const database_config_t* saved,
     merged->bnode_cache_memory_mb = passed->bnode_cache_memory_mb;
     merged->bnode_cache_shards = passed->bnode_cache_shards;
     merged->wal_config = passed->wal_config;
+    merged->vacuum_config = passed->vacuum_config;
 
     // THREADING: Use passed values
     merged->worker_threads = passed->worker_threads;

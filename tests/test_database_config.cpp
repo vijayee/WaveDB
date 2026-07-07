@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #endif
 #include <cstring>
+#include <string>
 extern "C" {
 #include "Database/database_config.h"
 #include "Database/database.h"
@@ -306,6 +307,32 @@ TEST(DatabaseConfigTest, VacuumDefaults) {
     EXPECT_EQ(config->vacuum_config.writer_block_timeout_ms, 0u);
     EXPECT_EQ(config->vacuum_config.adaptive_busy_threshold, 32u);
     database_config_destroy(config);
+}
+
+TEST(DatabaseConfigTest, VacuumConfigPersists) {
+    std::string dir = "/tmp/wavedb_cfg_vacuum_" + std::to_string(getpid());
+    mkdir(dir.c_str(), 0700);
+
+    database_config_t* cfg = database_config_default();
+    cfg->vacuum_config.mode = VACUUM_MODE_ADAPTIVE;
+    cfg->vacuum_config.stale_threshold = 0.45;
+    cfg->vacuum_config.background_interval_ms = 30000;
+    cfg->vacuum_config.adaptive_busy_threshold = 64;
+
+    ASSERT_EQ(database_config_save(dir.c_str(), cfg), 0);
+    database_config_destroy(cfg);
+
+    database_config_t* loaded = database_config_load(dir.c_str());
+    ASSERT_NE(loaded, nullptr);
+    EXPECT_EQ(loaded->vacuum_config.mode, VACUUM_MODE_ADAPTIVE);
+    EXPECT_DOUBLE_EQ(loaded->vacuum_config.stale_threshold, 0.45);
+    EXPECT_EQ(loaded->vacuum_config.background_interval_ms, 30000u);
+    EXPECT_EQ(loaded->vacuum_config.adaptive_busy_threshold, 64u);
+    database_config_destroy(loaded);
+
+    // cleanup
+    std::string cmd = "rm -rf " + dir;
+    system(cmd.c_str());
 }
 
 // Test: External pool/wheel not owned
