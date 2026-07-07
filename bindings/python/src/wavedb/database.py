@@ -7,7 +7,7 @@ from typing import Any
 from ._async import AsyncBridge, decode_identifier_payload
 from ._errors import map_error
 from ._native import ffi, lib, libc
-from .config import WaveDBConfig, WaveDBEncryption
+from .config import VacuumConfig, WaveDBConfig, WaveDBEncryption
 from .exceptions import EncryptionError, InvalidPathError, WaveDBError
 
 
@@ -80,6 +80,7 @@ class WaveDB:
         delimiter: str = "/",
         config: "WaveDBConfig | None" = None,
         encryption: "WaveDBEncryption | None" = None,
+        vacuum_config: "VacuumConfig | None" = None,
     ) -> None:
         c = config or WaveDBConfig()
         # When in_memory=True, the path is ignored (NULL location passed to C).
@@ -129,6 +130,13 @@ class WaveDB:
                     lib.encrypted_database_config_set_asymmetric_public_key(
                         cfg, buf, len(encryption.asymmetric_public_key)
                     )
+                if vacuum_config is not None:
+                    # `encrypted_database_config_t` has `database_config_t` as
+                    # its first member, so casting the opaque pointer to
+                    # `database_config_t*` lands on the same address and lets
+                    # us reuse the same vacuum setters.
+                    base_cfg = ffi.cast("database_config_t*", cfg)
+                    vacuum_config.apply_to(lib, base_cfg)
                 self._db = lib.database_create_encrypted(path_b, cfg, err)
             finally:
                 lib.encrypted_database_config_destroy(cfg)
@@ -144,6 +152,8 @@ class WaveDB:
                 lib.database_config_set_wal_debounce_ms(cfg, c.wal_debounce_ms)
                 lib.database_config_set_worker_threads(cfg, c.worker_threads)
                 lib.database_config_set_sync_only(cfg, 1 if c.sync_only else 0)
+                if vacuum_config is not None:
+                    vacuum_config.apply_to(lib, cfg)
                 self._db = lib.database_create_with_config(path_b, cfg, err)
             finally:
                 lib.database_config_destroy(cfg)
@@ -229,6 +239,32 @@ class WaveDB:
     def del_sync(self, key) -> None:
         """Delete the value at `key`. No-op if the key is absent."""
         self._raw_del(_normalize_key(key, self._delimiter))
+
+    def flush(self) -> int:
+        """Flush dirty bnodes to the page file.
+
+        Necessary before `vacuum()` in sync_only mode: vacuum only reclaims
+        stale bytes that have already been written to the page file. Calling
+        vacuum without flushing first leaves nothing to compact, and leaving
+        dirty bnodes unflushed at `close()` can hang the destructor.
+        """
+        self._check_open()
+        rc = lib.database_flush_dirty_bnodes(self._db)
+        if rc != 0:
+            raise map_error(rc, "flush_dirty_bnodes failed")
+        return rc
+
+    def vacuum(self) -> int:
+        """Synchronously compact the page file, reclaiming stale bytes.
+
+        Returns 0 on success, negative error code on failure. Call `flush()`
+        first so dirty bnodes are on disk for vacuum to reclaim. Requires
+        `VacuumConfig(mode=VacuumMode.manual_only)` (or stricter) on the
+        database — a database created with `manual_only` will not auto-vacuum,
+        so the caller controls when compaction runs.
+        """
+        self._check_open()
+        return lib.database_vacuum(self._db)
 
     def _build_raw_ops(self, ops: list[dict]) -> "tuple[Any, list[bytes]]":
         """Build a raw_op_t array from a list of op dicts.

@@ -110,6 +110,24 @@ void database_config_set_wal_debounce_ms(database_config_t*, uint64_t);
 void database_config_set_worker_threads(database_config_t*, uint8_t);
 void database_config_set_sync_only(database_config_t*, uint8_t);
 
+/* Vacuum configuration (struct is opaque in this binding, so callers must
+   use these setters rather than touching c_config.vacuum_config.* directly). */
+void database_config_set_vacuum_mode(database_config_t*, uint8_t);
+void database_config_set_vacuum_stale_threshold(database_config_t*, double);
+void database_config_set_vacuum_min_file_size_bytes(database_config_t*, uint64_t);
+void database_config_set_vacuum_min_stale_bytes(database_config_t*, uint64_t);
+void database_config_set_vacuum_background_interval_ms(database_config_t*, uint32_t);
+void database_config_set_vacuum_drain_timeout_ms(database_config_t*, uint32_t);
+void database_config_set_vacuum_cursor_close_wait_ms(database_config_t*, uint32_t);
+void database_config_set_vacuum_max_runtime_ms(database_config_t*, uint32_t);
+void database_config_set_vacuum_writer_block_timeout_ms(database_config_t*, uint32_t);
+void database_config_set_vacuum_adaptive_busy_threshold(database_config_t*, uint32_t);
+
+/* Page-file compaction. flush() writes dirty bnodes to disk (a precondition
+   for vacuum); vacuum() rewrites the page file without stale regions. */
+int database_flush_dirty_bnodes(database_t* db);
+int database_vacuum(database_t* db);
+
 encrypted_database_config_t* encrypted_database_config_default(void);
 void encrypted_database_config_destroy(encrypted_database_config_t*);
 void encrypted_database_config_set_type(encrypted_database_config_t*, int);

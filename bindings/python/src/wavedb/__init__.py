@@ -1,6 +1,6 @@
 """WaveDB Python bindings."""
 
-from .config import WaveDBConfig, WaveDBEncryption
+from .config import VacuumConfig, VacuumMode, WaveDBConfig, WaveDBEncryption
 from .database import WaveDB
 from .exceptions import (
     EncryptionError,
@@ -29,8 +29,10 @@ __all__ = [
     "InvalidPathError",
     "NotFoundError",
     "Subtree",
+    "VacuumConfig",
+    "VacuumMode",
     "WaveDB",
-    "WaveDBError",
     "WaveDBConfig",
     "WaveDBEncryption",
+    "WaveDBError",
 ]
