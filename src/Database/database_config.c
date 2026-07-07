@@ -53,6 +53,18 @@ database_config_t* database_config_default(void) {
     config->worker_threads = DATABASE_CONFIG_DEFAULT_WORKER_THREADS;
     config->timer_resolution_ms = DATABASE_CONFIG_DEFAULT_TIMER_RESOLUTION_MS;
 
+    // Vacuum config defaults
+    config->vacuum_config.mode = VACUUM_MODE_STRICT;
+    config->vacuum_config.stale_threshold = 0.30;
+    config->vacuum_config.min_file_size_bytes = 64ull * 1024 * 1024;
+    config->vacuum_config.min_stale_bytes = 16ull * 1024 * 1024;
+    config->vacuum_config.background_interval_ms = 60000;
+    config->vacuum_config.drain_timeout_ms = 5000;
+    config->vacuum_config.cursor_close_wait_ms = 60000;
+    config->vacuum_config.max_runtime_ms = 30000;
+    config->vacuum_config.writer_block_timeout_ms = 0;
+    config->vacuum_config.adaptive_busy_threshold = 32;
+
     // External resources (NULL = create own)
     config->external_pool = NULL;
     config->external_wheel = NULL;

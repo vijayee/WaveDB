@@ -49,6 +49,25 @@ typedef struct {
     uint8_t has_encryption;          /* Whether encryption is enabled */
 } encryption_config_t;
 
+typedef enum {
+    VACUUM_MODE_MANUAL_ONLY = 0,
+    VACUUM_MODE_STRICT      = 1,
+    VACUUM_MODE_ADAPTIVE    = 2,
+} vacuum_mode_t;
+
+typedef struct {
+    vacuum_mode_t mode;
+    double         stale_threshold;
+    uint64_t       min_file_size_bytes;
+    uint64_t       min_stale_bytes;
+    uint32_t       background_interval_ms;
+    uint32_t       drain_timeout_ms;
+    uint32_t       cursor_close_wait_ms;
+    uint32_t       max_runtime_ms;
+    uint32_t       writer_block_timeout_ms;
+    uint32_t       adaptive_busy_threshold;
+} vacuum_config_t;
+
 /**
  * Database configuration structure.
  *
@@ -74,6 +93,9 @@ typedef struct {
     // === THREADING SETTINGS ===
     uint8_t worker_threads;       // Number of workers (default: 4)
     uint16_t timer_resolution_ms; // Timer resolution (default: 10)
+
+    // === VACUUM SETTINGS ===
+    vacuum_config_t vacuum_config;
 
     // === EXTERNAL RESOURCES (not saved) ===
     work_pool_t* external_pool;

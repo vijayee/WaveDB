@@ -292,6 +292,22 @@ TEST(DatabaseConfig, ReopenPreservesImmutable) {
     system(cmd);
 }
 
+TEST(DatabaseConfigTest, VacuumDefaults) {
+    database_config_t* config = database_config_default();
+    ASSERT_NE(config, nullptr);
+    EXPECT_EQ(config->vacuum_config.mode, VACUUM_MODE_STRICT);
+    EXPECT_DOUBLE_EQ(config->vacuum_config.stale_threshold, 0.30);
+    EXPECT_EQ(config->vacuum_config.min_file_size_bytes, 64ull * 1024 * 1024);
+    EXPECT_EQ(config->vacuum_config.min_stale_bytes, 16ull * 1024 * 1024);
+    EXPECT_EQ(config->vacuum_config.background_interval_ms, 60000u);
+    EXPECT_EQ(config->vacuum_config.drain_timeout_ms, 5000u);
+    EXPECT_EQ(config->vacuum_config.cursor_close_wait_ms, 60000u);
+    EXPECT_EQ(config->vacuum_config.max_runtime_ms, 30000u);
+    EXPECT_EQ(config->vacuum_config.writer_block_timeout_ms, 0u);
+    EXPECT_EQ(config->vacuum_config.adaptive_busy_threshold, 32u);
+    database_config_destroy(config);
+}
+
 // Test: External pool/wheel not owned
 TEST(DatabaseConfig, ExternalResourcesNotOwned) {
     char temp_dir[256];
