@@ -176,9 +176,9 @@ data.wdbp.vacuum.tmp              ← transient; exists only during a vacuum pas
 | `src/Database/database.h` | Add `database_vacuum()`, `vacuum_in_progress`/`vacuum_cvar`/`vacuum_writer_lock`/`open_cursor_count` to `database_t`. |
 | `src/Database/database.c` | Implement `database_vacuum()`; snapshot threshold hook in `database_snapshot()`; background vacuum task spawn/stop in create/destroy; block writers in `put_sync`/`get_sync`/etc; cursor open/close tracking. |
 | `src/Database/database_iterator.c` | Register/unregister cursors in `db->open_cursor_count` (atomic). |
-| `bindings/nodejs/` | Expose `vacuum()` method on Database. |
-| `bindings/dart/` | Expose `vacuum()` method on WaveDB. |
-| `bindings/python/` | Expose `vacuum()` method on WaveDB. |
+| `bindings/nodejs/` | Expose `vacuum()` method on Database. Expose all `vacuum_config_t` fields under `config.vacuum` (see Bindings). |
+| `bindings/dart/` | Expose `vacuum()` method on WaveDB. Expose all `vacuum_config_t` fields under `config.vacuum` (see Bindings). |
+| `bindings/python/` | Expose `vacuum()` method on WaveDB. Expose all `vacuum_config_t` fields under `config.vacuum` (see Bindings). |
 | `tests/` | New unit tests (see Testing). |
 | `benchmarks/benchmark_vacuum.cpp` | New: perf microbenchmark. |
 
@@ -191,6 +191,48 @@ The post-order walk + remap logic touches `page_file_t`, `hbtrie_t`, `bnode_t`, 
 - **C:** new `src/Storage/vacuum.c` — dedicated module. Pro: clean separation, easy to test in isolation. Con: another file to maintain.
 
 **Recommendation: B** — mirror the existing `database_flush_dirty_bnodes` pattern; it's already in the right layer. `page_file_vacuum()` only adds the *file-level* operations (open tmp, swap, persist stale mgr); the trie walk stays in database.c.
+
+## Bindings
+
+All `vacuum_config_t` fields must be exposed through every binding (Node.js, Dart, Python), mirroring how existing `database_config_t` fields are exposed (see `bindings/nodejs/src/database.cc:77-160` for the established pattern: a config object with named keys parsed at database creation time, copied into the C struct before `database_create_with_config`).
+
+### Node.js
+
+The database constructor accepts a `config` object. Add a nested `vacuum` sub-object:
+
+```js
+const db = new WaveDB(path, {
+  vacuum: {
+    mode: 'strict',                 // 'manual_only' | 'strict' | 'adaptive'
+    staleThreshold: 0.30,           // 0.0-1.0
+    minFileSizeBytes: 64 * 1024 * 1024,
+    minStaleBytes: 16 * 1024 * 1024,
+    backgroundIntervalMs: 60000,
+    drainTimeoutMs: 5000,
+    cursorCloseWaitMs: 60000,
+    maxRuntimeMs: 30000,
+    writerBlockTimeoutMs: 0,        // 0 = block forever
+    adaptiveBusyThreshold: 32,
+  }
+});
+await db.vacuum();                  // manual trigger
+```
+
+String-to-enum mapping for `mode` happens in the binding (`manual_only` → `VACUUM_MODE_MANUAL_ONLY`, etc.). All other fields are numeric and pass straight through with range validation (reject NaN, negatives, out-of-range `staleThreshold`). Omitted fields fall back to C-side defaults (via `database_config_default`).
+
+### Dart
+
+Mirror the existing `DatabaseConfig` pattern in `bindings/dart/lib/src/native/types.dart`. Add a `VacuumConfig` class with named fields, a `VacuumMode` enum, and a `toNative()` that produces the C struct. The `WaveDB` constructor accepts `vacuumConfig` as an optional named parameter. `WaveDB.vacuum()` is the manual trigger.
+
+### Python
+
+Mirror the existing `DatabaseConfig` pattern in `bindings/python/src/wavedb/database.py`. Add a `VacuumConfig` dataclass (or attrs/Pydantic-style class matching whatever the existing config uses) with all fields, a `VacuumMode` enum, and serialization to the C struct via the existing FFI layer. `WaveDB.vacuum()` is the manual trigger.
+
+### Roundtrip test
+
+`test_vacuum_bindings_config` — for each binding: construct a DB with a custom `vacuum` config, write/overwrite enough to cross the threshold, verify the configured mode + threshold actually governs behavior (e.g. `MANUAL_ONLY` does not auto-vacuum on snapshot; `STRICT` does). Also verify omitted fields default correctly.
+
+## Data flow
 
 ## Data flow
 
