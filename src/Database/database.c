@@ -757,6 +757,34 @@ static void database_eviction_task_execute(void* ctx) {
         return;
     }
 
+    // Skip the body during vacuum — nulling entries would race with the
+    // vacuum walk. The eviction_queue is left untouched; queued offsets
+    // are processed by database_vacuum_drain before the page-file swap,
+    // and any offsets still queued after vacuum will be re-evaluated
+    // against the new page file on the next eviction task iteration
+    // (the bnode_cache_complete_evict path drops offsets that no longer
+    // match a live cache entry).
+    if (atomic_load(&db->vacuum_in_progress)) {
+        // Reschedule without doing work.
+        if (db->pool != NULL) {
+            work_t* task = work_create(database_eviction_task_execute,
+                                        database_eviction_task_abort,
+                                        db);
+            if (task != NULL) {
+                atomic_fetch_add(&db->eviction_in_flight, 1);
+                refcounter_yield((refcounter_t*) task);
+                if (work_pool_enqueue(db->pool, task) != 0) {
+                    work_destroy(task);
+                    work_destroy(task);
+                    atomic_fetch_sub(&db->eviction_in_flight, 1);
+                }
+            }
+        }
+        // This work item's lifecycle ends — decrement counter.
+        atomic_fetch_sub(&db->eviction_in_flight, 1);
+        return;
+    }
+
     uint64_t offsets[64];
     size_t n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
 
@@ -2065,6 +2093,58 @@ static int database_vacuum_rewrite(database_t* db, const char* tmp_path) {
     return 0;
 }
 
+// Drain in-flight work before vacuum. Returns 0 on success, -EBUSY on timeout.
+//
+// For non-sync_only mode we must ensure no async work modifies the trie
+// during the vacuum walk, and that queued eviction offsets don't survive
+// the page-file swap with stale offsets:
+//   1. The eviction task checks vacuum_in_progress (already set by the
+//      caller) and skips its body — no polling of eviction_in_flight is
+//      needed because the task self-reschedules forever (the counter
+//      never reaches 0 for a live db). The race window (task mid-body
+//      when vacuum_in_progress is set) is microseconds and the task body
+//      only nulls entries whose child_disk_offset matches a queued
+//      offset — those children are not in the in-memory trie anyway.
+//   2. Drain the eviction_queue ourselves so queued offsets are nulled
+//      before the page-file swap renders them invalid.
+//   3. tx_manager_gc — prune unreachable versions from MVCC chains so
+//      vacuum does not copy them as live data.
+//
+// Note: polling work_pool idleCount == size is incompatible with a
+// running timing wheel (the wheel's tick re-enqueues itself forever, so
+// idleCount never reaches size). We skip that check — the eviction-task
+// skip + queue drain covers the trie-modifying async work.
+//
+// timeout_ms is currently unused (kept in the signature for forward
+// compatibility with future bounded-wait extensions).
+static int database_vacuum_drain(database_t* db, uint32_t timeout_ms) {
+    (void)timeout_ms;
+    if (db == NULL) return -1;
+
+    // Drain queued eviction offsets here so they don't survive the page
+    // file swap with stale offsets. The eviction task skips its body
+    // while vacuum_in_progress is set, so it won't race with us.
+    if (db->trie != NULL && db->bnode_cache != NULL) {
+        uint64_t offsets[64];
+        size_t n;
+        do {
+            n = eviction_queue_drain(&db->eviction_queue, offsets, 64);
+            for (size_t i = 0; i < n; i++) {
+                hbtrie_null_entries_by_offset(db->trie, offsets[i]);
+                bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
+            }
+        } while (n > 0);
+    }
+
+    // GC version chains (prunes unreachable versions so they're not
+    // copied as live data during the rewrite).
+    if (db->tx_manager != NULL) {
+        tx_manager_gc(db->tx_manager);
+    }
+
+    return 0;
+}
+
 int database_vacuum(database_t* db) {
     if (db == NULL) return -1;
     // Nothing to vacuum if no page file (in-memory mode).
@@ -2097,6 +2177,19 @@ int database_vacuum(database_t* db) {
     char* tmp_path = NULL;
 
     do {
+        // For sync_only: no work pool / no tx_manager to drain.
+        // For non-sync_only: drain in-flight work with bounded timeout.
+        // Abort with -EBUSY if drain times out (vacuum_in_progress is
+        // cleared by the do/while epilogue).
+        if (!db->sync_only) {
+            uint32_t drain_timeout = 0;
+            if (db->active_config != NULL) {
+                drain_timeout = db->active_config->vacuum_config.drain_timeout_ms;
+            }
+            rc = database_vacuum_drain(db, drain_timeout);
+            if (rc != 0) break;
+        }
+
         // Build tmp path: <page_file->path>.vacuum.tmp
         size_t plen = strlen(db->page_file->path);
         tmp_path = get_clear_memory(plen + 12);

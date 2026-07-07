@@ -27,6 +27,8 @@ extern "C" {
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
 #include "Storage/page_file.h"
+#include "Workers/pool.h"
+#include "Time/wheel.h"
 }
 
 class VacuumTest : public ::testing::Test {
@@ -147,5 +149,131 @@ TEST_F(VacuumTest, BasicShrinksAfterOverwrite) {
     for (int i = 0; i < N; i++) {
         std::string expected = "v5_" + std::to_string(i);
         EXPECT_EQ(get("key/" + std::to_string(i)), expected);
+    }
+}
+
+// ============================================================================
+// Async-mode fixture: creates a real work pool + timing wheel + db in
+// non-sync_only mode. Verifies vacuum drains in-flight work before rewrite.
+// ============================================================================
+class VacuumAsyncTest : public ::testing::Test {
+protected:
+    std::string test_dir;
+    database_t* db;
+    work_pool_t* pool;
+    hierarchical_timing_wheel_t* wheel;
+
+    void SetUp() override {
+        test_dir = "/tmp/wavedb_vacuum_async_" + std::to_string(getpid()) + "_" +
+                   std::to_string((size_t)this);
+        mkdir(test_dir.c_str(), 0700);
+
+        // Real work pool + wheel — the async fixture exercises the
+        // drain path (polling idleCount == size, eviction_in_flight == 0).
+        pool = work_pool_create(4);
+        work_pool_launch(pool);
+        wheel = hierarchical_timing_wheel_create(8, pool);
+        hierarchical_timing_wheel_run(wheel);
+
+        database_config_t* cfg = database_config_default();
+        cfg->external_pool = pool;
+        cfg->external_wheel = wheel;
+        // Bypass gates so vacuum runs even on our small test DB
+        cfg->vacuum_config.min_file_size_bytes = 0;
+        cfg->vacuum_config.min_stale_bytes = 0;
+        std::string path = test_dir;  // location is a directory, not a file
+        db = database_create_with_config(path.c_str(), cfg, NULL);
+        database_config_destroy(cfg);
+        ASSERT_NE(db, nullptr);
+    }
+
+    void TearDown() override {
+        if (db) database_destroy(db);
+        // Match the teardown order from test_database.cpp: stop wheel,
+        // shutdown pool, join workers, then destroy structures. Do NOT
+        // call wait_for_idle_signal on the wheel — debouncers reschedule
+        // indefinitely so idle is never reached.
+        if (wheel) hierarchical_timing_wheel_stop(wheel);
+        if (pool) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+        }
+        if (wheel) hierarchical_timing_wheel_destroy(wheel);
+        if (pool) work_pool_destroy(pool);
+        std::string cmd = "rm -rf " + test_dir;
+        system(cmd.c_str());
+    }
+
+    // Helpers copied verbatim from VacuumTest (correct API signatures:
+    // identifier_create(buf, 0) + database_get_sync(db, p, &v)).
+    path_t* make_path(const std::string& key) {
+        path_t* p = path_create();
+        buffer_t* buf = buffer_create_from_pointer_copy(
+            (uint8_t*)key.data(), key.size());
+        identifier_t* id = identifier_create(buf, 0);
+        buffer_destroy(buf);
+        path_append(p, id);
+        identifier_destroy(id);
+        return p;
+    }
+
+    void put(const std::string& key, const std::string& val) {
+        path_t* p = make_path(key);
+        buffer_t* vbuf = buffer_create_from_pointer_copy(
+            (uint8_t*)val.data(), val.size());
+        identifier_t* v = identifier_create(vbuf, 0);
+        buffer_destroy(vbuf);
+        ASSERT_EQ(database_put_sync(db, p, v), 0);
+    }
+
+    std::string get(const std::string& key) {
+        path_t* p = make_path(key);
+        identifier_t* v = NULL;
+        int rc = database_get_sync(db, p, &v);
+        if (rc == -2 || v == NULL) return "";
+        std::string out;
+        buffer_t* b = identifier_to_buffer(v);
+        if (b != NULL) {
+            out.assign((const char*)b->data, b->size);
+            buffer_destroy(b);
+        }
+        identifier_destroy(v);
+        return out;
+    }
+
+    uint64_t file_size() {
+        struct stat st;
+        std::string p = test_dir + "/data.wdbp";
+        if (stat(p.c_str(), &st) != 0) return 0;
+        return (uint64_t)st.st_size;
+    }
+};
+
+TEST_F(VacuumAsyncTest, VacuumWithConcurrentWriter) {
+    const int N = 200;
+    // Initial load
+    for (int i = 0; i < N; i++) {
+        put("k/" + std::to_string(i), "v0");
+    }
+    database_flush_dirty_bnodes(db);
+
+    // Overwrite to grow the file via CoW
+    for (int rep = 0; rep < 5; rep++) {
+        for (int i = 0; i < N; i++) {
+            put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        }
+        database_flush_dirty_bnodes(db);
+    }
+
+    uint64_t before = file_size();
+    ASSERT_GT(before, (uint64_t)0);
+    ASSERT_EQ(database_vacuum(db), 0);
+    uint64_t after = file_size();
+    EXPECT_LT(after, before);
+
+    // All keys readable with latest value
+    for (int i = 0; i < N; i++) {
+        std::string expected = "v4";
+        EXPECT_EQ(get("k/" + std::to_string(i)), expected);
     }
 }
