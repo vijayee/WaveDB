@@ -1138,3 +1138,11 @@ TEST_F(DatabaseTest, BatchVsIndividualPutPerformance) {
         SUCCEED() << "Individual: " << individual_ms << "ms, Batch: " << batch_ms << "ms";
     }
 }
+
+TEST_F(DatabaseTest, VacuumFieldsInitialized) {
+    // Stub returns 0 — verifies the infrastructure compiles and the stub works
+    int err = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &err);
+    ASSERT_NE(db, nullptr);
+    EXPECT_EQ(database_vacuum(db), 0);
+}

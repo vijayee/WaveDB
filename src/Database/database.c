@@ -1153,6 +1153,15 @@ database_t* database_create_with_config(const char* location,
 
     refcounter_init((refcounter_t*)db);
 
+    // Initialize vacuum infrastructure
+    atomic_store(&db->vacuum_in_progress, 0);
+    atomic_store(&db->open_cursor_count, 0);
+    db->vacuum_task_id = 0;
+    platform_lock_init(&db->vacuum_writer_lock);
+    platform_condition_init(&db->vacuum_cvar);
+    platform_lock_init(&db->cursor_count_mutex);
+    platform_condition_init(&db->cursor_cvar);
+
     if (owns_config) {
         database_config_destroy(effective_config);
     }
@@ -1466,6 +1475,15 @@ void database_destroy(database_t* db) {
                 spinlock_destroy(&db->write_locks[i]);
             }
         }
+
+        // Wake any waiters before destroying vacuum/cursor condvars, then
+        // destroy the vacuum synchronization primitives.
+        platform_broadcast_condition(&db->vacuum_cvar);
+        platform_broadcast_condition(&db->cursor_cvar);
+        platform_lock_destroy(&db->vacuum_writer_lock);
+        platform_condition_destroy(&db->vacuum_cvar);
+        platform_lock_destroy(&db->cursor_count_mutex);
+        platform_condition_destroy(&db->cursor_cvar);
 
         // Destroy active config
         if (db->active_config != NULL) {
@@ -1847,6 +1865,12 @@ size_t database_count(database_t* db) {
         return database_lru_cache_size_unsafe(db->lru);
     }
     return database_lru_cache_size(db->lru);
+}
+
+int database_vacuum(database_t* db) {
+    if (db == NULL) return -1;
+    // Stub: returns 0 (no-op) for now. Real implementation in Task 9.
+    return 0;
 }
 
 // ============================================================================

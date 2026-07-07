@@ -90,6 +90,15 @@ typedef struct {
     encryption_t* encryption;
 
     uint8_t sync_only;                  // 1 = sync-only mode (no concurrency control)
+
+    // Vacuum / page-file reclamation infrastructure
+    ATOMIC_TYPE(int) vacuum_in_progress;        // 1 while a vacuum pass is running
+    PLATFORMLOCKTYPE(vacuum_writer_lock);      // guards vacuum_cvar waiters
+    PLATFORMCONDITIONTYPE(vacuum_cvar);        // writers/readers block here during vacuum
+    PLATFORMLOCKTYPE(cursor_count_mutex);      // guards open_cursor_count + cursor_cvar waiters
+    PLATFORMCONDITIONTYPE(cursor_cvar);        // vacuum waits here for cursors to close
+    ATOMIC_TYPE(int) open_cursor_count;        // number of open cursors (blocks vacuum if > 0)
+    uint64_t vacuum_task_id;                   // 0 = no background task scheduled
 } database_t;
 
 /**
@@ -381,6 +390,12 @@ void database_raw_results_free(raw_result_t* results, size_t count);
  * @return 0 on success, -1 on failure
  */
 int database_flush_dirty_bnodes(database_t* db);
+
+/**
+ * Trigger a vacuum / compaction pass.
+ * Returns 0 on success, -EBUSY if open cursors prevent vacuum, <0 on error.
+ */
+int database_vacuum(database_t* db);
 
 #ifdef __cplusplus
 }
