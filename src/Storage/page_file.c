@@ -80,7 +80,11 @@ static void serialize_superblock(const page_superblock_t* sb, uint8_t* buf, uint
     memcpy(buf + 70, &crc, 4);
 }
 
-// Read a superblock from a buffer, returns 0 on success, -1 on CRC failure
+// Read a superblock from a buffer, returns 0 on success, -1 on CRC failure.
+// Tries the new layout (CRC over [0, 70), crc32 at offset 70, stale_region
+// fields at 54/62) first, then falls back to the old layout (CRC over [0, 54),
+// crc32 at offset 54, no stale_region fields) so files written before the
+// stale_region extension remain readable.
 static int deserialize_superblock(const uint8_t* buf, page_superblock_t* out_sb) {
     memcpy(out_sb->magic, buf, 4);
     memcpy(&out_sb->version, buf + 4, 2);
@@ -90,16 +94,32 @@ static int deserialize_superblock(const uint8_t* buf, page_superblock_t* out_sb)
     memcpy(&out_sb->last_txn_time, buf + 30, 8);
     memcpy(&out_sb->last_txn_nanos, buf + 38, 8);
     memcpy(&out_sb->last_txn_count, buf + 46, 8);
-    memcpy(&out_sb->stale_region_offset, buf + 54, 8);
-    memcpy(&out_sb->stale_region_size, buf + 62, 8);
-    memcpy(&out_sb->crc32, buf + 70, 4);
 
-    // Verify CRC
-    uint32_t computed = XXH32(buf, 70, 0);
-    if (computed != out_sb->crc32) {
-        return -1;
+    // Try new layout first: CRC over [0, 70), crc32 at offset 70,
+    // stale_region_offset at 54, stale_region_size at 62.
+    uint32_t computed_new = XXH32(buf, 70, 0);
+    uint32_t stored_new;
+    memcpy(&stored_new, buf + 70, 4);
+    if (computed_new == stored_new) {
+        memcpy(&out_sb->stale_region_offset, buf + 54, 8);
+        memcpy(&out_sb->stale_region_size, buf + 62, 8);
+        out_sb->crc32 = stored_new;
+        return 0;
     }
-    return 0;
+
+    // Fall back to old layout: CRC over [0, 54), crc32 at offset 54,
+    // no stale_region fields (set to 0).
+    uint32_t computed_old = XXH32(buf, 54, 0);
+    uint32_t stored_old;
+    memcpy(&stored_old, buf + 54, 4);
+    if (computed_old == stored_old) {
+        out_sb->stale_region_offset = 0;
+        out_sb->stale_region_size = 0;
+        out_sb->crc32 = stored_old;
+        return 0;
+    }
+
+    return -1;
 }
 
 page_file_t* page_file_create(const char* path, uint64_t block_size, uint64_t num_superblocks, encryption_t* encryption) {

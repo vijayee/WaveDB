@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 #include "Storage/page_file.h"
+#include <xxhash.h>
 
 #if _WIN32
 #include <io.h>
@@ -426,6 +427,69 @@ TEST_F(PageFileTest, StaleRegionPersistsAcrossReopen) {
     double ratio_after = page_file_stale_ratio(pf);
     EXPECT_NEAR(ratio_after, ratio_before, 0.001)
         << "stale ratio should persist across reopen";
+
+    page_file_destroy(pf);
+}
+
+// Regression test: old-format superblocks (CRC over [0, 54), crc32 at offset 54,
+// no stale_region fields, bytes [54, block_size) zero-padded) must still be
+// readable by the new deserialize_superblock which otherwise expects CRC over
+// [0, 70) at offset 70. Without the fallback path, every old superblock fails
+// CRC and existing DBs silently lose their root on reopen.
+TEST_F(PageFileTest, OldFormatSuperblockStillReadable) {
+    char path[512];
+    make_path(path, sizeof(path), "data.wdbp");
+
+    // Open writable so the file exists; we'll overwrite the superblock slot
+    // manually with an old-format buffer.
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_NE(pf, nullptr);
+    ASSERT_EQ(page_file_open(pf, 1), 0);
+
+    // Build an old-format superblock buffer manually.
+    uint8_t* blk_buf = (uint8_t*)calloc(4096, 1);
+    ASSERT_NE(blk_buf, nullptr);
+    // magic
+    memcpy(blk_buf, "WDBP", 4);
+    // version = 1
+    uint16_t ver = 1;
+    memcpy(blk_buf + 4, &ver, 2);
+    // root_offset = 4096 (block 1, after 1 superblock)
+    uint64_t root_off = 4096;
+    memcpy(blk_buf + 6, &root_off, 8);
+    // root_size = 0
+    uint64_t root_sz = 0;
+    memcpy(blk_buf + 14, &root_sz, 8);
+    // revision = 5
+    uint64_t rev = 5;
+    memcpy(blk_buf + 22, &rev, 8);
+    // last_txn_time/nanos/count = 0 (already zeroed by calloc)
+    // Old layout: CRC over [0, 54), stored at offset 54. Bytes [54, 4096)
+    // are zero-padded.
+    uint32_t crc = XXH32(blk_buf, 54, 0);
+    memcpy(blk_buf + 54, &crc, 4);
+
+    // Write to slot 0.
+    ASSERT_EQ(pwrite(pf->fd, blk_buf, 4096, 0), (ssize_t)4096);
+    free(blk_buf);
+
+    page_file_destroy(pf);
+
+    // Re-open read-only — should pick up the old-format superblock via fallback.
+    pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_NE(pf, nullptr);
+    ASSERT_EQ(page_file_open(pf, 0), 0);
+
+    page_superblock_t sb;
+    uint64_t slot = 999;
+    ASSERT_EQ(page_file_read_superblock(pf, &sb, &slot), 0)
+        << "old-format superblock should be readable via fallback";
+    EXPECT_EQ(sb.revision, 5ull);
+    EXPECT_EQ(sb.root_offset, 4096ull);
+    EXPECT_EQ(sb.stale_region_offset, 0ull)
+        << "old-format should report no persisted stale regions";
+    EXPECT_EQ(sb.stale_region_size, 0ull);
+    EXPECT_EQ(slot, 0ull);
 
     page_file_destroy(pf);
 }
