@@ -88,4 +88,41 @@ describe('Vacuum', function () {
       assert.strictEqual(v, `v5_${i}`, `key k/${i} should be v5_${i} after vacuum, got ${v}`);
     }
   });
+
+  it('vacuumStatus returns sensible fields', () => {
+    db = new WaveDB(dbDir, {
+      enablePersist: true,
+      syncOnly: true,
+      vacuum: {
+        mode: 'manual_only',
+        staleThreshold: 0.30,
+        minFileSizeBytes: 0,
+        minStaleBytes: 0,
+      },
+    });
+
+    // Fresh DB — staleRatio is 0, no vacuum in progress, no cursors.
+    const s0 = db.vacuumStatus();
+    assert.strictEqual(typeof s0, 'object', 'vacuumStatus must return an object');
+    assert.strictEqual(typeof s0.staleRatio, 'number');
+    assert.strictEqual(typeof s0.wouldTrigger, 'boolean');
+    assert.strictEqual(s0.vacuumInProgress, false);
+    assert.strictEqual(s0.openCursorCount, 0);
+
+    // Write + overwrite to generate stale bytes.
+    const N = 100;
+    for (let i = 0; i < N; i++) db.putSync(`k/${i}`, `v0_${i}`);
+    db.flush();
+    for (let rep = 1; rep <= 5; rep++) {
+      for (let i = 0; i < N; i++) db.putSync(`k/${i}`, `v${rep}_${i}`);
+      db.flush();
+    }
+
+    const s1 = db.vacuumStatus();
+    assert.ok(s1.staleBytes > 0, `staleBytes should be > 0 after overwrites: ${s1.staleBytes}`);
+    assert.ok(s1.staleRatio > 0.0, `staleRatio should be > 0: ${s1.staleRatio}`);
+    assert.ok(s1.fileSize > 0, `fileSize should be > 0: ${s1.fileSize}`);
+    assert.strictEqual(s1.vacuumInProgress, false);
+    assert.strictEqual(s1.openCursorCount, 0);
+  });
 });

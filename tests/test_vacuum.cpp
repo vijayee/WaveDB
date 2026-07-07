@@ -653,3 +653,46 @@ TEST_F(VacuumTest, VacuumShrinksAfterReopen) {
     EXPECT_EQ(readable_after_vacuum, N)
         << "all " << N << " keys should be readable after vacuum+reopen";
 }
+
+TEST_F(VacuumTest, VacuumStatusReportsState) {
+    vacuum_status_t st;
+    ASSERT_EQ(database_vacuum_status(db, &st), 0);
+    EXPECT_EQ(st.open_cursor_count, 0u);
+    EXPECT_EQ(st.vacuum_in_progress, 0u);
+    EXPECT_GE(st.file_size, 0u);
+    EXPECT_DOUBLE_EQ(st.stale_ratio, 0.0);
+
+    // Write some keys
+    const int N = 100;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    database_flush_dirty_bnodes(db);
+
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        EXPECT_DOUBLE_EQ(s2.stale_ratio, 0.0);
+        EXPECT_EQ(s2.would_trigger, 0u) << "fresh load should not trigger";
+    }
+
+    // Overwrite to grow stale
+    for (int rep = 0; rep < 10; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        database_flush_dirty_bnodes(db);
+    }
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        EXPECT_GT(s2.stale_bytes, 0u);
+        EXPECT_GT(s2.stale_ratio, 0.0);
+    }
+
+    // Open cursor — count should reflect
+    database_iterator_t* it = database_scan_start(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        EXPECT_EQ(s2.open_cursor_count, 1u);
+    }
+    database_scan_end(it);
+}

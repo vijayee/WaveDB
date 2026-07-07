@@ -48,6 +48,7 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("createReadStream", &WaveDB::CreateReadStream),
     InstanceMethod("close", &WaveDB::Close),
     InstanceMethod("vacuum", &WaveDB::Vacuum),
+    InstanceMethod("vacuumStatus", &WaveDB::VacuumStatus),
     InstanceMethod("flush", &WaveDB::Flush),
     InstanceMethod("openSubtree", &WaveDB::OpenSubtree),
     InstanceMethod("deleteSubtree", &WaveDB::DeleteSubtree),
@@ -1599,6 +1600,33 @@ Napi::Value WaveDB::Flush(const Napi::CallbackInfo& info) {
         .ThrowAsJavaScriptException();
   }
   return env.Undefined();
+}
+
+Napi::Value WaveDB::VacuumStatus(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  vacuum_status_t st;
+  int rc = database_vacuum_status(db_, &st);
+  if (rc != 0) {
+    Napi::Error::New(env, "vacuum_status failed")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Object obj = Napi::Object::New(env);
+  obj.Set("fileSize", Napi::Number::New(env, (double)st.file_size));
+  obj.Set("staleBytes", Napi::Number::New(env, (double)st.stale_bytes));
+  obj.Set("staleRatio", Napi::Number::New(env, st.stale_ratio));
+  obj.Set("vacuumInProgress", Napi::Boolean::New(env, st.vacuum_in_progress != 0));
+  obj.Set("openCursorCount", Napi::Number::New(env, (double)st.open_cursor_count));
+  obj.Set("wouldTrigger", Napi::Boolean::New(env, st.would_trigger != 0));
+  return obj;
 }
 
 Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {

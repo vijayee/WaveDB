@@ -976,6 +976,21 @@ class WaveDB implements Finalizable {
     return rc;
   }
 
+  /// Inspect vacuum state — same signals the auto-triggers evaluate.
+  ///
+  /// Returns a [VacuumStatus] snapshot with file_size, stale_bytes,
+  /// stale_ratio, vacuum_in_progress, open_cursor_count, and would_trigger.
+  /// Useful in MANUAL_ONLY mode where the caller polls and decides when to
+  /// call [vacuum]. Throws [WaveDBException] on error.
+  VacuumStatus vacuumStatus() {
+    _checkClosed();
+    final s = WaveDBNative.databaseVacuumStatus(_db!);
+    if (s == null) {
+      throw WaveDBException.ioError('vacuumStatus', 'return code: -1');
+    }
+    return s;
+  }
+
   // ============================================================
   // LIFECYCLE
   // ============================================================

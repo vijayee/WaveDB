@@ -115,4 +115,37 @@ void main() {
       } catch (_) {}
     }
   });
+
+  test('vacuumStatus returns sensible fields', () {
+    // Fresh DB: no cursors, no vacuum in progress, staleRatio 0.0.
+    final s0 = db.vacuumStatus();
+    expect(s0, isNotNull);
+    expect(s0.vacuumInProgress, isFalse);
+    expect(s0.openCursorCount, 0);
+    expect(s0.staleRatio, isA<double>());
+    expect(s0.wouldTrigger, isA<bool>());
+    expect(s0.fileSize, greaterThanOrEqualTo(0));
+
+    // Write + overwrite to generate stale bytes.
+    final big = List<String>.generate(100, (i) => 'v0_${'x' * 256}_$i');
+    for (var i = 0; i < 100; i++) {
+      db.putSync('k/$i', big[i]);
+    }
+    db.flush();
+    for (var rep = 1; rep <= 5; rep++) {
+      for (var i = 0; i < 100; i++) {
+        db.putSync('k/$i', 'v${rep}_${'x' * 256}_$i');
+      }
+      db.flush();
+    }
+
+    final s1 = db.vacuumStatus();
+    expect(s1.staleBytes, greaterThan(0),
+        reason: 'staleBytes should be > 0 after overwrites');
+    expect(s1.staleRatio, greaterThan(0.0),
+        reason: 'staleRatio should be > 0 after overwrites');
+    expect(s1.fileSize, greaterThan(0));
+    expect(s1.vacuumInProgress, isFalse);
+    expect(s1.openCursorCount, 0);
+  });
 }

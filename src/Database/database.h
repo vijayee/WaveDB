@@ -405,6 +405,25 @@ int database_vacuum(database_t* db);
  */
 int database_vacuum_auto(database_t* db);
 
+/**
+ * Vacuum introspection: snapshot of the same signals the auto-triggers use.
+ * Lets MANUAL_ONLY users poll and decide when to call database_vacuum().
+ *
+ * @param db  Database handle
+ * @param out Pointer to a vacuum_status_t filled in by this call
+ * @return 0 on success, -1 on invalid args
+ */
+typedef struct {
+    uint64_t file_size;          // current page file size in bytes
+    uint64_t stale_bytes;         // total stale region bytes
+    double   stale_ratio;         // stale_bytes / file_size (0 if file_size==0)
+    uint8_t  vacuum_in_progress;  // 1 while a vacuum pass is running
+    uint32_t open_cursor_count;   // currently-open cursors (blocks vacuum)
+    uint8_t  would_trigger;       // 1 if auto-trigger predicate is satisfied
+} vacuum_status_t;
+
+int database_vacuum_status(database_t* db, vacuum_status_t* out);
+
 #ifdef __cplusplus
 }
 #endif

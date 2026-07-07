@@ -48,6 +48,7 @@ private:
 
   // Vacuum / compaction
   Napi::Value Vacuum(const Napi::CallbackInfo& info);
+  Napi::Value VacuumStatus(const Napi::CallbackInfo& info);
   Napi::Value Flush(const Napi::CallbackInfo& info);
 
   // Subtree

@@ -117,3 +117,46 @@ def test_default_vacuum_config_strict_mode():
     assert cfg.mode == VacuumMode.strict
     assert cfg.stale_threshold > 0
     assert cfg.min_file_size_bytes > 0
+
+
+def test_vacuum_status_fields(vac_dir):
+    """vacuum_status() exposes file_size, stale_bytes, stale_ratio,
+    vacuum_in_progress, open_cursor_count, and would_trigger — the same
+    signals the auto-triggers evaluate."""
+    db = WaveDB(
+        vac_dir,
+        config=WaveDBConfig(sync_only=True),
+        vacuum_config=VacuumConfig(
+            mode=VacuumMode.manual_only,
+            min_file_size_bytes=0,
+            min_stale_bytes=0,
+        ),
+    )
+    try:
+        # Fresh DB: no stale bytes, no cursors, no vacuum in progress.
+        s = db.vacuum_status()
+        assert isinstance(s, dict)
+        assert isinstance(s['stale_ratio'], float)
+        assert isinstance(s['would_trigger'], bool)
+        assert s['vacuum_in_progress'] is False
+        assert s['open_cursor_count'] == 0
+        assert s['stale_bytes'] == 0
+        assert s['stale_ratio'] == 0.0
+
+        # Write + overwrite to grow stale.
+        for i in range(100):
+            db.put_sync(f"k/{i}", b"v0")
+        db.flush()
+        for rep in range(1, 6):
+            for i in range(100):
+                db.put_sync(f"k/{i}", f"v{rep}".encode())
+            db.flush()
+
+        s2 = db.vacuum_status()
+        assert s2['stale_bytes'] > 0, f"stale_bytes should be > 0: {s2}"
+        assert s2['stale_ratio'] > 0.0
+        assert s2['file_size'] > 0
+        assert s2['vacuum_in_progress'] is False
+        assert s2['open_cursor_count'] == 0
+    finally:
+        db.close()

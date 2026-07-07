@@ -105,6 +105,36 @@ typedef DatabaseVacuum = int Function(Pointer<database_t> db);
 typedef DatabaseFlushDirtyBnodesC = Int32 Function(Pointer<database_t> db);
 typedef DatabaseFlushDirtyBnodes = int Function(Pointer<database_t> db);
 
+/// C struct: vacuum_status_t (see src/Database/database.h).
+/// Layout: file_size(8) stale_bytes(8) stale_ratio(8) vacuum_in_progress(1)
+///         open_cursor_count(4) would_trigger(1)  — total 32 bytes with
+/// 8-byte alignment of the leading 8-byte fields, plus tail padding.
+final class VacuumStatusC extends Struct {
+  @Uint64()
+  external int fileSize;
+
+  @Uint64()
+  external int staleBytes;
+
+  @Double()
+  external double staleRatio;
+
+  @Uint8()
+  external int vacuumInProgress;
+
+  @Uint32()
+  external int openCursorCount;
+
+  @Uint8()
+  external int wouldTrigger;
+}
+
+/// C signature: int32_t database_vacuum_status(database_t* db, vacuum_status_t* out)
+typedef DatabaseVacuumStatusC = Int32 Function(
+    Pointer<database_t> db, Pointer<VacuumStatusC> out);
+typedef DatabaseVacuumStatus = int Function(
+    Pointer<database_t> db, Pointer<VacuumStatusC> out);
+
 // ============================================================
 // C TYPEDEFS - Encrypted Database Configuration
 // ============================================================
@@ -1396,6 +1426,8 @@ class WaveDBNative {
       .lookupFunction<DatabaseVacuumC, DatabaseVacuum>('database_vacuum');
   static late final DatabaseFlushDirtyBnodes _databaseFlushDirtyBnodes = WaveDBLibrary.load()
       .lookupFunction<DatabaseFlushDirtyBnodesC, DatabaseFlushDirtyBnodes>('database_flush_dirty_bnodes');
+  static late final DatabaseVacuumStatus _databaseVacuumStatus = WaveDBLibrary.load()
+      .lookupFunction<DatabaseVacuumStatusC, DatabaseVacuumStatus>('database_vacuum_status');
 
   static late final DatabaseCreateWithConfig _databaseCreateWithConfig = WaveDBLibrary.load()
       .lookupFunction<DatabaseCreateWithConfigC, DatabaseCreateWithConfig>('database_create_with_config');
@@ -3061,5 +3093,30 @@ class WaveDBNative {
   /// Returns 0 on success, <0 on error.
   static int databaseFlushDirtyBnodes(Pointer<database_t> db) {
     return _databaseFlushDirtyBnodes(db);
+  }
+
+  /// Inspect vacuum state: same signals the auto-triggers evaluate.
+  ///
+  /// Returns a [VacuumStatus] snapshot. Useful in MANUAL_ONLY mode where the
+  /// caller polls and decides when to call [databaseVacuum]. Returns null on
+  /// error (invalid args / null db).
+  static VacuumStatus? databaseVacuumStatus(Pointer<database_t> db) {
+    if (db == nullptr) return null;
+    final outPtr = calloc<VacuumStatusC>();
+    try {
+      final rc = _databaseVacuumStatus(db, outPtr);
+      if (rc != 0) return null;
+      final ref = outPtr.ref;
+      return VacuumStatus(
+        fileSize: ref.fileSize,
+        staleBytes: ref.staleBytes,
+        staleRatio: ref.staleRatio,
+        vacuumInProgress: ref.vacuumInProgress != 0,
+        openCursorCount: ref.openCursorCount,
+        wouldTrigger: ref.wouldTrigger != 0,
+      );
+    } finally {
+      calloc.free(outPtr);
+    }
   }
 }

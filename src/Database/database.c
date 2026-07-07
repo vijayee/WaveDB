@@ -2509,6 +2509,30 @@ int database_vacuum_auto(database_t* db) {
     return rc;
 }
 
+int database_vacuum_status(database_t* db, vacuum_status_t* out) {
+    if (db == NULL || out == NULL) return -1;
+    memset(out, 0, sizeof(*out));
+
+    if (db->page_file != NULL) {
+        out->file_size = page_file_size(db->page_file);
+        out->stale_bytes = stale_region_total(db->page_file->stale_mgr);
+        out->stale_ratio = out->file_size > 0
+            ? (double)out->stale_bytes / (double)out->file_size : 0.0;
+    }
+    out->vacuum_in_progress = (uint8_t)atomic_load(&db->vacuum_in_progress);
+    out->open_cursor_count = (uint32_t)atomic_load(&db->open_cursor_count);
+
+    // would_trigger = same predicate used by snapshot/background triggers
+    if (db->active_config != NULL) {
+        vacuum_config_t* vc = &db->active_config->vacuum_config;
+        out->would_trigger =
+            (out->stale_ratio >= vc->stale_threshold &&
+             out->file_size >= vc->min_file_size_bytes &&
+             out->stale_bytes >= vc->min_stale_bytes) ? 1 : 0;
+    }
+    return 0;
+}
+
 // ============================================================================
 // Synchronous API Implementation
 // ============================================================================

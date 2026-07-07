@@ -681,6 +681,31 @@ class WaveDB {
   }
 
   /**
+   * Inspect vacuum state: same signals the auto-triggers evaluate.
+   *
+   * Returns an object with:
+   *   - fileSize         (number, bytes)
+   *   - staleBytes       (number, bytes)
+   *   - staleRatio       (number, 0..1)
+   *   - vacuumInProgress (boolean)
+   *   - openCursorCount  (number)
+   *   - wouldTrigger     (boolean — true if the auto-trigger predicate is met)
+   *
+   * Useful for MANUAL_ONLY mode where the caller polls and decides when to
+   * call vacuum(). Throws on error.
+   */
+  vacuumStatus() {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
+    try {
+      return this._db.vacuumStatus();
+    } catch (err) {
+      throw convertError(err);
+    }
+  }
+
+  /**
    * Close the database
    */
   close() {

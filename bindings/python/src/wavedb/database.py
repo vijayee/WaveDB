@@ -266,6 +266,36 @@ class WaveDB:
         self._check_open()
         return lib.database_vacuum(self._db)
 
+    def vacuum_status(self) -> dict:
+        """Inspect vacuum state: same signals the auto-triggers evaluate.
+
+        Returns a dict with:
+          - ``file_size``          (int, bytes)
+          - ``stale_bytes``        (int, bytes)
+          - ``stale_ratio``        (float, 0..1)
+          - ``vacuum_in_progress`` (bool)
+          - ``open_cursor_count``  (int)
+          - ``would_trigger``      (bool — True if the auto-trigger predicate
+            is satisfied: stale_ratio >= stale_threshold AND
+            file_size >= min_file_size_bytes AND stale_bytes >= min_stale_bytes)
+
+        Useful in ``VacuumMode.manual_only`` mode where the caller polls and
+        decides when to call `vacuum()`. Raises `RuntimeError` on error.
+        """
+        self._check_open()
+        st = ffi.new("vacuum_status_t*")
+        rc = lib.database_vacuum_status(self._db, st)
+        if rc != 0:
+            raise RuntimeError("vacuum_status failed")
+        return {
+            'file_size': st.file_size,
+            'stale_bytes': st.stale_bytes,
+            'stale_ratio': st.stale_ratio,
+            'vacuum_in_progress': bool(st.vacuum_in_progress),
+            'open_cursor_count': st.open_cursor_count,
+            'would_trigger': bool(st.would_trigger),
+        }
+
     def _build_raw_ops(self, ops: list[dict]) -> "tuple[Any, list[bytes]]":
         """Build a raw_op_t array from a list of op dicts.
 

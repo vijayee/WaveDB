@@ -138,6 +138,48 @@ class VacuumConfig {
   });
 }
 
+/// Vacuum introspection snapshot — same signals the auto-triggers evaluate.
+///
+/// Maps to vacuum_status_t in C. Returned by [WaveDB.vacuumStatus]. Useful
+/// in MANUAL_ONLY mode where the caller polls and decides when to call
+/// [WaveDB.vacuum].
+class VacuumStatus {
+  /// Current page file size in bytes.
+  final int fileSize;
+
+  /// Total stale region bytes in the page file.
+  final int staleBytes;
+
+  /// stale_bytes / file_size (0.0 if file_size == 0).
+  final double staleRatio;
+
+  /// True while a vacuum pass is running.
+  final bool vacuumInProgress;
+
+  /// Number of currently-open cursors (vacuum blocks if > 0).
+  final int openCursorCount;
+
+  /// True if the auto-trigger predicate is satisfied
+  /// (stale_ratio >= stale_threshold AND file_size >= min_file_size_bytes
+  /// AND stale_bytes >= min_stale_bytes).
+  final bool wouldTrigger;
+
+  const VacuumStatus({
+    required this.fileSize,
+    required this.staleBytes,
+    required this.staleRatio,
+    required this.vacuumInProgress,
+    required this.openCursorCount,
+    required this.wouldTrigger,
+  });
+
+  @override
+  String toString() =>
+      'VacuumStatus(fileSize=$fileSize, staleBytes=$staleBytes, '
+      'staleRatio=$staleRatio, vacuumInProgress=$vacuumInProgress, '
+      'openCursorCount=$openCursorCount, wouldTrigger=$wouldTrigger)';
+}
+
 /// Buffer structure for raw data
 /// Maps to buffer_t in C
 ///

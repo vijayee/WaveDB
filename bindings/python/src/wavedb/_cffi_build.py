@@ -124,9 +124,20 @@ void database_config_set_vacuum_writer_block_timeout_ms(database_config_t*, uint
 void database_config_set_vacuum_adaptive_busy_threshold(database_config_t*, uint32_t);
 
 /* Page-file compaction. flush() writes dirty bnodes to disk (a precondition
-   for vacuum); vacuum() rewrites the page file without stale regions. */
+   for vacuum); vacuum() rewrites the page file without stale regions.
+   database_vacuum_status exposes the same signals the auto-triggers use. */
+typedef struct {
+    uint64_t file_size;
+    uint64_t stale_bytes;
+    double   stale_ratio;
+    uint8_t  vacuum_in_progress;
+    uint32_t open_cursor_count;
+    uint8_t  would_trigger;
+} vacuum_status_t;
+
 int database_flush_dirty_bnodes(database_t* db);
 int database_vacuum(database_t* db);
+int database_vacuum_status(database_t* db, vacuum_status_t* out);
 
 encrypted_database_config_t* encrypted_database_config_default(void);
 void encrypted_database_config_destroy(encrypted_database_config_t*);
