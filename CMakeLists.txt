@@ -356,6 +356,11 @@ if(BUILD_TESTS)
     add_executable(benchmark_database_quick tests/benchmark_database_quick.cpp)
     target_link_libraries(benchmark_database_quick wavedb gtest gtest_main Threads::Threads)
 
+    # Vacuum performance microbenchmark (initial load, overwrite passes,
+    # vacuum time + shrinkage, post-vacuum write throughput)
+    add_executable(benchmark_vacuum benchmarks/benchmark_vacuum.cpp)
+    target_link_libraries(benchmark_vacuum wavedb Threads::Threads)
+
     # Test for GraphQL lexer
     add_executable(test_graphql_lexer tests/test_graphql_lexer.cpp)
     target_link_libraries(test_graphql_lexer wavedb gtest gtest_main)
