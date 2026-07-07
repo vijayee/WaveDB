@@ -331,7 +331,12 @@ TEST(DatabaseConfigTest, VacuumConfigPersists) {
     database_config_destroy(loaded);
 
     // cleanup
-    std::string cmd = "rm -rf " + dir;
+    std::string cmd;
+#if _WIN32
+    cmd = "rmdir /s /q " + dir;
+#else
+    cmd = "rm -rf " + dir;
+#endif
     system(cmd.c_str());
 }
 
