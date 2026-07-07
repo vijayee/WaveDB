@@ -160,6 +160,20 @@ void page_file_destroy(page_file_t* pf) {
 int page_file_open(page_file_t* pf, uint8_t writable) {
     if (pf == NULL) return -1;
 
+    // Cleanup any orphan vacuum.tmp from a previous crashed vacuum.
+    // Done first, before any other work — the tmp file is leftover from a
+    // vacuum that crashed mid-rewrite and must be removed before we touch
+    // the data file again.
+    if (pf->path != NULL) {
+        size_t plen = strlen(pf->path);
+        char* tmp_path = get_clear_memory(plen + 12);  // ".vacuum.tmp" + NUL
+        memcpy(tmp_path, pf->path, plen);
+        memcpy(tmp_path + plen, ".vacuum.tmp", 11);
+        tmp_path[plen + 11] = '\0';
+        unlink(tmp_path);  // ignore errors (ENOENT is fine)
+        free(tmp_path);
+    }
+
     if (pf->fd >= 0) {
         // Already open, close the old fd first
         close(pf->fd);

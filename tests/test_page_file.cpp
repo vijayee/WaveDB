@@ -493,3 +493,35 @@ TEST_F(PageFileTest, OldFormatSuperblockStillReadable) {
 
     page_file_destroy(pf);
 }
+
+// 13. Orphan *.vacuum.tmp from a crashed vacuum is cleaned up on open.
+TEST_F(PageFileTest, VacuumTmpCleanedUpOnOpen) {
+    char path[512];
+    make_path(path, sizeof(path), "data.wdbp");
+
+    page_file_t* pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_EQ(page_file_open(pf, 1), 0);
+
+    // Create a fake orphan vacuum.tmp alongside
+    char tmp_path[512];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.vacuum.tmp", path);
+    FILE* f = fopen(tmp_path, "wb");
+    ASSERT_NE(f, nullptr);
+    fwrite("garbage", 1, 7, f);
+    fclose(f);
+
+    // Verify tmp exists
+    struct stat st;
+    ASSERT_EQ(stat(tmp_path, &st), 0);
+
+    page_file_destroy(pf);
+
+    // Reopen — should delete the orphan tmp
+    pf = page_file_create(path, 4096, 2, NULL);
+    ASSERT_EQ(page_file_open(pf, 1), 0);
+
+    EXPECT_NE(stat(tmp_path, &st), 0)
+        << "vacuum.tmp should have been deleted on open";
+
+    page_file_destroy(pf);
+}
