@@ -130,7 +130,26 @@ The vacuum must not run while a reader can dereference an old `disk_offset`. The
 
 For `sync_only` mode: no work pool, no tx_manager, no concurrent readers. Steps 1-4 collapse; vacuum is effectively single-threaded.
 
-### Stale region persistence
+### Introspection API
+
+In `MANUAL_ONLY` mode, the user has no way to know when to call `database_vacuum()` without the same signals the auto-triggers use. Expose them via a single status call:
+
+```c
+typedef struct {
+    uint64_t file_size;            // current page file size in bytes
+    uint64_t stale_bytes;           // total stale bytes tracked
+    double   stale_ratio;           // stale_bytes / file_size (0.0-1.0)
+    uint8_t  vacuum_in_progress;    // 1 if a vacuum is currently running
+    uint32_t open_cursor_count;    // number of open cursors (blocks vacuum if > 0)
+    uint8_t  would_trigger;         // 1 if stale_ratio >= stale_threshold AND file_size >= min_file_size_bytes AND stale_bytes >= min_stale_bytes
+} vacuum_status_t;
+
+int database_vacuum_status(database_t* db, vacuum_status_t* out);
+```
+
+`would_trigger` is the same boolean the snapshot threshold and background worker evaluate; users in MANUAL_ONLY mode can poll `database_vacuum_status()` and call `database_vacuum()` when `would_trigger == 1`.
+
+Exposed in all three bindings as `vacuumStatus()` returning an object with the same fields.
 
 Currently `stale_region_serialize` / `stale_region_deserialize` are dead code — the stale mgr is in-memory only and resets to empty on every reopen. Fix as part of this work:
 

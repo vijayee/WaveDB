@@ -3134,6 +3134,309 @@ git commit -m "docs: mark mechanism 2 (overwrite CoW bloat) as fixed in 0.1.15"
 
 ---
 
+## Task 23: Vacuum introspection API (`database_vacuum_status`)
+
+**Files:**
+- Modify: `src/Database/database.h` (declare `vacuum_status_t`, `database_vacuum_status`)
+- Modify: `src/Database/database.c` (implement)
+- Modify: `bindings/nodejs/src/database.cc`
+- Modify: `bindings/dart/lib/src/native/types.dart`
+- Modify: `bindings/dart/lib/src/native/wavedb_bindings.dart`
+- Modify: `bindings/python/src/wavedb/database.py`
+- Modify: `bindings/python/src/wavedb/_cffi_build.py`
+- Test: `tests/test_vacuum.cpp`, `bindings/nodejs/tests/test_vacuum.js`, `bindings/dart/test/vacuum_test.dart`, `bindings/python/tests/test_vacuum.py`
+
+- [ ] **Step 1: Write the failing C test**
+
+Append to `tests/test_vacuum.cpp`:
+
+```cpp
+TEST_F(VacuumTest, VacuumStatusReportsState) {
+    // Empty DB — no stale, no cursors
+    vacuum_status_t st;
+    ASSERT_EQ(database_vacuum_status(db, &st), 0);
+    EXPECT_EQ(st.open_cursor_count, 0u);
+    EXPECT_EQ(st.vacuum_in_progress, 0u);
+    EXPECT_GE(st.file_size, 0u);
+    EXPECT_DOUBLE_EQ(st.stale_ratio, 0.0);
+
+    // Write some keys
+    const int N = 100;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    uint64_t after_init = 0;
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        after_init = s2.file_size;
+        EXPECT_DOUBLE_EQ(s2.stale_ratio, 0.0);
+        EXPECT_EQ(s2.would_trigger, 0u) << "fresh load should not trigger";
+    }
+
+    // Overwrite to grow stale
+    for (int rep = 0; rep < 10; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+    }
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        EXPECT_GT(s2.stale_bytes, 0u);
+        EXPECT_GT(s2.stale_ratio, 0.0);
+        // would_trigger depends on min_file_size_bytes/min_stale_bytes defaults (64MB / 16MB)
+        // — for this small test, won't trigger. Just verify the field is present.
+    }
+
+    // Open cursor — count should reflect
+    database_iterator_t* it = database_iterator_create(db);
+    ASSERT_NE(it, nullptr);
+    {
+        vacuum_status_t s2;
+        ASSERT_EQ(database_vacuum_status(db, &s2), 0);
+        EXPECT_EQ(s2.open_cursor_count, 1u);
+    }
+    database_iterator_destroy(it);
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd build && cmake --build . -j$(nproc) && ctest --output-on-failure -R VacuumTest.VacuumStatusReportsState`
+Expected: FAIL — `vacuum_status_t` and `database_vacuum_status` not declared.
+
+- [ ] **Step 3: Implement the C API**
+
+In `src/Database/database.h`, add (near `database_vacuum`):
+
+```c
+typedef struct {
+    uint64_t file_size;
+    uint64_t stale_bytes;
+    double   stale_ratio;
+    uint8_t  vacuum_in_progress;
+    uint32_t open_cursor_count;
+    uint8_t  would_trigger;
+} vacuum_status_t;
+
+int database_vacuum_status(database_t* db, vacuum_status_t* out);
+```
+
+In `src/Database/database.c`, add:
+
+```c
+int database_vacuum_status(database_t* db, vacuum_status_t* out) {
+    if (db == NULL || out == NULL) return -1;
+    memset(out, 0, sizeof(*out));
+
+    if (db->page_file != NULL) {
+        out->file_size = page_file_size(db->page_file);
+        out->stale_bytes = stale_region_total(db->page_file->stale_mgr);
+        out->stale_ratio = out->file_size > 0
+            ? (double)out->stale_bytes / (double)out->file_size : 0.0;
+    }
+    out->vacuum_in_progress = (uint8_t)atomic_load(&db->vacuum_in_progress);
+    out->open_cursor_count = (uint32_t)atomic_load(&db->open_cursor_count);
+
+    // would_trigger = same predicate used by snapshot/background triggers
+    vacuum_config_t* vc = &db->config.vacuum_config;
+    out->would_trigger =
+        (out->stale_ratio >= vc->stale_threshold &&
+         out->file_size >= vc->min_file_size_bytes &&
+         out->stale_bytes >= vc->min_stale_bytes) ? 1 : 0;
+
+    return 0;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd build && cmake --build . -j$(nproc) && ctest --output-on-failure -R VacuumTest.VacuumStatusReportsState`
+Expected: PASS.
+
+- [ ] **Step 5: Add Node.js binding**
+
+In `bindings/nodejs/src/database.cc`, add a method:
+
+```cpp
+Napi::Value Database::VacuumStatus(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  vacuum_status_t st;
+  int rc = database_vacuum_status(this->db_, &st);
+  if (rc != 0) {
+    Napi::Error::New(env, "vacuum_status failed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  Napi::Object obj = Napi::Object::New(env);
+  obj.Set("fileSize", Napi::Number::New(env, (double)st.file_size));
+  obj.Set("staleBytes", Napi::Number::New(env, (double)st.stale_bytes));
+  obj.Set("staleRatio", Napi::Number::New(env, st.stale_ratio));
+  obj.Set("vacuumInProgress", Napi::Boolean::New(env, st.vacuum_in_progress != 0));
+  obj.Set("openCursorCount", Napi::Number::New(env, st.open_cursor_count));
+  obj.Set("wouldTrigger", Napi::Boolean::New(env, st.would_trigger != 0));
+  return obj;
+}
+```
+
+Register it in `Init`:
+
+```cpp
+Napi::InstanceMethod("vacuumStatus", &Database::VacuumStatus),
+```
+
+Append to `bindings/nodejs/tests/test_vacuum.js`:
+
+```js
+const status = db.vacuumStatus();
+assert.ok(typeof status === 'object');
+assert.ok(typeof status.staleRatio === 'number');
+assert.ok(typeof status.wouldTrigger === 'boolean');
+assert.equal(status.vacuumInProgress, false);
+assert.equal(status.openCursorCount, 0);
+```
+
+- [ ] **Step 6: Add Dart binding**
+
+In `bindings/dart/lib/src/native/types.dart`:
+
+```dart
+class VacuumStatus {
+  final int fileSize;
+  final int staleBytes;
+  final double staleRatio;
+  final bool vacuumInProgress;
+  final int openCursorCount;
+  final bool wouldTrigger;
+
+  VacuumStatus({
+    required this.fileSize,
+    required this.staleBytes,
+    required this.staleRatio,
+    required this.vacuumInProgress,
+    required this.openCursorCount,
+    required this.wouldTrigger,
+  });
+}
+```
+
+In `bindings/dart/lib/src/native/wavedb_bindings.dart`, add a `vacuumStatus()` method to `WaveDB`:
+
+```dart
+VacuumStatus vacuumStatus() {
+  final ptr = calloc<vacuum_status_t>();
+  final rc = _bindings.database_vacuum_status(_dbPtr, ptr);
+  if (rc != 0) {
+    calloc.free(ptr);
+    throw Exception('vacuum_status failed');
+  }
+  final s = ptr.ref;
+  final status = VacuumStatus(
+    fileSize: s.file_size,
+    staleBytes: s.stale_bytes,
+    staleRatio: s.stale_ratio,
+    vacuumInProgress: s.vacuum_in_progress != 0,
+    openCursorCount: s.open_cursor_count,
+    wouldTrigger: s.would_trigger != 0,
+  );
+  calloc.free(ptr);
+  return status;
+}
+```
+
+(Match the actual ffi struct binding pattern — read the existing `DatabaseConfig` usage in `wavedb_bindings.dart` first to mirror field-access style.)
+
+Add to `bindings/dart/test/vacuum_test.dart`:
+
+```dart
+test('vacuumStatus returns sensible fields', () {
+  final s = db.vacuumStatus();
+  expect(s.vacuumInProgress, isFalse);
+  expect(s.openCursorCount, 0);
+  expect(s.staleRatio, isA<double>());
+  expect(s.wouldTrigger, isA<bool>());
+});
+```
+
+- [ ] **Step 7: Add Python binding**
+
+In `bindings/python/src/wavedb/database.py`, add to `WaveDB`:
+
+```python
+    def vacuum_status(self) -> dict:
+        st = self._lib.vacuum_status_t()
+        rc = self._lib.database_vacuum_status(self._db, st)
+        if rc != 0:
+            raise RuntimeError("vacuum_status failed")
+        return {
+            'file_size': st.file_size,
+            'stale_bytes': st.stale_bytes,
+            'stale_ratio': st.stale_ratio,
+            'vacuum_in_progress': bool(st.vacuum_in_progress),
+            'open_cursor_count': st.open_cursor_count,
+            'would_trigger': bool(st.would_trigger),
+        }
+```
+
+In `bindings/python/src/wavedb/_cffi_build.py`, add to the cdef block:
+
+```c
+typedef struct {
+    uint64_t file_size;
+    uint64_t stale_bytes;
+    double   stale_ratio;
+    uint8_t  vacuum_in_progress;
+    uint32_t open_cursor_count;
+    uint8_t  would_trigger;
+} vacuum_status_t;
+
+int database_vacuum_status(database_t* db, vacuum_status_t* out);
+```
+
+Add to `bindings/python/tests/test_vacuum.py`:
+
+```python
+def test_vacuum_status_fields():
+    tmpdir = tempfile.mkdtemp(prefix='wavedb_py_status_')
+    db_path = os.path.join(tmpdir, 'data.wdbp')
+    db = WaveDB(db_path, vacuum_config=VacuumConfig(
+        mode=VacuumMode.manual_only,
+        min_file_size_bytes=0,
+        min_stale_bytes=0,
+    ))
+    s = db.vacuum_status()
+    assert isinstance(s['stale_ratio'], float)
+    assert isinstance(s['would_trigger'], bool)
+    assert s['vacuum_in_progress'] is False
+    assert s['open_cursor_count'] == 0
+    db.close()
+    import shutil; shutil.rmtree(tmpdir)
+```
+
+- [ ] **Step 8: Run binding tests**
+
+Run: `cd bindings/nodejs && npm test -- test_vacuum.js`
+Run: `cd bindings/dart && dart test test/vacuum_test.dart`
+Run: `cd bindings/python && pytest tests/test_vacuum.py -v`
+Expected: all PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/Database/database.h src/Database/database.c \
+        bindings/nodejs/src/database.cc bindings/nodejs/tests/test_vacuum.js \
+        bindings/dart/lib/src/native/types.dart bindings/dart/lib/src/native/wavedb_bindings.dart \
+        bindings/dart/test/vacuum_test.dart \
+        bindings/python/src/wavedb/database.py bindings/python/src/wavedb/_cffi_build.py \
+        bindings/python/tests/test_vacuum.py \
+        tests/test_vacuum.cpp
+git commit -m "feat(database): add database_vacuum_status introspection API
+
+Adds vacuum_status_t and database_vacuum_status() exposing file_size,
+stale_bytes, stale_ratio, vacuum_in_progress, open_cursor_count, and
+would_trigger — the same predicate the snapshot/background triggers
+evaluate. Lets MANUAL_ONLY users poll and decide when to vacuum.
+Exposed in Node.js, Dart, and Python bindings as vacuumStatus()."
+```
+
+---
+
 ## Self-Review Notes (post-write)
 
 **Spec coverage check:**
@@ -3151,6 +3454,7 @@ git commit -m "docs: mark mechanism 2 (overwrite CoW bloat) as fixed in 0.1.15"
 - ✅ NUL-free scan after vacuum — Task 15
 - ✅ Reopen persistence end-to-end — Task 16
 - ✅ Bindings (all fields) — Tasks 17, 18, 19
+- ✅ Introspection API (`database_vacuum_status`) — Task 23
 - ✅ Performance benchmark — Task 20
 - ✅ Validation gates — Task 21
 - ✅ Docs update — Task 22
