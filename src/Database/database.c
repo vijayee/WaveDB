@@ -2382,6 +2382,25 @@ static int database_vacuum_run(database_t* db) {
             if (rc != 0) break;
         }
 
+        // Flush all dirty bnodes to the current page file before vacuuming.
+        // This ensures the in-memory trie is consistent with disk before
+        // the walk, and after the swap all bnodes are clean with new offsets.
+        // Without this, database_destroy → database_persist can hang because
+        // dirty bnodes' old offsets don't exist in the new file.
+        rc = database_flush_dirty_bnodes(db);
+        if (rc != 0) break;
+
+        // Write barrier: acquire all shard locks in order, then release.
+        // This waits for all in-flight puts to complete. New puts will
+        // block on vacuum_in_progress (checked before acquiring shard lock).
+        // The walk then proceeds without concurrent trie modifications.
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            spinlock_lock(&db->write_locks[i]);
+        }
+        for (int i = 0; i < WRITE_LOCK_SHARDS; i++) {
+            spinlock_unlock(&db->write_locks[i]);
+        }
+
         // Build tmp path: <page_file->path>.vacuum.tmp
         size_t plen = strlen(db->page_file->path);
         tmp_path = get_clear_memory(plen + 12);

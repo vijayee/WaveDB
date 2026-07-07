@@ -155,6 +155,17 @@ TEST_F(VacuumTest, BasicShrinksAfterOverwrite) {
     }
 }
 
+TEST_F(VacuumTest, VacuumWithoutPriorFlushDoesNotHangOnClose) {
+    // Put data WITHOUT flushing, then vacuum, then close.
+    // Before the fix: close hangs in database_persist.
+    // After the fix: vacuum auto-flushes, close completes.
+    const int N = 200;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    // NO database_flush_dirty_bnodes here — vacuum should handle it
+    ASSERT_EQ(database_vacuum(db), 0);
+    // Close should not hang (TearDown calls database_destroy)
+}
+
 // ============================================================================
 // Async-mode fixture: creates a real work pool + timing wheel + db in
 // non-sync_only mode. Verifies vacuum drains in-flight work before rewrite.
