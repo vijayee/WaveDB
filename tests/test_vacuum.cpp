@@ -16,13 +16,16 @@
 #include <chrono>
 #include <thread>
 #include <future>
+#include <atomic>
 #include <vector>
 #include <string>
 #include <cstdio>
 #include <sys/stat.h>
+#include <errno.h>
 extern "C" {
 #include "Database/database.h"
 #include "Database/database_config.h"
+#include "Database/database_iterator.h"
 #include "HBTrie/path.h"
 #include "HBTrie/identifier.h"
 #include "Buffer/buffer.h"
@@ -248,6 +251,54 @@ protected:
         return (uint64_t)st.st_size;
     }
 };
+
+TEST_F(VacuumTest, OpenCursorRefusesVacuum) {
+    // Write a key so a cursor has something to iterate
+    put("k1", "v1");
+
+    database_iterator_t* it = database_scan_start(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    // Manual vacuum should refuse with -EBUSY
+    int rc = database_vacuum(db);
+    EXPECT_EQ(rc, -EBUSY);
+
+    database_scan_end(it);
+
+    // Now vacuum should succeed
+    EXPECT_EQ(database_vacuum(db), 0);
+}
+
+TEST_F(VacuumTest, AutoVacuumWaitsForCursorClose) {
+    put("k1", "v1");
+    // Overwrite enough to grow the file (bypass gates via config in SetUp)
+    for (int rep = 0; rep < 20; rep++) put("k1", "v" + std::to_string(rep));
+
+    // Open cursor
+    database_iterator_t* it = database_scan_start(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::atomic<bool> vacuum_done(false);
+    std::atomic<int> vacuum_rc(-100);
+
+    // Launch auto-trigger vacuum in a thread
+    auto fut = std::async(std::launch::async, [&]() {
+        int rc = database_vacuum_auto(db);
+        vacuum_rc.store(rc);
+        vacuum_done.store(true);
+    });
+
+    // Wait a moment — vacuum should NOT have completed (cursor still open)
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_FALSE(vacuum_done.load()) << "vacuum should be waiting on cursor close";
+
+    // Close cursor — vacuum should fire within ~10ms (well before cursor_close_wait_ms=60s)
+    database_scan_end(it);
+
+    fut.wait_for(std::chrono::seconds(5));
+    EXPECT_TRUE(vacuum_done.load());
+    EXPECT_EQ(vacuum_rc.load(), 0);
+}
 
 TEST_F(VacuumAsyncTest, VacuumWithConcurrentWriter) {
     const int N = 200;

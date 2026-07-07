@@ -397,6 +397,13 @@ int database_flush_dirty_bnodes(database_t* db);
  */
 int database_vacuum(database_t* db);
 
+/**
+ * Auto-trigger vacuum (used by snapshot threshold + background worker).
+ * Returns 0 on success, -EBUSY if cursors don't close within
+ * vacuum_config.cursor_close_wait_ms, <0 on other errors.
+ */
+int database_vacuum_auto(database_t* db);
+
 #ifdef __cplusplus
 }
 #endif

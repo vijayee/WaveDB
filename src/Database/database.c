@@ -2145,34 +2145,9 @@ static int database_vacuum_drain(database_t* db, uint32_t timeout_ms) {
     return 0;
 }
 
-int database_vacuum(database_t* db) {
-    if (db == NULL) return -1;
-    // Nothing to vacuum if no page file (in-memory mode).
-    if (db->page_file == NULL) return 0;
-
-    // Manual trigger: refuse if cursors are open (Task 11 handles the
-    // cursor-close wait; here we just refuse).
-    if (atomic_load(&db->open_cursor_count) > 0) {
-        return -EBUSY;
-    }
-
-    // Min file size gate — too small to bother.
-    uint64_t fsz = page_file_size(db->page_file);
-    if (db->active_config != NULL &&
-        fsz < db->active_config->vacuum_config.min_file_size_bytes) {
-        return 0;
-    }
-
-    // Min stale bytes gate — not enough to reclaim.
-    uint64_t stale = stale_region_total(db->page_file->stale_mgr);
-    if (db->active_config != NULL &&
-        stale < db->active_config->vacuum_config.min_stale_bytes) {
-        return 0;
-    }
-
-    // Set vacuum_in_progress — writers will block from here.
-    atomic_store(&db->vacuum_in_progress, 1);
-
+// Shared core: assumes vacuum_in_progress is already set and cursors are
+// already checked/handled by the caller. Returns 0 on success, <0 on error.
+static int database_vacuum_run(database_t* db) {
     int rc = 0;
     char* tmp_path = NULL;
 
@@ -2180,7 +2155,7 @@ int database_vacuum(database_t* db) {
         // For sync_only: no work pool / no tx_manager to drain.
         // For non-sync_only: drain in-flight work with bounded timeout.
         // Abort with -EBUSY if drain times out (vacuum_in_progress is
-        // cleared by the do/while epilogue).
+        // cleared by the caller's epilogue).
         if (!db->sync_only) {
             uint32_t drain_timeout = 0;
             if (db->active_config != NULL) {
@@ -2218,12 +2193,101 @@ int database_vacuum(database_t* db) {
         unlink(tmp_path);
         free(tmp_path);
     }
+    return rc;
+}
 
-    // Resume writers.
+int database_vacuum(database_t* db) {
+    if (db == NULL) return -1;
+    // Nothing to vacuum if no page file (in-memory mode).
+    if (db->page_file == NULL) return 0;
+
+    // Manual trigger: refuse if cursors are open.
+    if (atomic_load(&db->open_cursor_count) > 0) {
+        return -EBUSY;
+    }
+
+    // Min file size gate — too small to bother.
+    uint64_t fsz = page_file_size(db->page_file);
+    if (db->active_config != NULL &&
+        fsz < db->active_config->vacuum_config.min_file_size_bytes) {
+        return 0;
+    }
+
+    // Min stale bytes gate — not enough to reclaim.
+    uint64_t stale = stale_region_total(db->page_file->stale_mgr);
+    if (db->active_config != NULL &&
+        stale < db->active_config->vacuum_config.min_stale_bytes) {
+        return 0;
+    }
+
+    // Set vacuum_in_progress — writers will block from here.
+    atomic_store(&db->vacuum_in_progress, 1);
+
+    int rc = database_vacuum_run(db);
+
+    // Resume writers and wake any new-cursor-creation waiters.
     atomic_store(&db->vacuum_in_progress, 0);
     platform_lock(&db->vacuum_writer_lock);
     platform_broadcast_condition(&db->vacuum_cvar);
     platform_unlock(&db->vacuum_writer_lock);
+    platform_lock(&db->cursor_count_mutex);
+    platform_broadcast_condition(&db->cursor_cvar);
+    platform_unlock(&db->cursor_count_mutex);
+
+    return rc;
+}
+
+int database_vacuum_auto(database_t* db) {
+    if (db == NULL) return -1;
+    // Nothing to vacuum if no page file (in-memory mode).
+    if (db->page_file == NULL) return 0;
+
+    // Min file size gate — too small to bother.
+    uint64_t fsz = page_file_size(db->page_file);
+    if (db->active_config != NULL &&
+        fsz < db->active_config->vacuum_config.min_file_size_bytes) {
+        return 0;
+    }
+
+    // Min stale bytes gate — not enough to reclaim.
+    uint64_t stale = stale_region_total(db->page_file->stale_mgr);
+    if (db->active_config != NULL &&
+        stale < db->active_config->vacuum_config.min_stale_bytes) {
+        return 0;
+    }
+
+    // Wait for cursors to close (wait-loop to handle races / spurious wakes).
+    uint32_t cursor_wait_ms = 60000;  // default
+    if (db->active_config != NULL) {
+        cursor_wait_ms = db->active_config->vacuum_config.cursor_close_wait_ms;
+    }
+
+    platform_lock(&db->cursor_count_mutex);
+    while (atomic_load(&db->open_cursor_count) > 0) {
+        int rc = platform_condition_timedwait(&db->cursor_count_mutex,
+                                               &db->cursor_cvar,
+                                               cursor_wait_ms);
+        if (rc != 0) {
+            // Timeout (ETIMEDOUT) or error — give up this tick.
+            platform_unlock(&db->cursor_count_mutex);
+            return -EBUSY;
+        }
+    }
+    // Hold the mutex while setting vacuum_in_progress to block new cursors
+    // before the race window reopens.
+    atomic_store(&db->vacuum_in_progress, 1);
+    platform_unlock(&db->cursor_count_mutex);
+
+    int rc = database_vacuum_run(db);
+
+    // Resume writers and wake any new-cursor-creation waiters.
+    atomic_store(&db->vacuum_in_progress, 0);
+    platform_lock(&db->vacuum_writer_lock);
+    platform_broadcast_condition(&db->vacuum_cvar);
+    platform_unlock(&db->vacuum_writer_lock);
+    platform_lock(&db->cursor_count_mutex);
+    platform_broadcast_condition(&db->cursor_cvar);
+    platform_unlock(&db->cursor_count_mutex);
 
     return rc;
 }

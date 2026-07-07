@@ -442,6 +442,16 @@ database_iterator_t* database_scan_start(database_t* db,
         return NULL;
     }
 
+    // Block new cursor creation while vacuum is in progress.
+    // This pairs with vacuum_auto's wait-loop: vacuum waits for open cursors
+    // to close, then sets vacuum_in_progress under cursor_count_mutex so new
+    // cursors block here until vacuum finishes.
+    platform_lock(&db->cursor_count_mutex);
+    while (atomic_load(&db->vacuum_in_progress) != 0) {
+        platform_condition_timedwait(&db->cursor_count_mutex, &db->cursor_cvar, 0);  // 0 = wait forever
+    }
+    platform_unlock(&db->cursor_count_mutex);
+
     database_iterator_t* iter = get_clear_memory(sizeof(database_iterator_t));
     if (iter == NULL) {
         return NULL;
