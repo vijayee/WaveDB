@@ -179,6 +179,21 @@ void database_config_set_timer_resolution_ms(database_config_t* config, uint16_t
 void database_config_set_sync_only(database_config_t* config, uint8_t sync_only);
 
 /**
+ * Vacuum configuration setters. Each sets the corresponding field on
+ * config->vacuum_config. NULL-safe.
+ */
+void database_config_set_vacuum_mode(database_config_t* config, uint8_t mode);
+void database_config_set_vacuum_stale_threshold(database_config_t* config, double threshold);
+void database_config_set_vacuum_min_file_size_bytes(database_config_t* config, uint64_t bytes);
+void database_config_set_vacuum_min_stale_bytes(database_config_t* config, uint64_t bytes);
+void database_config_set_vacuum_background_interval_ms(database_config_t* config, uint32_t ms);
+void database_config_set_vacuum_drain_timeout_ms(database_config_t* config, uint32_t ms);
+void database_config_set_vacuum_cursor_close_wait_ms(database_config_t* config, uint32_t ms);
+void database_config_set_vacuum_max_runtime_ms(database_config_t* config, uint32_t ms);
+void database_config_set_vacuum_writer_block_timeout_ms(database_config_t* config, uint32_t ms);
+void database_config_set_vacuum_adaptive_busy_threshold(database_config_t* config, uint32_t threshold);
+
+/**
  * Encrypted database configuration.
  *
  * Wraps database_config_t with encryption key material.

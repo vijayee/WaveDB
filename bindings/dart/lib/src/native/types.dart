@@ -65,6 +65,79 @@ enum WalSyncMode {
   const WalSyncMode(this.value);
 }
 
+/// Vacuum / compaction mode.
+/// Maps to vacuum_mode_t in C: VACUUM_MODE_MANUAL_ONLY=0,
+/// VACUUM_MODE_STRICT=1, VACUUM_MODE_ADAPTIVE=2.
+enum VacuumMode {
+  /// Background vacuum disabled; vacuum only runs when explicitly requested
+  /// via [WaveDB.vacuum].
+  manualOnly(0),
+  /// Auto-trigger vacuum when the configured stale thresholds are exceeded.
+  strict(1),
+  /// Like strict, but defers vacuum during periods of high write activity
+  /// (measured against [VacuumConfig.adaptiveBusyThreshold]).
+  adaptive(2);
+
+  final int value;
+  const VacuumMode(this.value);
+}
+
+/// Vacuum / compaction configuration.
+///
+/// Maps to vacuum_config_t in C. All fields default to the C defaults
+/// (see database_config_default in database_config.c). Pass to [WaveDB]
+/// via [WaveDBConfig.vacuumConfig].
+class VacuumConfig {
+  /// When to trigger vacuum passes.
+  final VacuumMode mode;
+
+  /// Fraction of the page file that must be stale before strict/adaptive
+  /// auto-vacuum fires (0.0–1.0). Default 0.30.
+  final double staleThreshold;
+
+  /// Minimum total page file size in bytes before auto-vacuum is considered.
+  /// Below this, the file is too small to be worth compacting. Default 64 MiB.
+  final int minFileSizeBytes;
+
+  /// Minimum stale bytes before auto-vacuum is considered. Default 16 MiB.
+  final int minStaleBytes;
+
+  /// Background vacuum interval in milliseconds (adaptive mode). Default 60000.
+  final int backgroundIntervalMs;
+
+  /// Time to wait for in-flight writes to drain before vacuum starts, in ms.
+  /// Default 5000.
+  final int drainTimeoutMs;
+
+  /// Time to wait for open cursors to close before vacuum gives up, in ms.
+  /// Default 60000.
+  final int cursorCloseWaitMs;
+
+  /// Maximum wall-clock runtime for a single vacuum pass, in ms. Default 30000.
+  final int maxRuntimeMs;
+
+  /// How long writers block waiting for vacuum to finish before failing the
+  /// write, in ms. 0 = block indefinitely. Default 0.
+  final int writerBlockTimeoutMs;
+
+  /// Adaptive-mode threshold above which vacuum is deferred due to busy
+  /// writers. Default 32.
+  final int adaptiveBusyThreshold;
+
+  const VacuumConfig({
+    this.mode = VacuumMode.strict,
+    this.staleThreshold = 0.30,
+    this.minFileSizeBytes = 64 * 1024 * 1024,
+    this.minStaleBytes = 16 * 1024 * 1024,
+    this.backgroundIntervalMs = 60000,
+    this.drainTimeoutMs = 5000,
+    this.cursorCloseWaitMs = 60000,
+    this.maxRuntimeMs = 30000,
+    this.writerBlockTimeoutMs = 0,
+    this.adaptiveBusyThreshold = 32,
+  });
+}
+
 /// Buffer structure for raw data
 /// Maps to buffer_t in C
 ///

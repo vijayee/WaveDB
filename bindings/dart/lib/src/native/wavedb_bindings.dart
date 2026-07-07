@@ -90,6 +90,20 @@ typedef _ConfigSetU64C = Void Function(Pointer<database_config_t>, Uint64);
 typedef _ConfigSetU64 = void Function(Pointer<database_config_t>, int);
 typedef _ConfigSetSizeC = Void Function(Pointer<database_config_t>, UintPtr);
 typedef _ConfigSetSize = void Function(Pointer<database_config_t>, int);
+typedef _ConfigSetDoubleC = Void Function(Pointer<database_config_t>, Double);
+typedef _ConfigSetDouble = void Function(Pointer<database_config_t>, double);
+
+// ============================================================
+// C TYPEDEFS - Vacuum Operations
+// ============================================================
+
+/// C signature: int32_t database_vacuum(database_t* db)
+typedef DatabaseVacuumC = Int32 Function(Pointer<database_t> db);
+typedef DatabaseVacuum = int Function(Pointer<database_t> db);
+
+/// C signature: int32_t database_flush_dirty_bnodes(database_t* db)
+typedef DatabaseFlushDirtyBnodesC = Int32 Function(Pointer<database_t> db);
+typedef DatabaseFlushDirtyBnodes = int Function(Pointer<database_t> db);
 
 // ============================================================
 // C TYPEDEFS - Encrypted Database Configuration
@@ -1355,6 +1369,34 @@ class WaveDBNative {
   static late final _ConfigSetU8 _configSetSyncOnly = WaveDBLibrary.load()
       .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_sync_only');
 
+  // Vacuum config setters
+  static late final _ConfigSetU8 _configSetVacuumMode = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU8C, _ConfigSetU8>('database_config_set_vacuum_mode');
+  static late final _ConfigSetDouble _configSetVacuumStaleThreshold = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetDoubleC, _ConfigSetDouble>('database_config_set_vacuum_stale_threshold');
+  static late final _ConfigSetU64 _configSetVacuumMinFileSizeBytes = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU64C, _ConfigSetU64>('database_config_set_vacuum_min_file_size_bytes');
+  static late final _ConfigSetU64 _configSetVacuumMinStaleBytes = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU64C, _ConfigSetU64>('database_config_set_vacuum_min_stale_bytes');
+  static late final _ConfigSetU32 _configSetVacuumBackgroundIntervalMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_background_interval_ms');
+  static late final _ConfigSetU32 _configSetVacuumDrainTimeoutMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_drain_timeout_ms');
+  static late final _ConfigSetU32 _configSetVacuumCursorCloseWaitMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_cursor_close_wait_ms');
+  static late final _ConfigSetU32 _configSetVacuumMaxRuntimeMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_max_runtime_ms');
+  static late final _ConfigSetU32 _configSetVacuumWriterBlockTimeoutMs = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_writer_block_timeout_ms');
+  static late final _ConfigSetU32 _configSetVacuumAdaptiveBusyThreshold = WaveDBLibrary.load()
+      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_adaptive_busy_threshold');
+
+  // Vacuum operations
+  static late final DatabaseVacuum _databaseVacuum = WaveDBLibrary.load()
+      .lookupFunction<DatabaseVacuumC, DatabaseVacuum>('database_vacuum');
+  static late final DatabaseFlushDirtyBnodes _databaseFlushDirtyBnodes = WaveDBLibrary.load()
+      .lookupFunction<DatabaseFlushDirtyBnodesC, DatabaseFlushDirtyBnodes>('database_flush_dirty_bnodes');
+
   static late final DatabaseCreateWithConfig _databaseCreateWithConfig = WaveDBLibrary.load()
       .lookupFunction<DatabaseCreateWithConfigC, DatabaseCreateWithConfig>('database_create_with_config');
 
@@ -1753,6 +1795,7 @@ class WaveDBNative {
     int? walDebounceMs,
     int? walMaxFileSize,
     bool? syncOnly,
+    VacuumConfig? vacuumConfig,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -1783,6 +1826,7 @@ class WaveDBNative {
         _configSetSyncOnly(configPtr, 1);
         _configSetWorkerThreads(configPtr, 0);
       }
+      _applyVacuumConfig(configPtr, vacuumConfig);
 
       final db = _databaseCreateWithConfig(
         pathPtr.cast(),
@@ -1805,6 +1849,22 @@ class WaveDBNative {
       calloc.free(pathPtr);
       calloc.free(errorPtr);
     }
+  }
+
+  /// Apply [VacuumConfig] overrides to a native database_config_t via the C
+  /// setter functions. NULL-safe on both [configPtr] and [vacuumConfig].
+  static void _applyVacuumConfig(Pointer<database_config_t> configPtr, VacuumConfig? vacuumConfig) {
+    if (configPtr == nullptr || vacuumConfig == null) return;
+    _configSetVacuumMode(configPtr, vacuumConfig.mode.value);
+    _configSetVacuumStaleThreshold(configPtr, vacuumConfig.staleThreshold);
+    _configSetVacuumMinFileSizeBytes(configPtr, vacuumConfig.minFileSizeBytes);
+    _configSetVacuumMinStaleBytes(configPtr, vacuumConfig.minStaleBytes);
+    _configSetVacuumBackgroundIntervalMs(configPtr, vacuumConfig.backgroundIntervalMs);
+    _configSetVacuumDrainTimeoutMs(configPtr, vacuumConfig.drainTimeoutMs);
+    _configSetVacuumCursorCloseWaitMs(configPtr, vacuumConfig.cursorCloseWaitMs);
+    _configSetVacuumMaxRuntimeMs(configPtr, vacuumConfig.maxRuntimeMs);
+    _configSetVacuumWriterBlockTimeoutMs(configPtr, vacuumConfig.writerBlockTimeoutMs);
+    _configSetVacuumAdaptiveBusyThreshold(configPtr, vacuumConfig.adaptiveBusyThreshold);
   }
 
   /// Create an encrypted database with full configuration
@@ -1839,6 +1899,7 @@ class WaveDBNative {
     int? walDebounceMs,
     int? walMaxFileSize,
     bool? syncOnly,
+    VacuumConfig? vacuumConfig,
   }) {
     final pathPtr = path.toNativeUtf8();
     final errorPtr = calloc<Int32>();
@@ -1887,6 +1948,7 @@ class WaveDBNative {
           _configSetSyncOnly(configPtr, 1);
           _configSetWorkerThreads(configPtr, 0);
         }
+        _applyVacuumConfig(configPtr, vacuumConfig);
 
         final db = _databaseCreateEncrypted(
           pathPtr.cast(),
@@ -2971,5 +3033,33 @@ class WaveDBNative {
   /// Returns a pointer to the internal string (do not free).
   static Pointer<Utf8> errorGetMessage(Pointer<async_error_t> error) {
     return _errorGetMessage(error);
+  }
+
+  // ============================================================
+  // PUBLIC API - Vacuum / Compaction
+  // ============================================================
+
+  /// Trigger a vacuum / compaction pass on the database's page file.
+  ///
+  /// In sync_only mode, call [databaseFlushDirtyBnodes] first so the page
+  /// file reflects the latest trie state — vacuum reclaims stale CoW bytes
+  /// from the page file, and un-flushed dirty bnodes are not yet on disk.
+  ///
+  /// Returns 0 on success, -EBUSY if open cursors prevent vacuum, <0 on
+  /// other errors.
+  static int databaseVacuum(Pointer<database_t> db) {
+    return _databaseVacuum(db);
+  }
+
+  /// Flush dirty bnodes to the page file.
+  ///
+  /// In sync_only mode this is necessary before [databaseVacuum] for the
+  /// page file to actually have stale bytes to reclaim. Outside sync_only
+  /// mode the worker pool flushes asynchronously, but an explicit flush
+  /// still ensures the latest state is on disk before vacuum runs.
+  ///
+  /// Returns 0 on success, <0 on error.
+  static int databaseFlushDirtyBnodes(Pointer<database_t> db) {
+    return _databaseFlushDirtyBnodes(db);
   }
 }

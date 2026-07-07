@@ -718,6 +718,63 @@ void database_config_set_sync_only(database_config_t* config, uint8_t sync_only)
     config->sync_only = sync_only ? 1 : 0;
 }
 
+// === Vacuum configuration setters ===
+
+void database_config_set_vacuum_mode(database_config_t* config, uint8_t mode) {
+    if (config == NULL) return;
+    switch (mode) {
+        case 0: config->vacuum_config.mode = VACUUM_MODE_MANUAL_ONLY; break;
+        case 1: config->vacuum_config.mode = VACUUM_MODE_STRICT; break;
+        case 2: config->vacuum_config.mode = VACUUM_MODE_ADAPTIVE; break;
+        default: break;
+    }
+}
+
+void database_config_set_vacuum_stale_threshold(database_config_t* config, double threshold) {
+    if (config == NULL) return;
+    config->vacuum_config.stale_threshold = threshold;
+}
+
+void database_config_set_vacuum_min_file_size_bytes(database_config_t* config, uint64_t bytes) {
+    if (config == NULL) return;
+    config->vacuum_config.min_file_size_bytes = bytes;
+}
+
+void database_config_set_vacuum_min_stale_bytes(database_config_t* config, uint64_t bytes) {
+    if (config == NULL) return;
+    config->vacuum_config.min_stale_bytes = bytes;
+}
+
+void database_config_set_vacuum_background_interval_ms(database_config_t* config, uint32_t ms) {
+    if (config == NULL) return;
+    config->vacuum_config.background_interval_ms = ms;
+}
+
+void database_config_set_vacuum_drain_timeout_ms(database_config_t* config, uint32_t ms) {
+    if (config == NULL) return;
+    config->vacuum_config.drain_timeout_ms = ms;
+}
+
+void database_config_set_vacuum_cursor_close_wait_ms(database_config_t* config, uint32_t ms) {
+    if (config == NULL) return;
+    config->vacuum_config.cursor_close_wait_ms = ms;
+}
+
+void database_config_set_vacuum_max_runtime_ms(database_config_t* config, uint32_t ms) {
+    if (config == NULL) return;
+    config->vacuum_config.max_runtime_ms = ms;
+}
+
+void database_config_set_vacuum_writer_block_timeout_ms(database_config_t* config, uint32_t ms) {
+    if (config == NULL) return;
+    config->vacuum_config.writer_block_timeout_ms = ms;
+}
+
+void database_config_set_vacuum_adaptive_busy_threshold(database_config_t* config, uint32_t threshold) {
+    if (config == NULL) return;
+    config->vacuum_config.adaptive_busy_threshold = threshold;
+}
+
 // === Encrypted database config ===
 
 encrypted_database_config_t* encrypted_database_config_default(void) {

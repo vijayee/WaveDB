@@ -52,6 +52,10 @@ class WaveDBConfig {
   /// When true, worker threads are forced to 0.
   final bool? syncOnly;
 
+  /// Vacuum / compaction configuration. Null falls back to C defaults
+  /// (mode=strict, 30% stale threshold, 64 MiB min file, 16 MiB min stale).
+  final VacuumConfig? vacuumConfig;
+
   const WaveDBConfig({
     this.chunkSize,
     this.btreeNodeSize,
@@ -65,6 +69,7 @@ class WaveDBConfig {
     this.walDebounceMs,
     this.walMaxFileSize,
     this.syncOnly,
+    this.vacuumConfig,
   });
 }
 
@@ -156,6 +161,7 @@ class WaveDB implements Finalizable {
         walDebounceMs: config.walDebounceMs,
         walMaxFileSize: config.walMaxFileSize,
         syncOnly: config.syncOnly,
+        vacuumConfig: config.vacuumConfig,
       );
     } else {
       _db = WaveDBNative.databaseCreate(path);
@@ -223,6 +229,7 @@ class WaveDB implements Finalizable {
         walDebounceMs: config?.walDebounceMs,
         walMaxFileSize: config?.walMaxFileSize,
         syncOnly: config?.syncOnly,
+        vacuumConfig: config?.vacuumConfig,
       );
     } finally {
       if (symKeyPtr != null) calloc.free(symKeyPtr);
@@ -927,6 +934,46 @@ class WaveDB implements Finalizable {
     } finally {
       calloc.free(prefixPtr);
     }
+  }
+
+  // ============================================================
+  // VACUUM / COMPACTION
+  // ============================================================
+
+  /// Flush dirty bnodes to the page file.
+  ///
+  /// In sync_only mode this is necessary before [vacuum] for the page file
+  /// to actually have stale bytes to reclaim: vacuum reclaims stale CoW
+  /// copies from the page file, and un-flushed dirty bnodes are not yet on
+  /// disk. Outside sync_only mode the worker pool flushes asynchronously,
+  /// but an explicit flush still ensures the latest state is on disk.
+  ///
+  /// Returns 0 on success, <0 on error.
+  int flush() {
+    _checkClosed();
+    final rc = WaveDBNative.databaseFlushDirtyBnodes(_db!);
+    if (rc != 0) {
+      throw WaveDBException.ioError('flush', 'return code: $rc');
+    }
+    return rc;
+  }
+
+  /// Trigger a vacuum / compaction pass on the page file.
+  ///
+  /// Rewrites the page file, dropping stale CoW copies and reclaiming free
+  /// space. In sync_only mode, call [flush] first so the page file reflects
+  /// the latest trie state. Keys remain readable after vacuum; cursors
+  /// opened before vacuum are refused (close them first).
+  ///
+  /// Returns 0 on success, -EBUSY if open cursors prevent vacuum, <0 on
+  /// other errors.
+  int vacuum() {
+    _checkClosed();
+    final rc = WaveDBNative.databaseVacuum(_db!);
+    if (rc != 0) {
+      throw WaveDBException.ioError('vacuum', 'return code: $rc');
+    }
+    return rc;
   }
 
   // ============================================================
