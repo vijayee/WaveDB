@@ -61,6 +61,7 @@ set(WAVEDB_SOURCES
     src/Util/perf_counters.c
     src/Util/memory_pool.c
     src/Util/memory_pool.c
+    src/Util/offset_remap.c
 
     # Buffer
     src/Buffer/buffer.c
@@ -285,6 +286,11 @@ if(BUILD_TESTS)
     add_executable(test_page_file tests/test_page_file.cpp)
     target_link_libraries(test_page_file wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_page_file COMMAND test_page_file)
+
+    # Test for offset_remap
+    add_executable(test_offset_remap tests/test_offset_remap.cpp)
+    target_link_libraries(test_offset_remap wavedb gtest gtest_main)
+    add_test(NAME test_offset_remap COMMAND test_offset_remap)
 
     # Test for bnode_cache
     add_executable(test_bnode_cache tests/test_bnode_cache.cpp)
