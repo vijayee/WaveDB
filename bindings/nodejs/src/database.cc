@@ -47,6 +47,8 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("getObjectSync", &WaveDB::GetObjectSync),
     InstanceMethod("createReadStream", &WaveDB::CreateReadStream),
     InstanceMethod("close", &WaveDB::Close),
+    InstanceMethod("vacuum", &WaveDB::Vacuum),
+    InstanceMethod("flush", &WaveDB::Flush),
     InstanceMethod("openSubtree", &WaveDB::OpenSubtree),
     InstanceMethod("deleteSubtree", &WaveDB::DeleteSubtree),
   });
@@ -152,6 +154,67 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
       if (walOpts.Has("maxFileSize")) {
         Napi::Number val = walOpts.Get("maxFileSize").As<Napi::Number>();
         config->wal_config.max_file_size = static_cast<size_t>(val.Uint32Value());
+      }
+    }
+
+    if (options.Has("vacuum") && options.Get("vacuum").IsObject()) {
+      Napi::Object vacuumOpts = options.Get("vacuum").As<Napi::Object>();
+
+      if (vacuumOpts.Has("mode")) {
+        Napi::String mode = vacuumOpts.Get("mode").As<Napi::String>();
+        std::string modeStr = mode.Utf8Value();
+        if (modeStr == "manual_only") {
+          config->vacuum_config.mode = VACUUM_MODE_MANUAL_ONLY;
+        } else if (modeStr == "strict") {
+          config->vacuum_config.mode = VACUUM_MODE_STRICT;
+        } else if (modeStr == "adaptive") {
+          config->vacuum_config.mode = VACUUM_MODE_ADAPTIVE;
+        }
+      }
+
+      if (vacuumOpts.Has("staleThreshold")) {
+        Napi::Number val = vacuumOpts.Get("staleThreshold").As<Napi::Number>();
+        config->vacuum_config.stale_threshold = val.DoubleValue();
+      }
+
+      if (vacuumOpts.Has("minFileSizeBytes")) {
+        Napi::Number val = vacuumOpts.Get("minFileSizeBytes").As<Napi::Number>();
+        config->vacuum_config.min_file_size_bytes = static_cast<uint64_t>(val.DoubleValue());
+      }
+
+      if (vacuumOpts.Has("minStaleBytes")) {
+        Napi::Number val = vacuumOpts.Get("minStaleBytes").As<Napi::Number>();
+        config->vacuum_config.min_stale_bytes = static_cast<uint64_t>(val.DoubleValue());
+      }
+
+      if (vacuumOpts.Has("backgroundIntervalMs")) {
+        Napi::Number val = vacuumOpts.Get("backgroundIntervalMs").As<Napi::Number>();
+        config->vacuum_config.background_interval_ms = static_cast<uint32_t>(val.Uint32Value());
+      }
+
+      if (vacuumOpts.Has("drainTimeoutMs")) {
+        Napi::Number val = vacuumOpts.Get("drainTimeoutMs").As<Napi::Number>();
+        config->vacuum_config.drain_timeout_ms = static_cast<uint32_t>(val.Uint32Value());
+      }
+
+      if (vacuumOpts.Has("cursorCloseWaitMs")) {
+        Napi::Number val = vacuumOpts.Get("cursorCloseWaitMs").As<Napi::Number>();
+        config->vacuum_config.cursor_close_wait_ms = static_cast<uint32_t>(val.Uint32Value());
+      }
+
+      if (vacuumOpts.Has("maxRuntimeMs")) {
+        Napi::Number val = vacuumOpts.Get("maxRuntimeMs").As<Napi::Number>();
+        config->vacuum_config.max_runtime_ms = static_cast<uint32_t>(val.Uint32Value());
+      }
+
+      if (vacuumOpts.Has("writerBlockTimeoutMs")) {
+        Napi::Number val = vacuumOpts.Get("writerBlockTimeoutMs").As<Napi::Number>();
+        config->vacuum_config.writer_block_timeout_ms = static_cast<uint32_t>(val.Uint32Value());
+      }
+
+      if (vacuumOpts.Has("adaptiveBusyThreshold")) {
+        Napi::Number val = vacuumOpts.Get("adaptiveBusyThreshold").As<Napi::Number>();
+        config->vacuum_config.adaptive_busy_threshold = static_cast<uint32_t>(val.Uint32Value());
       }
     }
 
@@ -1503,6 +1566,40 @@ Napi::Value WaveDB::DeleteSubtree(const Napi::CallbackInfo& info) {
 }
 
 // --- Lifecycle ---
+
+Napi::Value WaveDB::Vacuum(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  int rc = database_vacuum(db_);
+  if (rc != 0) {
+    Napi::Error::New(env, std::string("vacuum failed: rc=") + std::to_string(rc))
+        .ThrowAsJavaScriptException();
+  }
+  return env.Undefined();
+}
+
+Napi::Value WaveDB::Flush(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed")
+        .ThrowAsJavaScriptException();
+    return env.Undefined();
+  }
+
+  int rc = database_flush_dirty_bnodes(db_);
+  if (rc != 0) {
+    Napi::Error::New(env, std::string("flush failed: rc=") + std::to_string(rc))
+        .ThrowAsJavaScriptException();
+  }
+  return env.Undefined();
+}
 
 Napi::Value WaveDB::Close(const Napi::CallbackInfo& info) {
   if (db_) {

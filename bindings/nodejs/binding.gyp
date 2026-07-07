@@ -75,6 +75,7 @@
       "c_src/src/Util/log.c",
       "c_src/src/Util/memory_pool.c",
       "c_src/src/Util/mkdir_p.c",
+      "c_src/src/Util/offset_remap.c",
       "c_src/src/Util/path_join.c",
       "c_src/src/Util/perf_counters.c",
       "c_src/src/Util/rm_rf.c",

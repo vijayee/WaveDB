@@ -46,6 +46,10 @@ private:
   // Lifecycle
   Napi::Value Close(const Napi::CallbackInfo& info);
 
+  // Vacuum / compaction
+  Napi::Value Vacuum(const Napi::CallbackInfo& info);
+  Napi::Value Flush(const Napi::CallbackInfo& info);
+
   // Subtree
   Napi::Value OpenSubtree(const Napi::CallbackInfo& info);
   Napi::Value DeleteSubtree(const Napi::CallbackInfo& info);

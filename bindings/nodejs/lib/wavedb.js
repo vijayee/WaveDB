@@ -113,6 +113,7 @@ class WaveDB {
     if (options.workerThreads !== undefined) nativeOptions.workerThreads = options.workerThreads;
     if (options.encryption !== undefined) nativeOptions.encryption = options.encryption;
     if (options.syncOnly !== undefined) nativeOptions.syncOnly = options.syncOnly;
+    if (options.vacuum !== undefined) nativeOptions.vacuum = options.vacuum;
 
     this._db = new WaveDBNative(path, nativeOptions);
     this._closed = false;
@@ -640,6 +641,43 @@ class WaveDB {
     const nativeIterator = this._db.createReadStream(iterOptions);
     // Wrap in JavaScript stream
     return new WaveDBIterator(nativeIterator, iterOptions);
+  }
+
+  /**
+   * Trigger a vacuum / compaction pass on the page file.
+   *
+   * Compacts the page file by reclaiming stale regions. Behavior depends on
+   * the `vacuum` config object passed to the constructor (mode, thresholds).
+   * Throws on error.
+   */
+  vacuum() {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
+    try {
+      this._db.vacuum();
+    } catch (err) {
+      throw convertError(err);
+    }
+  }
+
+  /**
+   * Flush dirty in-memory bnodes to the page file.
+   *
+   * In sync_only mode, writes are held in memory until explicitly flushed
+   * (or until close, which persists everything). Call this before vacuum()
+   * so the page file reflects the latest trie state and vacuum has stale
+   * CoW copies to reclaim. Throws on error.
+   */
+  flush() {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
+    try {
+      this._db.flush();
+    } catch (err) {
+      throw convertError(err);
+    }
   }
 
   /**
