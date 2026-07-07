@@ -25,6 +25,7 @@
 #include <chrono>
 extern "C" {
 #include "Database/database.h"
+#include "Database/database_iterator.h"
 #include "Time/wheel.h"
 #include "Workers/pool.h"
 #include "HBTrie/path.h"
@@ -1145,4 +1146,28 @@ TEST_F(DatabaseTest, VacuumFieldsInitialized) {
     db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &err);
     ASSERT_NE(db, nullptr);
     EXPECT_EQ(database_vacuum(db), 0);
+}
+
+TEST_F(DatabaseTest, CursorCountTracksOpenClose) {
+    int err = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    // Put a key first so the cursor has something to iterate
+    path_t* p = make_path({"foo"});
+    identifier_t* v = make_value("bar");
+    EXPECT_EQ(database_put_sync(db, p, v), 0);
+    identifier_destroy(v);
+    path_destroy(p);
+
+    // No cursors open yet
+    EXPECT_EQ(atomic_load(&db->open_cursor_count), 0);
+
+    database_iterator_t* it = database_scan_start(db, NULL, NULL);
+    EXPECT_NE(it, nullptr);
+    EXPECT_EQ(atomic_load(&db->open_cursor_count), 1);
+
+    database_scan_end(it);
+    EXPECT_EQ(atomic_load(&db->open_cursor_count), 0);
 }

@@ -448,6 +448,8 @@ database_iterator_t* database_scan_start(database_t* db,
     }
 
     iter->db = db;
+    // Register this cursor — vacuum will refuse/wait while count > 0
+    atomic_fetch_add(&db->open_cursor_count, 1);
     // Copy paths — the iterator owns its copies, callers retain theirs
     iter->start_path = start_path ? path_copy(start_path) : NULL;
     iter->end_path = end_path ? path_copy(end_path) : NULL;
@@ -460,6 +462,8 @@ database_iterator_t* database_scan_start(database_t* db,
         if (iter->start_path) path_destroy(iter->start_path);
         if (iter->end_path) path_destroy(iter->end_path);
         if (iter->current_path) path_destroy(iter->current_path);
+        // Unregister — we incremented above but won't return the iterator
+        atomic_fetch_sub(&db->open_cursor_count, 1);
         free(iter);
         return NULL;
     }
@@ -523,6 +527,19 @@ void database_scan_end(database_iterator_t* iter) {
 
         // Free stack
         if (iter->stack) free(iter->stack);
+
+        // Unregister this cursor — if we were the last one, wake any
+        // vacuum waiting for cursors to close.
+        if (iter->db != NULL) {
+            long prev = atomic_fetch_sub(&iter->db->open_cursor_count, 1);
+            if (prev == 1) {
+                // Last cursor closed — broadcast cursor_cvar so any waiting
+                // vacuum can proceed
+                platform_lock(&iter->db->cursor_count_mutex);
+                platform_broadcast_condition(&iter->db->cursor_cvar);
+                platform_unlock(&iter->db->cursor_count_mutex);
+            }
+        }
 
         // Free iterator
         free(iter);
