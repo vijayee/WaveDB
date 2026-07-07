@@ -418,6 +418,14 @@ void hierarchical_timing_wheel_cancel_timer(hierarchical_timing_wheel_t* wheel, 
   timer_st* timer = hashmap_get(&wheel->timers, &timerId);
   if (timer != NULL) {
     timer->removed = 1;
+    // Invoke the abort callback so the timer's ctx can be cleaned up.
+    // Without this, cancelling a pending timer would leak the ctx (the
+    // execute callback is never invoked, and stop only calls abort for
+    // timers still in the hashmap — a cancelled timer is already gone).
+    // Existing callers pass NULL abort, so this is a no-op for them.
+    if (timer->abort) {
+      timer->abort(timer->ctx);
+    }
     hashmap_remove(&wheel->timers, &timerId);
     timer_unref(timer);  // Release hashmap reference
     if (hashmap_size(&wheel->timers) == 0) {

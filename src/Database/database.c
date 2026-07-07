@@ -837,12 +837,35 @@ typedef struct {
 
 static void database_vacuum_schedule_background(database_t* db);
 
-static void database_vacuum_task_execute(void* arg) {
+static void database_vacuum_task_abort(void* arg) {
+    // Frees the vacuum_task_ctx_t and decrements the in-flight counter.
+    // Called by hierarchical_timing_wheel_cancel_timer (when database_destroy
+    // cancels a pending timer) and by hierarchical_timing_wheel_stop (for
+    // owns_wheel teardown). Either way, the counter incremented in
+    // schedule_background is consumed here so the drain loop can exit.
+    if (arg == NULL) return;
     vacuum_task_ctx_t* ctx = (vacuum_task_ctx_t*)arg;
     database_t* db = ctx->db;
     free(ctx);
+    if (db != NULL) {
+        atomic_fetch_sub(&db->vacuum_in_flight, 1);
+    }
+}
 
-    if (db == NULL || db->page_file == NULL) return;
+static void database_vacuum_task_execute(void* arg) {
+    vacuum_task_ctx_t* ctx = (vacuum_task_ctx_t*)arg;
+    database_t* db = ctx ? ctx->db : NULL;
+    free(ctx);
+
+    if (db == NULL) return;
+
+    // If destruction is in progress (or the page_file is already gone),
+    // don't run the vacuum and don't reschedule. The drain loop in
+    // database_destroy is waiting on vacuum_in_flight to hit 0.
+    if (db->page_file == NULL || db->destroying) {
+        atomic_fetch_sub(&db->vacuum_in_flight, 1);
+        return;
+    }
 
     vacuum_mode_t mode = VACUUM_MODE_STRICT;
     if (db->active_config != NULL) {
@@ -852,6 +875,7 @@ static void database_vacuum_task_execute(void* arg) {
     // MANUAL_ONLY: don't run, but still reschedule (in case config changes later)
     if (mode == VACUUM_MODE_MANUAL_ONLY) {
         database_vacuum_schedule_background(db);
+        atomic_fetch_sub(&db->vacuum_in_flight, 1);
         return;
     }
 
@@ -867,6 +891,7 @@ static void database_vacuum_task_execute(void* arg) {
             size_t active = db->pool->size - db->pool->idleCount;
             if (active > threshold) {
                 database_vacuum_schedule_background(db);
+                atomic_fetch_sub(&db->vacuum_in_flight, 1);
                 return;
             }
         }
@@ -880,6 +905,7 @@ static void database_vacuum_task_execute(void* arg) {
     }
     if (ratio < threshold) {
         database_vacuum_schedule_background(db);
+        atomic_fetch_sub(&db->vacuum_in_flight, 1);
         return;
     }
 
@@ -888,10 +914,12 @@ static void database_vacuum_task_execute(void* arg) {
 
     // Reschedule next tick
     database_vacuum_schedule_background(db);
+
+    atomic_fetch_sub(&db->vacuum_in_flight, 1);
 }
 
 static void database_vacuum_schedule_background(database_t* db) {
-    if (db == NULL || db->wheel == NULL) return;
+    if (db == NULL || db->wheel == NULL || db->destroying) return;
     uint32_t interval_ms = 60000;
     if (db->active_config != NULL) {
         interval_ms = db->active_config->vacuum_config.background_interval_ms;
@@ -905,8 +933,14 @@ static void database_vacuum_schedule_background(database_t* db) {
     timer_duration_t delay = {0};
     delay.milliseconds = interval_ms;
 
+    // Increment in-flight BEFORE set_timer so the counter reflects the
+    // pending timer. The execute callback decrements at its end (after
+    // reschedule); the abort callback decrements when stop cancels the
+    // pending timer (owns_wheel case). For !owns_wheel, the timer fires
+    // and execute self-skips via the destroying check, decrementing.
+    atomic_fetch_add(&db->vacuum_in_flight, 1);
     db->vacuum_task_id = hierarchical_timing_wheel_set_timer(
-        db->wheel, ctx, database_vacuum_task_execute, NULL, delay);
+        db->wheel, ctx, database_vacuum_task_execute, database_vacuum_task_abort, delay);
 }
 
 database_t* database_create_with_config(const char* location,
@@ -1293,6 +1327,7 @@ database_t* database_create_with_config(const char* location,
     // Initialize vacuum infrastructure
     atomic_store(&db->vacuum_in_progress, 0);
     atomic_store(&db->open_cursor_count, 0);
+    atomic_store(&db->vacuum_in_flight, 0);
     db->vacuum_task_id = 0;
     platform_lock_init(&db->vacuum_writer_lock);
     platform_condition_init(&db->vacuum_cvar);
@@ -1493,12 +1528,16 @@ void database_destroy(database_t* db) {
     uint_fast32_t count = refcounter_count((refcounter_t*)db);
 
     if (count == 0) {
-        // Signal that destruction is in progress so eviction task won't reschedule.
+        // Signal that destruction is in progress so eviction task won't reschedule,
+        // and so the vacuum task's destroying-check skips (no reschedule, just
+        // decrements vacuum_in_flight).
         db->destroying = true;
 
-        // Cancel any scheduled background vacuum task. Done before wheel stop
-        // so the timer doesn't fire mid-teardown. (For external wheels, the
-        // caller is responsible for stopping the wheel after database_destroy.)
+        // Cancel any scheduled background vacuum task. cancel_timer invokes
+        // the abort callback (database_vacuum_task_abort), which frees ctx and
+        // decrements vacuum_in_flight. If the timer already fired (callback
+        // running or queued), the cancel is a no-op on the timer ID — the
+        // callback will see destroying=true, skip, and decrement.
         if (db->vacuum_task_id != 0 && db->wheel != NULL) {
             hierarchical_timing_wheel_cancel_timer(db->wheel, db->vacuum_task_id);
             db->vacuum_task_id = 0;
@@ -1535,6 +1574,20 @@ void database_destroy(database_t* db) {
                 // Yield to the worker thread executing the eviction task
                 sched_yield();
             }
+        }
+
+        // Wait for any in-flight vacuum callback to complete before destroying
+        // the structures it accesses. cancel_timer (called above) invokes the
+        // abort callback for pending timers, which decrements vacuum_in_flight.
+        // hierarchical_timing_wheel_stop (owns_wheel) also invokes abort for any
+        // remaining timers. If the timer already fired (callback running on the
+        // pool), the cancel is a no-op and we wait for the callback to finish
+        // (it sees destroying=true, skips, and decrements). A timeout prevents
+        // an infinite hang if something goes wrong.
+        int vacuum_wait_ms = 0;
+        while (atomic_load(&db->vacuum_in_flight) > 0 && vacuum_wait_ms < 5000) {
+            usleep(1000);  // 1ms
+            vacuum_wait_ms++;
         }
 
         // Flush all thread-local WALs to disk before destroying
