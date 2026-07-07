@@ -92,6 +92,32 @@ static void abort_database_delete(void* ctx) {
     free(del_ctx);
 }
 
+// Block the calling writer/reader if a vacuum is in progress.
+// Returns 0 on resume (vacuum finished), -ETIMEDOUT if writer_block_timeout_ms
+// elapsed (only when timeout is non-zero).
+static int database_vacuum_block_if_in_progress(database_t* db) {
+    if (db == NULL) return -1;
+    if (atomic_load(&db->vacuum_in_progress) == 0) return 0;
+
+    uint32_t timeout_ms = 0;
+    if (db->active_config != NULL) {
+        timeout_ms = db->active_config->vacuum_config.writer_block_timeout_ms;
+    }
+
+    platform_lock(&db->vacuum_writer_lock);
+    while (atomic_load(&db->vacuum_in_progress) != 0) {
+        int rc = platform_condition_timedwait(&db->vacuum_writer_lock, &db->vacuum_cvar, timeout_ms);
+        if (rc != 0 && timeout_ms > 0) {
+            // Timed out (ETIMEDOUT or error)
+            platform_unlock(&db->vacuum_writer_lock);
+            return -ETIMEDOUT;
+        }
+        // rc == 0 means signal/broadcast — recheck the flag in loop
+    }
+    platform_unlock(&db->vacuum_writer_lock);
+    return 0;
+}
+
 // Helper to encode path+value for WAL using binary format
 // Binary payload format:
 //   [0xB1 magic][path_count:2B BE][path_len:4B BE]
@@ -1885,6 +1911,14 @@ int database_put_sync(database_t* db, path_t* path, identifier_t* value) {
         return -1;
     }
 
+    // Block if a vacuum is in progress
+    int vb_rc = database_vacuum_block_if_in_progress(db);
+    if (vb_rc != 0) {
+        path_destroy(path);
+        identifier_destroy(value);
+        return vb_rc;
+    }
+
     // Fast path: sync-only mode — skip MVCC, locks, and write_locks
     if (db->sync_only) {
         transaction_id_t txn_id = transaction_id_get_next();
@@ -2006,6 +2040,13 @@ int database_get_sync(database_t* db, path_t* path, identifier_t** result) {
         return -1;
     }
 
+    // Block if a vacuum is in progress
+    int vb_rc = database_vacuum_block_if_in_progress(db);
+    if (vb_rc != 0) {
+        path_destroy(path);
+        return vb_rc;
+    }
+
     // Fast path: sync-only mode — skip seqlocks and tx_manager
     if (db->sync_only) {
         // Check LRU cache first (unsafe — no mutex)
@@ -2084,6 +2125,13 @@ int database_delete_sync(database_t* db, path_t* path) {
     if (db == NULL || path == NULL) {
         if (path) path_destroy(path);
         return -1;
+    }
+
+    // Block if a vacuum is in progress
+    int vb_rc = database_vacuum_block_if_in_progress(db);
+    if (vb_rc != 0) {
+        path_destroy(path);
+        return vb_rc;
     }
 
     // Fast path: sync-only mode — skip MVCC, locks, and write_locks

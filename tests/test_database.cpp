@@ -23,6 +23,8 @@
 #include <string>
 #include <chrono>
 #include <chrono>
+#include <atomic>
+#include <thread>
 extern "C" {
 #include "Database/database.h"
 #include "Database/database_iterator.h"
@@ -1155,11 +1157,10 @@ TEST_F(DatabaseTest, CursorCountTracksOpenClose) {
     ASSERT_EQ(err, 0);
 
     // Put a key first so the cursor has something to iterate
+    // database_put_sync consumes p and v (destroys them on all paths)
     path_t* p = make_path({"foo"});
     identifier_t* v = make_value("bar");
     EXPECT_EQ(database_put_sync(db, p, v), 0);
-    identifier_destroy(v);
-    path_destroy(p);
 
     // No cursors open yet
     EXPECT_EQ(atomic_load(&db->open_cursor_count), 0);
@@ -1170,4 +1171,38 @@ TEST_F(DatabaseTest, CursorCountTracksOpenClose) {
 
     database_scan_end(it);
     EXPECT_EQ(atomic_load(&db->open_cursor_count), 0);
+}
+
+TEST_F(DatabaseTest, WriterBlocksDuringVacuum) {
+    // Manually set vacuum_in_progress, then call put_sync from a thread,
+    // verify it blocks. Clear the flag and verify the writer unblocks.
+    int err = 0;
+    db = database_create(test_dir.c_str(), 0, NULL, 0, 0, 0, pool, wheel, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    atomic_store(&db->vacuum_in_progress, 1);
+
+    std::atomic<bool> put_done(false);
+
+    auto fut = std::async(std::launch::async, [&]() {
+        path_t* p = make_path({"k1"});
+        identifier_t* v = make_value("v1");
+        // database_put_sync consumes p and v (destroys them on all paths)
+        database_put_sync(db, p, v);
+        put_done.store(true);
+    });
+
+    // Give it a moment to block
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_FALSE(put_done.load()) << "writer should be blocked";
+
+    // Release vacuum
+    atomic_store(&db->vacuum_in_progress, 0);
+    platform_lock(&db->vacuum_writer_lock);
+    platform_broadcast_condition(&db->vacuum_cvar);
+    platform_unlock(&db->vacuum_writer_lock);
+
+    fut.wait();
+    EXPECT_TRUE(put_done.load());
 }

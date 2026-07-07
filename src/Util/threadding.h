@@ -42,6 +42,9 @@ void platform_rw_lock_destroy(SRWLOCK* lock);
 void platform_condition_init(CONDITION_VARIABLE* condition);
 void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition);
 void platform_condition_destroy(CONDITION_VARIABLE* condition);
+// Returns 0 on signal/broadcast, non-zero on timeout (ETIMEDOUT) or error.
+// timeout_ms = 0 means wait forever (delegate to platform_condition_wait).
+int platform_condition_timedwait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition, uint32_t timeout_ms);
 void platform_signal_condition(CONDITION_VARIABLE* condition);
 void platform_broadcast_condition(CONDITION_VARIABLE* condition);
 void platform_barrier_init(SYNCHRONIZATION_BARRIER* barrier, long count);
@@ -73,6 +76,9 @@ void platform_rw_lock_destroy(pthread_rwlock_t* lock);
 void platform_condition_init(pthread_cond_t* condition);
 void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition);
 void platform_condition_destroy(pthread_cond_t* condition);
+// Returns 0 on signal/broadcast, non-zero on timeout (ETIMEDOUT) or error.
+// timeout_ms = 0 means wait forever (delegate to platform_condition_wait).
+int platform_condition_timedwait(pthread_mutex_t* lock, pthread_cond_t* condition, uint32_t timeout_ms);
 void platform_signal_condition(pthread_cond_t* condition);
 void platform_broadcast_condition(pthread_cond_t* condition);
 void platform_barrier_init(pthread_barrier_t* barrier, unsigned int count);

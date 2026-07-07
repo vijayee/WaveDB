@@ -5,11 +5,13 @@
 #include "log.h"
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #if _WIN32
 #include "Util/windows_compat.h"
 #else
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h>
 #endif
 #if _WIN32
 void platform_lock(CRITICAL_SECTION* lock) {
@@ -58,6 +60,12 @@ void platform_condition_init(CONDITION_VARIABLE* condition) {
 
 void platform_condition_wait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition) {
   SleepConditionVariableCS(condition, lock, INFINITE);
+}
+
+int platform_condition_timedwait(CRITICAL_SECTION* lock, CONDITION_VARIABLE* condition, uint32_t timeout_ms) {
+  BOOL result = SleepConditionVariableCS(condition, lock, timeout_ms == 0 ? INFINITE : (DWORD)timeout_ms);
+  if (result) return 0;
+  return GetLastError() == ERROR_TIMEOUT ? ETIMEDOUT : -1;
 }
 
 void platform_condition_destroy(CONDITION_VARIABLE* condition) {
@@ -190,6 +198,24 @@ void platform_condition_wait(pthread_mutex_t* lock, pthread_cond_t* condition) {
     log_trace("Failed to destroy condition");
     abort();
   }
+}
+
+int platform_condition_timedwait(pthread_mutex_t* lock, pthread_cond_t* condition, uint32_t timeout_ms) {
+  if (timeout_ms == 0) {
+    // Delegate to unbounded wait
+    int result = pthread_cond_wait(condition, lock);
+    return result;  // 0 on success
+  }
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += timeout_ms / 1000;
+  ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+  if (ts.tv_nsec >= 1000000000L) {
+    ts.tv_sec += 1;
+    ts.tv_nsec -= 1000000000L;
+  }
+  int result = pthread_cond_timedwait(condition, lock, &ts);
+  return result;  // 0 on signal, ETIMEDOUT on timeout
 }
 
 void platform_condition_destroy(pthread_cond_t* condition) {
