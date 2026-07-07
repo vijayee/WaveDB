@@ -1,10 +1,10 @@
-# Page-File Write Amplification: Sub-Block Packing (fixed 0.1.12) + Reclamation (tech debt)
+# Page-File Write Amplification: Sub-Block Packing (fixed 0.1.12) + Reclamation (fixed 0.1.15)
 
-**Date:** 2026-07-06
+**Date:** 2026-07-06 (updated 2026-07-07)
 **Status:** Mechanism 1 (initial-load structural bloat) **FIXED in 0.1.12** by sub-block
-packing. Mechanism 2 (overwrite CoW bloat) **deferred** — reclamation/vacuum is
-unimplemented; this doc records the full scope, reproduction, and proposed fix so a
-future release can pick it up.
+packing. Mechanism 2 (overwrite CoW bloat) **FIXED in 0.1.15** by vacuum/compaction pass
+(see `docs/superpowers/specs/2026-07-07-page-file-reclamation-design.md` for design and
+`docs/superpowers/plans/2026-07-07-page-file-reclamation.md` for implementation).
 
 ## TL;DR
 
@@ -90,7 +90,13 @@ correctly. Reopen + NUL-free scan gate holds. Zero test-suite regressions
 (the 3 `test_encryption` failures and all `*_async` failures are pre-existing
 on 0.1.11 — environmental, unrelated to this change).
 
-## Mechanism 2 — Overwrite CoW bloat (DEFERRED)
+## Mechanism 2 — Overwrite CoW bloat (FIXED 0.1.15)
+
+Implemented via `database_vacuum()` + snapshot threshold + background worker.
+See `docs/superpowers/specs/2026-07-07-page-file-reclamation-design.md` for
+design and `docs/superpowers/plans/2026-07-07-page-file-reclamation.md` for
+implementation. The sections below are retained as historical record of the
+root cause and the proposed fix that was implemented.
 
 ### Root cause
 

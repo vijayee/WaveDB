@@ -69,3 +69,23 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 - Last chunk may not be full: `last_len = length - (nchunk - 1) * chunk_size`
 - Original length stored in `identifier_t.length`
 - No null padding - use length field for reconstruction
+
+## Vacuum / Page-File Reclamation
+
+- `database_vacuum(db)` — manual trigger; returns `-EBUSY` if cursors open, `0` on success/no-op
+- `database_vacuum_auto(db)` — internal; used by snapshot threshold + background worker; waits on `cursor_cvar` for cursors to close
+- `database_vacuum_status(db, &st)` — introspection; returns file_size, stale_bytes, stale_ratio, vacuum_in_progress, open_cursor_count, would_trigger
+- `database_flush_dirty_bnodes(db)` — must be called before vacuum in sync_only mode for the page file to have stale bytes to reclaim
+- `vacuum_config_t` — configurable via `database_config_t.vacuum_config`; persisted in CBOR config
+- Modes: `VACUUM_MODE_MANUAL_ONLY` (0), `VACUUM_MODE_STRICT` (1, default), `VACUUM_MODE_ADAPTIVE` (2)
+- Writers block on `db->vacuum_cvar` during vacuum; resume when vacuum clears
+- Auto-triggers wait on `db->cursor_cvar` for cursors to close (no "skip tick")
+- Stale regions persist in the superblock across reopen (extended `page_superblock_t` with backward-compat for old format)
+- See `docs/superpowers/specs/2026-07-07-page-file-reclamation-design.md` for design
+- See `docs/superpowers/plans/2026-07-07-page-file-reclamation.md` for implementation plan
+
+### Known Limitations
+
+- Background vacuum worker test (`VacuumAsyncTest.BackgroundWorkerAutoVacuums`) is flaky — hangs intermittently due to timing-dependent interaction between background vacuum blocking writers and the test's put loop. Pre-existing, not caused by the vacuum implementation itself.
+- Eviction task can free an `hbtrie_node_t` during the vacuum walk (small race window, mitigated by `vacuum_in_progress` check at top of eviction task but not fully closed). A refcount or quiescence barrier would close it fully.
+- Calling `database_vacuum` on a DB with unflushed dirty bnodes can cause `database_destroy` to hang in `database_persist`. Call `database_flush_dirty_bnodes` before vacuum in sync_only mode.
