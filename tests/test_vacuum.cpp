@@ -425,3 +425,51 @@ TEST_F(VacuumAsyncTest, BackgroundWorkerAutoVacuums) {
         EXPECT_EQ(get("k/" + std::to_string(i)), "v4");
     }
 }
+
+TEST_F(VacuumTest, ReopenAfterCrashMidRewrite) {
+    const int N = 200;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    // Flush to make the page file actually grow
+    database_flush_dirty_bnodes(db);
+    for (int rep = 0; rep < 5; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        database_flush_dirty_bnodes(db);
+    }
+
+    // Simulate a crash mid-rewrite: create a fake vacuum.tmp and don't call vacuum.
+    // On reopen, the tmp should be cleaned up (by Task 5's page_file_open cleanup)
+    // and the old file should be intact.
+    std::string tmp_path = test_dir + "/data.wdbp.vacuum.tmp";
+    FILE* f = fopen(tmp_path.c_str(), "wb");
+    ASSERT_NE(f, nullptr);
+    fwrite("partial vacuum data", 1, 20, f);
+    fclose(f);
+
+    uint64_t size_before = file_size();
+
+    database_destroy(db);
+    db = nullptr;
+
+    // Reopen
+    database_config_t* cfg = database_config_default();
+    database_config_set_sync_only(cfg, 1);
+    cfg->vacuum_config.min_file_size_bytes = 0;
+    cfg->vacuum_config.min_stale_bytes = 0;
+    std::string path = test_dir;  // location is a directory
+    db = database_create_with_config(path.c_str(), cfg, NULL);
+    database_config_destroy(cfg);
+    ASSERT_NE(db, nullptr);
+
+    // Tmp should be cleaned up
+    struct stat st;
+    EXPECT_NE(stat(tmp_path.c_str(), &st), 0)
+        << "vacuum.tmp should be cleaned up on reopen";
+
+    // File size unchanged (old file intact)
+    EXPECT_EQ(file_size(), size_before);
+
+    // Keys still readable with latest value
+    for (int i = 0; i < N; i++) {
+        EXPECT_EQ(get("k/" + std::to_string(i)), "v4");
+    }
+}
