@@ -639,19 +639,17 @@ TEST_F(VacuumTest, VacuumShrinksAfterReopen) {
     uint64_t after = file_size();
     EXPECT_LT(after, before) << "vacuum should shrink the file after reopen";
 
-    // Keys readable after vacuum — note: vacuum-after-reopen has a known
-    // limitation where bnodes that were lazy-loaded from the reopened file
-    // but not present in memory during the vacuum walk retain stale
-    // child_disk_offset values. This is a vacuum walk bug, not a stale_region
-    // persistence bug (which is what Task 16 verifies above). We assert that
-    // at least the keys whose bnodes were in memory during vacuum remain
-    // readable — the rest are covered by NulFreeScanAfterVacuum (which
-    // vacuums before reopen and reads via scan).
+    // All keys must be readable after vacuum. Previously this had a known
+    // limitation where lazy-loaded bnodes (on disk but not in memory during
+    // the vacuum walk) retained stale child_disk_offset values, causing data
+    // loss for ~90% of keys. The vacuum walk now lazy-loads children from
+    // disk before recursing, so the parent's child_disk_offset is patched
+    // to the new file's offset.
     int readable_after_vacuum = 0;
     for (int i = 0; i < N; i++) {
         std::string got = get("k/" + std::to_string(i));
         if (!got.empty()) readable_after_vacuum++;
     }
-    EXPECT_GT(readable_after_vacuum, 0)
-        << "at least some keys should be readable after vacuum+reopen";
+    EXPECT_EQ(readable_after_vacuum, N)
+        << "all " << N << " keys should be readable after vacuum+reopen";
 }

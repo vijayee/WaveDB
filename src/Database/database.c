@@ -2116,6 +2116,12 @@ static int database_vacuum_walk_hbnode(database_t* db, hbtrie_node_t* hn,
     // Walk the whole btree of this hbnode to find every leaf entry that points
     // to a child hbtrie_node, and recurse into each before writing any bnode
     // in this hbnode's btree.
+    //
+    // After a reopen, child bnodes/hbtrie_nodes may be lazy-loaded (in-memory
+    // pointer NULL, child_disk_offset set). We must load them from disk here
+    // so the recursive walk can patch the parent's child_disk_offset to the
+    // new file's offset. Otherwise the parent's stale offset would point to
+    // garbage in the new file after the swap.
     vec_t(bnode_t*) leaf_stack;
     vec_init(&leaf_stack);
     vec_push(&leaf_stack, hn->btree);
@@ -2126,15 +2132,45 @@ static int database_vacuum_walk_hbnode(database_t* db, hbtrie_node_t* hn,
         for (size_t i = 0; i < bn->entries.length; i++) {
             bnode_entry_t* entry = &bn->entries.data[i];
 
-            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+            if (entry->is_bnode_child) {
                 // Interior bnode — descend within this btree. We'll write it
                 // in PHASE 2; just keep walking to find leaf entries.
-                vec_push(&leaf_stack, entry->child_bnode);
+                if (entry->child_bnode == NULL && entry->child_disk_offset != 0
+                        && db->trie->fcache != NULL) {
+                    if (bnode_entry_lazy_load_bnode_child(entry, db->trie->fcache,
+                                                           db->trie->chunk_size,
+                                                           db->trie->btree_node_size) != 0) {
+                        vec_deinit(&leaf_stack);
+                        return -1;
+                    }
+                }
+                if (entry->child_bnode != NULL) {
+                    vec_push(&leaf_stack, entry->child_bnode);
+                }
             } else {
                 // Leaf entry — recurse into hbtrie children.
+                if (!entry->is_bnode_child && !entry->has_value
+                        && entry->child == NULL && entry->child_disk_offset != 0
+                        && db->trie->fcache != NULL) {
+                    if (bnode_entry_lazy_load_hbtrie_child(entry, db->trie->fcache,
+                                                            db->trie->chunk_size,
+                                                            db->trie->btree_node_size) != 0) {
+                        vec_deinit(&leaf_stack);
+                        return -1;
+                    }
+                }
                 if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
                     int rc = database_vacuum_walk_hbnode(db, entry->child, bn, i, new_pf, remap);
                     if (rc != 0) { vec_deinit(&leaf_stack); return rc; }
+                }
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                        && entry->has_value && db->trie->fcache != NULL) {
+                    if (bnode_entry_lazy_load_trie_child(entry, db->trie->fcache,
+                                                          db->trie->chunk_size,
+                                                          db->trie->btree_node_size) != 0) {
+                        vec_deinit(&leaf_stack);
+                        return -1;
+                    }
                 }
                 if (entry->trie_child != NULL) {
                     int rc = database_vacuum_walk_hbnode(db, entry->trie_child, bn, i, new_pf, remap);
@@ -2160,8 +2196,20 @@ static int database_vacuum_walk_bnode(database_t* db, bnode_t* bn,
     if (bn == NULL) return 0;
 
     // Recurse into child bnodes first (post-order).
+    // Lazy-load any interior child bnodes that are on disk but not in memory
+    // (happens after reopen when those bnodes were never accessed). Loading
+    // them here lets us patch this entry's child_disk_offset to the new file
+    // offset during the post-order write below.
     for (size_t i = 0; i < bn->entries.length; i++) {
         bnode_entry_t* entry = &bn->entries.data[i];
+        if (entry->is_bnode_child && entry->child_bnode == NULL
+                && entry->child_disk_offset != 0 && db->trie->fcache != NULL) {
+            if (bnode_entry_lazy_load_bnode_child(entry, db->trie->fcache,
+                                                   db->trie->chunk_size,
+                                                   db->trie->btree_node_size) != 0) {
+                return -1;
+            }
+        }
         if (entry->is_bnode_child && entry->child_bnode != NULL) {
             int rc = database_vacuum_walk_bnode(db, entry->child_bnode, bn, i, new_pf, remap);
             if (rc != 0) return rc;
