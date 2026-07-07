@@ -473,3 +473,117 @@ TEST_F(VacuumTest, ReopenAfterCrashMidRewrite) {
         EXPECT_EQ(get("k/" + std::to_string(i)), "v4");
     }
 }
+
+// After vacuum + reopen, scanning all keys must produce no NUL bytes in
+// the key set. Catches the case where the post-order walk fails to patch
+// child_disk_offset on some parent entry, causing page_file_read_node to
+// read the wrong block on reopen and produce NUL-padded garbage keys.
+//
+// Note: we reopen in non-sync_only mode (with a worker pool + timing wheel)
+// because database_scan_start relies on tx_manager_get_last_committed,
+// which returns 0 in sync_only mode (tx_manager is NULL) — that would
+// suppress every version on reopen and yield an empty scan regardless of
+// vacuum correctness. Reopening with a pool exercises the same on-disk
+// layout (vacuum produces a single rewrite regardless of mode) while
+// letting the iterator actually see persisted version chains.
+TEST_F(VacuumTest, NulFreeScanAfterVacuum) {
+    // Write keys with potentially-problematic byte patterns
+    const int N = 500;
+    for (int i = 0; i < N; i++) {
+        std::string key = "k/" + std::to_string(i) + "/suffix";
+        put(key, "v0");
+    }
+    database_flush_dirty_bnodes(db);
+    for (int rep = 0; rep < 5; rep++) {
+        for (int i = 0; i < N; i++) {
+            std::string key = "k/" + std::to_string(i) + "/suffix";
+            put(key, "v" + std::to_string(rep));
+        }
+        database_flush_dirty_bnodes(db);
+    }
+
+    ASSERT_EQ(database_vacuum(db), 0);
+
+    // Tear down the sync_only db before reopening with a worker pool.
+    database_destroy(db);
+    db = nullptr;
+
+    // Reopen in non-sync_only mode so database_scan_start can resolve
+    // persisted version chains via tx_manager_get_last_committed.
+    work_pool_t* pool = work_pool_create(4);
+    ASSERT_NE(pool, nullptr);
+    work_pool_launch(pool);
+    hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
+    ASSERT_NE(wheel, nullptr);
+    hierarchical_timing_wheel_run(wheel);
+
+    database_config_t* cfg = database_config_default();
+    cfg->external_pool = pool;
+    cfg->external_wheel = wheel;
+    cfg->vacuum_config.min_file_size_bytes = 0;
+    cfg->vacuum_config.min_stale_bytes = 0;
+    std::string path = test_dir;
+    db = database_create_with_config(path.c_str(), cfg, NULL);
+    database_config_destroy(cfg);
+    ASSERT_NE(db, nullptr);
+
+    // The sync_only DB we vacuumed above persisted last_txn=0 to the
+    // superblock (no tx_manager in sync_only mode — see
+    // database_flush_dirty_bnodes). On reopen the new tx_manager starts
+    // at last_committed=0, so MVCC scan would see no persisted versions.
+    // Do one dummy put to advance last_committed past every persisted
+    // txn_id (transaction_id_get_next uses CLOCK_MONOTONIC, which is
+    // strictly greater than the persisted timestamps). The dummy key is
+    // plain ASCII so it cannot introduce NUL bytes itself.
+    put("zz_advance_txn_dummy", "1");
+
+    // Scan all keys — verify no NUL bytes leaked into the key set
+    database_iterator_t* it = database_scan_start(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    int count = 0;
+    while (true) {
+        path_t* out_path = nullptr;
+        identifier_t* out_value = nullptr;
+        int rc = database_scan_next(it, &out_path, &out_value);
+        if (rc != 0) break;  // end of iteration or error
+
+        ASSERT_NE(out_path, nullptr);
+        // Walk all identifiers in the path and check for NUL bytes
+        size_t plen = path_length(out_path);
+        for (size_t pi = 0; pi < plen; pi++) {
+            identifier_t* id = path_get(out_path, pi);
+            ASSERT_NE(id, nullptr);
+            size_t len = 0;
+            uint8_t* data = identifier_get_data(id, &len);
+            if (data && len > 0) {
+                for (size_t bi = 0; bi < len; bi++) {
+                    ASSERT_NE(data[bi], 0u)
+                        << "NUL byte in scanned key at count=" << count
+                        << " path_idx=" << pi << " byte_idx=" << bi;
+                }
+                free(data);
+            }
+            // path_get returns a borrowed reference owned by the path — do NOT destroy
+        }
+
+        if (out_path) path_destroy(out_path);
+        if (out_value) identifier_destroy(out_value);
+        count++;
+    }
+    database_scan_end(it);
+
+    // We should have scanned all N keys (or at least > 0)
+    EXPECT_GT(count, 0) << "scan should produce at least one key";
+
+    // Tear down the pool + wheel we created for the reopen.
+    database_destroy(db);
+    db = nullptr;
+    hierarchical_timing_wheel_stop(wheel);
+    work_pool_shutdown(pool);
+    work_pool_join_all(pool);
+    hierarchical_timing_wheel_destroy(wheel);
+    work_pool_destroy(pool);
+    pool = nullptr;
+    wheel = nullptr;
+}
