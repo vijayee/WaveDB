@@ -60,7 +60,7 @@ typedef struct {
     uint64_t       min_stale_bytes;         // don't vacuum if less stale; default 16 MB
     uint32_t       background_interval_ms;  // default 60000 (0 = disabled)
     uint32_t       drain_timeout_ms;       // halt→drain wait; default 5000
-    uint32_t       cursor_wait_ms;         // wait for open cursors before bailing; default 1000
+    uint32_t       cursor_close_wait_ms;   // auto-trigger wait for cursors to close; default 60000
     uint32_t       max_runtime_ms;          // hard cap on a single vacuum; default 30000 (0 = no cap)
     uint32_t       writer_block_timeout_ms; // 0 = block forever; default 0
     uint32_t       adaptive_busy_threshold; // queue length to skip adaptive tick; default 32
@@ -108,11 +108,12 @@ The vacuum must not run while a reader can dereference an old `disk_offset`. The
    
    All of these check `vacuum_in_progress`; if set, they `platform_lock(&db->vacuum_writer_lock)` + `platform_condition_wait(db->vacuum_cvar, ..., writer_block_timeout_ms)`. Default `writer_block_timeout_ms = 0` (wait forever); if nonzero and timeout hits, return `-ETIMEDOUT`.
 
-2. **Refuse if cursors open** — if `db->open_cursor_count > 0` when vacuum is requested:
-   - Manual API: return `-EBUSY` immediately (caller closes cursors and retries).
-   - Snapshot threshold / background worker: skip this tick; reschedule.
+2. **Cursor handling** — if `db->open_cursor_count > 0` when vacuum is requested:
+   - **Manual API** (`database_vacuum()`): return `-EBUSY` immediately. A sync caller doesn't want to block on an unknown-duration cursor close; they re-call after closing cursors.
+   - **Snapshot threshold / background worker**: do **not** skip the tick. Wait on `db->cursor_cvar` up to `cursor_close_wait_ms` (default 60000 = 60s). When the last cursor closes (cursor destroy broadcasts `cursor_cvar`), wake up and proceed to step 3 immediately — vacuum fires within milliseconds of cursor close, not on the next tick. If `cursor_close_wait_ms` elapses with cursors still open, give up this tick and reschedule normally.
+   - **Race window**: between "count drops to 0, broadcast" and "vacuum wakes, sets `vacuum_in_progress=1`", a new cursor could squeeze in. Mitigate with a wait loop: `while (open_cursor_count > 0) condition_wait(cursor_cvar, ..., cursor_close_wait_ms)`. Once the loop exits, hold `cursor_count_mutex` while setting `vacuum_in_progress = 1`, which blocks new cursor creation before the race window reopens.
    
-   New cursors block on the same condvar (cursor creation is in the block list above), so the open-cursor count can only decrease during a vacuum attempt.
+   This avoids the "indefinitely blocked" failure mode: as long as the user eventually closes their cursors, vacuum fires promptly. The tick interval is only the fallback for cursors that stay open beyond `cursor_close_wait_ms`.
 
 3. **Drain in-flight (bounded)** — wait up to `drain_timeout_ms` (default 5000) for:
    - `work_pool` queue empty (`work_pool_wait_for_idle_signal`)
@@ -220,7 +221,7 @@ database_vacuum(db) / snapshot threshold / background tick
 
 | Failure | Behavior | State after |
 |---|---|---|
-| Open cursor at vacuum start | Manual: `-EBUSY`. Auto: skip tick. | Unchanged. |
+| Open cursor at vacuum start | Manual: `-EBUSY` (caller retries). Auto: wait `cursor_close_wait_ms` for cursors to close; if they do, proceed; if timeout, skip tick. | Unchanged until cursors close. |
 | Drain timeout | Abort. `-EBUSY` returned. | Unchanged. Writers resume. |
 | `-EIO` mid-rewrite | Abort. Delete `vacuum.tmp`. | Old file intact. `-EIO` returned. |
 | Crash before rename | Old file intact. `vacuum.tmp` orphaned. | Next `page_file_open` deletes `vacuum.tmp`. |
@@ -236,6 +237,7 @@ database_vacuum(db) / snapshot threshold / background tick
 - `test_vacuum_basic` — write N=1000 keys, overwrite each 5×, vacuum, file size shrinks ≥ 5×, all keys still readable.
 - `test_vacuum_reopen_persistence` — write + overwrite, close, reopen (stale_region persisted via superblock), vacuum, file shrinks. Verifies the persistence fix end-to-end.
 - `test_vacuum_open_cursor_refuses` — open cursor, call `database_vacuum()`, expect `-EBUSY`; close cursor, vacuum succeeds.
+- `test_vacuum_auto_cursor_close_waits` — open cursor, trigger background vacuum (or simulate snapshot threshold); verify vacuum does NOT run while cursor open; close cursor from another thread; verify vacuum fires within ~10ms of cursor close (well before next tick).
 - `test_vacuum_concurrent_writer` — writer thread loops `put_sync`; vacuum thread calls `database_vacuum()`; verify writers blocked during vacuum, resumed after, no corruption (key set intact).
 - `test_vacuum_crash_recovery` — simulate crash mid-rewrite (delete `vacuum.tmp` mid-pass via test hook), reopen from old file, verify all keys present, verify `vacuum.tmp` cleaned up.
 - `test_vacuum_threshold_strict` — push stale_ratio over 30%, call `database_snapshot()`, verify vacuum ran automatically and file shrunk.
