@@ -381,3 +381,47 @@ TEST_F(VacuumTest, ManualOnlyModeSkipsAutoVacuum) {
     uint64_t after = file_size();
     EXPECT_EQ(after, before) << "MANUAL_ONLY mode: snapshot should not auto-vacuum";
 }
+
+TEST_F(VacuumAsyncTest, BackgroundWorkerAutoVacuums) {
+    // Lower background_interval_ms by recreating DB with custom config
+    database_destroy(db);
+    db = nullptr;
+    std::string path = test_dir;
+    std::string cmd = "rm -rf " + path + "/data.wdbp*";
+    system(cmd.c_str());
+
+    database_config_t* cfg = database_config_default();
+    cfg->external_pool = pool;
+    cfg->external_wheel = wheel;
+    cfg->vacuum_config.mode = VACUUM_MODE_STRICT;
+    cfg->vacuum_config.background_interval_ms = 200;  // 200ms for fast test
+    cfg->vacuum_config.stale_threshold = 0.10;
+    cfg->vacuum_config.min_file_size_bytes = 0;
+    cfg->vacuum_config.min_stale_bytes = 0;
+    db = database_create_with_config(path.c_str(), cfg, NULL);
+    database_config_destroy(cfg);
+    ASSERT_NE(db, nullptr);
+
+    // Push enough overwrites to cross threshold
+    const int N = 500;
+    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
+    // Flush to make the page file actually grow
+    database_flush_dirty_bnodes(db);
+    for (int rep = 0; rep < 5; rep++) {
+        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
+        database_flush_dirty_bnodes(db);
+    }
+    uint64_t before = file_size();
+    ASSERT_GT(before, (uint64_t)0);
+
+    // Wait for background vacuum to fire (multiple intervals — 200ms each, wait 2s)
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+
+    uint64_t after = file_size();
+    EXPECT_LT(after, before) << "background worker should have vacuumed";
+
+    // Keys still readable
+    for (int i = 0; i < N; i++) {
+        EXPECT_EQ(get("k/" + std::to_string(i)), "v4");
+    }
+}

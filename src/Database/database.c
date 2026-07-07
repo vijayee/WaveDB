@@ -827,6 +827,88 @@ static void database_eviction_task_abort(void* ctx) {
     }
 }
 
+// ============================================================================
+// Background vacuum worker
+// ============================================================================
+
+typedef struct {
+    database_t* db;
+} vacuum_task_ctx_t;
+
+static void database_vacuum_schedule_background(database_t* db);
+
+static void database_vacuum_task_execute(void* arg) {
+    vacuum_task_ctx_t* ctx = (vacuum_task_ctx_t*)arg;
+    database_t* db = ctx->db;
+    free(ctx);
+
+    if (db == NULL || db->page_file == NULL) return;
+
+    vacuum_mode_t mode = VACUUM_MODE_STRICT;
+    if (db->active_config != NULL) {
+        mode = db->active_config->vacuum_config.mode;
+    }
+
+    // MANUAL_ONLY: don't run, but still reschedule (in case config changes later)
+    if (mode == VACUUM_MODE_MANUAL_ONLY) {
+        database_vacuum_schedule_background(db);
+        return;
+    }
+
+    // ADAPTIVE: skip if work_pool is busy
+    if (mode == VACUUM_MODE_ADAPTIVE && db->pool != NULL) {
+        // Approximate "busy" by checking if any workers are active.
+        // (idleCount < size means work is in-flight)
+        if (db->pool->idleCount < db->pool->size) {
+            uint32_t threshold = 32;
+            if (db->active_config != NULL) {
+                threshold = db->active_config->vacuum_config.adaptive_busy_threshold;
+            }
+            size_t active = db->pool->size - db->pool->idleCount;
+            if (active > threshold) {
+                database_vacuum_schedule_background(db);
+                return;
+            }
+        }
+    }
+
+    // Check threshold before running (avoid no-op vacuums)
+    double ratio = page_file_stale_ratio(db->page_file);
+    double threshold = 0.30;
+    if (db->active_config != NULL) {
+        threshold = db->active_config->vacuum_config.stale_threshold;
+    }
+    if (ratio < threshold) {
+        database_vacuum_schedule_background(db);
+        return;
+    }
+
+    // Run vacuum
+    database_vacuum_auto(db);
+
+    // Reschedule next tick
+    database_vacuum_schedule_background(db);
+}
+
+static void database_vacuum_schedule_background(database_t* db) {
+    if (db == NULL || db->wheel == NULL) return;
+    uint32_t interval_ms = 60000;
+    if (db->active_config != NULL) {
+        interval_ms = db->active_config->vacuum_config.background_interval_ms;
+    }
+    if (interval_ms == 0) return;  // disabled
+
+    vacuum_task_ctx_t* ctx = get_clear_memory(sizeof(vacuum_task_ctx_t));
+    if (ctx == NULL) return;
+    ctx->db = db;
+
+    timer_duration_t delay = {0};
+    delay.milliseconds = interval_ms;
+
+    db->vacuum_task_id = hierarchical_timing_wheel_set_timer(
+        db->wheel, ctx, database_vacuum_task_execute, NULL, delay);
+}
+
 database_t* database_create_with_config(const char* location,
                                         database_config_t* config,
                                         int* error_code) {
@@ -1221,6 +1303,13 @@ database_t* database_create_with_config(const char* location,
         database_config_destroy(effective_config);
     }
 
+    // Schedule background vacuum worker (only when enabled and not MANUAL_ONLY)
+    if (db->wheel != NULL && db->active_config != NULL &&
+        db->active_config->vacuum_config.background_interval_ms > 0 &&
+        db->active_config->vacuum_config.mode != VACUUM_MODE_MANUAL_ONLY) {
+        database_vacuum_schedule_background(db);
+    }
+
     return db;
 }
 
@@ -1406,6 +1495,14 @@ void database_destroy(database_t* db) {
     if (count == 0) {
         // Signal that destruction is in progress so eviction task won't reschedule.
         db->destroying = true;
+
+        // Cancel any scheduled background vacuum task. Done before wheel stop
+        // so the timer doesn't fire mid-teardown. (For external wheels, the
+        // caller is responsible for stopping the wheel after database_destroy.)
+        if (db->vacuum_task_id != 0 && db->wheel != NULL) {
+            hierarchical_timing_wheel_cancel_timer(db->wheel, db->vacuum_task_id);
+            db->vacuum_task_id = 0;
+        }
 
         // Unregister eviction callback so no new eviction offsets are queued.
         if (db->bnode_cache != NULL) {
