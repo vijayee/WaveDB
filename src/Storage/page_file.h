@@ -105,6 +105,12 @@ uint64_t page_file_size(page_file_t* pf);
 // Get current stale ratio (0.0-1.0)
 double page_file_stale_ratio(page_file_t* pf);
 
+// Atomically swap vacuum.tmp over the live file. After this call, pf points
+// at the new file (fd opened, cur_bid/cur_offset reset to EOF, stale_mgr
+// replaced with new_mgr). Returns 0 on success, -1 on error (old file intact).
+int page_file_vacuum_file_swap(page_file_t* pf, const char* vacuum_tmp_path,
+                                stale_region_mgr_t* new_mgr);
+
 #ifdef __cplusplus
 }
 #endif

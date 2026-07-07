@@ -292,6 +292,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_offset_remap wavedb gtest gtest_main)
     add_test(NAME test_offset_remap COMMAND test_offset_remap)
 
+    # Test for vacuum
+    add_executable(test_vacuum tests/test_vacuum.cpp)
+    target_link_libraries(test_vacuum wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_vacuum COMMAND test_vacuum)
+
     # Test for bnode_cache
     add_executable(test_bnode_cache tests/test_bnode_cache.cpp)
     target_link_libraries(test_bnode_cache wavedb gtest gtest_main Threads::Threads)

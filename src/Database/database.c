@@ -15,6 +15,7 @@
 #include "../Util/path_join.h"
 #include "../Util/log.h"
 #include "../Storage/node_serializer.h"
+#include "../Util/offset_remap.h"
 #include "../Storage/page_file.h"
 #include "../Storage/encryption.h"
 #include "../Storage/bnode_cache.h"
@@ -1893,10 +1894,245 @@ size_t database_count(database_t* db) {
     return database_lru_cache_size(db->lru);
 }
 
+// Forward declarations for vacuum walk helpers.
+static int database_vacuum_walk_hbnode(database_t* db, hbtrie_node_t* hn,
+                                         bnode_t* parent_bnode, size_t parent_entry_index,
+                                         page_file_t* new_pf, offset_remap_t* remap);
+static int database_vacuum_walk_bnode(database_t* db, bnode_t* bn,
+                                       bnode_t* parent_bnode, size_t parent_entry_index,
+                                       page_file_t* new_pf, offset_remap_t* remap);
+static int database_vacuum_rewrite(database_t* db, const char* tmp_path);
+
+// Walk an hbtrie_node post-order: recurse into child hbtrie_nodes (via leaf
+// entries) first, then walk this hbnode's btree and write each bnode.
+// Patching parent's child_disk_offset happens in two places:
+//   - For hbtrie-children: patched by the recursive walk_hbnode call (which
+//     writes the child's btree root and calls walk_bnode's parent-patch on
+//     the cross-hbnode boundary).
+//   - For interior bnode-children: patched by walk_bnode as we descend.
+static int database_vacuum_walk_hbnode(database_t* db, hbtrie_node_t* hn,
+                                         bnode_t* parent_bnode, size_t parent_entry_index,
+                                         page_file_t* new_pf, offset_remap_t* remap) {
+    if (hn == NULL || hn->btree == NULL) return 0;
+
+    // PHASE 1 — recurse into child hbtrie_nodes via leaf entries (post-order).
+    // Walk the whole btree of this hbnode to find every leaf entry that points
+    // to a child hbtrie_node, and recurse into each before writing any bnode
+    // in this hbnode's btree.
+    vec_t(bnode_t*) leaf_stack;
+    vec_init(&leaf_stack);
+    vec_push(&leaf_stack, hn->btree);
+
+    while (leaf_stack.length > 0) {
+        bnode_t* bn = vec_pop(&leaf_stack);
+
+        for (size_t i = 0; i < bn->entries.length; i++) {
+            bnode_entry_t* entry = &bn->entries.data[i];
+
+            if (entry->is_bnode_child && entry->child_bnode != NULL) {
+                // Interior bnode — descend within this btree. We'll write it
+                // in PHASE 2; just keep walking to find leaf entries.
+                vec_push(&leaf_stack, entry->child_bnode);
+            } else {
+                // Leaf entry — recurse into hbtrie children.
+                if (!entry->is_bnode_child && !entry->has_value && entry->child != NULL) {
+                    int rc = database_vacuum_walk_hbnode(db, entry->child, bn, i, new_pf, remap);
+                    if (rc != 0) { vec_deinit(&leaf_stack); return rc; }
+                }
+                if (entry->trie_child != NULL) {
+                    int rc = database_vacuum_walk_hbnode(db, entry->trie_child, bn, i, new_pf, remap);
+                    if (rc != 0) { vec_deinit(&leaf_stack); return rc; }
+                }
+            }
+        }
+    }
+    vec_deinit(&leaf_stack);
+
+    // PHASE 2 — walk this hbnode's btree (all bnodes in it) and write each
+    // post-order. The leaf entries pointing to child hbtrie_nodes already
+    // have their child_disk_offset patched by the recursive walks above.
+    // Interior bnode child_disk_offset fields are patched as we walk down.
+    return database_vacuum_walk_bnode(db, hn->btree, parent_bnode, parent_entry_index, new_pf, remap);
+}
+
+// Walk a bnode tree (within one hbtrie_node) post-order: children first, then
+// this bnode. After writing this bnode, patch the parent's child_disk_offset.
+static int database_vacuum_walk_bnode(database_t* db, bnode_t* bn,
+                                       bnode_t* parent_bnode, size_t parent_entry_index,
+                                       page_file_t* new_pf, offset_remap_t* remap) {
+    if (bn == NULL) return 0;
+
+    // Recurse into child bnodes first (post-order).
+    for (size_t i = 0; i < bn->entries.length; i++) {
+        bnode_entry_t* entry = &bn->entries.data[i];
+        if (entry->is_bnode_child && entry->child_bnode != NULL) {
+            int rc = database_vacuum_walk_bnode(db, entry->child_bnode, bn, i, new_pf, remap);
+            if (rc != 0) return rc;
+        }
+    }
+
+    // Serialize + write this bnode. All child_disk_offset fields on interior
+    // entries are now up-to-date (patched by the recursive calls above), and
+    // leaf entries pointing to hbtrie children were patched by walk_hbnode.
+    uint8_t* buf = NULL;
+    size_t len = 0;
+    int rc = bnode_serialize_v3(bn, db->trie->chunk_size, &buf, &len);
+    if (rc != 0) return rc;
+
+    uint64_t new_offset = 0;
+    uint64_t bids[64] = {0};
+    size_t num_bids = 0;
+    rc = page_file_write_node(new_pf, buf, len, &new_offset, bids, 64, &num_bids);
+    free(buf);
+    if (rc != 0) return rc;
+
+    // Record old -> new in remap (for any future offset fixups).
+    if (bn->disk_offset != UINT64_MAX && bn->disk_offset != 0) {
+        offset_remap_put(remap, bn->disk_offset, new_offset);
+    }
+    bn->disk_offset = new_offset;
+    bn->is_dirty = 0;
+
+    // Patch parent's child_disk_offset in memory so the parent's serialized
+    // bytes (written next, since we're post-order) contain the new offset.
+    if (parent_bnode != NULL && parent_entry_index < parent_bnode->entries.length) {
+        parent_bnode->entries.data[parent_entry_index].child_disk_offset = new_offset;
+    }
+
+    return 0;
+}
+
+static int database_vacuum_rewrite(database_t* db, const char* tmp_path) {
+    // Create a fresh page_file_t for the tmp file with same block_size,
+    // num_superblocks, encryption as the live file.
+    page_file_t* new_pf = page_file_create(tmp_path,
+                                           db->page_file->block_size,
+                                           db->page_file->num_superblocks,
+                                           db->page_file->encryption);
+    if (new_pf == NULL) return -1;
+    if (page_file_open(new_pf, 1) != 0) {
+        page_file_destroy(new_pf);
+        return -1;
+    }
+
+    offset_remap_t* remap = offset_remap_create(1024);
+    if (remap == NULL) {
+        page_file_destroy(new_pf);
+        return -1;
+    }
+
+    hbtrie_node_t* root = atomic_load_ptr(&db->trie->root, hbtrie_node_t*);
+    if (root == NULL) {
+        // Empty trie — just write an empty superblock.
+        page_file_write_superblock(new_pf, 0, 0, NULL);
+        page_file_destroy(new_pf);
+        offset_remap_destroy(remap);
+        return 0;
+    }
+
+    // Post-order walk: write each bnode, patch parent's child_disk_offset.
+    int rc = database_vacuum_walk_hbnode(db, root, NULL, 0, new_pf, remap);
+
+    if (rc == 0) {
+        // Root hbtrie_node's btree root bnode is the new root offset.
+        // Match database_flush_dirty_bnodes: root->disk_offset = root->btree->disk_offset.
+        root->disk_offset = root->btree->disk_offset;
+
+        // Write superblock with new root offset + last committed txn.
+        transaction_id_t last_txn;
+        if (db->tx_manager != NULL) {
+            last_txn = tx_manager_get_last_committed(db->tx_manager);
+        } else {
+            last_txn.time = 0;
+            last_txn.nanos = 0;
+            last_txn.count = 0;
+        }
+        rc = page_file_write_superblock(new_pf, root->disk_offset, 0, &last_txn);
+    }
+
+    if (rc != 0) {
+        page_file_destroy(new_pf);
+        unlink(tmp_path);
+        offset_remap_destroy(remap);
+        return rc;
+    }
+
+    // fsync the new file so the swap is durable.
+    fsync(new_pf->fd);
+
+    offset_remap_destroy(remap);
+    page_file_destroy(new_pf);  // closes the tmp fd; swap will reopen.
+    return 0;
+}
+
 int database_vacuum(database_t* db) {
     if (db == NULL) return -1;
-    // Stub: returns 0 (no-op) for now. Real implementation in Task 9.
-    return 0;
+    // Nothing to vacuum if no page file (in-memory mode).
+    if (db->page_file == NULL) return 0;
+
+    // Manual trigger: refuse if cursors are open (Task 11 handles the
+    // cursor-close wait; here we just refuse).
+    if (atomic_load(&db->open_cursor_count) > 0) {
+        return -EBUSY;
+    }
+
+    // Min file size gate — too small to bother.
+    uint64_t fsz = page_file_size(db->page_file);
+    if (db->active_config != NULL &&
+        fsz < db->active_config->vacuum_config.min_file_size_bytes) {
+        return 0;
+    }
+
+    // Min stale bytes gate — not enough to reclaim.
+    uint64_t stale = stale_region_total(db->page_file->stale_mgr);
+    if (db->active_config != NULL &&
+        stale < db->active_config->vacuum_config.min_stale_bytes) {
+        return 0;
+    }
+
+    // Set vacuum_in_progress — writers will block from here.
+    atomic_store(&db->vacuum_in_progress, 1);
+
+    int rc = 0;
+    char* tmp_path = NULL;
+
+    do {
+        // Build tmp path: <page_file->path>.vacuum.tmp
+        size_t plen = strlen(db->page_file->path);
+        tmp_path = get_clear_memory(plen + 12);
+        if (tmp_path == NULL) { rc = -1; break; }
+        memcpy(tmp_path, db->page_file->path, plen);
+        memcpy(tmp_path + plen, ".vacuum.tmp", 11);
+        tmp_path[plen + 11] = '\0';
+
+        rc = database_vacuum_rewrite(db, tmp_path);
+        if (rc != 0) break;
+
+        // Atomic swap: rename tmp over live, reopen fd, reset stale_mgr.
+        stale_region_mgr_t* new_mgr = stale_region_mgr_create();
+        rc = page_file_vacuum_file_swap(db->page_file, tmp_path, new_mgr);
+        if (rc != 0) {
+            // Swap failed; delete the tmp file and destroy the unused new_mgr.
+            unlink(tmp_path);
+            if (new_mgr != NULL) stale_region_mgr_destroy(new_mgr);
+        }
+        // On success, tmp_path was consumed by rename — free the buffer but
+        // the unlink below is a no-op (ENOENT).
+    } while (0);
+
+    // Clean up tmp_path buffer; unlink is a no-op if rename already consumed it.
+    if (tmp_path != NULL) {
+        unlink(tmp_path);
+        free(tmp_path);
+    }
+
+    // Resume writers.
+    atomic_store(&db->vacuum_in_progress, 0);
+    platform_lock(&db->vacuum_writer_lock);
+    platform_broadcast_condition(&db->vacuum_cvar);
+    platform_unlock(&db->vacuum_writer_lock);
+
+    return rc;
 }
 
 // ============================================================================

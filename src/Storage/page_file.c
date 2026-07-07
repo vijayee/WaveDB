@@ -16,6 +16,7 @@
 
 #if _WIN32
 #include "Util/unistd_compat.h"
+#include <windows.h>
 #define open _open
 /* _chsize_s (64-bit) not _chsize (32-bit long) — see Util/unistd_compat.h.
  * unistd_compat.h already maps ftruncate to _chsize_s, but page_file.c also
@@ -917,4 +918,88 @@ double page_file_stale_ratio(page_file_t* pf) {
     uint64_t stale = stale_region_total(pf->stale_mgr);
     platform_unlock(&pf->lock);
     return (double)stale / (double)file_sz;
+}
+
+int page_file_vacuum_file_swap(page_file_t* pf, const char* vacuum_tmp_path,
+                                stale_region_mgr_t* new_mgr) {
+    if (pf == NULL || vacuum_tmp_path == NULL) return -1;
+
+    platform_lock(&pf->lock);
+
+    // Close the old fd so the rename can succeed on Windows (open files can't
+    // be renamed over on some platforms).
+    if (pf->fd >= 0) {
+        close(pf->fd);
+        pf->fd = -1;
+    }
+
+    // Atomic rename: POSIX rename() atomically replaces the destination.
+#if _WIN32
+    if (!MoveFileExA(vacuum_tmp_path, pf->path, MOVEFILE_REPLACE_EXISTING)) {
+        // Restore the old fd — reopen the original file (still intact)
+        int flags = pf->is_writable ? O_RDWR : O_RDONLY;
+        flags |= O_BINARY;
+        pf->fd = open(pf->path, flags);
+        platform_unlock(&pf->lock);
+        return -1;
+    }
+#else
+    if (rename(vacuum_tmp_path, pf->path) != 0) {
+        // Rename failed — old file is still intact. Reopen it.
+        int flags = pf->is_writable ? (O_RDWR | O_CREAT) : O_RDONLY;
+        int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+        pf->fd = open(pf->path, flags, mode);
+        platform_unlock(&pf->lock);
+        return -1;
+    }
+#endif
+
+    // Open the new file (now at pf->path).
+    int flags = pf->is_writable ? O_RDWR : O_RDONLY;
+#if _WIN32
+    flags |= O_BINARY;
+#else
+    int mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+#endif
+    pf->fd = open(pf->path, flags
+#if _WIN32
+        , 0
+#else
+        , mode
+#endif
+    );
+    if (pf->fd < 0) {
+        platform_unlock(&pf->lock);
+        return -1;
+    }
+
+    // Reset cur_bid/cur_offset to new EOF (next write goes at the end).
+    int64_t sz = lseek(pf->fd, 0, SEEK_END);
+    if (sz < 0) {
+        close(pf->fd);
+        pf->fd = -1;
+        platform_unlock(&pf->lock);
+        return -1;
+    }
+    uint64_t total_blocks = (uint64_t)sz / pf->block_size;
+    uint64_t remainder = (uint64_t)sz % pf->block_size;
+    if (remainder > 0) {
+        pf->cur_bid = total_blocks;
+        pf->cur_offset = remainder;
+    } else {
+        pf->cur_bid = total_blocks;
+        pf->cur_offset = 0;
+    }
+
+    // Replace stale_mgr with the new (empty) one.
+    if (pf->stale_mgr != NULL) {
+        stale_region_mgr_destroy(pf->stale_mgr);
+    }
+    pf->stale_mgr = new_mgr != NULL ? new_mgr : stale_region_mgr_create();
+
+    // Bump revision so the next superblock write goes to the next slot.
+    pf->revision++;
+
+    platform_unlock(&pf->lock);
+    return 0;
 }
