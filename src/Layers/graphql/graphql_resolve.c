@@ -160,7 +160,13 @@ static database_iterator_t* resolve_layer_scan_start(graphql_layer_t* layer, pat
     if (layer->subtree) {
         return database_subtree_scan_start(layer->subtree, start_path, end_path);
     }
-    return database_scan_start(layer->db, start_path, end_path);
+    database_iterator_t* iter = database_scan_start(layer->db, start_path, end_path);
+    /* database_scan_start copies the paths (iterator owns its copies); honor
+       the "takes ownership" contract by destroying the originals, mirroring
+       database_subtree_scan_start which consumes them in the subtree branch. */
+    if (start_path) path_destroy(start_path);
+    if (end_path) path_destroy(end_path);
+    return iter;
 }
 
 static int64_t resolve_layer_increment_sync(graphql_layer_t* layer, path_t* path, int64_t delta) {

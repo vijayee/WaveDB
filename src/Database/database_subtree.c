@@ -921,7 +921,10 @@ database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
     }
 
     database_iterator_t* iter = database_scan_start(st->db, prefixed_start, prefixed_end);
-    /* database_scan_start takes ownership of prefixed_start and prefixed_end */
+    /* database_scan_start copies the paths (the iterator owns its copies); we
+       retain ownership of the prefixed originals and must destroy them here. */
+    if (prefixed_start) path_destroy(prefixed_start);
+    if (prefixed_end) path_destroy(prefixed_end);
     if (iter != NULL) {
         iter->prefix_skip = subtree_prefix_component_count(st);
     }
@@ -1107,8 +1110,10 @@ int database_subtree_scan_sync_raw(database_subtree_t* st,
         if (start_path == NULL) return -1;
     }
 
-    /* database_scan_start takes ownership of start_path */
+    /* database_scan_start copies the paths (the iterator owns its copies);
+       we retain ownership of the originals and must destroy them here. */
     database_iterator_t* iter = database_scan_start(st->db, start_path, NULL);
+    if (start_path) path_destroy(start_path);
     if (iter == NULL) return 0;
 
     size_t prefix_count = subtree_prefix_component_count(st);
@@ -1222,8 +1227,11 @@ int database_subtree_scan_range_sync_raw(database_subtree_t* st,
         }
     }
 
-    /* database_scan_start takes ownership of start_path and end_path */
+    /* database_scan_start copies the paths (the iterator owns its copies);
+       we retain ownership of the originals and must destroy them here. */
     database_iterator_t* iter = database_scan_start(st->db, start_path, end_path);
+    if (start_path) path_destroy(start_path);
+    if (end_path) path_destroy(end_path);
     if (iter == NULL) return 0;
 
     size_t prefix_count = subtree_prefix_component_count(st);
