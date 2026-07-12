@@ -46,6 +46,7 @@ typedef struct database_iterator_t {
 
     transaction_id_t read_txn_id;      // Transaction ID for visibility check
     uint8_t finished;                  // 1 when iteration complete
+    uint8_t reverse;                   // 1 = reverse scan (database_scan_prev), 0 = forward
 
     // Number of leading path identifiers to skip when building result paths.
     // Set by database_subtree_scan_start/range to strip the subtree prefix.
@@ -89,6 +90,45 @@ int database_scan_next(database_iterator_t* iter,
  * @param iter  Iterator to destroy
  */
 void database_scan_end(database_iterator_t* iter);
+
+/**
+ * Start a REVERSE database scan.
+ *
+ * Creates an iterator that emits (path, value) pairs in DESCENDING path order.
+ * `start_path` is the lower bound (scan stops when reached; NULL = no lower
+ * bound = scan to the smallest key in the db).
+ * `end_path` is the upper bound (scan starts at the largest key < end_path;
+ * NULL = no upper bound = start at the largest key in the db).
+ *
+ * Bounds semantics: a key k is emitted iff start_path <= k < end_path (same
+ * half-open interval as forward); the only difference is emission ORDER
+ * (descending vs ascending).
+ *
+ * Caller takes ownership of the iterator; free with database_scan_end.
+ *
+ * @param db         Database to scan
+ * @param start_path Optional lower bound (NULL = no lower bound). Takes ownership.
+ * @param end_path   Optional upper bound (NULL = no upper bound). Takes ownership.
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_scan_start_reverse(database_t* db,
+                                                   path_t* start_path,
+                                                   path_t* end_path);
+
+/**
+ * Get the PREVIOUS entry from a reverse iterator (i.e. the next-smaller key).
+ *
+ * Returns the next (path, value) pair in descending order. Caller takes
+ * ownership of returned path and identifier (must destroy them).
+ *
+ * @param iter      Iterator handle (from database_scan_start_reverse)
+ * @param out_path  Output: path key (caller must destroy)
+ * @param out_value Output: value (caller must destroy)
+ * @return 0 on success, -1 on end of iteration, -2 on error
+ */
+int database_scan_prev(database_iterator_t* iter,
+                       path_t** out_path,
+                       identifier_t** out_value);
 
 #ifdef __cplusplus
 }

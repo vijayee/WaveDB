@@ -889,3 +889,17 @@ int database_scan_next(database_iterator_t* iter,
     iter->finished = 1;
     return -1;
 }
+/* Stub implementations — replaced by full versions in Task 3. */
+database_iterator_t* database_scan_start_reverse(database_t* db,
+                                                   path_t* start_path,
+                                                   path_t* end_path) {
+    (void)db; (void)start_path; (void)end_path;
+    return NULL;
+}
+
+int database_scan_prev(database_iterator_t* iter,
+                       path_t** out_path,
+                       identifier_t** out_value) {
+    (void)iter; (void)out_path; (void)out_value;
+    return -2;
+}

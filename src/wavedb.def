@@ -47,8 +47,10 @@ EXPORTS
     database_raw_value_free
     database_scan_end
     database_scan_next
+    database_scan_prev
     database_scan_range_sync_raw
     database_scan_start
+    database_scan_start_reverse
     database_scan_sync_raw
     database_subtree_batch_sync_raw
     database_subtree_close
