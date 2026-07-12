@@ -899,18 +899,66 @@ void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
   cursor->trie = trie;
   cursor->stack_depth = 0;
   cursor->finished = 0;
+  cursor->reverse = 0;
 
   // Push root node onto stack
   hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
   if (root != NULL) {
     cursor->stack[0].node = root;
     cursor->stack[0].entry_index = 0;
+    cursor->stack[0].value_pending = 0;
     cursor->stack_depth = 1;
   } else {
     cursor->finished = 1;
   }
 
   (void)path; // Path is for future seek support
+}
+
+/*
+ * Helper for reverse cursor: push `child` as a new frame on top of the
+ * cursor stack, positioned at the rightmost entry (entry_index = count-1).
+ * Performs lazy loading of the child's btree if needed so that count is
+ * accurate.  No further descent — hbtrie_cursor_prev() will process the
+ * rightmost entry on its next iteration, descending further if needed.
+ */
+static void reverse_push_child(hbtrie_cursor_t* cursor, hbtrie_node_t* child) {
+  size_t idx = cursor->stack_depth;
+  cursor->stack[idx].node = child;
+  cursor->stack[idx].entry_index = 0;
+  cursor->stack[idx].value_pending = 0;
+  if (child != NULL && child->btree != NULL) {
+    size_t count = bnode_count(child->btree);
+    cursor->stack[idx].entry_index = (count == 0) ? 0 : count - 1;
+  }
+  cursor->stack_depth++;
+}
+
+void hbtrie_cursor_init_reverse(hbtrie_cursor_t* cursor, hbtrie_t* trie) {
+  if (cursor == NULL || trie == NULL) return;
+  cursor->trie = trie;
+  cursor->stack_depth = 0;
+  cursor->finished = 0;
+  cursor->reverse = 1;
+
+  hbtrie_node_t* root = atomic_load_ptr(&trie->root, hbtrie_node_t*);
+  if (root == NULL) {
+    cursor->finished = 1;
+    return;
+  }
+  /* Position at the root's rightmost entry.  No descent — the first
+     hbtrie_cursor_prev() call walks down to the rightmost leaf, mirroring
+     the forward cursor which positions at the root's leftmost entry and
+     lets hbtrie_cursor_next() walk down to the leftmost leaf. */
+  cursor->stack[0].node = root;
+  cursor->stack[0].value_pending = 0;
+  if (root->btree != NULL) {
+    size_t count = bnode_count(root->btree);
+    cursor->stack[0].entry_index = (count == 0) ? 0 : count - 1;
+  } else {
+    cursor->stack[0].entry_index = 0;
+  }
+  cursor->stack_depth = 1;
 }
 
 hbtrie_cursor_t* hbtrie_cursor_create(hbtrie_t* trie, path_t* path) {
@@ -997,6 +1045,94 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
   return -1;
 }
 
+int hbtrie_cursor_prev(hbtrie_cursor_t* cursor) {
+  if (cursor == NULL || cursor->finished) return -1;
+
+  while (cursor->stack_depth > 0) {
+    hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+    hbtrie_node_t* node = frame->node;
+    if (node == NULL || node->btree == NULL) {
+      cursor->stack_depth--;
+      continue;
+    }
+
+    bnode_t* btree = node->btree;
+    size_t count = bnode_count(btree);
+    int descended = 0;
+
+    while (frame->entry_index != SIZE_MAX) {
+      if (frame->entry_index >= count) {
+        if (count == 0) break;
+        frame->entry_index = count - 1;
+      }
+      bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
+      size_t this_index = frame->entry_index;
+      frame->entry_index--;
+
+      if (entry == NULL) continue;
+
+      /* Lazy load trie_child if needed. */
+      if (entry->trie_child == NULL && entry->child_disk_offset != 0
+          && cursor->trie->fcache != NULL) {
+        bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
+                                         cursor->trie->chunk_size,
+                                         cursor->trie->btree_node_size);
+      }
+
+      if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        if (entry->has_value) {
+          if (frame->value_pending == 0) {
+            /* First visit: descend into the subtree first, emit value on
+               pop-back. Re-position entry_index at this_index so we revisit
+               this entry after the subtree is exhausted. */
+            frame->entry_index = this_index;
+            frame->value_pending = 1;
+            reverse_push_child(cursor, entry->trie_child);
+            descended = 1;
+            break;  /* break inner loop to descend into pushed child */
+          } else {
+            /* Second visit: subtree exhausted, emit the value. */
+            frame->value_pending = 0;
+            frame->entry_index = this_index - 1;  /* move past this entry */
+            return 0;
+          }
+        }
+        /* No value, just descend into the subtree. */
+        reverse_push_child(cursor, entry->trie_child);
+        descended = 1;
+        break;
+      }
+
+      if (entry->has_value) {
+        return 0;
+      }
+
+      /* Lazy load hbtrie child if needed. */
+      if (entry->child == NULL && !entry->has_value && entry->child_disk_offset != 0
+          && cursor->trie->fcache != NULL) {
+        bnode_entry_lazy_load_hbtrie_child(entry, cursor->trie->fcache,
+                                           cursor->trie->chunk_size,
+                                           cursor->trie->btree_node_size);
+      }
+      if (entry->child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+        reverse_push_child(cursor, entry->child);
+        descended = 1;
+        break;
+      }
+      /* No value, no child — skip. entry_index already decremented. */
+    }
+
+    /* Pop this frame if we did not push a child to descend into AND the
+       level is exhausted (entry_index underflowed past 0, or bnode empty). */
+    if (!descended && (count == 0 || frame->entry_index == SIZE_MAX)) {
+      cursor->stack_depth--;
+    }
+  }
+
+  cursor->finished = 1;
+  return -1;
+}
+
 int hbtrie_cursor_at_end(hbtrie_cursor_t* cursor) {
   if (cursor == NULL) return 1;
   return cursor->finished;
@@ -1006,6 +1142,16 @@ bnode_entry_t* hbtrie_cursor_get_entry(hbtrie_cursor_t* cursor) {
   if (cursor == NULL || cursor->stack_depth == 0 || cursor->finished) return NULL;
 
   hbtrie_cursor_frame_t* frame = &cursor->stack[cursor->stack_depth - 1];
+  if (frame->node == NULL || frame->node->btree == NULL) return NULL;
+
+  if (cursor->reverse) {
+    // Reverse cursor: hbtrie_cursor_prev() decrements entry_index past the
+    // current entry, so the current entry is at entry_index + 1.
+    size_t count = bnode_count(frame->node->btree);
+    if (frame->entry_index + 1 >= count) return NULL;
+    return bnode_get(frame->node->btree, frame->entry_index + 1);
+  }
+
   if (frame->entry_index == 0) return NULL;
 
   // entry_index was already advanced by next(), so look at previous

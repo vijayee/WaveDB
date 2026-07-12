@@ -401,6 +401,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_graph wavedb gtest gtest_main)
     add_test(NAME test_graph COMMAND test_graph)
 
+    # Test for engine backward scan (reverse iteration)
+    add_executable(test_reverse_scan tests/test_reverse_scan.cpp)
+    target_link_libraries(test_reverse_scan wavedb gtest gtest_main)
+    add_test(NAME test_reverse_scan COMMAND test_reverse_scan)
+
     # Test for Graph DSL Parser
     add_executable(test_graph_parser tests/test_graph_parser.cpp)
     target_link_libraries(test_graph_parser wavedb gtest gtest_main)

@@ -84,6 +84,9 @@ typedef struct hbtrie_t {
 typedef struct {
     hbtrie_node_t* node;              // Current HBTrie node at this level
     size_t entry_index;               // Current entry index in the B+tree
+    uint8_t value_pending;            // Reverse cursor: 1 when a has_value+trie_child
+                                      // entry's subtree has been exhausted and the value
+                                      // still needs to be emitted on pop-back
 } hbtrie_cursor_frame_t;
 
 #define HBTRIE_CURSOR_MAX_DEPTH 32
@@ -99,6 +102,8 @@ typedef struct {
     hbtrie_cursor_frame_t stack[HBTRIE_CURSOR_MAX_DEPTH];
     size_t stack_depth;                // Current depth in the trie
     int finished;                      // 1 when traversal is complete
+    int reverse;                       // 1 if initialized via hbtrie_cursor_init_reverse
+                                      // (affects hbtrie_cursor_get_entry indexing)
 } hbtrie_cursor_t;
 
 /**
@@ -189,6 +194,30 @@ void hbtrie_cursor_destroy(hbtrie_cursor_t* cursor);
  * @return 0 on success, -1 at end of traversal
  */
 int hbtrie_cursor_next(hbtrie_cursor_t* cursor);
+
+/**
+ * Initialize a cursor for REVERSE DFS traversal of the HBTrie.
+ *
+ * Positions the cursor at the rightmost leaf (descends always taking the
+ * last entry of each bnode). hbtrie_cursor_prev() then walks entries in
+ * descending sort order.
+ *
+ * @param cursor  Cursor to initialize
+ * @param trie    HBTrie to traverse
+ */
+void hbtrie_cursor_init_reverse(hbtrie_cursor_t* cursor, hbtrie_t* trie);
+
+/**
+ * Advance cursor to the PREVIOUS entry with a value (reverse DFS).
+ *
+ * Mirror of hbtrie_cursor_next: decrements entry_index, descends into the
+ * rightmost child when an entry has a child, backtracks when a level is
+ * exhausted (entry_index underflows past 0).
+ *
+ * @param cursor  Cursor to advance
+ * @return 0 on success, -1 at beginning of traversal
+ */
+int hbtrie_cursor_prev(hbtrie_cursor_t* cursor);
 
 /**
  * Check if cursor has finished traversal.
