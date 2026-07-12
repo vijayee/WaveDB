@@ -95,8 +95,13 @@ TEST_F(HBTrieReverseTest, CursorPrevDescendingOrder) {
 }
 
 // Multi-chunk keys (up to 3 HBTrie levels): reverse scan must yield one
-// value-bearing entry per inserted key. Verifies the rightmost-descent
-// logic crosses multiple trie levels without double-yielding or skipping.
+// value-bearing entry per inserted key IN STRICTLY DESCENDING ORDER.
+// Verifies the rightmost-descent logic crosses multiple trie levels
+// without double-yielding or skipping, and that the order is correct.
+// We compare the FIRST chunk of each yielded key (read from the root
+// frame) rather than the leaf chunk, because two keys ("cherry" and
+// "elderberry") share the same last chunk "ry\0\0" — leaf chunks alone
+// can't distinguish their order.
 TEST_F(HBTrieReverseTest, CursorPrevMultiChunkCount) {
     const char* keys[] = {"apple", "banana", "cherry", "date", "elderberry"};
     for (const char* k : keys) {
@@ -106,14 +111,40 @@ TEST_F(HBTrieReverseTest, CursorPrevMultiChunkCount) {
     hbtrie_cursor_t rev;
     hbtrie_cursor_init_reverse(&rev, trie);
     size_t rev_count = 0;
+    std::vector<std::string> first_chunks;
     while (hbtrie_cursor_prev(&rev) == 0) {
         bnode_entry_t* e = hbtrie_cursor_get_entry(&rev);
         ASSERT_NE(e, nullptr);
         ASSERT_EQ(e->has_value, 1);
+        // Read the root frame's current entry to get the first chunk of
+        // the yielded key. reverse_push_child / hbtrie_cursor_prev set
+        // stack[0].entry_index to (this_index - 1) on regular descents,
+        // so entry_index + 1 recovers the root entry we descended from.
+        // (For stack_depth==1 yields like "date", the same +1 recovers
+        // the yielded root entry itself.)
+        bnode_t* root_btree = rev.stack[0].node->btree;
+        size_t root_count = bnode_count(root_btree);
+        size_t root_idx = rev.stack[0].entry_index + 1;
+        ASSERT_LT(root_idx, root_count);
+        bnode_entry_t* root_entry = bnode_get(root_btree, root_idx);
+        ASSERT_NE(root_entry, nullptr);
+        ASSERT_NE(root_entry->key, nullptr);
+        first_chunks.emplace_back((const char*)root_entry->key->data,
+                                  root_entry->key->size);
         rev_count++;
     }
 
     EXPECT_EQ(rev_count, 5u);
+    // Expected descending first-chunk order: elde > date > cher > bana > appl.
+    std::vector<std::string> expected = {
+        std::string("elde", 4),
+        std::string("date", 4),
+        std::string("cher", 4),
+        std::string("bana", 4),
+        std::string("appl", 4),
+    };
+    ASSERT_EQ(first_chunks.size(), expected.size());
+    EXPECT_EQ(first_chunks, expected);
 }
 
 // Empty trie: reverse cursor should immediately return -1.
@@ -165,5 +196,84 @@ TEST_F(HBTrieReverseTest, CursorPrevPrefixShared) {
     // Descending order: "apple" (second chunk "e\0\0\0") sorts after "appl"
     // at the root, so reverse yields the trie_child subtree first, then the
     // root value. Two value-bearing entries total.
+    // The value_pending mechanism must emit the root value AFTER the subtree.
+    // Asserting the ORDER proves the two-visit logic works — without this,
+    // the test would pass even if the value were emitted before the subtree
+    // (which would be wrong).
     ASSERT_EQ(got.size(), 2u);
+    // got[0]: leaf chunk of "apple" — "e" zero-padded to chunk_size=4.
+    EXPECT_EQ(got[0], std::string("e\0\0\0", 4));
+    // got[1]: root value chunk for "appl" (emitted on value_pending pop-back).
+    EXPECT_EQ(got[1], std::string("appl", 4));
+}
+
+// value_pending at an INTERMEDIATE trie level (not the root).
+//
+// Keys (chunk_size=4):
+//   "aaaabbbb"   -> chunks ["aaaa", "bbbb"]            (2 chunks)
+//   "aaaabbbbX"  -> chunks ["aaaa", "bbbb", "X\0\0\0"] (3 chunks)
+//   "aaaabbbbY"  -> chunks ["aaaa", "bbbb", "Y\0\0\0"] (3 chunks)
+//   "aaaacccc"   -> chunks ["aaaa", "cccc"]            (2 chunks)
+//
+// Trie shape:
+//   root: entry "aaaa" (has_value=0, trie_child != NULL)  -- regular descent
+//     depth 1: entries "bbbb" and "cccc"
+//       "cccc": has_value=1, no child         -> plain leaf ("aaaacccc")
+//       "bbbb": has_value=1 + trie_child       -> INTERMEDIATE value_pending
+//         depth 2: entries "X\0\0\0", "Y\0\0\0" (both plain leaves)
+//
+// This forces the value_pending two-visit logic to fire at depth 1: the
+// "bbbb" entry's subtree ("aaaabbbbY", "aaaabbbbX") must be exhausted
+// BEFORE the "bbbb" value ("aaaabbbb") is emitted, then iteration continues
+// to siblings. CursorPrevPrefixShared only exercises value_pending at the
+// root; this test covers the non-root case.
+//
+// Expected descending full-key order:
+//   "aaaacccc" > "aaaabbbbY" > "aaaabbbbX" > "aaaabbbb"
+//
+// We assert both the leaf chunk and the stack depth at each yield, which
+// uniquely identifies which key was emitted and at which trie level.
+TEST_F(HBTrieReverseTest, CursorPrevValueWithTrieChildIntermediateLevel) {
+    insert_key("aaaabbbb");
+    insert_key("aaaabbbbX");
+    insert_key("aaaabbbbY");
+    insert_key("aaaacccc");
+
+    hbtrie_cursor_t cursor;
+    hbtrie_cursor_init_reverse(&cursor, trie);
+
+    // Collect (leaf_chunk_bytes, stack_depth) for each yielded entry.
+    std::vector<std::pair<std::string, size_t>> got;
+    while (hbtrie_cursor_prev(&cursor) == 0) {
+        bnode_entry_t* e = hbtrie_cursor_get_entry(&cursor);
+        ASSERT_NE(e, nullptr);
+        ASSERT_EQ(e->has_value, 1);
+        ASSERT_NE(e->key, nullptr);
+        ASSERT_GE(e->key->size, 1u);
+        std::string k((const char*)e->key->data, e->key->size);
+        got.emplace_back(k, cursor.stack_depth);
+    }
+
+    ASSERT_EQ(got.size(), 4u);
+
+    // 1) "aaaacccc" -> leaf chunk "cccc" at depth 1 (stack_depth=2).
+    EXPECT_EQ(got[0].first, std::string("cccc", 4));
+    EXPECT_EQ(got[0].second, 2u);
+
+    // 2) "aaaabbbbY" -> leaf chunk "Y\0\0\0" at depth 2 (stack_depth=3).
+    static const char kY[] = {'Y', 0, 0, 0};
+    EXPECT_EQ(got[1].first, std::string(kY, 4));
+    EXPECT_EQ(got[1].second, 3u);
+
+    // 3) "aaaabbbbX" -> leaf chunk "X\0\0\0" at depth 2 (stack_depth=3).
+    static const char kX[] = {'X', 0, 0, 0};
+    EXPECT_EQ(got[2].first, std::string(kX, 4));
+    EXPECT_EQ(got[2].second, 3u);
+
+    // 4) "aaaabbbb" -> leaf chunk "bbbb" at depth 1 (stack_depth=2),
+    //    emitted by the value_pending pop-back AFTER the subtree was
+    //    exhausted. This is the key assertion: if value_pending were
+    //    broken, "bbbb" would appear before "Y"/"X" (or not at all).
+    EXPECT_EQ(got[3].first, std::string("bbbb", 4));
+    EXPECT_EQ(got[3].second, 2u);
 }

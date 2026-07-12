@@ -918,9 +918,10 @@ void hbtrie_cursor_init(hbtrie_cursor_t* cursor, hbtrie_t* trie, path_t* path) {
 /*
  * Helper for reverse cursor: push `child` as a new frame on top of the
  * cursor stack, positioned at the rightmost entry (entry_index = count-1).
- * Performs lazy loading of the child's btree if needed so that count is
- * accurate.  No further descent — hbtrie_cursor_prev() will process the
- * rightmost entry on its next iteration, descending further if needed.
+ * Reads the child's btree count so the new frame is positioned at the
+ * rightmost entry (count - 1).  No further descent — hbtrie_cursor_prev()
+ * will process the rightmost entry on its next iteration, descending
+ * further if needed.
  */
 static void reverse_push_child(hbtrie_cursor_t* cursor, hbtrie_node_t* child) {
   size_t idx = cursor->stack_depth;
