@@ -30,8 +30,7 @@
 | `src/Database/database_config.c` | Defaults, CBOR serialize/parse for `vacuum_config`. |
 | `src/Storage/page_file.h` | Extend `page_superblock_t` with `stale_region_offset`/`stale_region_size`; declare `page_file_vacuum_file_swap()`. |
 | `src/Storage/page_file.c` | Persist stale_region blob in superblock; cleanup `*.vacuum.tmp` on open; atomic file swap helper. |
-| `src/Database/database.h` | Add `database_vacuum()`; add `vacuum_in_progress` / `vacuum_cvar` / `vacuum_writer_lock` / `cursor_cvar` / `cursor_count_mutex` / `open_cursor_count` / `vacuum_task_id` to `database_t`. |
-| `src/Database/database.c` | `database_vacuum()` core; snapshot threshold hook; background vacuum task; writer block in sync paths; cursor count maintenance. |
+| `src/Database/database.c` | `database_vacuum()` core; snapshot threshold hook; writer block in sync paths; cursor count maintenance. |
 | `src/Database/database_iterator.c` | Increment/decrement `db->open_cursor_count`; broadcast `cursor_cvar` on close. |
 | `bindings/nodejs/src/database.cc` | Parse `config.vacuum`; expose `vacuum()`. |
 | `bindings/dart/lib/src/native/types.dart` | `VacuumConfig` + `VacuumMode`; `toNative()`. |
@@ -63,7 +62,6 @@ TEST(DatabaseConfigTest, VacuumDefaults) {
     EXPECT_DOUBLE_EQ(config->vacuum_config.stale_threshold, 0.30);
     EXPECT_EQ(config->vacuum_config.min_file_size_bytes, 64ull * 1024 * 1024);
     EXPECT_EQ(config->vacuum_config.min_stale_bytes, 16ull * 1024 * 1024);
-    EXPECT_EQ(config->vacuum_config.background_interval_ms, 60000u);
     EXPECT_EQ(config->vacuum_config.drain_timeout_ms, 5000u);
     EXPECT_EQ(config->vacuum_config.cursor_close_wait_ms, 60000u);
     EXPECT_EQ(config->vacuum_config.max_runtime_ms, 30000u);
@@ -94,7 +92,6 @@ typedef struct {
     double         stale_threshold;
     uint64_t       min_file_size_bytes;
     uint64_t       min_stale_bytes;
-    uint32_t       background_interval_ms;
     uint32_t       drain_timeout_ms;
     uint32_t       cursor_close_wait_ms;
     uint32_t       max_runtime_ms;
@@ -119,7 +116,6 @@ In `src/Database/database_config.c`, in `database_config_default()` after the `t
     config->vacuum_config.stale_threshold = 0.30;
     config->vacuum_config.min_file_size_bytes = 64ull * 1024 * 1024;
     config->vacuum_config.min_stale_bytes = 16ull * 1024 * 1024;
-    config->vacuum_config.background_interval_ms = 60000;
     config->vacuum_config.drain_timeout_ms = 5000;
     config->vacuum_config.cursor_close_wait_ms = 60000;
     config->vacuum_config.max_runtime_ms = 30000;
@@ -159,7 +155,6 @@ TEST(DatabaseConfigTest, VacuumConfigPersists) {
     database_config_t* cfg = database_config_default();
     cfg->vacuum_config.mode = VACUUM_MODE_ADAPTIVE;
     cfg->vacuum_config.stale_threshold = 0.45;
-    cfg->vacuum_config.background_interval_ms = 30000;
     cfg->vacuum_config.adaptive_busy_threshold = 64;
 
     ASSERT_EQ(database_config_save(dir.c_str(), cfg), 0);
@@ -169,7 +164,6 @@ TEST(DatabaseConfigTest, VacuumConfigPersists) {
     ASSERT_NE(loaded, nullptr);
     EXPECT_EQ(loaded->vacuum_config.mode, VACUUM_MODE_ADAPTIVE);
     EXPECT_DOUBLE_EQ(loaded->vacuum_config.stale_threshold, 0.45);
-    EXPECT_EQ(loaded->vacuum_config.background_interval_ms, 30000u);
     EXPECT_EQ(loaded->vacuum_config.adaptive_busy_threshold, 64u);
     database_config_destroy(loaded);
 
@@ -210,8 +204,6 @@ In `src/Database/database_config.c`, find the `cbor_build_map` call in `database
         .value = cbor_move(cbor_build_uint64(config->vacuum_config.min_stale_bytes))
     });
     cbor_map_add(vacuum_map, (struct cbor_pair){
-        .key = cbor_move(cbor_build_string("background_interval_ms")),
-        .value = cbor_move(cbor_build_uint32(config->vacuum_config.background_interval_ms))
     });
     cbor_map_add(vacuum_map, (struct cbor_pair){
         .key = cbor_move(cbor_build_string("drain_timeout_ms")),
@@ -249,7 +241,6 @@ In `database_config_load`, after the `timer_resolution_ms` parse line, add:
         config->vacuum_config.stale_threshold = (double)get_map_float(vacuum_map, "stale_threshold", 0.30);
         config->vacuum_config.min_file_size_bytes = get_map_uint(vacuum_map, "min_file_size_bytes", 64ull * 1024 * 1024);
         config->vacuum_config.min_stale_bytes = get_map_uint(vacuum_map, "min_stale_bytes", 16ull * 1024 * 1024);
-        config->vacuum_config.background_interval_ms = (uint32_t)get_map_uint(vacuum_map, "background_interval_ms", 60000);
         config->vacuum_config.drain_timeout_ms = (uint32_t)get_map_uint(vacuum_map, "drain_timeout_ms", 5000);
         config->vacuum_config.cursor_close_wait_ms = (uint32_t)get_map_uint(vacuum_map, "cursor_close_wait_ms", 60000);
         config->vacuum_config.max_runtime_ms = (uint32_t)get_map_uint(vacuum_map, "max_runtime_ms", 30000);
@@ -896,7 +887,6 @@ In `src/Database/database.h`, add to `database_t` (find the struct and append):
     PLATFORMLOCKTYPE(cursor_count_mutex);
     PLATFORMCONDTYPE(cursor_cvar);
     atomic_int      open_cursor_count;
-    uint64_t        vacuum_task_id;  // 0 = no background task scheduled
 ```
 
 If `PLATFORMCONDTYPE` doesn't exist, add to `src/Util/threadding.h` (check first — likely already exists or needs a typedef). If you need to add it:
@@ -925,7 +915,6 @@ In `src/Database/database.c`, in `database_create_with_config` after the existin
 ```c
     atomic_init(&db->vacuum_in_progress, 0);
     atomic_init(&db->open_cursor_count, 0);
-    db->vacuum_task_id = 0;
     platform_lock_init(&db->vacuum_writer_lock);
     platform_condition_init(&db->vacuum_cvar);
     platform_lock_init(&db->cursor_count_mutex);
@@ -2136,149 +2125,6 @@ git commit -m "feat(database): snapshot threshold triggers vacuum"
 
 ---
 
-## Task 13: Background vacuum worker
-
-**Files:**
-- Modify: `src/Database/database.c` (background task spawn/stop in create/destroy)
-
-- [ ] **Step 1: Write the failing test**
-
-Append to `tests/test_vacuum.cpp`:
-
-```cpp
-TEST_F(VacuumAsyncTest, BackgroundWorkerAutoVacuums) {
-    // Lower background_interval_ms by recreating DB
-    database_destroy(db);
-    std::string path = test_dir + "/data.wdbp";
-    std::string cmd = "rm -f " + path;
-    system(cmd.c_str());
-
-    database_config_t* cfg = database_config_default();
-    cfg->external_pool = pool;
-    cfg->external_wheel = wheel;
-    cfg->vacuum_config.mode = VACUUM_MODE_STRICT;
-    cfg->vacuum_config.background_interval_ms = 200;  // 200ms for fast test
-    cfg->vacuum_config.stale_threshold = 0.10;
-    cfg->vacuum_config.min_file_size_bytes = 0;  // bypass for test
-    cfg->vacuum_config.min_stale_bytes = 0;
-    db = database_create_with_config(path.c_str(), cfg);
-    database_config_destroy(cfg);
-
-    // Push enough overwrites to cross threshold
-    const int N = 500;
-    for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v0");
-    for (int rep = 0; rep < 10; rep++) {
-        for (int i = 0; i < N; i++) put("k/" + std::to_string(i), "v" + std::to_string(rep));
-    }
-    uint64_t before = file_size();
-
-    // Wait for background vacuum to fire (multiple intervals)
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-    uint64_t after = file_size();
-    EXPECT_LT(after, before) << "background worker should have vacuumed";
-
-    // Keys still readable
-    for (int i = 0; i < N; i++) {
-        EXPECT_EQ(get("k/" + std::to_string(i)), "v9");
-    }
-}
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd build && cmake --build . -j$(nproc) && ctest --output-on-failure -R VacuumAsyncTest.BackgroundWorkerAutoVacuums`
-Expected: FAIL — background worker not implemented; file doesn't shrink.
-
-- [ ] **Step 3: Implement the background worker**
-
-In `src/Database/database.c`, add a timer task function:
-
-```c
-typedef struct {
-    database_t* db;
-} vacuum_task_ctx_t;
-
-static void database_vacuum_task_execute(void* arg) {
-    vacuum_task_ctx_t* ctx = (vacuum_task_ctx_t*)arg;
-    database_t* db = ctx->db;
-    free(ctx);
-
-    if (db == NULL) return;
-
-    vacuum_mode_t mode = db->config.vacuum_config.mode;
-    if (mode == VACUUM_MODE_MANUAL_ONLY) {
-        // reschedule
-        database_vacuum_schedule_background(db);
-        return;
-    }
-
-    // ADAPTIVE: skip if work_pool is busy
-    if (mode == VACUUM_MODE_ADAPTIVE && db->pool != NULL) {
-        size_t q = work_pool_queue_len(db->pool);
-        if (q > db->config.vacuum_config.adaptive_busy_threshold) {
-            database_vacuum_schedule_background(db);
-            return;
-        }
-    }
-
-    // Run vacuum
-    database_vacuum_auto(db);
-
-    // Reschedule
-    database_vacuum_schedule_background(db);
-}
-
-static void database_vacuum_schedule_background(database_t* db) {
-    if (db == NULL) return;
-    if (db->config.vacuum_config.background_interval_ms == 0) return;
-    if (db->wheel == NULL) return;
-
-    vacuum_task_ctx_t* ctx = get_clear_memory(sizeof(vacuum_task_ctx_t));
-    ctx->db = db;
-    // Schedule via the timing wheel; check the wheel API for the exact call
-    // (likely hierarchical_timing_wheel_schedule_after(wheel, ms, fn, ctx))
-    db->vacuum_task_id = hierarchical_timing_wheel_schedule_after(
-        db->wheel, db->config.vacuum_config.background_interval_ms,
-        database_vacuum_task_execute, ctx);
-}
-```
-
-(Read `src/Time/wheel.h` first to find the actual scheduling function name and signature — adjust the call above to match.)
-
-In `database_create_with_config`, after the wheel is set up, schedule the first tick:
-
-```c
-    if (db->config.vacuum_config.background_interval_ms > 0 &&
-        db->wheel != NULL &&
-        db->config.vacuum_config.mode != VACUUM_MODE_MANUAL_ONLY) {
-        database_vacuum_schedule_background(db);
-    }
-```
-
-In `database_destroy`, before stopping the wheel, cancel the scheduled task:
-
-```c
-    if (db->vacuum_task_id != 0 && db->wheel != NULL) {
-        hierarchical_timing_wheel_cancel(db->wheel, db->vacuum_task_id);
-        db->vacuum_task_id = 0;
-    }
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd build && cmake --build . -j$(nproc) && ctest --output-on-failure -R VacuumAsyncTest.BackgroundWorkerAutoVacuums`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/Database/database.c src/Time/wheel.h tests/test_vacuum.cpp
-git commit -m "feat(database): background vacuum worker"
-```
-
----
-
 ## Task 14: Crash recovery test
 
 **Files:**
@@ -2586,7 +2432,6 @@ In `bindings/nodejs/src/database.cc`, find the config parsing block (around line
     }
     Napi::Number bg_int = vacuum_obj.Get("backgroundIntervalMs").As<Napi::Number>();
     if (!bg_int.IsUndefined() && bg_int.IsNumber()) {
-      config->vacuum_config.background_interval_ms = (uint32_t)bg_int.NumberValue();
     }
     Napi::Number drain_to = vacuum_obj.Get("drainTimeoutMs").As<Napi::Number>();
     if (!drain_to.IsUndefined() && drain_to.IsNumber()) {
@@ -2842,7 +2687,6 @@ class VacuumConfig:
                  stale_threshold: float = 0.30,
                  min_file_size_bytes: int = 64 * 1024 * 1024,
                  min_stale_bytes: int = 16 * 1024 * 1024,
-                 background_interval_ms: int = 60000,
                  drain_timeout_ms: int = 5000,
                  cursor_close_wait_ms: int = 60000,
                  max_runtime_ms: int = 30000,
@@ -2852,7 +2696,6 @@ class VacuumConfig:
         self.stale_threshold = stale_threshold
         self.min_file_size_bytes = min_file_size_bytes
         self.min_stale_bytes = min_stale_bytes
-        self.background_interval_ms = background_interval_ms
         self.drain_timeout_ms = drain_timeout_ms
         self.cursor_close_wait_ms = cursor_close_wait_ms
         self.max_runtime_ms = max_runtime_ms
@@ -2865,7 +2708,6 @@ class VacuumConfig:
         c_config.vacuum_config.stale_threshold = self.stale_threshold
         c_config.vacuum_config.min_file_size_bytes = self.min_file_size_bytes
         c_config.vacuum_config.min_stale_bytes = self.min_stale_bytes
-        c_config.vacuum_config.background_interval_ms = self.background_interval_ms
         c_config.vacuum_config.drain_timeout_ms = self.drain_timeout_ms
         c_config.vacuum_config.cursor_close_wait_ms = self.cursor_close_wait_ms
         c_config.vacuum_config.max_runtime_ms = self.max_runtime_ms
@@ -3441,8 +3283,8 @@ Exposed in Node.js, Dart, and Python bindings as vacuumStatus()."
 
 **Spec coverage check:**
 - ✅ Vacuum pass with atomic swap — Tasks 9, 10
-- ✅ Three trigger surfaces — Tasks 9 (manual), 12 (snapshot), 13 (background)
-- ✅ Three modes — Task 1 (config), 12 (snapshot gating), 13 (adaptive skip)
+- ✅ Two trigger surfaces — Tasks 9 (manual), 12 (snapshot). Task 13 (background worker) was removed post-write; the snapshot threshold + manual `database_vacuum()` cover all real scenarios, so the background timer + `vacuum_in_flight` drain + `background_interval_ms` config field were all deleted (see commit "refactor(vacuum): remove background timer, rely on snapshot threshold").
+- ✅ Three modes — Task 1 (config), 12 (snapshot gating)
 - ✅ Halt-block-resume quiescence — Task 8
 - ✅ Cursor handling: manual `-EBUSY`, auto wait on `cursor_cvar` — Task 11
 - ✅ Drain timeout / `-EBUSY` — Task 10
@@ -3460,15 +3302,14 @@ Exposed in Node.js, Dart, and Python bindings as vacuumStatus()."
 - ✅ Docs update — Task 22
 
 **Not covered (intentionally deferred per spec open questions):**
-- Adaptive exponential backoff on consecutive aborts (spec open question #4) — defer to a follow-up plan
 - Disk-spilled remap for very large DBs (spec open question #5) — defer until measured
 
 **Type consistency check:**
 - `database_vacuum(db)` — declared Task 6, defined Task 9/11, called from bindings Tasks 17-19. ✓
-- `database_vacuum_auto(db)` — declared Task 11, called from Task 12 (snapshot) and Task 13 (background). ✓
+- `database_vacuum_auto(db)` — declared Task 11, called from Task 12 (snapshot). ✓ (Task 13 caller removed.)
 - `page_file_vacuum_file_swap(pf, tmp_path, new_mgr)` — declared Task 9, called Task 9/11. ✓
 - `offset_remap_t` / `offset_remap_create/put/get/destroy/size` — Task 3, used in Task 9. ✓
-- `vacuum_config_t` fields: `mode`, `stale_threshold`, `min_file_size_bytes`, `min_stale_bytes`, `background_interval_ms`, `drain_timeout_ms`, `cursor_close_wait_ms`, `max_runtime_ms`, `writer_block_timeout_ms`, `adaptive_busy_threshold` — Task 1, used consistently throughout. ✓
+- `vacuum_config_t` fields: `mode`, `stale_threshold`, `min_file_size_bytes`, `min_stale_bytes`, `drain_timeout_ms`, `cursor_close_wait_ms`, `max_runtime_ms`, `writer_block_timeout_ms`, `adaptive_busy_threshold` — Task 1, used consistently throughout. ✓ (`background_interval_ms` removed.)
 - `page_superblock_t` fields `stale_region_offset`, `stale_region_size` — Task 4, used in Task 9 (write_superblock during rewrite). ✓
 
 **Placeholder scan:** no TBDs, TODOs, "implement later", or "similar to Task N" — every code step contains the actual code.

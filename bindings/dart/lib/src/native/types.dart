@@ -102,9 +102,6 @@ class VacuumConfig {
   /// Minimum stale bytes before auto-vacuum is considered. Default 16 MiB.
   final int minStaleBytes;
 
-  /// Background vacuum interval in milliseconds (adaptive mode). Default 60000.
-  final int backgroundIntervalMs;
-
   /// Time to wait for in-flight writes to drain before vacuum starts, in ms.
   /// Default 5000.
   final int drainTimeoutMs;
@@ -129,7 +126,6 @@ class VacuumConfig {
     this.staleThreshold = 0.30,
     this.minFileSizeBytes = 64 * 1024 * 1024,
     this.minStaleBytes = 16 * 1024 * 1024,
-    this.backgroundIntervalMs = 60000,
     this.drainTimeoutMs = 5000,
     this.cursorCloseWaitMs = 60000,
     this.maxRuntimeMs = 30000,

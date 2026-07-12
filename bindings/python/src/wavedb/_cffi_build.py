@@ -116,7 +116,6 @@ void database_config_set_vacuum_mode(database_config_t*, uint8_t);
 void database_config_set_vacuum_stale_threshold(database_config_t*, double);
 void database_config_set_vacuum_min_file_size_bytes(database_config_t*, uint64_t);
 void database_config_set_vacuum_min_stale_bytes(database_config_t*, uint64_t);
-void database_config_set_vacuum_background_interval_ms(database_config_t*, uint32_t);
 void database_config_set_vacuum_drain_timeout_ms(database_config_t*, uint32_t);
 void database_config_set_vacuum_cursor_close_wait_ms(database_config_t*, uint32_t);
 void database_config_set_vacuum_max_runtime_ms(database_config_t*, uint32_t);

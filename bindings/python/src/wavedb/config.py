@@ -35,7 +35,6 @@ class VacuumConfig:
     stale_threshold: float = 0.30
     min_file_size_bytes: int = 64 * 1024 * 1024
     min_stale_bytes: int = 16 * 1024 * 1024
-    background_interval_ms: int = 60000
     drain_timeout_ms: int = 5000
     cursor_close_wait_ms: int = 60000
     max_runtime_ms: int = 30000
@@ -51,8 +50,6 @@ class VacuumConfig:
             raise ValueError("min_file_size_bytes must be non-negative")
         if self.min_stale_bytes < 0:
             raise ValueError("min_stale_bytes must be non-negative")
-        if self.background_interval_ms < 0:
-            raise ValueError("background_interval_ms must be non-negative")
         if self.drain_timeout_ms < 0:
             raise ValueError("drain_timeout_ms must be non-negative")
         if self.cursor_close_wait_ms < 0:
@@ -75,7 +72,6 @@ class VacuumConfig:
         lib.database_config_set_vacuum_stale_threshold(c_config, float(self.stale_threshold))
         lib.database_config_set_vacuum_min_file_size_bytes(c_config, int(self.min_file_size_bytes))
         lib.database_config_set_vacuum_min_stale_bytes(c_config, int(self.min_stale_bytes))
-        lib.database_config_set_vacuum_background_interval_ms(c_config, int(self.background_interval_ms))
         lib.database_config_set_vacuum_drain_timeout_ms(c_config, int(self.drain_timeout_ms))
         lib.database_config_set_vacuum_cursor_close_wait_ms(c_config, int(self.cursor_close_wait_ms))
         lib.database_config_set_vacuum_max_runtime_ms(c_config, int(self.max_runtime_ms))

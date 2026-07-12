@@ -58,7 +58,6 @@ database_config_t* database_config_default(void) {
     config->vacuum_config.stale_threshold = 0.30;
     config->vacuum_config.min_file_size_bytes = 64ull * 1024 * 1024;
     config->vacuum_config.min_stale_bytes = 16ull * 1024 * 1024;
-    config->vacuum_config.background_interval_ms = 60000;
     config->vacuum_config.drain_timeout_ms = 5000;
     config->vacuum_config.cursor_close_wait_ms = 60000;
     config->vacuum_config.max_runtime_ms = 30000;
@@ -246,7 +245,7 @@ int database_config_save(const char* location, const database_config_t* config) 
     });
 
     // Add vacuum config as nested map
-    cbor_item_t* vacuum = cbor_new_definite_map(10);
+    cbor_item_t* vacuum = cbor_new_definite_map(9);
     cbor_map_add(vacuum, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("mode")),
         .value = cbor_move(cbor_build_uint8((uint8_t)config->vacuum_config.mode))
@@ -262,10 +261,6 @@ int database_config_save(const char* location, const database_config_t* config) 
     cbor_map_add(vacuum, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("min_stale_bytes")),
         .value = cbor_move(cbor_build_uint64(config->vacuum_config.min_stale_bytes))
-    });
-    cbor_map_add(vacuum, (struct cbor_pair) {
-        .key = cbor_move(cbor_build_string("background_interval_ms")),
-        .value = cbor_move(cbor_build_uint32(config->vacuum_config.background_interval_ms))
     });
     cbor_map_add(vacuum, (struct cbor_pair) {
         .key = cbor_move(cbor_build_string("drain_timeout_ms")),
@@ -545,7 +540,6 @@ database_config_t* database_config_load(const char* location) {
         config->vacuum_config.stale_threshold = get_map_float(vacuum_map, "stale_threshold", 0.30);
         config->vacuum_config.min_file_size_bytes = get_map_uint(vacuum_map, "min_file_size_bytes", 64ull * 1024 * 1024);
         config->vacuum_config.min_stale_bytes = get_map_uint(vacuum_map, "min_stale_bytes", 16ull * 1024 * 1024);
-        config->vacuum_config.background_interval_ms = (uint32_t)get_map_uint(vacuum_map, "background_interval_ms", 60000);
         config->vacuum_config.drain_timeout_ms = (uint32_t)get_map_uint(vacuum_map, "drain_timeout_ms", 5000);
         config->vacuum_config.cursor_close_wait_ms = (uint32_t)get_map_uint(vacuum_map, "cursor_close_wait_ms", 60000);
         config->vacuum_config.max_runtime_ms = (uint32_t)get_map_uint(vacuum_map, "max_runtime_ms", 30000);
@@ -743,11 +737,6 @@ void database_config_set_vacuum_min_file_size_bytes(database_config_t* config, u
 void database_config_set_vacuum_min_stale_bytes(database_config_t* config, uint64_t bytes) {
     if (config == NULL) return;
     config->vacuum_config.min_stale_bytes = bytes;
-}
-
-void database_config_set_vacuum_background_interval_ms(database_config_t* config, uint32_t ms) {
-    if (config == NULL) return;
-    config->vacuum_config.background_interval_ms = ms;
 }
 
 void database_config_set_vacuum_drain_timeout_ms(database_config_t* config, uint32_t ms) {

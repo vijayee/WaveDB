@@ -98,8 +98,6 @@ typedef struct {
     PLATFORMLOCKTYPE(cursor_count_mutex);      // guards open_cursor_count + cursor_cvar waiters
     PLATFORMCONDITIONTYPE(cursor_cvar);        // vacuum waits here for cursors to close
     ATOMIC_TYPE(int) open_cursor_count;        // number of open cursors (blocks vacuum if > 0)
-    uint64_t vacuum_task_id;                   // 0 = no background task scheduled
-    ATOMIC_TYPE(int) vacuum_in_flight;         // 1 while a vacuum callback is executing
 } database_t;
 
 /**

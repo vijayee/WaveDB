@@ -300,7 +300,6 @@ TEST(DatabaseConfigTest, VacuumDefaults) {
     EXPECT_DOUBLE_EQ(config->vacuum_config.stale_threshold, 0.30);
     EXPECT_EQ(config->vacuum_config.min_file_size_bytes, 64ull * 1024 * 1024);
     EXPECT_EQ(config->vacuum_config.min_stale_bytes, 16ull * 1024 * 1024);
-    EXPECT_EQ(config->vacuum_config.background_interval_ms, 60000u);
     EXPECT_EQ(config->vacuum_config.drain_timeout_ms, 5000u);
     EXPECT_EQ(config->vacuum_config.cursor_close_wait_ms, 60000u);
     EXPECT_EQ(config->vacuum_config.max_runtime_ms, 30000u);
@@ -316,7 +315,6 @@ TEST(DatabaseConfigTest, VacuumConfigPersists) {
     database_config_t* cfg = database_config_default();
     cfg->vacuum_config.mode = VACUUM_MODE_ADAPTIVE;
     cfg->vacuum_config.stale_threshold = 0.45;
-    cfg->vacuum_config.background_interval_ms = 30000;
     cfg->vacuum_config.adaptive_busy_threshold = 64;
 
     ASSERT_EQ(database_config_save(dir.c_str(), cfg), 0);
@@ -326,7 +324,6 @@ TEST(DatabaseConfigTest, VacuumConfigPersists) {
     ASSERT_NE(loaded, nullptr);
     EXPECT_EQ(loaded->vacuum_config.mode, VACUUM_MODE_ADAPTIVE);
     EXPECT_DOUBLE_EQ(loaded->vacuum_config.stale_threshold, 0.45);
-    EXPECT_EQ(loaded->vacuum_config.background_interval_ms, 30000u);
     EXPECT_EQ(loaded->vacuum_config.adaptive_busy_threshold, 64u);
     database_config_destroy(loaded);
 

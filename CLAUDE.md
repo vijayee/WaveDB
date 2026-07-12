@@ -73,7 +73,7 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 ## Vacuum / Page-File Reclamation
 
 - `database_vacuum(db)` — manual trigger; returns `-EBUSY` if cursors open, `0` on success/no-op
-- `database_vacuum_auto(db)` — internal; used by snapshot threshold + background worker; waits on `cursor_cvar` for cursors to close
+- `database_vacuum_auto(db)` — internal; used by snapshot threshold; waits on `cursor_cvar` for cursors to close
 - `database_vacuum_status(db, &st)` — introspection; returns file_size, stale_bytes, stale_ratio, vacuum_in_progress, open_cursor_count, would_trigger
 - `database_flush_dirty_bnodes(db)` — vacuum auto-flushes internally before the rewrite; calling it manually is optional (useful for forcing a flush without vacuuming)
 - `vacuum_config_t` — configurable via `database_config_t.vacuum_config`; persisted in CBOR config

@@ -60,7 +60,6 @@ typedef struct {
     double         stale_threshold;
     uint64_t       min_file_size_bytes;
     uint64_t       min_stale_bytes;
-    uint32_t       background_interval_ms;
     uint32_t       drain_timeout_ms;
     uint32_t       cursor_close_wait_ms;
     uint32_t       max_runtime_ms;
@@ -186,7 +185,6 @@ void database_config_set_vacuum_mode(database_config_t* config, uint8_t mode);
 void database_config_set_vacuum_stale_threshold(database_config_t* config, double threshold);
 void database_config_set_vacuum_min_file_size_bytes(database_config_t* config, uint64_t bytes);
 void database_config_set_vacuum_min_stale_bytes(database_config_t* config, uint64_t bytes);
-void database_config_set_vacuum_background_interval_ms(database_config_t* config, uint32_t ms);
 void database_config_set_vacuum_drain_timeout_ms(database_config_t* config, uint32_t ms);
 void database_config_set_vacuum_cursor_close_wait_ms(database_config_t* config, uint32_t ms);
 void database_config_set_vacuum_max_runtime_ms(database_config_t* config, uint32_t ms);

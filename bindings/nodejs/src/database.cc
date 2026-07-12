@@ -188,11 +188,6 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
         config->vacuum_config.min_stale_bytes = static_cast<uint64_t>(val.DoubleValue());
       }
 
-      if (vacuumOpts.Has("backgroundIntervalMs")) {
-        Napi::Number val = vacuumOpts.Get("backgroundIntervalMs").As<Napi::Number>();
-        config->vacuum_config.background_interval_ms = static_cast<uint32_t>(val.Uint32Value());
-      }
-
       if (vacuumOpts.Has("drainTimeoutMs")) {
         Napi::Number val = vacuumOpts.Get("drainTimeoutMs").As<Napi::Number>();
         config->vacuum_config.drain_timeout_ms = static_cast<uint32_t>(val.Uint32Value());

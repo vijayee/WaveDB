@@ -1408,8 +1408,6 @@ class WaveDBNative {
       .lookupFunction<_ConfigSetU64C, _ConfigSetU64>('database_config_set_vacuum_min_file_size_bytes');
   static late final _ConfigSetU64 _configSetVacuumMinStaleBytes = WaveDBLibrary.load()
       .lookupFunction<_ConfigSetU64C, _ConfigSetU64>('database_config_set_vacuum_min_stale_bytes');
-  static late final _ConfigSetU32 _configSetVacuumBackgroundIntervalMs = WaveDBLibrary.load()
-      .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_background_interval_ms');
   static late final _ConfigSetU32 _configSetVacuumDrainTimeoutMs = WaveDBLibrary.load()
       .lookupFunction<_ConfigSetU32C, _ConfigSetU32>('database_config_set_vacuum_drain_timeout_ms');
   static late final _ConfigSetU32 _configSetVacuumCursorCloseWaitMs = WaveDBLibrary.load()
@@ -1891,7 +1889,6 @@ class WaveDBNative {
     _configSetVacuumStaleThreshold(configPtr, vacuumConfig.staleThreshold);
     _configSetVacuumMinFileSizeBytes(configPtr, vacuumConfig.minFileSizeBytes);
     _configSetVacuumMinStaleBytes(configPtr, vacuumConfig.minStaleBytes);
-    _configSetVacuumBackgroundIntervalMs(configPtr, vacuumConfig.backgroundIntervalMs);
     _configSetVacuumDrainTimeoutMs(configPtr, vacuumConfig.drainTimeoutMs);
     _configSetVacuumCursorCloseWaitMs(configPtr, vacuumConfig.cursorCloseWaitMs);
     _configSetVacuumMaxRuntimeMs(configPtr, vacuumConfig.maxRuntimeMs);

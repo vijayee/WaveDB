@@ -8,7 +8,7 @@
 
 WaveDB is copy-on-write: every update writes bnodes to a fresh file offset and marks the old offset stale. Stale regions are tracked but never reclaimed, so update workloads grow the page file ~linearly with overwrite count. Several reclamation primitives (`page_file_get_reusable_blocks`, `stale_region_serialize/deserialize`, `bnode_cache_flush_dirty`) are dead code with zero callers. This spec defines a coordinated **vacuum pass** that walks the live trie, rewrites every live bnode to a fresh `data.wdbp.vacuum.tmp`, atomically renames it over `data.wdbp`, and persists the (now empty) stale region manager in the new file's superblock.
 
-Three trigger surfaces (manual API, snapshot threshold, background worker) feed the same core. Writers and readers **block** on a condition variable during the vacuum window rather than bouncing with `-EBUSY`; the only `-EBUSY` returns are open-cursor refusal and drain-timeout abort.
+Two trigger surfaces (manual API, snapshot threshold) feed the same core. Writers and readers **block** on a condition variable during the vacuum window rather than bouncing with `-EBUSY`; the only `-EBUSY` returns are open-cursor refusal and drain-timeout abort.
 
 ## Background
 
@@ -26,11 +26,10 @@ See `docs/page-file-reclamation-tech-debt.md` for the full reproduction, root-ca
 
 ### Trigger surfaces
 
-Three trigger surfaces feed one core `page_file_vacuum()`:
+Two trigger surfaces feed one core `page_file_vacuum()`:
 
 1. **Manual API** — `database_vacuum(db)` synchronous call. Always available regardless of `vacuum_mode`. Exposed in Node.js / Dart / Python bindings as `vacuum()`.
 2. **Snapshot threshold** — `database_snapshot()` checks `page_file_stale_ratio()` ≥ `vacuum_config.stale_threshold` and runs vacuum instead of plain `database_flush_dirty_bnodes` when crossed. Gated by `vacuum_mode` having `STRICT` or `ADAPTIVE`.
-3. **Background worker** — a timer task scheduled via the existing work_pool / timing wheel fires every `vacuum_config.background_interval_ms`; if stale ratio ≥ threshold and mode allows, runs vacuum.
 
 ### Modes
 
@@ -42,9 +41,9 @@ typedef enum {
 } vacuum_mode_t;
 ```
 
-- `MANUAL_ONLY` — only `database_vacuum()` calls. Snapshot threshold + background worker are no-ops.
-- `STRICT` — snapshot threshold + background worker both active; run when threshold crossed regardless of system load.
-- `ADAPTIVE` — same as STRICT but the background worker skips a tick when `work_pool_queue_len > adaptive_busy_threshold` (don't compete with the writer). Snapshot-triggered vacuum still runs in ADAPTIVE (caller already paid for the snapshot).
+- `MANUAL_ONLY` — only `database_vacuum()` calls. Snapshot threshold is a no-op.
+- `STRICT` — snapshot threshold is active; run when threshold crossed regardless of system load.
+- `ADAPTIVE` — same as STRICT. Snapshot-triggered vacuum runs in ADAPTIVE (caller already paid for the snapshot).
 
 Default: `STRICT`, with `stale_threshold=0.30`. Users opt down to `MANUAL_ONLY` or up to `ADAPTIVE`.
 
@@ -58,7 +57,6 @@ typedef struct {
     double         stale_threshold;         // 0.0-1.0; default 0.30
     uint64_t       min_file_size_bytes;     // don't vacuum below this; default 64 MB
     uint64_t       min_stale_bytes;         // don't vacuum if less stale; default 16 MB
-    uint32_t       background_interval_ms;  // default 60000 (0 = disabled)
     uint32_t       drain_timeout_ms;       // halt→drain wait; default 5000
     uint32_t       cursor_close_wait_ms;   // auto-trigger wait for cursors to close; default 60000
     uint32_t       max_runtime_ms;          // hard cap on a single vacuum; default 30000 (0 = no cap)
@@ -110,7 +108,7 @@ The vacuum must not run while a reader can dereference an old `disk_offset`. The
 
 2. **Cursor handling** — if `db->open_cursor_count > 0` when vacuum is requested:
    - **Manual API** (`database_vacuum()`): return `-EBUSY` immediately. A sync caller doesn't want to block on an unknown-duration cursor close; they re-call after closing cursors.
-   - **Snapshot threshold / background worker**: do **not** skip the tick. Wait on `db->cursor_cvar` up to `cursor_close_wait_ms` (default 60000 = 60s). When the last cursor closes (cursor destroy broadcasts `cursor_cvar`), wake up and proceed to step 3 immediately — vacuum fires within milliseconds of cursor close, not on the next tick. If `cursor_close_wait_ms` elapses with cursors still open, give up this tick and reschedule normally.
+   - **Snapshot threshold**: do **not** skip the tick. Wait on `db->cursor_cvar` up to `cursor_close_wait_ms` (default 60000 = 60s). When the last cursor closes (cursor destroy broadcasts `cursor_cvar`), wake up and proceed to step 3 immediately — vacuum fires within milliseconds of cursor close, not on the next tick. If `cursor_close_wait_ms` elapses with cursors still open, give up this tick and reschedule normally.
    - **Race window**: between "count drops to 0, broadcast" and "vacuum wakes, sets `vacuum_in_progress=1`", a new cursor could squeeze in. Mitigate with a wait loop: `while (open_cursor_count > 0) condition_wait(cursor_cvar, ..., cursor_close_wait_ms)`. Once the loop exits, hold `cursor_count_mutex` while setting `vacuum_in_progress = 1`, which blocks new cursor creation before the race window reopens.
    
    This avoids the "indefinitely blocked" failure mode: as long as the user eventually closes their cursors, vacuum fires promptly. The tick interval is only the fallback for cursors that stay open beyond `cursor_close_wait_ms`.
@@ -147,7 +145,7 @@ typedef struct {
 int database_vacuum_status(database_t* db, vacuum_status_t* out);
 ```
 
-`would_trigger` is the same boolean the snapshot threshold and background worker evaluate; users in MANUAL_ONLY mode can poll `database_vacuum_status()` and call `database_vacuum()` when `would_trigger == 1`.
+`would_trigger` is the same boolean the snapshot threshold evaluates; users in MANUAL_ONLY mode can poll `database_vacuum_status()` and call `database_vacuum()` when `would_trigger == 1`.
 
 Exposed in all three bindings as `vacuumStatus()` returning an object with the same fields.
 
@@ -193,7 +191,7 @@ data.wdbp.vacuum.tmp              ← transient; exists only during a vacuum pas
 | `src/Database/database_config.h` | Add `vacuum_config_t`, `vacuum_mode_t`. |
 | `src/Database/database_config.c` | Persist/parse `vacuum_config` in CBOR config map. |
 | `src/Database/database.h` | Add `database_vacuum()`, `vacuum_in_progress`/`vacuum_cvar`/`vacuum_writer_lock`/`open_cursor_count` to `database_t`. |
-| `src/Database/database.c` | Implement `database_vacuum()`; snapshot threshold hook in `database_snapshot()`; background vacuum task spawn/stop in create/destroy; block writers in `put_sync`/`get_sync`/etc; cursor open/close tracking. |
+| `src/Database/database.c` | Implement `database_vacuum()`; snapshot threshold hook in `database_snapshot()`; block writers in `put_sync`/`get_sync`/etc; cursor open/close tracking. |
 | `src/Database/database_iterator.c` | Register/unregister cursors in `db->open_cursor_count` (atomic). |
 | `bindings/nodejs/` | Expose `vacuum()` method on Database. Expose all `vacuum_config_t` fields under `config.vacuum` (see Bindings). |
 | `bindings/dart/` | Expose `vacuum()` method on WaveDB. Expose all `vacuum_config_t` fields under `config.vacuum` (see Bindings). |
@@ -226,7 +224,6 @@ const db = new WaveDB(path, {
     staleThreshold: 0.30,           // 0.0-1.0
     minFileSizeBytes: 64 * 1024 * 1024,
     minStaleBytes: 16 * 1024 * 1024,
-    backgroundIntervalMs: 60000,
     drainTimeoutMs: 5000,
     cursorCloseWaitMs: 60000,
     maxRuntimeMs: 30000,
@@ -256,7 +253,7 @@ Mirror the existing `DatabaseConfig` pattern in `bindings/python/src/wavedb/data
 ## Data flow
 
 ```
-database_vacuum(db) / snapshot threshold / background tick
+database_vacuum(db) / snapshot threshold
         │
         ├─ check open_cursor_count → if > 0, return -EBUSY (manual) / skip (auto)
         ├─ set vacuum_in_progress=1  ── writers block on condvar ──────┐
@@ -298,11 +295,11 @@ database_vacuum(db) / snapshot threshold / background tick
 - `test_vacuum_basic` — write N=1000 keys, overwrite each 5×, vacuum, file size shrinks ≥ 5×, all keys still readable.
 - `test_vacuum_reopen_persistence` — write + overwrite, close, reopen (stale_region persisted via superblock), vacuum, file shrinks. Verifies the persistence fix end-to-end.
 - `test_vacuum_open_cursor_refuses` — open cursor, call `database_vacuum()`, expect `-EBUSY`; close cursor, vacuum succeeds.
-- `test_vacuum_auto_cursor_close_waits` — open cursor, trigger background vacuum (or simulate snapshot threshold); verify vacuum does NOT run while cursor open; close cursor from another thread; verify vacuum fires within ~10ms of cursor close (well before next tick).
+- `test_vacuum_auto_cursor_close_waits` — open cursor, trigger snapshot threshold vacuum; verify vacuum does NOT run while cursor open; close cursor from another thread; verify vacuum fires within ~10ms of cursor close (well before next tick).
 - `test_vacuum_concurrent_writer` — writer thread loops `put_sync`; vacuum thread calls `database_vacuum()`; verify writers blocked during vacuum, resumed after, no corruption (key set intact).
 - `test_vacuum_crash_recovery` — simulate crash mid-rewrite (delete `vacuum.tmp` mid-pass via test hook), reopen from old file, verify all keys present, verify `vacuum.tmp` cleaned up.
 - `test_vacuum_threshold_strict` — push stale_ratio over 30%, call `database_snapshot()`, verify vacuum ran automatically and file shrunk.
-- `test_vacuum_adaptive_skip` — saturate `work_pool_queue_len > 32`, call snapshot-triggered vacuum, verify it ran (snapshot always runs); call background-tick vacuum, verify it skipped.
+- `test_vacuum_adaptive_skip` — saturate `work_pool_queue_len > 32`, call snapshot-triggered vacuum, verify it ran (snapshot always runs).
 - `test_vacuum_bindings` — Node.js / Dart / Python expose `vacuum()`; round-trip write/overwrite/vacuum/read.
 - `test_vacuum_min_file_size` — file below `min_file_size_bytes`, vacuum refuses with `-ECANCELED` (no-op); above threshold, runs.
 - `test_vacuum_max_runtime` — artificially slow rewrite via test hook; verify `-ETIMEDOUT` after `max_runtime_ms`.
@@ -316,7 +313,7 @@ Extend the existing reopen + NUL-free scan gate (`tests/test_reopen_nulfree_scan
 `benchmarks/benchmark_vacuum.cpp`:
 - Write N keys (N ∈ {1k, 10k, 100k, 1M}), overwrite each K times (K ∈ {1, 5, 20, 100}).
 - Measure: file size before/after each overwrite pass, vacuum duration, file size after vacuum, ops/sec during normal writes vs. during vacuum drain window.
-- Compare 3 modes: `MANUAL_ONLY` (baseline growth, no auto-vacuum), `STRICT` (background 60s), `ADAPTIVE` (background 60s + busy skip).
+- Compare 3 modes: `MANUAL_ONLY` (baseline growth, no auto-vacuum), `STRICT` (snapshot-triggered), `ADAPTIVE` (snapshot-triggered, no background tick to skip).
 - Halt-window impact: measure latency spike on `put_sync` during drain. Tune `drain_timeout_ms` from data.
 - Rewrite cost: vacuum walks every live bnode once. Verify O(live bnodes), not O(file size).
 
@@ -336,9 +333,7 @@ Extend the existing reopen + NUL-free scan gate (`tests/test_reopen_nulfree_scan
 
 3. **Adaptive busy threshold = 32** queue depth is a guess. The right value depends on the user's writer throughput and work_pool size. Document that this is tunable; users with sustained heavy write load should consider MANUAL_ONLY.
 
-4. **Should background vacuum back off if it aborts N times in a row?** Probably yes — log a warning and double the interval up to a cap (exponential backoff). Open for the implementation plan to decide.
-
-5. **Memory cost during vacuum** — the remap hashmap holds one entry per live bnode. For 100k bnodes, ~1.6 MB (16 bytes per entry, 50% load factor). Bounded and acceptable. For very large DBs (10M+ bnodes), consider a disk-spilled remap, but defer until measured.
+4. **Memory cost during vacuum** — the remap hashmap holds one entry per live bnode. For 100k bnodes, ~1.6 MB (16 bytes per entry, 50% load factor). Bounded and acceptable. For very large DBs (10M+ bnodes), consider a disk-spilled remap, but defer until measured.
 
 ## References
 
