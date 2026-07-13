@@ -34,3 +34,6 @@ KVBench/
 bindings/dart/.dart_tool/
 bindings/dart/libwavedb.so
 bindings/dart/pubspec.lock
+
+# Vector bench corpora (large generated .fvec/.gt files)
+bench/vector/corpus/
