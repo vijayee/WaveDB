@@ -394,6 +394,11 @@ static graphql_result_node_t* execute_scan(graphql_layer_t* layer,
         return list;
     }
 
+    // resolve_layer_scan_start takes ownership of start_path (destroys it
+    // after database_scan_start copies it). Null plan->scan_start so the
+    // later graphql_plan_destroy doesn't double-free the dangling pointer.
+    plan->scan_start = NULL;
+
     database_iterator_t* iter = resolve_layer_scan_start(layer, scan_start, NULL);
     if (iter == NULL) {
         return list;
@@ -1657,8 +1662,10 @@ static graphql_result_t* graphql_mutate_impl(graphql_layer_t* layer, const char*
 
                 path_t* start = path_from_string(prefix);
                 if (start != NULL) {
+                    // resolve_layer_scan_start takes ownership of start_path
+                    // (destroys it after database_scan_start copies it). Do not
+                    // destroy start again here — that would double-free it.
                     database_iterator_t* iter = resolve_layer_scan_start(layer, start, NULL);
-                    path_destroy(start);
 
                     if (iter != NULL) {
                         path_t* out_path = NULL;
