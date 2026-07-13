@@ -541,14 +541,15 @@ static void seek_to_end_path(database_iterator_t* iter) {
             bnode_t* root_bn = current->btree;
             size_t root_index;
             bnode_entry_t* root_entry = bnode_find(root_bn, chunk, &root_index);
-            (void)root_entry;
             size_t ub = root_index;  // first entry >= end's chunk
 
             if (atomic_load(&root_bn->level) > 1) {
                 // Internal root: descend through the separator whose child holds
                 // keys < end's chunk. Separator at ub-1 (if ub>0) is the largest
                 // separator < end's chunk; its child holds all keys in
-                // [sep.key, next_sep.key) which are all < end.
+                // [sep.key, next_sep.key) which are all < end. If ub points at
+                // an exact match, that separator's child holds keys == chunk,
+                // so we still want the child before it (ub-1).
                 if (ub == 0) {
                     goto bail;
                 }
@@ -609,25 +610,36 @@ static void seek_to_end_path(database_iterator_t* iter) {
                 }
                 // cur_bn is the leaf bnode for this trie level.
                 size_t ub_leaf;
-                bnode_entry_t* entry = bnode_find(cur_bn, chunk, &ub_leaf);
-                (void)entry;
-                if (ub_leaf == 0) {
-                    goto bail;
+                bnode_entry_t* leaf_match = bnode_find(cur_bn, chunk, &ub_leaf);
+                int leaf_exact = (leaf_match != NULL);
+                if (!leaf_exact && ub_leaf == 0) {
+                    goto bail;  // no entry < end's chunk and no exact match
                 }
                 if (push_bnode_frame(iter, cur_bn, iter->stack_depth - 1) < 0) {
                     goto bail;
                 }
                 size_t leaf_idx = iter->stack_depth - 1;
-                // Position at the last entry < chunk. scan_prev reads at
-                // entry_index, then decrements, so the first emitted entry is
-                // ub_leaf - 1.
-                iter->stack[leaf_idx].entry_index = ub_leaf - 1;
                 if (is_last) {
+                    // Largest entry strictly < end's chunk. For exact match,
+                    // the entry at ub_leaf == end_path -> exclude, position at
+                    // ub_leaf - 1. For no exact match, ub_leaf = insertion
+                    // point, position at ub_leaf - 1. Bail if ub_leaf == 0
+                    // (exact match at 0: entry == end_path, excluded; or all
+                    // entries > end's chunk).
+                    if (ub_leaf == 0) {
+                        goto bail;
+                    }
+                    // scan_prev reads at entry_index, then decrements, so the
+                    // first emitted entry is ub_leaf - 1.
+                    iter->stack[leaf_idx].entry_index = ub_leaf - 1;
                     return;  // positioned — scan_prev emits from leaf_idx
                 }
-                // end_path continues deeper — descend into the entry's child
-                // (the entry at ub_leaf - 1, whose chunk < end's chunk).
-                bnode_entry_t* leaf_entry = bnode_get(cur_bn, ub_leaf - 1);
+                // end_path continues deeper — descend into the entry's child.
+                // For exact match, descend into ub_leaf (the matching entry) to
+                // check deeper chunks. For no exact match, descend into ub_leaf-1
+                // (the largest entry < end's chunk); all keys under it are < end.
+                size_t descend_idx = leaf_exact ? ub_leaf : (ub_leaf - 1);
+                bnode_entry_t* leaf_entry = bnode_get(cur_bn, descend_idx);
                 if (leaf_entry == NULL) {
                     goto bail;
                 }
@@ -644,11 +656,26 @@ static void seek_to_end_path(database_iterator_t* iter) {
                     next = leaf_entry->child;
                 }
                 if (next == NULL) {
-                    // No deeper trie level but end_path continues — end_path is
-                    // not a stored key. The current leaf entry (ub_leaf - 1) is
-                    // the largest key < end_path at this trie level. Returning
-                    // here leaves scan_prev positioned to emit it.
+                    // No deeper trie level but end_path continues. The entry at
+                    // descend_idx is a prefix of end_path (exact match) or < end's
+                    // chunk (no exact match) — either way it's < end_path. Position
+                    // at descend_idx so scan_prev emits it.
+                    iter->stack[leaf_idx].entry_index = descend_idx;
                     return;
+                }
+                // Position the leaf frame for the descent. For has_value +
+                // trie_child, set value_pending=1 and entry_index = descend_idx
+                // so scan_prev emits the value AFTER the subtree is exhausted
+                // (on pop-back) and chunk collection resolves to the descended
+                // entry. For has_value=0 + child, set entry_index = descend_idx-1
+                // so chunk collection (entry_index + 1) resolves to the descended
+                // entry and scan_prev resumes at the previous entry on pop-back.
+                if (leaf_entry->has_value && leaf_entry->trie_child != NULL) {
+                    iter->stack[leaf_idx].entry_index = descend_idx;
+                    iter->stack[leaf_idx].value_pending = 1;
+                } else {
+                    iter->stack[leaf_idx].entry_index =
+                        (descend_idx == 0) ? SIZE_MAX : (descend_idx - 1);
                 }
                 if (push_frame(iter, next, iter->stack_depth - 1) < 0) {
                     goto bail;
@@ -665,15 +692,28 @@ static void seek_to_end_path(database_iterator_t* iter) {
             } else {
                 // Leaf root (single-level B+tree): the trie-level frame IS the
                 // leaf frame. Apply the seek decision directly to it.
-                if (ub == 0) {
-                    goto bail;
-                }
-                iter->stack[trie_frame_idx].entry_index = ub - 1;
+                int exact_match = (root_entry != NULL);
                 if (is_last) {
+                    // Largest entry strictly < end's chunk. For exact match,
+                    // the entry at ub == end_path -> exclude, position at ub-1.
+                    // For no exact match, ub = insertion point, position at ub-1.
+                    // Bail if ub == 0 (exact match at 0: entry == end_path,
+                    // excluded; or all entries > end's chunk).
+                    if (ub == 0) {
+                        goto bail;
+                    }
+                    iter->stack[trie_frame_idx].entry_index = ub - 1;
                     return;  // positioned — scan_prev emits from trie_frame_idx
                 }
-                // end_path continues deeper — descend into the entry's child.
-                bnode_entry_t* leaf_entry = bnode_get(root_bn, ub - 1);
+                // !is_last: end_path continues deeper — descend into the entry's
+                // child. For exact match, descend into ub (the matching entry) to
+                // check deeper chunks. For no exact match, descend into ub-1
+                // (the largest entry < end's chunk); all keys under it are < end.
+                if (!exact_match && ub == 0) {
+                    goto bail;  // no entry to descend into
+                }
+                size_t descend_idx = exact_match ? ub : (ub - 1);
+                bnode_entry_t* leaf_entry = bnode_get(root_bn, descend_idx);
                 if (leaf_entry == NULL) {
                     goto bail;
                 }
@@ -690,7 +730,26 @@ static void seek_to_end_path(database_iterator_t* iter) {
                     next = leaf_entry->child;
                 }
                 if (next == NULL) {
+                    // No deeper trie level but end_path continues. The entry at
+                    // descend_idx is a prefix of end_path (exact match) or < end's
+                    // chunk (no exact match) — either way it's < end_path. Position
+                    // at descend_idx so scan_prev emits it.
+                    iter->stack[trie_frame_idx].entry_index = descend_idx;
                     return;
+                }
+                // Position the leaf frame for the descent. For has_value +
+                // trie_child, set value_pending=1 and entry_index = descend_idx
+                // so scan_prev emits the value AFTER the subtree is exhausted
+                // (on pop-back) and chunk collection resolves to the descended
+                // entry. For has_value=0 + child, set entry_index = descend_idx-1
+                // so chunk collection (entry_index + 1) resolves to the descended
+                // entry and scan_prev resumes at the previous entry on pop-back.
+                if (leaf_entry->has_value && leaf_entry->trie_child != NULL) {
+                    iter->stack[trie_frame_idx].entry_index = descend_idx;
+                    iter->stack[trie_frame_idx].value_pending = 1;
+                } else {
+                    iter->stack[trie_frame_idx].entry_index =
+                        (descend_idx == 0) ? SIZE_MAX : (descend_idx - 1);
                 }
                 if (push_frame(iter, next, iter->stack_depth - 1) < 0) {
                     goto bail;

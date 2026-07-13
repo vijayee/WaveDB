@@ -694,6 +694,9 @@ via the `VectorLayer` wrapper; round-trip metadata; error mapping via
   `database_scan_start_reverse` for the subtree path, or do reverse scans
   on a subtree'd db just use full paths? Resolved at Phase 0 implementation
   time based on how `database_subtree_scan_start` is structured.
+  RESOLVED: `database_subtree_scan_start_reverse` was added as a thin wrapper
+  mirroring `database_subtree_scan_start`, calling `database_scan_start_reverse`
+  and setting `prefix_skip`. See commit 8cc44cb.
 
 ## Status / next
 

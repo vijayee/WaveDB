@@ -315,6 +315,28 @@ static path_t* path_from_str(const char* s) {
     return p;
 }
 
+// Build a multi-identifier path by splitting s on delim. Each segment becomes
+// its own identifier (matching how database_put_sync_raw with the same delim
+// stores keys). Used for bounds on multi-identifier reverse scans.
+static path_t* path_from_str_delim(const char* s, char delim) {
+    path_t* p = path_create();
+    size_t len = strlen(s);
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || s[i] == delim) {
+            size_t part_len = i - start;
+            buffer_t* buf = buffer_create_from_pointer_copy(
+                (uint8_t*)(s + start), part_len);
+            identifier_t* id = identifier_create(buf, 0);
+            buffer_destroy(buf);
+            path_append(p, id);
+            identifier_destroy(id);
+            start = i + 1;
+        }
+    }
+    return p;
+}
+
 class DatabaseReverseTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -667,6 +689,74 @@ TEST_F(DatabaseReverseTest, ValueWithTrieChild) {
     // ("users" < "users/alice" < "users/bob" lexicographically; reverse gives
     //  users/bob, users/alice, users.)
     std::vector<std::string> expected = {"users/bob", "users/alice", "users"};
+    ASSERT_EQ(got, expected);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 6 regression: bounded reverse scan where the end_path lands on a
+// has_value+trie_child entry. "users" has a value AND a trie_child
+// (alice/bob subtree). seek_to_end_path descends into "users"'s trie_child
+// when end_path = ["users", "bob"] continues deeper. Without setting
+// value_pending=1 on the leaf frame, scan_prev would re-descend into the
+// already-processed trie_child on pop-back, causing duplicate emissions of
+// users/alice.
+//
+// Reverse scan over [apple, users/bob) must emit, descending:
+//   users/alice, users, cherry, banana, apple
+TEST_F(DatabaseReverseTest, BoundedReverseWithValueTrieChild) {
+    database_config_t* cfg = database_config_default();
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    auto put = [&](const std::string& k, const std::string& v) {
+        int rc = database_put_sync_raw(db, k.c_str(), k.size(), '/',
+                                       (const uint8_t*)v.c_str(), v.size());
+        ASSERT_EQ(rc, 0);
+    };
+    put("apple", "V");
+    put("banana", "V");
+    put("cherry", "V");
+    put("users", "V_users");       // has_value + trie_child
+    put("users/alice", "V_a");
+    put("users/bob", "V_b");
+
+    path_t* start = path_from_str_delim("apple", '/');
+    path_t* end = path_from_str_delim("users/bob", '/');
+    database_iterator_t* it = database_scan_start_reverse(db, start, end);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        std::string key;
+        size_t n = path_length(p);
+        for (size_t i = 0; i < n; i++) {
+            identifier_t* id = path_get(p, i);
+            size_t dlen;
+            uint8_t* data = identifier_get_data_copy(id, &dlen);
+            if (i > 0) key += "/";
+            key += std::string((const char*)data, dlen);
+            free(data);
+        }
+        got.push_back(key);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+    path_destroy(start);
+    path_destroy(end);
+
+    // Keys in [apple, users/bob), descending: users/alice, users, cherry, banana, apple.
+    // If seek_to_end_path fails to set value_pending on the "users" leaf frame,
+    // scan_prev re-descends into the alice/bob subtree on pop-back and emits
+    // users/alice a second time.
+    std::vector<std::string> expected = {
+        "users/alice", "users", "cherry", "banana", "apple"
+    };
     ASSERT_EQ(got, expected);
 
     database_destroy(db);
