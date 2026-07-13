@@ -505,3 +505,66 @@ TEST_F(VectorLayerTest, SLSHSearchRightOnly) {
     vector_layer_free_results(results, n);
     vector_layer_destroy(vl);
 }
+
+/* Task 12: async insert/search/delete via Workers/promise.
+ * The vector async API is "blocking async": work is enqueued to the db's
+ * worker pool, and the caller blocks on a condvar until the promise resolves.
+ * With sync_only=0, open_separate creates a db with a real pool, so this
+ * exercises the worker path. With sync_only=1 (default in flat_config), the
+ * async variants fall back to the sync versions (no pool available). */
+TEST_F(VectorLayerTest, AsyncInsertSearchDelete) {
+    vector_layer_config_t cfg = flat_config(4);
+    cfg.format.distance = VL_DIST_L2;
+    cfg.runtime.sync_only = 0;  // enable real async (db gets a worker pool)
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    int rc = vector_layer_insert(vl, "a", v, NULL, 0);  // async
+    ASSERT_EQ(rc, 0);
+    // Async insert blocks until the worker resolves, so count must already be 1.
+    // The poll loop is a safety net for any scheduling latency.
+    for (int i = 0; i < 100 && vector_layer_count(vl) == 0; i++) {
+        usleep(10000);  // 10ms
+    }
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+
+    vl_result_t *results = NULL; int n = 0;
+    rc = vector_layer_search(vl, v, 1, &results, &n);  // async
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(n, 1);
+    ASSERT_STREQ(results[0].id, "a");
+    vector_layer_free_results(results, n);
+
+    rc = vector_layer_delete(vl, "a");  // async
+    ASSERT_EQ(rc, 0);
+    for (int i = 0; i < 100 && vector_layer_count(vl) == 1; i++) {
+        usleep(10000);
+    }
+    EXPECT_EQ(vector_layer_count(vl), 0u);
+
+    vector_layer_destroy(vl);
+}
+
+/* sync_only=1 (default) — async variants must route to sync (no pool). */
+TEST_F(VectorLayerTest, AsyncRoutesToSyncWhenNoPool) {
+    vector_layer_config_t cfg = flat_config(4);
+    // cfg.runtime.sync_only = 1 is the default from flat_config
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    ASSERT_EQ(vector_layer_insert(vl, "a", v, NULL, 0), 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search(vl, v, 1, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    vector_layer_free_results(results, n);
+
+    ASSERT_EQ(vector_layer_delete(vl, "a"), 0);
+    EXPECT_EQ(vector_layer_count(vl), 0u);
+    vector_layer_destroy(vl);
+}
