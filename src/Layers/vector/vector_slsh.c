@@ -31,7 +31,6 @@ typedef struct {
  * Pre-train (no projections): n_tables=0, proj=NULL.
  * Returns 0 on success, negative errno on alloc/get failure. */
 static int slsh_load_projections(vector_layer_t *vl, slsh_proj_cache_t *cache) {
-    database_t *db = vl->db;
     char d = vl->format.delimiter;
     int dim = vl->format.dim;
     int L = vl->format.slsh_lsh_tables;
@@ -48,7 +47,7 @@ static int slsh_load_projections(vector_layer_t *vl, slsh_proj_cache_t *cache) {
         char *pkey = vl_key_proj(vl->index_name, d, t);
         if (pkey == NULL) { free(cache->proj); cache->proj = NULL; return -12; }
         uint8_t *buf = NULL; size_t out_len = 0;
-        int rc = database_get_sync_raw(db, pkey, strlen(pkey), d, &buf, &out_len);
+        int rc = vl_get(vl, pkey, strlen(pkey), &buf, &out_len);
         free(pkey);
         if (rc == 0 && buf != NULL && out_len >= (size_t)dim * sizeof(float)) {
             memcpy(cache->proj + (size_t)t * dim, buf, (size_t)dim * sizeof(float));
@@ -113,8 +112,7 @@ static void slsh_compute_key(vector_layer_t *vl, const float *vec,
 int vector_slsh_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
                             const uint8_t *metadata, size_t metadata_len) {
     if (vl == NULL || id == NULL || vec == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -135,7 +133,7 @@ int vector_slsh_insert_sync(vector_layer_t *vl, const char *id, const float *vec
     char *cntkey = vl_key_count(vl->index_name, d);
     if (cntkey == NULL) return -12;
     size_t out_len = 0; uint8_t *buf = NULL; size_t cur = 0;
-    rc = database_get_sync_raw(db, cntkey, strlen(cntkey), d, &buf, &out_len);
+    rc = vl_get(vl, cntkey, strlen(cntkey), &buf, &out_len);
     if (rc == 0 && buf && out_len >= sizeof(size_t)) memcpy(&cur, buf, sizeof(size_t));
     if (buf) database_raw_value_free(buf);
     size_t next = cur + 1;
@@ -163,7 +161,7 @@ int vector_slsh_insert_sync(vector_layer_t *vl, const char *id, const float *vec
     ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t);
     ops[2].type = 0;
 
-    rc = database_batch_sync_raw(db, d, ops, 3);
+    rc = vl_batch(vl, ops, 3);
     free(vval); free(vkey); free(hkey); free(cntkey);
     return rc;
 }
@@ -220,8 +218,7 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
                             vl_result_t **out, int *out_n) {
     if (vl == NULL || query == NULL || out == NULL || out_n == NULL) return -22;
     *out = NULL; *out_n = 0;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     if (k <= 0) return 0;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
@@ -252,9 +249,9 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
     /* Build path_t objects for the scan bounds. database_scan_start copies
        the paths internally, so we can destroy them after the call. */
     path_t *fwd_start_path = path_create_from_raw(fwd_prefix_str, fwd_prefix_len,
-                                                   d, db->chunk_size);
+                                                   d, vl->db->chunk_size);
     path_t *fwd_end_path = path_create_from_raw(fwd_end_str, fwd_prefix_len + 1,
-                                                 d, db->chunk_size);
+                                                 d, vl->db->chunk_size);
     free(fwd_prefix_str);
     free(fwd_end_str);
     if (fwd_start_path == NULL || fwd_end_path == NULL) {
@@ -269,7 +266,7 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
     int radius = vl->runtime.slsh_scan_radius;
     if (radius <= 0) radius = 10;
 
-    database_iterator_t *fwd = database_scan_start(db, fwd_start_path, fwd_end_path);
+    database_iterator_t *fwd = vl_scan_start(vl, fwd_start_path, fwd_end_path);
     if (fwd != NULL) {
         path_t *p = NULL; identifier_t *v = NULL;
         for (int r = 0; r < radius && database_scan_next(fwd, &p, &v) == 0; r++) {
@@ -301,14 +298,14 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
             snprintf(hash_pfx_str, hash_pfx_len + 1, "vec%c%s%chash%c",
                      d, vl->index_name, d, d);
             path_t *bwd_start_path = path_create_from_raw(hash_pfx_str, hash_pfx_len,
-                                                          d, db->chunk_size);
+                                                          d, vl->db->chunk_size);
             free(hash_pfx_str);
             if (bwd_start_path != NULL) {
-                /* database_scan_start_reverse takes ownership of the path_t args;
+                /* vl_scan_start_reverse takes ownership of the path_t args;
                    we still own fwd_start_path (the iterator copies), so reuse it. */
-                database_iterator_t *bwd = database_scan_start_reverse(db,
-                                                                       bwd_start_path,
-                                                                       fwd_start_path);
+                database_iterator_t *bwd = vl_scan_start_reverse(vl,
+                                                                  bwd_start_path,
+                                                                  fwd_start_path);
                 path_destroy(bwd_start_path);
                 if (bwd != NULL) {
                     path_t *p = NULL; identifier_t *v = NULL;
@@ -350,7 +347,7 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
         char *vkey = vl_key_vector(vl->index_name, d, candidate_ids[i]);
         if (vkey == NULL) { free(candidate_ids[i]); continue; }
         uint8_t *vbuf = NULL; size_t vlen = 0;
-        int grc = database_get_sync_raw(db, vkey, strlen(vkey), d, &vbuf, &vlen);
+        int grc = vl_get(vl, vkey, strlen(vkey), &vbuf, &vlen);
         free(vkey);
         if (grc != 0 || vbuf == NULL || vlen < vec_bytes) {
             if (vbuf) database_raw_value_free(vbuf);
@@ -412,8 +409,7 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
 
 int vector_slsh_train(vector_layer_t *vl) {
     if (vl == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     int L = vl->format.slsh_lsh_tables;
     char d = vl->format.delimiter;
@@ -431,9 +427,8 @@ int vector_slsh_train(vector_layer_t *vl) {
         }
         char *pkey = vl_key_proj(vl->index_name, d, t);
         if (pkey == NULL) { free(proj); return -12; }
-        int rc = database_put_sync_raw(db, pkey, strlen(pkey), d,
-                                       (const uint8_t*)proj,
-                                       (size_t)dim * sizeof(float));
+        int rc = vl_put(vl, pkey, strlen(pkey),
+                        (const uint8_t*)proj, (size_t)dim * sizeof(float));
         free(proj); free(pkey);
         if (rc != 0) return rc;
     }
@@ -444,8 +439,7 @@ int vector_slsh_train(vector_layer_t *vl) {
 
 int vector_slsh_rebuild(vector_layer_t *vl) {
     if (vl == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -463,9 +457,8 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
 
     raw_result_t *old_hashes = NULL;
     size_t n_old = 0;
-    int rc = database_scan_range_sync_raw(db, hprefix, hprefix_len, hend,
-                                          hprefix_len + 1, d,
-                                          &old_hashes, &n_old);
+    int rc = vl_scan_range(vl, hprefix, hprefix_len, hend,
+                           hprefix_len + 1, &old_hashes, &n_old);
     free(hprefix); free(hend);
     if (rc != 0) return rc;
 
@@ -481,9 +474,8 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
 
     raw_result_t *vectors = NULL;
     size_t n_vectors = 0;
-    rc = database_scan_range_sync_raw(db, vprefix, vprefix_len, vend,
-                                      vprefix_len + 1, d,
-                                      &vectors, &n_vectors);
+    rc = vl_scan_range(vl, vprefix, vprefix_len, vend,
+                       vprefix_len + 1, &vectors, &n_vectors);
     free(vprefix); free(vend);
     if (rc != 0) { database_raw_results_free(old_hashes, n_old); return rc; }
 
@@ -592,7 +584,7 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
 
     /* 6. Apply the batch atomically. */
     if (op_i > 0) {
-        rc = database_batch_sync_raw(db, d, ops, op_i);
+        rc = vl_batch(vl, ops, op_i);
     } else {
         rc = 0;
     }
@@ -611,8 +603,7 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
 
 int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
     if (vl == NULL || id == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -621,7 +612,7 @@ int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
     char *vkey = vl_key_vector(vl->index_name, d, id);
     if (vkey == NULL) return -12;
     uint8_t *vbuf = NULL; size_t vlen = 0;
-    int rc = database_get_sync_raw(db, vkey, strlen(vkey), d, &vbuf, &vlen);
+    int rc = vl_get(vl, vkey, strlen(vkey), &vbuf, &vlen);
     if (rc != 0 || vbuf == NULL || vlen < vec_bytes) {
         if (vbuf) database_raw_value_free(vbuf);
         free(vkey);
@@ -645,7 +636,7 @@ int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
     char *cntkey = vl_key_count(vl->index_name, d);
     if (cntkey == NULL) { free(hkey); return -12; }
     uint8_t *cbuf = NULL; size_t clen = 0; size_t cur = 0;
-    rc = database_get_sync_raw(db, cntkey, strlen(cntkey), d, &cbuf, &clen);
+    rc = vl_get(vl, cntkey, strlen(cntkey), &cbuf, &clen);
     if (rc == 0 && cbuf && clen >= sizeof(size_t)) memcpy(&cur, cbuf, sizeof(size_t));
     if (cbuf) database_raw_value_free(cbuf);
 
@@ -663,7 +654,7 @@ int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
     ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t);
     ops[2].type = 0;  /* put count */
 
-    rc = database_batch_sync_raw(db, d, ops, 3);
+    rc = vl_batch(vl, ops, 3);
     free(vkey); free(hkey); free(cntkey);
     return rc;
 }

@@ -23,9 +23,18 @@ static int vl_init(vector_layer_t *vl, database_t *db, database_subtree_t *subtr
     vl->runtime = config->runtime;
     vl->index_name = strdup(index_name);
     if (vl->index_name == NULL) return -12;
-    vl->db = db;
+    if (subtree) {
+        /* Subtree mode: use the root db from the subtree, route ops through
+         * the subtree so keys land under the prefix. Take a reference on the
+         * subtree so it stays alive until vector_layer_destroy drops it. */
+        vl->db = database_subtree_get_db(subtree);
+        vl->subtree = subtree;
+        refcounter_reference((refcounter_t*)subtree);
+    } else {
+        vl->db = db;
+        vl->subtree = NULL;
+    }
     vl->owns_db = 0;
-    (void)subtree;  /* subtree support added in Task 13 */
     return 0;
 }
 
@@ -93,7 +102,17 @@ vector_layer_t* vector_layer_open_separate(const char *db_location, const char *
 void vector_layer_destroy(vector_layer_t *vl) {
     if (vl == NULL) return;
     free(vl->index_name);
-    if (vl->owns_db && vl->db) database_destroy(vl->db);
+    if (vl->subtree) {
+        /* Subtree mode: drop the layer's reference on the subtree. The caller
+         * still holds their own reference (from database_subtree_open) and
+         * closes it separately. Do NOT destroy the shared db. */
+        database_subtree_close(vl->subtree);
+        vl->subtree = NULL;
+        vl->db = NULL;
+    } else if (vl->owns_db && vl->db) {
+        database_destroy(vl->db);
+    }
+    vl->db = NULL;
     free(vl);
 }
 
@@ -109,8 +128,7 @@ size_t vector_layer_count(vector_layer_t *vl) {
     if (key == NULL) return 0;
     size_t out_len = 0;
     uint8_t *buf = NULL;
-    int rc = database_get_sync_raw(vl->db, key, strlen(key), vl->format.delimiter,
-                                   &buf, &out_len);
+    int rc = vl_get(vl, key, strlen(key), &buf, &out_len);
     free(key);
     if (rc != 0 || buf == NULL || out_len < sizeof(size_t)) {
         if (buf) database_raw_value_free(buf);

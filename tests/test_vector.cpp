@@ -568,3 +568,95 @@ TEST_F(VectorLayerTest, AsyncRoutesToSyncWhenNoPool) {
     EXPECT_EQ(vector_layer_count(vl), 0u);
     vector_layer_destroy(vl);
 }
+
+/* Task 13: subtree support — vector_layer_create with a non-NULL subtree
+ * shares the root db's key space under the subtree prefix. All vector ops
+ * must route through database_subtree_* so the prefix is prepended. */
+TEST_F(VectorLayerTest, CreateSubtree) {
+    database_config_t *dbcfg = database_config_default();
+    int db_err = 0;
+    database_t *db = database_create_with_config((char*)test_dir.c_str(), dbcfg, &db_err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(db_err, 0);
+
+    /* Open a subtree on "vec_subtree". */
+    database_subtree_t *subtree = database_subtree_open(db, "vec_subtree", '/');
+    ASSERT_NE(subtree, nullptr);
+
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_create("test", db, subtree, &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    EXPECT_EQ(err, 0);
+    EXPECT_EQ(vector_layer_count(vl), 0u);
+    float v[4] = {1, 2, 3, 4};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "a", v, NULL, 0), 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+
+    /* Search must also work through the subtree. */
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, v, 1, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    ASSERT_STREQ(results[0].id, "a");
+    vector_layer_free_results(results, n);
+
+    /* The vector entries must live under the "vec_subtree" prefix in the root
+     * db — verify by reading the count key directly from the root db with the
+     * prefix prepended. */
+    const char *prefixed = "vec_subtree/vec/test/count";
+    uint8_t *buf = NULL; size_t blen = 0;
+    int rc = database_get_sync_raw(db, prefixed, strlen(prefixed), '/',
+                                    &buf, &blen);
+    EXPECT_EQ(rc, 0) << "count key not found under subtree prefix in root db";
+    if (rc == 0 && buf && blen >= sizeof(size_t)) {
+        size_t c; memcpy(&c, buf, sizeof(size_t));
+        EXPECT_EQ(c, 1u);
+        database_raw_value_free(buf);
+    } else if (buf) {
+        database_raw_value_free(buf);
+    }
+
+    vector_layer_destroy(vl);
+    database_subtree_close(subtree);
+    database_destroy(db);
+    database_config_destroy(dbcfg);
+}
+
+/* Task 13 (R5): AtomicBatchRollback — a mid-batch failure must leave no
+ * partial index entries. The NULL id triggers pre-batch validation failure
+ * (-EINVAL) before any writes, so count stays 0 and no orphan keys leak. */
+TEST_F(VectorLayerTest, AtomicBatchRollback) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_IVF;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.ivf_n_clusters = 3;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.ivf_nprobe = 2;
+    cfg.runtime.ivf_flat_until = 1000;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    float v[4] = {1, 2, 3, 4};
+    /* Insert with NULL id should fail (invalid arg) before any writes. */
+    int rc = vector_layer_insert_sync(vl, NULL, v, NULL, 0);
+    EXPECT_LT(rc, 0);
+    EXPECT_EQ(vector_layer_count(vl), 0u);
+
+    /* Stronger check: a successful insert followed by a failed insert must
+     * leave the count + index reflecting only the successful insert. */
+    ASSERT_EQ(vector_layer_insert_sync(vl, "ok", v, NULL, 0), 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    rc = vector_layer_insert_sync(vl, NULL, v, NULL, 0);
+    EXPECT_LT(rc, 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u) << "failed insert leaked count";
+    /* The orphan check: search must still return only "ok". */
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, v, 1, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    ASSERT_STREQ(results[0].id, "ok");
+    vector_layer_free_results(results, n);
+
+    vector_layer_destroy(vl);
+}

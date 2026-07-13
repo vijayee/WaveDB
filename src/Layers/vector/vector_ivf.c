@@ -13,7 +13,6 @@
    Returns the cid of the nearest, or 0 if no centroids exist yet (pre-train).
    READ-ONLY scan — caller ensures no writes interleave. */
 static int ivf_nearest_centroid(vector_layer_t *vl, const float *vec) {
-    database_t *db = vl->db;
     char d = vl->format.delimiter;
     int dim = vl->format.dim;
 
@@ -30,8 +29,7 @@ static int ivf_nearest_centroid(vector_layer_t *vl, const float *vec) {
 
     raw_result_t *results = NULL;
     size_t count = 0;
-    int rc = database_scan_range_sync_raw(db, prefix, plen, end, plen + 1, d,
-                                          &results, &count);
+    int rc = vl_scan_range(vl, prefix, plen, end, plen + 1, &results, &count);
     free(prefix); free(end);
     if (rc != 0 || count == 0) {
         if (results) database_raw_results_free(results, count);
@@ -61,8 +59,7 @@ static int ivf_nearest_centroid(vector_layer_t *vl, const float *vec) {
 int vector_ivf_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
                            const uint8_t *metadata, size_t metadata_len) {
     if (vl == NULL || id == NULL || vec == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -75,7 +72,7 @@ int vector_ivf_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
     char *cntkey = vl_key_count(vl->index_name, d);
     if (cntkey == NULL) return -12;
     size_t out_len = 0; uint8_t *buf = NULL; size_t cur = 0;
-    int rc = database_get_sync_raw(db, cntkey, strlen(cntkey), d, &buf, &out_len);
+    int rc = vl_get(vl, cntkey, strlen(cntkey), &buf, &out_len);
     if (rc == 0 && buf && out_len >= sizeof(size_t)) memcpy(&cur, buf, sizeof(size_t));
     if (buf) database_raw_value_free(buf);
     size_t next = cur + 1;
@@ -103,7 +100,7 @@ int vector_ivf_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
     ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t);
     ops[2].type = 0;
 
-    rc = database_batch_sync_raw(db, d, ops, 3);
+    rc = vl_batch(vl, ops, 3);
     free(vval); free(vkey); free(ckey); free(cntkey);
     return rc;
 }
@@ -115,7 +112,6 @@ int vector_ivf_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
    get+split workaround. */
 static int ivf_scan_cluster(vector_layer_t *vl, int cid,
                             char ***out_ids, size_t *out_n, size_t *out_cap) {
-    database_t *db = vl->db;
     char d = vl->format.delimiter;
 
     /* Build prefix = "vec/{index}/cluster/{cid:010}/" and end = prefix + "\x7f". */
@@ -131,8 +127,7 @@ static int ivf_scan_cluster(vector_layer_t *vl, int cid,
 
     raw_result_t *results = NULL;
     size_t count = 0;
-    int rc = database_scan_range_sync_raw(db, pfx, plen, end, plen + 1, d,
-                                          &results, &count);
+    int rc = vl_scan_range(vl, pfx, plen, end, plen + 1, &results, &count);
     free(pfx); free(end);
     if (rc != 0) return rc;
 
@@ -177,8 +172,7 @@ int vector_ivf_search_sync(vector_layer_t *vl, const float *query, int k,
                            vl_result_t **out, int *out_n) {
     if (vl == NULL || query == NULL || out == NULL || out_n == NULL) return -22;
     *out = NULL; *out_n = 0;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     if (k <= 0) return 0;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
@@ -202,8 +196,8 @@ int vector_ivf_search_sync(vector_layer_t *vl, const float *query, int k,
 
     raw_result_t *centroids = NULL;
     size_t n_centroids = 0;
-    int rc = database_scan_range_sync_raw(db, prefix, plen, end, plen + 1,
-                                          d, &centroids, &n_centroids);
+    int rc = vl_scan_range(vl, prefix, plen, end, plen + 1,
+                           &centroids, &n_centroids);
     free(prefix); free(end);
     if (rc != 0) return rc;
     if (n_centroids == 0) {
@@ -275,7 +269,7 @@ int vector_ivf_search_sync(vector_layer_t *vl, const float *query, int k,
         char *vkey = vl_key_vector(vl->index_name, d, candidate_ids[i]);
         if (vkey == NULL) { free(candidate_ids[i]); continue; }
         uint8_t *vbuf = NULL; size_t vlen = 0;
-        int grc = database_get_sync_raw(db, vkey, strlen(vkey), d, &vbuf, &vlen);
+        int grc = vl_get(vl, vkey, strlen(vkey), &vbuf, &vlen);
         free(vkey);
         if (grc != 0 || vbuf == NULL || vlen < vec_bytes) {
             if (vbuf) database_raw_value_free(vbuf);
@@ -343,8 +337,7 @@ int vector_ivf_delete_sync(vector_layer_t *vl, const char *id) {
 
 int vector_ivf_train(vector_layer_t *vl) {
     if (vl == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     int K = vl->format.ivf_n_clusters;
     if (K <= 0) return -22;
@@ -364,8 +357,7 @@ int vector_ivf_train(vector_layer_t *vl) {
 
     raw_result_t *vectors = NULL;
     size_t n_vectors = 0;
-    int rc = database_scan_range_sync_raw(db, prefix, plen, end, plen + 1, d,
-                                          &vectors, &n_vectors);
+    int rc = vl_scan_range(vl, prefix, plen, end, plen + 1, &vectors, &n_vectors);
     free(prefix); free(end);
     if (rc != 0) return rc;
     if (n_vectors == 0) { database_raw_results_free(vectors, n_vectors); return 0; }
@@ -441,8 +433,8 @@ int vector_ivf_train(vector_layer_t *vl) {
             free(assignments); free(centroids);
             database_raw_results_free(vectors, n_vectors); return -12;
         }
-        rc = database_put_sync_raw(db, ckey, strlen(ckey), d,
-                                   (const uint8_t*)(centroids + c * dim), vec_bytes);
+        rc = vl_put(vl, ckey, strlen(ckey),
+                    (const uint8_t*)(centroids + c * dim), vec_bytes);
         free(ckey);
         if (rc != 0) {
             free(assignments); free(centroids);
@@ -458,8 +450,7 @@ int vector_ivf_train(vector_layer_t *vl) {
 
 int vector_ivf_rebuild(vector_layer_t *vl) {
     if (vl == NULL) return -22;
-    database_t *db = vl->db;
-    if (db == NULL) return -22;
+    if (vl->db == NULL) return -22;
     int dim = vl->format.dim;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
@@ -477,9 +468,8 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
 
     raw_result_t *old_members = NULL;
     size_t n_old = 0;
-    int rc = database_scan_range_sync_raw(db, cprefix, cprefix_len, cend,
-                                          cprefix_len + 1, d,
-                                          &old_members, &n_old);
+    int rc = vl_scan_range(vl, cprefix, cprefix_len, cend,
+                           cprefix_len + 1, &old_members, &n_old);
     free(cprefix); free(cend);
     if (rc != 0) return rc;
 
@@ -495,9 +485,8 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
 
     raw_result_t *vectors = NULL;
     size_t n_vectors = 0;
-    rc = database_scan_range_sync_raw(db, vprefix, vprefix_len, vend,
-                                      vprefix_len + 1, d,
-                                      &vectors, &n_vectors);
+    rc = vl_scan_range(vl, vprefix, vprefix_len, vend,
+                       vprefix_len + 1, &vectors, &n_vectors);
     free(vprefix); free(vend);
     if (rc != 0) { database_raw_results_free(old_members, n_old); return rc; }
 
@@ -524,9 +513,8 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
 
     raw_result_t *centroids = NULL;
     size_t n_centroids = 0;
-    rc = database_scan_range_sync_raw(db, cent_prefix, cent_prefix_len, cent_end,
-                                      cent_prefix_len + 1, d,
-                                      &centroids, &n_centroids);
+    rc = vl_scan_range(vl, cent_prefix, cent_prefix_len, cent_end,
+                       cent_prefix_len + 1, &centroids, &n_centroids);
     free(cent_prefix); free(cent_end);
     if (rc != 0) {
         database_raw_results_free(old_members, n_old);
@@ -681,7 +669,7 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
     /* 6. Apply the batch atomically: all deletes + all puts in ONE call.
        MVCC: a fresh scan after this commit sees the new memberships. */
     if (op_i > 0) {
-        rc = database_batch_sync_raw(db, d, ops, op_i);
+        rc = vl_batch(vl, ops, op_i);
     } else {
         rc = 0;
     }

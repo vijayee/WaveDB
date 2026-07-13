@@ -76,3 +76,78 @@ void vl_results_free(vl_result_t *results, int n) {
     }
     free(results);
 }
+
+/* ── Subtree-aware db op wrappers (Task 13) ── */
+
+int vl_put(vector_layer_t *vl, const char *key, size_t klen,
+           const uint8_t *value, size_t vlen) {
+    if (vl == NULL) return -22;
+    if (vl->subtree) {
+        return database_subtree_put_sync_raw(vl->subtree, key, klen,
+                                             vl->format.delimiter, value, vlen);
+    }
+    return database_put_sync_raw(vl->db, key, klen, vl->format.delimiter,
+                                 value, vlen);
+}
+
+int vl_get(vector_layer_t *vl, const char *key, size_t klen,
+           uint8_t **out, size_t *out_len) {
+    if (vl == NULL) return -22;
+    if (vl->subtree) {
+        return database_subtree_get_sync_raw(vl->subtree, key, klen,
+                                             vl->format.delimiter, out, out_len);
+    }
+    return database_get_sync_raw(vl->db, key, klen, vl->format.delimiter,
+                                 out, out_len);
+}
+
+int vl_delete(vector_layer_t *vl, const char *key, size_t klen) {
+    if (vl == NULL) return -22;
+    if (vl->subtree) {
+        return database_subtree_delete_sync_raw(vl->subtree, key, klen,
+                                                vl->format.delimiter);
+    }
+    return database_delete_sync_raw(vl->db, key, klen, vl->format.delimiter);
+}
+
+int vl_scan_range(vector_layer_t *vl,
+                  const char *start, size_t slen,
+                  const char *end, size_t elen,
+                  raw_result_t **results, size_t *count) {
+    if (vl == NULL) return -22;
+    if (vl->subtree) {
+        return database_subtree_scan_range_sync_raw(vl->subtree,
+                                                    start, slen, end, elen,
+                                                    vl->format.delimiter,
+                                                    results, count);
+    }
+    return database_scan_range_sync_raw(vl->db, start, slen, end, elen,
+                                        vl->format.delimiter, results, count);
+}
+
+int vl_batch(vector_layer_t *vl, const raw_op_t *ops, size_t count) {
+    if (vl == NULL) return -22;
+    if (vl->subtree) {
+        return database_subtree_batch_sync_raw(vl->subtree, vl->format.delimiter,
+                                               ops, count);
+    }
+    return database_batch_sync_raw(vl->db, vl->format.delimiter, ops, count);
+}
+
+database_iterator_t* vl_scan_start(vector_layer_t *vl,
+                                    path_t *start_path, path_t *end_path) {
+    if (vl == NULL) return NULL;
+    if (vl->subtree) {
+        return database_subtree_scan_start(vl->subtree, start_path, end_path);
+    }
+    return database_scan_start(vl->db, start_path, end_path);
+}
+
+database_iterator_t* vl_scan_start_reverse(vector_layer_t *vl,
+                                            path_t *start_path, path_t *end_path) {
+    if (vl == NULL) return NULL;
+    if (vl->subtree) {
+        return database_subtree_scan_start_reverse(vl->subtree, start_path, end_path);
+    }
+    return database_scan_start_reverse(vl->db, start_path, end_path);
+}
