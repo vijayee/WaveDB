@@ -8,6 +8,10 @@
 #include <string.h>
 #include <stdlib.h>
 #include <string>
+#include <vector>
+#include <set>
+#include <algorithm>
+#include <utility>
 
 #if _WIN32
 #include <io.h>
@@ -153,5 +157,77 @@ TEST_F(VectorLayerTest, FlatInsertCount) {
         ASSERT_EQ(rc, 0);
     }
     EXPECT_EQ(vector_layer_count(vl), 5u);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, FlatSearch) {
+    vector_layer_config_t cfg = flat_config(4);
+    cfg.format.distance = VL_DIST_L2;  // use L2 for predictable distances
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    float vs[5][4] = {
+        {1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1}, {1, 1, 1, 1}
+    };
+    const char* ids[5] = {"e0", "e1", "e2", "e3", "all"};
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ(vector_layer_insert_sync(vl, ids[i], vs[i], NULL, 0), 0);
+    }
+
+    // Query for {0,0,0,1} — nearest is "e3" (L2=0), then "all" (L2=sqrt(3)~1.73).
+    float q[4] = {0, 0, 0, 1};
+    vl_result_t *results = NULL;
+    int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, q, 2, &results, &n), 0);
+    ASSERT_EQ(n, 2);
+    EXPECT_STREQ(results[0].id, "e3");
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, FlatExactMatchesBruteForce) {
+    vector_layer_config_t cfg = flat_config(8);
+    cfg.format.distance = VL_DIST_L2;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    srand(42);
+    std::vector<std::vector<float>> stored;
+    std::vector<std::string> ids;
+    for (int i = 0; i < 50; i++) {
+        std::vector<float> v(8);
+        for (int d = 0; d < 8; d++) v[d] = (float)(rand() % 100) / 100.0f;
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v.data(), NULL, 0), 0);
+        stored.push_back(v);
+        ids.push_back(id);
+    }
+
+    // 10 queries; FLAT recall@10 must == 1.0 by definition.
+    int total_hits = 0;
+    for (int q = 0; q < 10; q++) {
+        std::vector<float> query(8);
+        for (int d = 0; d < 8; d++) query[d] = (float)(rand() % 100) / 100.0f;
+
+        // Brute-force ground truth.
+        std::vector<std::pair<float, int>> dists;
+        for (int i = 0; i < 50; i++) {
+            float d = vl_distance(query.data(), stored[i].data(), 8, VL_DIST_L2);
+            dists.push_back({d, i});
+        }
+        std::sort(dists.begin(), dists.end());
+        std::set<std::string> truth;
+        for (int i = 0; i < 10; i++) truth.insert(ids[dists[i].second]);
+
+        vl_result_t *results = NULL;
+        int n = 0;
+        ASSERT_EQ(vector_layer_search_sync(vl, query.data(), 10, &results, &n), 0);
+        ASSERT_EQ(n, 10);
+        for (int i = 0; i < n; i++) if (truth.count(results[i].id)) total_hits++;
+        vector_layer_free_results(results, n);
+    }
+    EXPECT_EQ(total_hits, 100);  // 10 queries × 10 results, all must hit (recall@10 == 1.0)
     vector_layer_destroy(vl);
 }
