@@ -488,6 +488,100 @@ cp ../../build/libwavedb.so .   # or set LD_LIBRARY_PATH
 dart test
 ```
 
+## Vector Layer
+
+Approximate-nearest-neighbour (ANN) vector similarity search on top of
+WaveDB, in the same process. Three index types: **FLAT** (exact
+brute-force), **IVF** (k-means inverted file), **SLSH** (sortable compound
+LSH with bidirectional scan). Config is split into a **format tier**
+(immutable after create — drop + recreate to change) and a **runtime tier**
+(mutable via `reconfigure`). See
+[`src/Layers/vector/README.md`](../../src/Layers/vector/README.md) for the
+authoritative C-layer config reference with spike-measured impact columns;
+[`bench/vector/REPORT.md`](../../bench/vector/REPORT.md) for the full
+bench numbers.
+
+### Config
+
+```dart
+import 'package:wavedb/vector_layer.dart';
+
+// Dedicated database (no key-space sharing). Use VectorLayer.open(...)
+// to share a WaveDB instance instead, optionally scoped to a Subtree.
+final vl = VectorLayer.openSeparate(
+  '/path/to/vecdb',
+  'embeddings',
+  Format(
+    indexType: IndexType.ivf,
+    dim: 384,
+    distance: Distance.cosine,
+    ivfNClusters: 50,
+  ),
+  Runtime(topK: 10, syncOnly: 1, ivfNprobe: 8, ivfFlatUntil: 1000),
+);
+
+// Runtime tier is mutable; format tier is not.
+vl.reconfigure(Runtime(topK: 20, ivfNprobe: 16));
+```
+
+#### Format tier (immutable after create)
+
+| Field | Type | Default | Effect on recall / latency / storage |
+|---|---|---|---|
+| `indexType` | `IndexType` | flat | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
+| `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
+| `delimiter` | String | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
+| `distance` | `Distance` | cosine | Used for assignment + rerank; match your embedding model (cosine for normalized, l2 for general, dot for inner-product) |
+| `ivfNClusters` | int | 50 | More clusters → higher recall (diminishing); training is O(K²·N·dim). ~sqrt(N) rule of thumb (50 for 10k, 170 for 30k) |
+| `slshLshTables` | int | 4 | More tables → higher recall (diminishing); 2-4 clustered, 4-8 uniform |
+| `slshHashBits` | int | 16 | More bits → finer buckets → higher recall up to sparsity; 8-16, 16 standard |
+| `slshBucketWidth` | double | 2.0 | Smaller W → higher recall up to sparsity. W=2.0 gives 9x lower latency than 10.0 at equal recall. 1.0-4.0 |
+
+#### Runtime tier (mutable via `reconfigure`)
+
+| Field | Type | Default | Effect on recall / latency / storage |
+|---|---|---|---|
+| `topK` | int | 10 | Linear in k (rerank cost); match your use case |
+| `syncOnly` | int | 1 | 1 = single-threaded, no MVCC overhead; 0 = async worker pool for concurrent callers |
+| `ivfNprobe` | int | 8 | Higher → higher recall (linear cost). 8 clears 0.90 on clustered; 16-32 if data is near-uniform |
+| `ivfFlatUntil` | int | 1000 | Below this count, FLAT (exact) is used; raise if cold-start recall is low |
+| `slshScanRadius` | int | 200 | **ADAPTIVE: actual = max(configured, count/30).** Configured is a floor; auto-scales with dataset size (~1000 at 30k). Raise for more recall on small datasets |
+
+### Example
+
+```dart
+final vl = VectorLayer.openSeparate(
+  '/path/to/vecdb',
+  'embeddings',
+  Format(
+    indexType: IndexType.ivf,
+    dim: 384,
+    distance: Distance.cosine,
+    ivfNClusters: 50,
+  ),
+  Runtime(topK: 10, syncOnly: 1, ivfNprobe: 8, ivfFlatUntil: 1000),
+);
+
+// Insert vectors (id, vec, optional metadata bytes).
+vl.insertSync('doc/1', [0.12, -0.04, /* ... */], metadata: Uint8List.fromList([1, 2, 3]));
+vl.insertSync('doc/2', [0.08,  0.11, /* ... */]);
+
+// Train k-means / regenerate projections. Call after a bulk load and
+// periodically as the dataset grows; FLAT is a no-op.
+vl.train();
+
+// Search — returns a List<VectorResult> sorted by distance.
+final results = vl.searchSync([0.10, 0.05, /* ... */], k: 10);
+for (final r in results) {
+  print('${r.id} ${r.distance} ${r.metadata}');
+}
+
+// Mutate the runtime tier at any time.
+vl.reconfigure(Runtime(topK: 20, ivfNprobe: 16));
+
+vl.close();
+```
+
 ## License
 
 MIT

@@ -285,6 +285,92 @@ so its speedup over sequential `await db.get()` is bounded by C
 work-pool parallelism (typically 1-3x) and drops to ~1x in in-memory
 mode where the asyncio marshalling loop dominates over C work.
 
+## Vector Layer
+
+Approximate-nearest-neighbour (ANN) vector similarity search on top of
+WaveDB, in the same process. Three index types: **FLAT** (exact
+brute-force), **IVF** (k-means inverted file), **SLSH** (sortable compound
+LSH with bidirectional scan). Config is split into a **format tier**
+(immutable after create — drop + recreate to change) and a **runtime tier**
+(mutable via `VectorLayer.reconfigure`). See
+[`src/Layers/vector/README.md`](../../src/Layers/vector/README.md) for the
+authoritative C-layer config reference with spike-measured impact columns;
+[`bench/vector/REPORT.md`](../../bench/vector/REPORT.md) for the full
+bench numbers.
+
+### Config
+
+```python
+from wavedb import VectorLayer, Format, Runtime, IndexType, Distance
+
+# Dedicated database (no key-space sharing). Use VectorLayer.open(...)
+# to share a WaveDB instance instead, optionally scoped to a Subtree.
+vl = VectorLayer.open_separate(
+    "/path/to/vecdb",
+    "embeddings",
+    Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE,
+           ivf_n_clusters=50),
+    Runtime(top_k=10, sync_only=1, ivf_nprobe=8, ivf_flat_until=1000),
+)
+
+# Runtime tier is mutable; format tier is not.
+vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
+```
+
+#### Format tier (immutable after create)
+
+| Field | Type | Default | Effect on recall / latency / storage |
+|---|---|---|---|
+| `index_type` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
+| `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
+| `delimiter` | str | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
+| `distance` | `Distance` | COSINE | Used for assignment + rerank; match your embedding model (COSINE for normalized, L2 for general, DOT for inner-product) |
+| `ivf_n_clusters` | int | 50 | More clusters → higher recall (diminishing); training is O(K²·N·dim). ~sqrt(N) rule of thumb (50 for 10k, 170 for 30k) |
+| `slsh_lsh_tables` | int | 4 | More tables → higher recall (diminishing); 2-4 clustered, 4-8 uniform |
+| `slsh_hash_bits` | int | 16 | More bits → finer buckets → higher recall up to sparsity; 8-16, 16 standard |
+| `slsh_bucket_width` | float | 2.0 | Smaller W → higher recall up to sparsity. W=2.0 gives 9x lower latency than 10.0 at equal recall. 1.0-4.0 |
+
+#### Runtime tier (mutable via `reconfigure`)
+
+| Field | Type | Default | Effect on recall / latency / storage |
+|---|---|---|---|
+| `top_k` | int | 10 | Linear in k (rerank cost); match your use case |
+| `sync_only` | int | 1 | 1 = single-threaded, no MVCC overhead; 0 = async worker pool for concurrent callers |
+| `ivf_nprobe` | int | 8 | Higher → higher recall (linear cost). 8 clears 0.90 on clustered; 16-32 if data is near-uniform |
+| `ivf_flat_until` | int | 1000 | Below this count, FLAT (exact) is used; raise if cold-start recall is low |
+| `slsh_scan_radius` | int | 200 | **ADAPTIVE: actual = max(configured, count/30).** Configured is a floor; auto-scales with dataset size (~1000 at 30k). Raise for more recall on small datasets |
+
+### Example
+
+```python
+from wavedb import VectorLayer, Format, Runtime, IndexType, Distance
+
+vl = VectorLayer.open_separate(
+    "/path/to/vecdb", "embeddings",
+    Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE,
+           ivf_n_clusters=50),
+    Runtime(top_k=10, sync_only=1, ivf_nprobe=8, ivf_flat_until=1000),
+)
+
+# Insert vectors (id, vec, optional metadata bytes).
+vl.insert_sync("doc/1", [0.12, -0.04, ...], metadata=b"payload")
+vl.insert_sync("doc/2", [0.08,  0.11, ...])
+
+# Train k-means / regenerate projections. Call after a bulk load and
+# periodically as the dataset grows; FLAT is a no-op.
+vl.train()
+
+# Search — returns a list[VectorResult] sorted by distance.
+results = vl.search_sync([0.10, 0.05, ...], k=10)
+for r in results:
+    print(r.id_str, r.distance, r.metadata)
+
+# Mutate the runtime tier at any time.
+vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
+
+vl.close()
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
