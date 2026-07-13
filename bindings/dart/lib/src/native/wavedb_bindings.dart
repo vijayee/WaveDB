@@ -1293,6 +1293,215 @@ typedef GraphParseExecuteAsync = int Function(
   Pointer<Utf8>, Pointer<graph_layer_t>, Pointer<promise_t>, Pointer<GraphParseError>);
 
 // ============================================================
+// C TYPEDEFS - Vector Layer
+// ============================================================
+
+/// C signature: vector_layer_t* vector_layer_create(
+///   const char *index_name, database_t *db, database_subtree_t *subtree,
+///   vector_layer_config_t *config, int *error_code)
+typedef VectorLayerCreateC = Pointer<vector_layer_t> Function(
+  Pointer<Utf8> indexName,
+  Pointer<database_t> db,
+  Pointer<database_subtree_t> subtree,
+  Pointer<vector_layer_config_t> config,
+  Pointer<Int32> errorCode,
+);
+typedef VectorLayerCreate = Pointer<vector_layer_t> Function(
+  Pointer<Utf8> indexName,
+  Pointer<database_t> db,
+  Pointer<database_subtree_t> subtree,
+  Pointer<vector_layer_config_t> config,
+  Pointer<Int32> errorCode,
+);
+
+/// C signature: vector_layer_t* vector_layer_open_separate(
+///   const char *db_location, const char *index_name,
+///   vector_layer_config_t *config, int *error_code)
+typedef VectorLayerOpenSeparateC = Pointer<vector_layer_t> Function(
+  Pointer<Utf8> dbLocation,
+  Pointer<Utf8> indexName,
+  Pointer<vector_layer_config_t> config,
+  Pointer<Int32> errorCode,
+);
+typedef VectorLayerOpenSeparate = Pointer<vector_layer_t> Function(
+  Pointer<Utf8> dbLocation,
+  Pointer<Utf8> indexName,
+  Pointer<vector_layer_config_t> config,
+  Pointer<Int32> errorCode,
+);
+
+/// C signature: void vector_layer_destroy(vector_layer_t* vl)
+typedef VectorLayerDestroyC = Void Function(Pointer<vector_layer_t> vl);
+typedef VectorLayerDestroy = void Function(Pointer<vector_layer_t> vl);
+
+/// C signature: int vector_layer_reconfigure(vector_layer_t* vl,
+///   vector_layer_runtime_t* runtime)
+typedef VectorLayerReconfigureC = Int32 Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<vector_layer_runtime_t> runtime,
+);
+typedef VectorLayerReconfigure = int Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<vector_layer_runtime_t> runtime,
+);
+
+/// C signature: int vector_layer_insert_sync(vector_layer_t* vl, const char* id,
+///   const float* vec, const uint8_t* metadata, size_t metadata_len)
+typedef VectorLayerInsertSyncC = Int32 Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<Float> vec,
+  Pointer<Uint8> metadata,
+  Size metadataLen,
+);
+typedef VectorLayerInsertSync = int Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<Float> vec,
+  Pointer<Uint8> metadata,
+  int metadataLen,
+);
+
+/// C signature: int vector_layer_search_sync(vector_layer_t* vl,
+///   const float* query, int k, vl_result_t** results, int* n_results)
+typedef VectorLayerSearchSyncC = Int32 Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Float> query,
+  Int32 k,
+  Pointer<Pointer<vl_result_t>> results,
+  Pointer<Int32> nResults,
+);
+typedef VectorLayerSearchSync = int Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Float> query,
+  int k,
+  Pointer<Pointer<vl_result_t>> results,
+  Pointer<Int32> nResults,
+);
+
+/// C signature: int vector_layer_delete_sync(vector_layer_t* vl, const char* id)
+typedef VectorLayerDeleteSyncC = Int32 Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+);
+typedef VectorLayerDeleteSync = int Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+);
+
+/// C signature: int vector_layer_train(vector_layer_t* vl)
+typedef VectorLayerTrainC = Int32 Function(Pointer<vector_layer_t> vl);
+typedef VectorLayerTrain = int Function(Pointer<vector_layer_t> vl);
+
+/// C signature: int vector_layer_rebuild(vector_layer_t* vl)
+typedef VectorLayerRebuildC = Int32 Function(Pointer<vector_layer_t> vl);
+typedef VectorLayerRebuild = int Function(Pointer<vector_layer_t> vl);
+
+/// C signature: size_t vector_layer_count(vector_layer_t* vl)
+typedef VectorLayerCountC = Size Function(Pointer<vector_layer_t> vl);
+typedef VectorLayerCount = int Function(Pointer<vector_layer_t> vl);
+
+/// C signature: void vector_layer_free_results(vl_result_t* results, int n)
+typedef VectorLayerFreeResultsC = Void Function(
+  Pointer<vl_result_t> results,
+  Int32 n,
+);
+typedef VectorLayerFreeResults = void Function(
+  Pointer<vl_result_t> results,
+  int n,
+);
+
+/// C signature: void vector_layer_insert(vector_layer_t* vl, const char* id,
+///   const float* vec, const uint8_t* metadata, size_t metadata_len,
+///   promise_t* promise)
+typedef VectorLayerInsertAsyncC = Void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<Float> vec,
+  Pointer<Uint8> metadata,
+  Size metadataLen,
+  Pointer<promise_t> promise,
+);
+typedef VectorLayerInsertAsync = void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<Float> vec,
+  Pointer<Uint8> metadata,
+  int metadataLen,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: void vector_layer_insert_batch(vector_layer_t* vl,
+///   const char** ids, const float** vecs, const uint8_t** metadatas,
+///   const size_t* meta_lens, int n, promise_t* promise)
+typedef VectorLayerInsertBatchAsyncC = Void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Pointer<Utf8>> ids,
+  Pointer<Pointer<Float>> vecs,
+  Pointer<Pointer<Uint8>> metadatas,
+  Pointer<Size> metaLens,
+  Int32 n,
+  Pointer<promise_t> promise,
+);
+typedef VectorLayerInsertBatchAsync = void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Pointer<Utf8>> ids,
+  Pointer<Pointer<Float>> vecs,
+  Pointer<Pointer<Uint8>> metadatas,
+  Pointer<Size> metaLens,
+  int n,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: int vector_layer_insert_batch_sync(vector_layer_t* vl,
+///   const char** ids, const float** vecs, const uint8_t** metadatas,
+///   const size_t* meta_lens, int n)
+typedef VectorLayerInsertBatchSyncC = Int32 Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Pointer<Utf8>> ids,
+  Pointer<Pointer<Float>> vecs,
+  Pointer<Pointer<Uint8>> metadatas,
+  Pointer<Size> metaLens,
+  Int32 n,
+);
+typedef VectorLayerInsertBatchSync = int Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Pointer<Utf8>> ids,
+  Pointer<Pointer<Float>> vecs,
+  Pointer<Pointer<Uint8>> metadatas,
+  Pointer<Size> metaLens,
+  int n,
+);
+
+/// C signature: void vector_layer_search(vector_layer_t* vl,
+///   const float* query, int k, promise_t* promise)
+typedef VectorLayerSearchAsyncC = Void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Float> query,
+  Int32 k,
+  Pointer<promise_t> promise,
+);
+typedef VectorLayerSearchAsync = void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Float> query,
+  int k,
+  Pointer<promise_t> promise,
+);
+
+/// C signature: void vector_layer_delete(vector_layer_t* vl, const char* id,
+///   promise_t* promise)
+typedef VectorLayerDeleteAsyncC = Void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<promise_t> promise,
+);
+typedef VectorLayerDeleteAsync = void Function(
+  Pointer<vector_layer_t> vl,
+  Pointer<Utf8> id,
+  Pointer<promise_t> promise,
+);
+
+// ============================================================
 // C TYPEDEFS - Promise
 // ============================================================
 
@@ -1727,6 +1936,74 @@ class WaveDBNative {
 
   static late final GraphParseExecuteAsync _graphParseExecuteAsync = WaveDBLibrary.load()
       .lookupFunction<GraphParseExecuteAsyncC, GraphParseExecuteAsync>('graph_parse_execute_async');
+
+  // ============================================================
+  // LAZY FUNCTIONS - Vector Layer
+  // ============================================================
+
+  static late final VectorLayerCreate _vectorLayerCreate = WaveDBLibrary.load()
+      .lookupFunction<VectorLayerCreateC, VectorLayerCreate>('vector_layer_create');
+
+  static late final VectorLayerOpenSeparate _vectorLayerOpenSeparate =
+      WaveDBLibrary.load().lookupFunction<VectorLayerOpenSeparateC,
+          VectorLayerOpenSeparate>('vector_layer_open_separate');
+
+  static late final VectorLayerDestroy _vectorLayerDestroy = WaveDBLibrary.load()
+      .lookupFunction<VectorLayerDestroyC, VectorLayerDestroy>('vector_layer_destroy');
+
+  static late final Pointer<NativeFunction<VectorLayerDestroyC>>
+      vectorLayerDestroyNative =
+      WaveDBLibrary.load().lookup('vector_layer_destroy');
+
+  static late final VectorLayerReconfigure _vectorLayerReconfigure =
+      WaveDBLibrary.load().lookupFunction<VectorLayerReconfigureC,
+          VectorLayerReconfigure>('vector_layer_reconfigure');
+
+  static late final VectorLayerInsertSync _vectorLayerInsertSync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerInsertSyncC,
+          VectorLayerInsertSync>('vector_layer_insert_sync');
+
+  static late final VectorLayerSearchSync _vectorLayerSearchSync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerSearchSyncC,
+          VectorLayerSearchSync>('vector_layer_search_sync');
+
+  static late final VectorLayerDeleteSync _vectorLayerDeleteSync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerDeleteSyncC,
+          VectorLayerDeleteSync>('vector_layer_delete_sync');
+
+  static late final VectorLayerTrain _vectorLayerTrain = WaveDBLibrary.load()
+      .lookupFunction<VectorLayerTrainC, VectorLayerTrain>('vector_layer_train');
+
+  static late final VectorLayerRebuild _vectorLayerRebuild =
+      WaveDBLibrary.load().lookupFunction<VectorLayerRebuildC,
+          VectorLayerRebuild>('vector_layer_rebuild');
+
+  static late final VectorLayerCount _vectorLayerCount = WaveDBLibrary.load()
+      .lookupFunction<VectorLayerCountC, VectorLayerCount>('vector_layer_count');
+
+  static late final VectorLayerFreeResults _vectorLayerFreeResults =
+      WaveDBLibrary.load().lookupFunction<VectorLayerFreeResultsC,
+          VectorLayerFreeResults>('vector_layer_free_results');
+
+  static late final VectorLayerInsertAsync _vectorLayerInsertAsync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerInsertAsyncC,
+          VectorLayerInsertAsync>('vector_layer_insert');
+
+  static late final VectorLayerInsertBatchAsync _vectorLayerInsertBatchAsync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerInsertBatchAsyncC,
+          VectorLayerInsertBatchAsync>('vector_layer_insert_batch');
+
+  static late final VectorLayerInsertBatchSync _vectorLayerInsertBatchSync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerInsertBatchSyncC,
+          VectorLayerInsertBatchSync>('vector_layer_insert_batch_sync');
+
+  static late final VectorLayerSearchAsync _vectorLayerSearchAsync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerSearchAsyncC,
+          VectorLayerSearchAsync>('vector_layer_search');
+
+  static late final VectorLayerDeleteAsync _vectorLayerDeleteAsync =
+      WaveDBLibrary.load().lookupFunction<VectorLayerDeleteAsyncC,
+          VectorLayerDeleteAsync>('vector_layer_delete');
 
   // Promise operations
   static late final PromiseCreate _promiseCreate = WaveDBLibrary.load()
@@ -3032,6 +3309,226 @@ class WaveDBNative {
     } finally {
       calloc.free(dslPtr);
       calloc.free(errorPtr);
+    }
+  }
+
+  // ============================================================
+  // PUBLIC API - Vector Layer
+  // ============================================================
+
+  /// Create a vector layer sharing `db`'s underlying database.
+  ///
+  /// `config` is a caller-allocated `Pointer<vector_layer_config_t>` already
+  /// filled in. If `subtree` is non-null, all keys land under that subtree
+  /// prefix; otherwise they land directly in `db` under `{indexName}/...`.
+  ///
+  /// Returns the opaque handle. Throws [WaveDBException] on failure
+  /// (error code from C via `error_code`).
+  static Pointer<vector_layer_t> vectorLayerCreate(
+    String indexName,
+    Pointer<database_t> db,
+    Pointer<database_subtree_t>? subtree,
+    Pointer<vector_layer_config_t> config,
+  ) {
+    final namePtr = indexName.toNativeUtf8();
+    final errorPtr = calloc<Int32>();
+    try {
+      final layer = _vectorLayerCreate(
+        namePtr.cast(),
+        db,
+        subtree ?? nullptr,
+        config,
+        errorPtr,
+      );
+      if (layer == nullptr) {
+        final err = errorPtr.value;
+        throw WaveDBException.ioError(
+            'vector_layer_create', 'Failed to create vector layer (error $err)');
+      }
+      return layer;
+    } finally {
+      calloc.free(namePtr);
+      calloc.free(errorPtr);
+    }
+  }
+
+  /// Open a vector layer on a DEDICATED database at `dbLocation`.
+  static Pointer<vector_layer_t> vectorLayerOpenSeparate(
+    String dbLocation,
+    String indexName,
+    Pointer<vector_layer_config_t> config,
+  ) {
+    final locPtr = dbLocation.toNativeUtf8();
+    final namePtr = indexName.toNativeUtf8();
+    final errorPtr = calloc<Int32>();
+    try {
+      final layer = _vectorLayerOpenSeparate(
+        locPtr.cast(),
+        namePtr.cast(),
+        config,
+        errorPtr,
+      );
+      if (layer == nullptr) {
+        final err = errorPtr.value;
+        throw WaveDBException.ioError('vector_layer_open_separate',
+            'Failed to open vector layer (error $err)');
+      }
+      return layer;
+    } finally {
+      calloc.free(locPtr);
+      calloc.free(namePtr);
+      calloc.free(errorPtr);
+    }
+  }
+
+  static void vectorLayerDestroy(Pointer<vector_layer_t> vl) {
+    _vectorLayerDestroy(vl);
+  }
+
+  static int vectorLayerReconfigure(
+    Pointer<vector_layer_t> vl,
+    Pointer<vector_layer_runtime_t> runtime,
+  ) {
+    return _vectorLayerReconfigure(vl, runtime);
+  }
+
+  /// Insert a vector synchronously. `vec` is a Float list; `metadata` is a
+  /// raw bytes list (empty allowed). The C function takes `float*` and
+  /// `uint8_t*` + len.
+  static int vectorLayerInsertSync(
+    Pointer<vector_layer_t> vl,
+    String id,
+    List<double> vec,
+    List<int> metadata,
+  ) {
+    final idPtr = id.toNativeUtf8();
+    final vecPtr = calloc<Float>(vec.length);
+    final metaLen = metadata.length;
+    final metaPtr = metaLen > 0 ? calloc<Uint8>(metaLen) : nullptr;
+    try {
+      for (var i = 0; i < vec.length; i++) {
+        vecPtr[i] = vec[i];
+      }
+      if (metaPtr != nullptr) {
+        for (var i = 0; i < metaLen; i++) {
+          metaPtr[i] = metadata[i];
+        }
+      }
+      return _vectorLayerInsertSync(
+        vl,
+        idPtr.cast(),
+        vecPtr,
+        metaPtr,
+        metaLen,
+      );
+    } finally {
+      calloc.free(idPtr);
+      calloc.free(vecPtr);
+      if (metaPtr != nullptr) calloc.free(metaPtr);
+    }
+  }
+
+  /// Synchronous search. Returns a list of `vl_result_t` pointers (caller
+  /// frees via [vectorLayerFreeResults]). `nOut` receives the count.
+  static int vectorLayerSearchSync(
+    Pointer<vector_layer_t> vl,
+    List<double> query,
+    int k,
+    Pointer<Pointer<vl_result_t>> resultsOut,
+    Pointer<Int32> nOut,
+  ) {
+    final qPtr = calloc<Float>(query.length);
+    try {
+      for (var i = 0; i < query.length; i++) {
+        qPtr[i] = query[i];
+      }
+      return _vectorLayerSearchSync(vl, qPtr, k, resultsOut, nOut);
+    } finally {
+      calloc.free(qPtr);
+    }
+  }
+
+  static int vectorLayerDeleteSync(Pointer<vector_layer_t> vl, String id) {
+    final idPtr = id.toNativeUtf8();
+    try {
+      return _vectorLayerDeleteSync(vl, idPtr.cast());
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  static int vectorLayerTrain(Pointer<vector_layer_t> vl) =>
+      _vectorLayerTrain(vl);
+
+  static int vectorLayerRebuild(Pointer<vector_layer_t> vl) =>
+      _vectorLayerRebuild(vl);
+
+  static int vectorLayerCount(Pointer<vector_layer_t> vl) =>
+      _vectorLayerCount(vl);
+
+  static void vectorLayerFreeResults(Pointer<vl_result_t> results, int n) {
+    if (results == nullptr) return;
+    _vectorLayerFreeResults(results, n);
+  }
+
+  // ── async variants (deferred — declared for symbol resolution) ──
+
+  static void vectorLayerInsertAsync(
+    Pointer<vector_layer_t> vl,
+    String id,
+    List<double> vec,
+    List<int> metadata,
+    Pointer<promise_t> promise,
+  ) {
+    final idPtr = id.toNativeUtf8();
+    final vecPtr = calloc<Float>(vec.length);
+    final metaLen = metadata.length;
+    final metaPtr = metaLen > 0 ? calloc<Uint8>(metaLen) : nullptr;
+    try {
+      for (var i = 0; i < vec.length; i++) {
+        vecPtr[i] = vec[i];
+      }
+      if (metaPtr != nullptr) {
+        for (var i = 0; i < metaLen; i++) {
+          metaPtr[i] = metadata[i];
+        }
+      }
+      _vectorLayerInsertAsync(
+        vl, idPtr.cast(), vecPtr, metaPtr, metaLen, promise);
+    } finally {
+      calloc.free(idPtr);
+      calloc.free(vecPtr);
+      if (metaPtr != nullptr) calloc.free(metaPtr);
+    }
+  }
+
+  static void vectorLayerDeleteAsync(
+    Pointer<vector_layer_t> vl,
+    String id,
+    Pointer<promise_t> promise,
+  ) {
+    final idPtr = id.toNativeUtf8();
+    try {
+      _vectorLayerDeleteAsync(vl, idPtr.cast(), promise);
+    } finally {
+      calloc.free(idPtr);
+    }
+  }
+
+  static void vectorLayerSearchAsync(
+    Pointer<vector_layer_t> vl,
+    List<double> query,
+    int k,
+    Pointer<promise_t> promise,
+  ) {
+    final qPtr = calloc<Float>(query.length);
+    try {
+      for (var i = 0; i < query.length; i++) {
+        qPtr[i] = query[i];
+      }
+      _vectorLayerSearchAsync(vl, qPtr, k, promise);
+    } finally {
+      calloc.free(qPtr);
     }
   }
 

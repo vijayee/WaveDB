@@ -392,6 +392,17 @@ class WaveDB implements Finalizable {
 
   int get _delimiterCodeUnit => _delimiter.codeUnitAt(0);
 
+  /// Native `database_t*` pointer — exposed so sibling layers (VectorLayer,
+  /// GraphLayer) can share the underlying database. Throws [StateError] if
+  /// the database has been closed.
+  Pointer<database_t> get databasePtr {
+    final db = _db;
+    if (_isClosed || db == null) {
+      throw StateError('WaveDB is closed');
+    }
+    return db;
+  }
+
   /// Convert a key (String or List) to a delimiter-joined string
   String _keyToString(dynamic key) {
     if (key is String) return key;

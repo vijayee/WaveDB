@@ -9,3 +9,12 @@ export 'src/subtree.dart' show Subtree;
 export 'src/iterator.dart' show KeyValue;
 export 'src/graph_layer.dart' show GraphLayer, GraphQuery, g, GraphLayerException;
 export 'src/graphql_layer.dart' show GraphQLLayer, GraphQLLayerConfig, GraphQLLayerException, GraphQLResult, GraphQLError;
+export 'src/vector_layer.dart'
+    show
+        VectorLayer,
+        VectorFormat,
+        VectorRuntime,
+        VectorResult,
+        VectorLayerException,
+        IndexType,
+        Distance;

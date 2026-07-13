@@ -262,3 +262,95 @@ base class RawResult extends Struct {
   @Size()
   external int valueLen;
 }
+
+// ============================================================
+// Vector Layer types
+// ============================================================
+
+/// Opaque handle to a Vector layer
+/// Maps to vector_layer_t in C
+base class vector_layer_t extends Opaque {}
+
+/// Immutable format tier — Maps to vector_layer_format_t in C.
+///
+/// Layout (64-bit Linux/macOS):
+/// - index_type   : int32 (enum vl_index_type_t) at 0
+/// - dim          : int32 at 4
+/// - delimiter    : char (1 byte) at 8, +3 padding
+/// - distance     : int32 (enum vl_distance_t) at 12
+/// - ivf_n_clusters: int32 at 16
+/// - slsh_lsh_tables: int32 at 20
+/// - slsh_hash_bits : int32 at 24
+/// - slsh_bucket_width: float32 at 28
+/// Total: 32 bytes. dart:ffi auto-aligns Int32 after Uint8 to offset 12.
+base class vector_layer_format_t extends Struct {
+  @Int32()
+  external int indexType;
+
+  @Int32()
+  external int dim;
+
+  @Uint8()
+  external int delimiter;
+
+  @Int32()
+  external int distance;
+
+  @Int32()
+  external int ivfNClusters;
+
+  @Int32()
+  external int slshLshTables;
+
+  @Int32()
+  external int slshHashBits;
+
+  @Float()
+  external double slshBucketWidth;
+}
+
+/// Runtime tier — Maps to vector_layer_runtime_t in C.
+///
+/// Layout: 5 × int32 = 20 bytes, no padding.
+base class vector_layer_runtime_t extends Struct {
+  @Int32()
+  external int topK;
+
+  @Int32()
+  external int syncOnly;
+
+  @Int32()
+  external int ivfNprobe;
+
+  @Int32()
+  external int ivfFlatUntil;
+
+  @Int32()
+  external int slshScanRadius;
+}
+
+/// Combined config — Maps to vector_layer_config_t in C.
+/// Layout: format (32 bytes) + runtime (20 bytes) = 52 bytes.
+base class vector_layer_config_t extends Struct {
+  external vector_layer_format_t format;
+  external vector_layer_runtime_t runtime;
+}
+
+/// One search hit — Maps to vl_result_t in C.
+/// Layout (64-bit):
+/// - id            : char* at 0
+/// - distance      : float at 8, +4 padding
+/// - metadata      : uint8_t* at 16
+/// - metadata_len  : size_t at 24
+/// Total: 32 bytes.
+base class vl_result_t extends Struct {
+  external Pointer<Uint8> id;
+
+  @Float()
+  external double distance;
+
+  external Pointer<Uint8> metadata;
+
+  @Size()
+  external int metadataLen;
+}
