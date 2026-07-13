@@ -18,7 +18,6 @@ char* vl_key_vector(const char *idx, char d, const char *id);
 char* vl_key_count(const char *idx, char d);
 char* vl_key_centroid(const char *idx, char d, int cid);
 char* vl_key_cluster_member(const char *idx, char d, int cid, const char *id);
-char* vl_key_clist(const char *idx, char d, int cid);
 char* vl_key_hash(const char *idx, char d, const uint8_t *lsh, size_t llen, const char *id);
 char* vl_key_proj(const char *idx, char d, int t);
 

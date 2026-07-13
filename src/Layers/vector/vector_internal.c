@@ -41,17 +41,6 @@ char* vl_key_cluster_member(const char *idx, char d, int cid, const char *id) {
     return buf;
 }
 
-/* Cluster membership list — single key per cid, value = newline-separated ids.
-   Avoids prefix-scan issues with overwritten keys. */
-char* vl_key_clist(const char *idx, char d, int cid) {
-    if (idx == NULL) return NULL;
-    size_t cap = 4 + strlen(idx) + 6 + 11 + 1;
-    char *buf = (char*)malloc(cap);
-    if (buf == NULL) return NULL;
-    snprintf(buf, cap, "vec%c%s%cclist%c%010d", d, idx, d, d, cid);
-    return buf;
-}
-
 char* vl_key_hash(const char *idx, char d, const uint8_t *lsh, size_t llen, const char *id) {
     if (idx == NULL || lsh == NULL || id == NULL) return NULL;
     size_t cap = 4 + strlen(idx) + 6 + 2*llen + 1 + strlen(id) + 1;

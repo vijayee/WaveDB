@@ -1,5 +1,8 @@
 /* vector_ivf.c — inverted file.
- * Task 1: stubs only. Task 6: insert. Search/delete/train/rebuild in later tasks. */
+ * Task 1: stubs only. Task 6: insert. Task 7: search. Task 8: train + rebuild.
+ * Task 8b: reverted the clist workaround — IVF operations now respect MVCC
+ * snapshot isolation by scanning first (read-only), computing in memory,
+ * then batching all writes atomically. Never interleave scans with writes. */
 #include "vector_internal.h"
 #include "../../Database/database.h"
 #include <stdlib.h>
@@ -7,7 +10,8 @@
 #include <stdio.h>
 
 /* Find the nearest centroid to `vec` by prefix-scanning vec/{index}/centroid/.
-   Returns the cid of the nearest, or 0 if no centroids exist yet (pre-train). */
+   Returns the cid of the nearest, or 0 if no centroids exist yet (pre-train).
+   READ-ONLY scan — caller ensures no writes interleave. */
 static int ivf_nearest_centroid(vector_layer_t *vl, const float *vec) {
     database_t *db = vl->db;
     char d = vl->format.delimiter;
@@ -60,116 +64,96 @@ int vector_ivf_insert_sync(vector_layer_t *vl, const char *id, const float *vec,
     database_t *db = vl->db;
     if (db == NULL) return -22;
     int dim = vl->format.dim;
+    char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
     size_t total = vec_bytes + metadata_len;
-    char d = vl->format.delimiter;
 
+    /* 1. Scan centroids (READ-ONLY) — happens BEFORE any writes. */
     int cid = ivf_nearest_centroid(vl, vec);
 
-    char *vkey = vl_key_vector(vl->index_name, d, id);
+    /* 2. Read current count (READ-ONLY). */
     char *cntkey = vl_key_count(vl->index_name, d);
-    char *clist_key = vl_key_clist(vl->index_name, d, cid);
-    if (!vkey || !cntkey || !clist_key) {
-        free(vkey); free(cntkey); free(clist_key); return -12;
-    }
-
-    /* Read current count (read-modify-write — read before the batch). */
+    if (cntkey == NULL) return -12;
     size_t out_len = 0; uint8_t *buf = NULL; size_t cur = 0;
     int rc = database_get_sync_raw(db, cntkey, strlen(cntkey), d, &buf, &out_len);
     if (rc == 0 && buf && out_len >= sizeof(size_t)) memcpy(&cur, buf, sizeof(size_t));
     if (buf) database_raw_value_free(buf);
     size_t next = cur + 1;
 
-    /* Build vector value = float[dim] + metadata. */
+    /* 3. Build ONE batch of 3 ops: vector + cluster membership + count.
+       All writes are issued atomically via a single database_batch_sync_raw
+       call. No scans happen after this point — MVCC happy. */
+    char *vkey = vl_key_vector(vl->index_name, d, id);
+    char *ckey = vl_key_cluster_member(vl->index_name, d, cid, id);
+    if (!vkey || !ckey) { free(vkey); free(ckey); free(cntkey); return -12; }
+
     uint8_t *vval = (uint8_t*)malloc(total);
-    if (vval == NULL) { free(vkey); free(cntkey); free(clist_key); return -12; }
+    if (vval == NULL) { free(vkey); free(ckey); free(cntkey); return -12; }
     memcpy(vval, vec, vec_bytes);
     if (metadata && metadata_len > 0) memcpy(vval + vec_bytes, metadata, metadata_len);
 
-    /* Batch: put vector + put count. */
-    raw_op_t ops[2];
-    ops[0].key = vkey; ops[0].key_len = strlen(vkey);
-    ops[0].value = vval; ops[0].value_len = total;
-    ops[0].type = 0;
-    ops[1].key = cntkey; ops[1].key_len = strlen(cntkey);
-    ops[1].value = (const uint8_t*)&next; ops[1].value_len = sizeof(size_t);
-    ops[1].type = 0;
-
-    rc = database_batch_sync_raw(db, d, ops, 2);
-    free(vval);
-    if (rc != 0) { free(vkey); free(cntkey); free(clist_key); return rc; }
-
-    /* Append id to the cluster's membership list (clist). Read-modify-write. */
-    size_t clist_len = 0; uint8_t *clist_buf = NULL;
-    rc = database_get_sync_raw(db, clist_key, strlen(clist_key), d,
-                               &clist_buf, &clist_len);
-    /* id + '\n' + existing list. */
     size_t id_len = strlen(id);
-    size_t new_len = id_len + 1 + (rc == 0 ? clist_len : 0);
-    uint8_t *new_list = (uint8_t*)malloc(new_len);
-    if (new_list == NULL) {
-        if (clist_buf) database_raw_value_free(clist_buf);
-        free(vkey); free(cntkey); free(clist_key);
-        return -12;
-    }
-    memcpy(new_list, id, id_len);
-    new_list[id_len] = '\n';
-    if (clist_buf && clist_len > 0) {
-        memcpy(new_list + id_len + 1, clist_buf, clist_len);
-    }
-    if (clist_buf) database_raw_value_free(clist_buf);
 
-    rc = database_put_sync_raw(db, clist_key, strlen(clist_key), d,
-                               new_list, new_len);
-    free(new_list);
-    free(vkey); free(cntkey); free(clist_key);
+    raw_op_t ops[3];
+    ops[0].key = vkey; ops[0].key_len = strlen(vkey);
+    ops[0].value = vval; ops[0].value_len = total; ops[0].type = 0;
+    ops[1].key = ckey; ops[1].key_len = strlen(ckey);
+    ops[1].value = (const uint8_t*)id; ops[1].value_len = id_len; ops[1].type = 0;
+    ops[2].key = cntkey; ops[2].key_len = strlen(cntkey);
+    ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t);
+    ops[2].type = 0;
+
+    rc = database_batch_sync_raw(db, d, ops, 3);
+    free(vval); free(vkey); free(ckey); free(cntkey);
     return rc;
 }
 
 /* ---- IVF search ---- */
 
-/* Read a cluster's membership list (clist) and append each id (strdup'd) to the
-   dynamic array. Uses direct get + split instead of prefix scan — avoids the
-   database bug where prefix scan doesn't see overwritten/delete-then-put keys. */
+/* Prefix-scan vec/{idx}/cluster/{cid}/ for member ids. READ-ONLY — used at
+   search time, never interleaved with writes. Restored from the clist
+   get+split workaround. */
 static int ivf_scan_cluster(vector_layer_t *vl, int cid,
                             char ***out_ids, size_t *out_n, size_t *out_cap) {
     database_t *db = vl->db;
     char d = vl->format.delimiter;
 
-    char *ckey = vl_key_clist(vl->index_name, d, cid);
-    if (ckey == NULL) return -12;
+    /* Build prefix = "vec/{index}/cluster/{cid:010}/" and end = prefix + "\x7f". */
+    size_t idx_len = strlen(vl->index_name);
+    size_t plen = 4 + idx_len + 9 + 11;  /* "vec"+d + idx+d + "cluster"+d + cid:010 + d */
+    char *pfx = (char*)malloc(plen + 1);
+    if (pfx == NULL) return -12;
+    snprintf(pfx, plen + 1, "vec%c%s%ccluster%c%010d%c", d, vl->index_name, d, d, cid, d);
+    char *end = (char*)malloc(plen + 2);
+    if (end == NULL) { free(pfx); return -12; }
+    memcpy(end, pfx, plen);
+    end[plen] = '\x7f'; end[plen + 1] = '\0';
 
-    uint8_t *buf = NULL; size_t buf_len = 0;
-    int rc = database_get_sync_raw(db, ckey, strlen(ckey), d, &buf, &buf_len);
-    free(ckey);
-    if (rc != 0 || buf == NULL || buf_len == 0) {
-        if (buf) database_raw_value_free(buf);
-        return 0;  /* empty cluster */
-    }
+    raw_result_t *results = NULL;
+    size_t count = 0;
+    int rc = database_scan_range_sync_raw(db, pfx, plen, end, plen + 1, d,
+                                          &results, &count);
+    free(pfx); free(end);
+    if (rc != 0) return rc;
 
-    /* Split by '\n'. Each line is an id. */
-    size_t start = 0;
-    for (size_t i = 0; i <= buf_len; i++) {
-        if (i == buf_len || buf[i] == '\n') {
-            size_t id_len = i - start;
-            if (id_len > 0) {
-                if (*out_n == *out_cap) {
-                    size_t ncap = *out_cap == 0 ? 16 : (*out_cap * 2);
-                    char **nids = (char**)realloc(*out_ids, ncap * sizeof(char*));
-                    if (nids == NULL) { database_raw_value_free(buf); return -12; }
-                    *out_ids = nids; *out_cap = ncap;
-                }
-                char *dup = (char*)malloc(id_len + 1);
-                if (dup == NULL) { database_raw_value_free(buf); return -12; }
-                memcpy(dup, buf + start, id_len);
-                dup[id_len] = '\0';
-                (*out_ids)[*out_n] = dup;
-                (*out_n)++;
-            }
-            start = i + 1;
+    for (size_t i = 0; i < count; i++) {
+        const char *key = results[i].key;
+        size_t klen = results[i].key_len;
+        /* id is the substring after the last delimiter. */
+        const char *id = key + klen;
+        for (size_t j = klen; j > 0; j--) {
+            if (key[j-1] == d) { id = key + j; break; }
         }
+        if (*out_n == *out_cap) {
+            size_t ncap = *out_cap == 0 ? 16 : *out_cap * 2;
+            char **new_ids = (char**)realloc(*out_ids, ncap * sizeof(char*));
+            if (new_ids == NULL) { database_raw_results_free(results, count); return -12; }
+            *out_ids = new_ids; *out_cap = ncap;
+        }
+        (*out_ids)[*out_n] = strdup(id);
+        (*out_n)++;
     }
-    database_raw_value_free(buf);
+    database_raw_results_free(results, count);
     return 0;
 }
 
@@ -261,7 +245,8 @@ int vector_ivf_search_sync(vector_layer_t *vl, const float *query, int k,
     if (nprobe <= 0) nprobe = 1;
     if ((size_t)nprobe > n_chits) nprobe = (int)n_chits;
 
-    /* 3. For each selected cid, read the cluster's membership list. */
+    /* 3. For each selected cid, prefix-scan the cluster's membership keys.
+       READ-ONLY — no writes interleave with search. */
     char **candidate_ids = NULL;
     size_t n_candidates = 0, cap_candidates = 0;
     for (int i = 0; i < nprobe; i++) {
@@ -447,7 +432,9 @@ int vector_ivf_train(vector_layer_t *vl) {
         free(new_centroids); free(counts);
     }
 
-    /* 4. Write centroids to vec/{index}/centroid/{cid} for cid in 0..K-1. */
+    /* 4. Write centroids to vec/{index}/centroid/{cid} for cid in 0..K-1.
+       Train only writes centroids — no membership mutation, no interleaving
+       concern. Each put is independent and idempotent under overwrite. */
     for (int c = 0; c < K; c++) {
         char *ckey = vl_key_centroid(vl->index_name, d, c);
         if (ckey == NULL) {
@@ -474,38 +461,123 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
     database_t *db = vl->db;
     if (db == NULL) return -22;
     int dim = vl->format.dim;
-    int K = vl->format.ivf_n_clusters;
     char d = vl->format.delimiter;
     size_t vec_bytes = (size_t)dim * sizeof(float);
     size_t idx_len = strlen(vl->index_name);
 
-    /* 1. Prefix-scan vec/{index}/vector/ → collect all vectors. */
-    size_t plen = 4 + idx_len + 7;  /* "vec" + d + idx + d + "vector" + d */
-    char *prefix = (char*)malloc(plen + 1);
-    if (prefix == NULL) return -12;
-    snprintf(prefix, plen + 1, "vec%c%s%cvector%c", d, vl->index_name, d, d);
-    char *end = (char*)malloc(plen + 2);
-    if (end == NULL) { free(prefix); return -12; }
-    memcpy(end, prefix, plen);
-    end[plen] = '\x7f'; end[plen + 1] = '\0';
+    /* 1. Scan vec/{idx}/cluster/ for old membership keys (READ-ONLY). */
+    size_t cprefix_len = 4 + idx_len + 8;  /* "vec" + d + idx + d + "cluster" + d */
+    char *cprefix = (char*)malloc(cprefix_len + 1);
+    if (cprefix == NULL) return -12;
+    snprintf(cprefix, cprefix_len + 1, "vec%c%s%ccluster%c", d, vl->index_name, d, d);
+    char *cend = (char*)malloc(cprefix_len + 2);
+    if (cend == NULL) { free(cprefix); return -12; }
+    memcpy(cend, cprefix, cprefix_len);
+    cend[cprefix_len] = '\x7f'; cend[cprefix_len + 1] = '\0';
+
+    raw_result_t *old_members = NULL;
+    size_t n_old = 0;
+    int rc = database_scan_range_sync_raw(db, cprefix, cprefix_len, cend,
+                                          cprefix_len + 1, d,
+                                          &old_members, &n_old);
+    free(cprefix); free(cend);
+    if (rc != 0) return rc;
+
+    /* 2. Scan vec/{idx}/vector/ for all vectors (READ-ONLY). */
+    size_t vprefix_len = 4 + idx_len + 7;  /* "vec" + d + idx + d + "vector" + d */
+    char *vprefix = (char*)malloc(vprefix_len + 1);
+    if (vprefix == NULL) { database_raw_results_free(old_members, n_old); return -12; }
+    snprintf(vprefix, vprefix_len + 1, "vec%c%s%cvector%c", d, vl->index_name, d, d);
+    char *vend = (char*)malloc(vprefix_len + 2);
+    if (vend == NULL) { free(vprefix); database_raw_results_free(old_members, n_old); return -12; }
+    memcpy(vend, vprefix, vprefix_len);
+    vend[vprefix_len] = '\x7f'; vend[vprefix_len + 1] = '\0';
 
     raw_result_t *vectors = NULL;
     size_t n_vectors = 0;
-    int rc = database_scan_range_sync_raw(db, prefix, plen, end, plen + 1, d,
-                                          &vectors, &n_vectors);
-    free(prefix); free(end);
-    if (rc != 0) return rc;
+    rc = database_scan_range_sync_raw(db, vprefix, vprefix_len, vend,
+                                      vprefix_len + 1, d,
+                                      &vectors, &n_vectors);
+    free(vprefix); free(vend);
+    if (rc != 0) { database_raw_results_free(old_members, n_old); return rc; }
 
-    /* 2. For each vector, compute nearest cid. Build per-cid id lists. */
-    /* dynamic array of ids per cid. */
-    char **lists = (char**)calloc(K, sizeof(char*));
-    size_t *list_lens = (size_t*)calloc(K, sizeof(size_t));
-    size_t *list_caps = (size_t*)calloc(K, sizeof(size_t));
-    if (lists == NULL || list_lens == NULL || list_caps == NULL) {
-        free(lists); free(list_lens); free(list_caps);
+    /* 3. Scan vec/{idx}/centroid/ once and cache (cid, float[dim]) in memory.
+       READ-ONLY — one scan, reused for all vectors below. */
+    size_t cent_prefix_len = 4 + idx_len + 10;  /* "vec" + d + idx + d + "centroid" + d */
+    char *cent_prefix = (char*)malloc(cent_prefix_len + 1);
+    if (cent_prefix == NULL) {
+        database_raw_results_free(old_members, n_old);
         database_raw_results_free(vectors, n_vectors);
         return -12;
     }
+    snprintf(cent_prefix, cent_prefix_len + 1, "vec%c%s%ccentroid%c",
+             d, vl->index_name, d, d);
+    char *cent_end = (char*)malloc(cent_prefix_len + 2);
+    if (cent_end == NULL) {
+        free(cent_prefix);
+        database_raw_results_free(old_members, n_old);
+        database_raw_results_free(vectors, n_vectors);
+        return -12;
+    }
+    memcpy(cent_end, cent_prefix, cent_prefix_len);
+    cent_end[cent_prefix_len] = '\x7f'; cent_end[cent_prefix_len + 1] = '\0';
+
+    raw_result_t *centroids = NULL;
+    size_t n_centroids = 0;
+    rc = database_scan_range_sync_raw(db, cent_prefix, cent_prefix_len, cent_end,
+                                      cent_prefix_len + 1, d,
+                                      &centroids, &n_centroids);
+    free(cent_prefix); free(cent_end);
+    if (rc != 0) {
+        database_raw_results_free(old_members, n_old);
+        database_raw_results_free(vectors, n_vectors);
+        return rc;
+    }
+
+    /* Cache centroids into arrays for in-memory nearest-centroid lookups. */
+    int *cent_cids = NULL;
+    float *cent_coords = NULL;
+    if (n_centroids > 0) {
+        cent_cids = (int*)malloc(n_centroids * sizeof(int));
+        cent_coords = (float*)malloc(n_centroids * dim * sizeof(float));
+        if (cent_cids == NULL || cent_coords == NULL) {
+            free(cent_cids); free(cent_coords);
+            database_raw_results_free(old_members, n_old);
+            database_raw_results_free(vectors, n_vectors);
+            database_raw_results_free(centroids, n_centroids);
+            return -12;
+        }
+    }
+    size_t n_cached = 0;
+    for (size_t i = 0; i < n_centroids; i++) {
+        if (centroids[i].value_len < vec_bytes) continue;
+        const char *key = centroids[i].key;
+        size_t klen = centroids[i].key_len;
+        const char *cid_str = key + klen;
+        for (size_t j = klen; j > 0; j--) {
+            if (key[j-1] == d) { cid_str = key + j; break; }
+        }
+        cent_cids[n_cached] = atoi(cid_str);
+        memcpy(cent_coords + n_cached * dim, centroids[i].value, vec_bytes);
+        n_cached++;
+    }
+    /* centroids results no longer needed — we have the cache. */
+    database_raw_results_free(centroids, n_centroids);
+
+    /* 4. Compute new memberships in memory: for each vector, find the nearest
+       cached centroid. Build the new membership key (vec/{idx}/cluster/{cid}/{id})
+       and remember the id value pointer (borrows into vectors[i].key, valid
+       until we free vectors — done AFTER the batch). */
+    char **new_member_keys = (char**)malloc((n_vectors ? n_vectors : 1) * sizeof(char*));
+    const char **new_id_ptrs = (const char**)malloc((n_vectors ? n_vectors : 1) * sizeof(const char*));
+    if (new_member_keys == NULL || new_id_ptrs == NULL) {
+        free(new_member_keys); free(new_id_ptrs);
+        free(cent_cids); free(cent_coords);
+        database_raw_results_free(old_members, n_old);
+        database_raw_results_free(vectors, n_vectors);
+        return -12;
+    }
+    size_t n_new = 0;
 
     for (size_t i = 0; i < n_vectors; i++) {
         if (vectors[i].value_len < vec_bytes) continue;
@@ -515,52 +587,114 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
         for (size_t j = klen; j > 0; j--) {
             if (key[j-1] == d) { id = key + j; break; }
         }
-        size_t id_len = strlen(id);
-        int cid = ivf_nearest_centroid(vl, (const float*)vectors[i].value);
-        if (cid < 0 || cid >= K) cid = 0;
 
-        /* Append "id\n" to lists[cid]. */
-        size_t needed = list_lens[cid] + id_len + 1;
-        if (list_caps[cid] < needed) {
-            size_t ncap = list_caps[cid] == 0 ? 64 : list_caps[cid] * 2;
-            while (ncap < needed) ncap *= 2;
-            char *nl = (char*)realloc(lists[cid], ncap);
-            if (nl == NULL) {
-                for (int c = 0; c < K; c++) free(lists[c]);
-                free(lists); free(list_lens); free(list_caps);
-                database_raw_results_free(vectors, n_vectors);
-                return -12;
+        int best_cid = 0;
+        if (n_cached > 0) {
+            float best_d = 1e30f;
+            for (size_t c = 0; c < n_cached; c++) {
+                float dist = vl_distance((const float*)vectors[i].value,
+                                         cent_coords + c * dim, dim,
+                                         vl->format.distance);
+                if (dist < best_d) { best_d = dist; best_cid = cent_cids[c]; }
             }
-            lists[cid] = nl; list_caps[cid] = ncap;
         }
-        memcpy(lists[cid] + list_lens[cid], id, id_len);
-        list_lens[cid] += id_len;
-        lists[cid][list_lens[cid]] = '\n';
-        list_lens[cid]++;
-    }
-    database_raw_results_free(vectors, n_vectors);
 
-    /* 3. Write each cid's list to vec/{index}/clist/{cid}. This overwrites the
-       old list (from insert). Uses put_sync_raw + direct get in search (no
-       prefix scan) so the overwrite bug doesn't apply. */
-    for (int c = 0; c < K; c++) {
-        char *ckey = vl_key_clist(vl->index_name, d, c);
-        if (ckey == NULL) {
-            for (int cc = 0; cc < K; cc++) free(lists[cc]);
-            free(lists); free(list_lens); free(list_caps);
+        char *mkey = vl_key_cluster_member(vl->index_name, d, best_cid, id);
+        if (mkey == NULL) {
+            for (size_t j = 0; j < n_new; j++) free(new_member_keys[j]);
+            free(new_member_keys); free(new_id_ptrs);
+            free(cent_cids); free(cent_coords);
+            database_raw_results_free(old_members, n_old);
+            database_raw_results_free(vectors, n_vectors);
             return -12;
         }
-        rc = database_put_sync_raw(db, ckey, strlen(ckey), d,
-                                   (const uint8_t*)lists[c], list_lens[c]);
-        free(ckey);
-        if (rc != 0) {
-            for (int cc = 0; cc < K; cc++) free(lists[cc]);
-            free(lists); free(list_lens); free(list_caps);
-            return rc;
-        }
+        new_member_keys[n_new] = mkey;
+        new_id_ptrs[n_new] = id;
+        n_new++;
     }
 
-    for (int c = 0; c < K; c++) free(lists[c]);
-    free(lists); free(list_lens); free(list_caps);
-    return 0;
+    /* 5. Build the batch. Partition old and new keys into:
+       - to_delete = old keys NOT in new set (membership removed/changed)
+       - to_put    = new keys NOT in old set (membership added/changed)
+       - unchanged = intersection — left as-is, no op needed
+       Skipping unchanged keys entirely avoids same-key delete-then-put under
+       MVCC (where both ops share the same txn_id and conflict) AND avoids
+       re-putting an existing key at a new txn_id (which can also shadow the
+       prior version in the same-txn version chain). */
+    size_t n_ops_max = n_old + n_new;
+    raw_op_t *ops = NULL;
+    if (n_ops_max > 0) {
+        ops = (raw_op_t*)malloc(n_ops_max * sizeof(raw_op_t));
+        if (ops == NULL) {
+            for (size_t j = 0; j < n_new; j++) free(new_member_keys[j]);
+            free(new_member_keys); free(new_id_ptrs);
+            free(cent_cids); free(cent_coords);
+            database_raw_results_free(old_members, n_old);
+            database_raw_results_free(vectors, n_vectors);
+            return -12;
+        }
+    }
+    size_t op_i = 0;
+
+    /* 5a. Deletes for old membership keys not in the new set. The key pointer
+       borrows into old_members[i].key (valid until we free old_members — done
+       AFTER the batch). */
+    for (size_t i = 0; i < n_old; i++) {
+        const char *old_key = old_members[i].key;
+        int still_present = 0;
+        for (size_t j = 0; j < n_new; j++) {
+            if (strcmp(old_key, new_member_keys[j]) == 0) {
+                still_present = 1;
+                break;
+            }
+        }
+        if (still_present) continue;  /* unchanged — leave it alone */
+        ops[op_i].key = old_key;
+        ops[op_i].key_len = old_members[i].key_len;
+        ops[op_i].value = NULL;
+        ops[op_i].value_len = 0;
+        ops[op_i].type = 1;  /* delete */
+        op_i++;
+    }
+
+    /* 5b. Puts for new membership keys not in the old set. Unchanged keys are
+       skipped (they already exist with the correct value from insert/a prior
+       rebuild). */
+    for (size_t j = 0; j < n_new; j++) {
+        const char *new_key = new_member_keys[j];
+        int already_present = 0;
+        for (size_t i = 0; i < n_old; i++) {
+            if (strcmp(new_key, old_members[i].key) == 0) {
+                already_present = 1;
+                break;
+            }
+        }
+        if (already_present) continue;  /* unchanged — leave it alone */
+        ops[op_i].key = new_key;
+        ops[op_i].key_len = strlen(new_key);
+        ops[op_i].value = (const uint8_t*)new_id_ptrs[j];
+        ops[op_i].value_len = strlen(new_id_ptrs[j]);
+        ops[op_i].type = 0;  /* put */
+        op_i++;
+    }
+
+    /* 6. Apply the batch atomically: all deletes + all puts in ONE call.
+       MVCC: a fresh scan after this commit sees the new memberships. */
+    if (op_i > 0) {
+        rc = database_batch_sync_raw(db, d, ops, op_i);
+    } else {
+        rc = 0;
+    }
+
+    /* 7. Cleanup. Free new membership keys, ops array, centroid cache, and
+       the scan results (now that the batch has copied what it needs). */
+    for (size_t j = 0; j < n_new; j++) free(new_member_keys[j]);
+    free(new_member_keys);
+    free(new_id_ptrs);
+    free(ops);
+    free(cent_cids);
+    free(cent_coords);
+    database_raw_results_free(old_members, n_old);
+    database_raw_results_free(vectors, n_vectors);
+    return rc;
 }
