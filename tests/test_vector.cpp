@@ -273,3 +273,26 @@ TEST_F(VectorLayerTest, FlatMetadata) {
     vector_layer_free_results(results, n);
     vector_layer_destroy(vl);
 }
+
+TEST_F(VectorLayerTest, IVFInsertCount) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_IVF;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.ivf_n_clusters = 3;
+    cfg.runtime.top_k = 10;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.ivf_nprobe = 2;
+    cfg.runtime.ivf_flat_until = 1000;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    float v[4] = {1, 2, 3, 4};
+    for (int i = 0; i < 5; i++) {
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0), 0);
+    }
+    EXPECT_EQ(vector_layer_count(vl), 5u);
+    vector_layer_destroy(vl);
+}
