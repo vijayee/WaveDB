@@ -204,6 +204,7 @@ TEST_F(PageCacheIntegrationTest, DirtyFlushCycle) {
     uint64_t flushed_offsets[NUM_NODES];
 
     /* Write 10 dirty nodes */
+    bnode_cache_item_t* items[NUM_NODES];
     for (int i = 0; i < NUM_NODES; i++) {
         snprintf(payloads[i], sizeof(payloads[i]), "node_%d_data", i);
         total_lens[i] = 0;
@@ -212,13 +213,21 @@ TEST_F(PageCacheIntegrationTest, DirtyFlushCycle) {
         uint64_t temp_offset = 0x1000 + i * 0x1000;
         int rc = bnode_cache_write(fcache, temp_offset, datas[i], total_lens[i]);
         ASSERT_EQ(rc, 0);
+        /* Take a reference BEFORE flush so the pointer remains valid across
+           flush (bnode_cache_flush_dirty relocates items to new disk offsets
+           via CoW, updating item->offset in place). */
+        items[i] = bnode_cache_read(fcache, temp_offset);
+        ASSERT_NE(items[i], nullptr);
     }
 
     /* Verify dirty count is 10 */
     EXPECT_EQ(bnode_cache_dirty_count(fcache), 10u);
     EXPECT_GT(bnode_cache_dirty_bytes(fcache), 0u);
 
-    /* Flush all dirty nodes */
+    /* Flush all dirty nodes. After flush, each item->offset is updated in
+       place to the real disk offset where page_file_write_node placed it.
+       With sub-block packing (commit 5382b7c), small single-block bnodes
+       share a 4KB block, so the flushed offsets are NOT 4096-spaced. */
     int rc = bnode_cache_flush_dirty(fcache);
     ASSERT_EQ(rc, 0);
 
@@ -226,14 +235,11 @@ TEST_F(PageCacheIntegrationTest, DirtyFlushCycle) {
     EXPECT_EQ(bnode_cache_dirty_count(fcache), 0u);
     EXPECT_EQ(bnode_cache_dirty_bytes(fcache), 0u);
 
-    /* After flush, read each node to get its real file offset.
-       Flush writes nodes sequentially starting from offset 8192 (after 2 superblocks).
-       Each node takes a small amount of space, so they're close together.
-       We read from each original temp offset — but after flush, the items moved.
-       Instead, we read all items by iterating and collecting offsets from the
-       original cache keys before flush. */
-    /* Since we can't easily iterate the cache, we use page_file_read_node
-       to verify all 10 nodes are persisted. They should be at sequential positions. */
+    /* Capture the real disk offsets assigned by flush, then release. */
+    for (int i = 0; i < NUM_NODES; i++) {
+        flushed_offsets[i] = items[i]->offset;
+        bnode_cache_release(fcache, items[i]);
+    }
 
     /* Close everything */
     bnode_cache_destroy_file_cache(fcache);
@@ -243,36 +249,26 @@ TEST_F(PageCacheIntegrationTest, DirtyFlushCycle) {
     page_file_destroy(pf);
     pf = nullptr;
 
-    /* Reopen and verify all 10 nodes are readable from the page file.
-       Nodes are written sequentially starting after the 2 superblocks.
-       With block_size=4096, the first node starts at offset 8192.
-       Each small node (< 4080 - 16 = 4064 bytes payload) fits in one block.
-       After the IndexBlkMeta, the next block starts at cur_bid * 4096. */
+    /* Reopen and verify all 10 nodes are readable from the page file at
+       the real disk offsets captured above. */
     pf = page_file_create(path, 4096, 2, NULL);
     ASSERT_NE(pf, nullptr);
     rc = page_file_open(pf, 1);
     ASSERT_EQ(rc, 0);
 
-    /* Read nodes by scanning the file starting at offset 8192.
-       Each node has a 4-byte size prefix, payload, and IndexBlkMeta at block end.
-       After reading one node, page_file_read_node returns the full node (with prefix).
-       The offset of each subsequent node is the next block boundary. */
     int nodes_found = 0;
-    uint64_t scan_offset = 8192;  /* Start after 2 superblocks */
-    while (nodes_found < NUM_NODES) {
+    for (int i = 0; i < NUM_NODES; i++) {
         size_t out_len = 0;
-        uint8_t* node_data = page_file_read_node(pf, scan_offset, &out_len);
-        if (node_data == nullptr) {
-            /* Try next block */
-            scan_offset += 4096;
-            if (scan_offset > 100 * 4096) break;  /* Safety limit */
-            continue;
-        }
-        /* Verify the node has valid data */
-        EXPECT_GT(out_len, 0u);
+        uint8_t* node_data = page_file_read_node(pf, flushed_offsets[i], &out_len);
+        ASSERT_NE(node_data, nullptr) << "Failed to read node " << i
+                                       << " at offset " << flushed_offsets[i];
+        /* page_file_read_node returns [4-byte size prefix][payload], with
+           out_len = payload length. Verify the payload matches what we wrote. */
+        ASSERT_EQ(out_len, strlen(payloads[i]));
+        EXPECT_EQ(memcmp(node_data + 4, payloads[i], strlen(payloads[i])), 0)
+            << "Payload mismatch for node " << i;
         free(node_data);
         nodes_found++;
-        scan_offset += 4096;
     }
     EXPECT_EQ(nodes_found, NUM_NODES);
 
