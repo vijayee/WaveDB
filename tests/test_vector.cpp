@@ -12,6 +12,8 @@
 #include <set>
 #include <algorithm>
 #include <utility>
+#include <future>
+#include <chrono>
 
 #if _WIN32
 #include <io.h>
@@ -29,6 +31,8 @@ extern "C" {
 #include "../src/Layers/vector/vector_internal.h"
 #include "../src/Database/database.h"
 #include "../src/Database/database_config.h"
+#include "../src/Workers/promise.h"
+#include "../src/Workers/error.h"
 }
 
 static int vl_test_counter = 0;
@@ -506,12 +510,29 @@ TEST_F(VectorLayerTest, SLSHSearchRightOnly) {
     vector_layer_destroy(vl);
 }
 
-/* Task 12: async insert/search/delete via Workers/promise.
- * The vector async API is "blocking async": work is enqueued to the db's
- * worker pool, and the caller blocks on a condvar until the promise resolves.
- * With sync_only=0, open_separate creates a db with a real pool, so this
- * exercises the worker path. With sync_only=1 (default in flat_config), the
- * async variants fall back to the sync versions (no pool available). */
+/* Async API (Task 12b): Graph-style true async — async variants return void
+ * and take a caller-owned promise_t*. The caller wires the promise to a C++
+ * std::promise here (in bindings it'd be a JS Promise / Dart Future / Python
+ * asyncio future). With sync_only=0, open_separate creates a db with a real
+ * worker pool, so this exercises the enqueue -> worker -> resolve path. With
+ * sync_only=1 (default in flat_config), the async variants run inline and
+ * resolve the promise before returning (no pool available). */
+
+/* Helper: create a promise wired to a std::promise<int> that captures 0 on
+ * resolve, -1 on reject. The caller awaits fut, then promise_destroy. */
+static promise_t* vl_make_int_promise(std::promise<int> *p) {
+    return promise_create(
+        [](void *ctx, void *payload) {
+            (void)payload;
+            static_cast<std::promise<int>*>(ctx)->set_value(0);
+        },
+        [](void *ctx, async_error_t *err) {
+            static_cast<std::promise<int>*>(ctx)->set_value(-1);
+            error_destroy(err);
+        },
+        p);
+}
+
 TEST_F(VectorLayerTest, AsyncInsertSearchDelete) {
     vector_layer_config_t cfg = flat_config(4);
     cfg.format.distance = VL_DIST_L2;
@@ -521,33 +542,67 @@ TEST_F(VectorLayerTest, AsyncInsertSearchDelete) {
     ASSERT_NE(vl, nullptr);
 
     float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    int rc = vector_layer_insert(vl, "a", v, NULL, 0);  // async
-    ASSERT_EQ(rc, 0);
-    // Async insert blocks until the worker resolves, so count must already be 1.
-    // The poll loop is a safety net for any scheduling latency.
-    for (int i = 0; i < 100 && vector_layer_count(vl) == 0; i++) {
-        usleep(10000);  // 10ms
+
+    /* Async insert. */
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        promise_t *cp = vl_make_int_promise(p.get());
+        ASSERT_NE(cp, nullptr);
+        vector_layer_insert(vl, "a", v, NULL, 0, cp);
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(fut.get(), 0);
+        promise_destroy(cp);
     }
+    /* fut is ready only after the worker resolved the promise, by which point
+       the insert is committed. Count must be 1. */
     EXPECT_EQ(vector_layer_count(vl), 1u);
 
-    vl_result_t *results = NULL; int n = 0;
-    rc = vector_layer_search(vl, v, 1, &results, &n);  // async
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(n, 1);
-    ASSERT_STREQ(results[0].id, "a");
-    vector_layer_free_results(results, n);
+    /* Async search — resolve payload is a vl_search_result_t*. */
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        struct sr_ctx { std::promise<int> *p; vl_search_result_t *sr; } sctx{p.get(), nullptr};
+        promise_t *cp = promise_create(
+            [](void *ctx_, void *payload) {
+                auto *c = static_cast<sr_ctx*>(ctx_);
+                c->sr = static_cast<vl_search_result_t*>(payload);
+                c->p->set_value(payload ? 1 : 0);
+            },
+            [](void *ctx_, async_error_t *err) {
+                auto *c = static_cast<sr_ctx*>(ctx_);
+                c->p->set_value(-1);
+                error_destroy(err);
+            },
+            &sctx);
+        vector_layer_search(vl, v, 1, cp);
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        ASSERT_EQ(fut.get(), 1);
+        ASSERT_NE(sctx.sr, nullptr);
+        ASSERT_EQ(sctx.sr->n_results, 1);
+        ASSERT_STREQ(sctx.sr->results[0].id, "a");
+        vector_layer_free_results(sctx.sr->results, sctx.sr->n_results);
+        free(sctx.sr);
+        promise_destroy(cp);
+    }
 
-    rc = vector_layer_delete(vl, "a");  // async
-    ASSERT_EQ(rc, 0);
-    for (int i = 0; i < 100 && vector_layer_count(vl) == 1; i++) {
-        usleep(10000);
+    /* Async delete. */
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        promise_t *cp = vl_make_int_promise(p.get());
+        vector_layer_delete(vl, "a", cp);
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(fut.get(), 0);
+        promise_destroy(cp);
     }
     EXPECT_EQ(vector_layer_count(vl), 0u);
 
     vector_layer_destroy(vl);
 }
 
-/* sync_only=1 (default) — async variants must route to sync (no pool). */
+/* sync_only=1 (default) — async variants run inline + resolve before
+ * returning (no pool available). */
 TEST_F(VectorLayerTest, AsyncRoutesToSyncWhenNoPool) {
     vector_layer_config_t cfg = flat_config(4);
     // cfg.runtime.sync_only = 1 is the default from flat_config
@@ -556,15 +611,53 @@ TEST_F(VectorLayerTest, AsyncRoutesToSyncWhenNoPool) {
     ASSERT_NE(vl, nullptr);
 
     float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
-    ASSERT_EQ(vector_layer_insert(vl, "a", v, NULL, 0), 0);
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        promise_t *cp = vl_make_int_promise(p.get());
+        vector_layer_insert(vl, "a", v, NULL, 0, cp);
+        /* No pool: inline + resolved before returning. */
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(fut.get(), 0);
+        promise_destroy(cp);
+    }
     EXPECT_EQ(vector_layer_count(vl), 1u);
 
-    vl_result_t *results = NULL; int n = 0;
-    ASSERT_EQ(vector_layer_search(vl, v, 1, &results, &n), 0);
-    ASSERT_EQ(n, 1);
-    vector_layer_free_results(results, n);
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        struct sr_ctx { std::promise<int> *p; vl_search_result_t *sr; } sctx{p.get(), nullptr};
+        promise_t *cp = promise_create(
+            [](void *ctx_, void *payload) {
+                auto *c = static_cast<sr_ctx*>(ctx_);
+                c->sr = static_cast<vl_search_result_t*>(payload);
+                c->p->set_value(payload ? 1 : 0);
+            },
+            [](void *ctx_, async_error_t *err) {
+                auto *c = static_cast<sr_ctx*>(ctx_);
+                c->p->set_value(-1);
+                error_destroy(err);
+            },
+            &sctx);
+        vector_layer_search(vl, v, 1, cp);
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        ASSERT_EQ(fut.get(), 1);
+        ASSERT_NE(sctx.sr, nullptr);
+        ASSERT_EQ(sctx.sr->n_results, 1);
+        vector_layer_free_results(sctx.sr->results, sctx.sr->n_results);
+        free(sctx.sr);
+        promise_destroy(cp);
+    }
 
-    ASSERT_EQ(vector_layer_delete(vl, "a"), 0);
+    {
+        auto p = std::make_shared<std::promise<int>>();
+        auto fut = p->get_future();
+        promise_t *cp = vl_make_int_promise(p.get());
+        vector_layer_delete(vl, "a", cp);
+        ASSERT_EQ(fut.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        EXPECT_EQ(fut.get(), 0);
+        promise_destroy(cp);
+    }
     EXPECT_EQ(vector_layer_count(vl), 0u);
     vector_layer_destroy(vl);
 }

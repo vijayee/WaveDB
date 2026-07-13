@@ -195,248 +195,514 @@ int vector_layer_rebuild(vector_layer_t *vl) {
     return -22;
 }
 
-/* ── Async API (Task 12) ─────────────────────────────────────────────
+/* ── Async API (Task 12b: true promise-based async) ───────────────────
  *
  * Pattern: mirrors the Graph layer's async (src/Layers/graph/graph.c):
- *   - Build a work_t with execute/abort callbacks + a context struct.
- *   - Create a promise_t with resolve/reject callbacks.
- *   - Enqueue to the database's work_pool (db->pool).
- *   - If no pool is available (sync_only mode), fall back to running the
- *     sync version inline (same as graph_insert's `else` branch).
- *
- * Difference from Graph: the vector layer's async API returns `int` and
- * fills out-pointers (results, n_results), so it is "blocking async" —
- * the caller blocks on a condvar until the worker resolves the promise.
- * Graph instead returns void and hands the caller the promise to wire up
- * (e.g. the Node binding bridges the promise to a JS Promise). The C
- * vector API chose the blocking shape because it has no external caller
- * to attach callbacks; the bindings (Tasks 18-20) can wrap this in their
- * own promise/future if they want non-blocking behavior, or call the
- * *_sync variants directly on a worker thread.
- *
- * When vl->runtime.sync_only is set OR db->pool is NULL, the async
- * variants route to the sync versions (no enqueue). This matches
- * Graph's "no pool → run inline" fallback. */
+ *   - Public async variants return void and take a caller-owned promise_t*.
+ *   - The caller creates the promise (with resolve/reject callbacks + ctx),
+ *     passes it in, and wires it to their runtime (JS Promise, Dart Future,
+ *     Python asyncio, or a C++ std::promise for tests).
+ *   - We build a work_t with execute/abort callbacks + a context struct that
+ *     COPIES the args (so the caller's buffers can be reused/freed immediately).
+ *   - We REFERENCE the promise (take a worker-owned ref), YIELD the work's
+ *     initial ref, and enqueue to the pool (db->pool, or the subtree's pool).
+ *   - The worker's execute callback runs the sync version, resolves the
+ *     promise with NULL (insert/delete/batch) or a vl_search_result_t*
+ *     (search) on success, rejects with an async_error_t* on failure, then
+ *     drops the worker's promise ref via promise_destroy and frees the ctx.
+ *   - If no pool is available (sync_only mode or db->pool == NULL), the sync
+ *     version runs INLINE and the promise is resolved before the function
+ *     returns — same as graph_insert's `else` branch. */
+typedef struct {
+    vector_layer_t *vl;
+    char *id;            /* copied (insert/delete) */
+    float *vec;          /* copied: dim floats (insert/search) */
+    uint8_t *metadata;   /* copied: metadata_len bytes (insert) */
+    size_t metadata_len;
+    int dim;
+    int k;               /* search only */
+    promise_t *promise;  /* worker-owned ref */
+} vl_insert_ctx_t;
 
-typedef enum { VL_ASYNC_INSERT, VL_ASYNC_SEARCH, VL_ASYNC_DELETE } vl_async_kind_t;
+typedef vl_insert_ctx_t vl_search_ctx_t;
+typedef vl_insert_ctx_t vl_delete_ctx_t;
 
 typedef struct {
     vector_layer_t *vl;
-    vl_async_kind_t kind;
-    /* insert/delete args (owned by ctx) */
-    char *id;
-    float *vec;            /* dim floats (insert/search) */
-    uint8_t *metadata;     /* metadata_len bytes (insert only) */
-    size_t metadata_len;
-    int k;                 /* search only */
-    /* outputs (filled by worker) */
-    int rc;
-    vl_result_t *results;  /* search only — ownership transferred to caller */
-    int n_results;
-    /* sync — caller waits on this */
-    PLATFORMLOCKTYPE(mtx);
-    PLATFORMCONDITIONTYPE(cv);
-    uint8_t done;
+    char **ids;          /* copied: n strings */
+    float **vecs;        /* copied: n × dim floats */
+    uint8_t **metadatas; /* copied: n metadata buffers (or NULL entries) */
+    size_t *meta_lens;
+    int n;
+    int dim;
     promise_t *promise;
-} vl_async_ctx_t;
+} vl_batch_ctx_t;
 
-static void vl_promise_resolved(void *ctx_, void *payload) {
-    (void)payload;
-    vl_async_ctx_t *c = (vl_async_ctx_t *)ctx_;
-    platform_lock(&c->mtx);
-    c->done = 1;
-    platform_broadcast_condition(&c->cv);
-    platform_unlock(&c->mtx);
-}
-
-static void vl_promise_rejected(void *ctx_, async_error_t *err) {
-    (void)err;
-    vl_async_ctx_t *c = (vl_async_ctx_t *)ctx_;
-    platform_lock(&c->mtx);
-    c->done = 1;
-    c->rc = -1;
-    platform_broadcast_condition(&c->cv);
-    platform_unlock(&c->mtx);
-}
-
-static void vl_work_run_sync(vl_async_ctx_t *c) {
-    switch (c->kind) {
-        case VL_ASYNC_INSERT:
-            c->rc = vector_layer_insert_sync(c->vl, c->id, c->vec,
-                                             c->metadata, c->metadata_len);
-            break;
-        case VL_ASYNC_SEARCH:
-            c->rc = vector_layer_search_sync(c->vl, c->vec, c->k,
-                                             &c->results, &c->n_results);
-            break;
-        case VL_ASYNC_DELETE:
-            c->rc = vector_layer_delete_sync(c->vl, c->id);
-            break;
-    }
-}
-
-static void vl_work_execute(void *ctx_) {
-    vl_async_ctx_t *c = (vl_async_ctx_t *)ctx_;
-    vl_work_run_sync(c);
-    if (c->promise) {
+static void vl_insert_execute(void *ctx_) {
+    vl_insert_ctx_t *c = (vl_insert_ctx_t *)ctx_;
+    int rc = vector_layer_insert_sync(c->vl, c->id, c->vec, c->metadata, c->metadata_len);
+    if (rc == 0) {
         promise_resolve(c->promise, NULL);
+    } else {
+        async_error_t *err = ERROR("Vector insert failed");
+        promise_reject(c->promise, err);
+        error_destroy(err);
     }
-}
-
-static void vl_work_abort(void *ctx_) {
-    vl_async_ctx_t *c = (vl_async_ctx_t *)ctx_;
-    async_error_t *err = ERROR("Vector async operation aborted");
-    promise_reject(c->promise, err);
-    error_destroy(err);
-}
-
-static void vl_async_ctx_destroy(vl_async_ctx_t *c) {
-    if (c == NULL) return;
-    platform_lock_destroy(&c->mtx);
-    platform_condition_destroy(&c->cv);
-    free(c->id);
-    free(c->vec);
-    free(c->metadata);
-    /* results ownership transferred to caller via the out-pointer; do not free here. */
+    promise_destroy(c->promise);
+    free(c->id); free(c->vec); free(c->metadata);
     free(c);
 }
 
-/* Runs the async op on the worker pool, blocking until it completes.
- * Returns the rc from the sync impl, or -1 on abort/reject. Does NOT
- * destroy the ctx — the caller reads outputs from it, then destroys it. */
-static int vl_async_run(vector_layer_t *vl, vl_async_ctx_t *c) {
-    if (vl == NULL || vl->db == NULL) {
-        return -22;
-    }
-    work_pool_t *pool = vl->db->pool;
-    /* sync_only or no pool → run inline (mirrors graph_insert fallback).
-       No promise is created in this path; the caller reads c->rc directly. */
-    if (vl->runtime.sync_only || pool == NULL) {
-        vl_work_run_sync(c);
-        return c->rc;
-    }
-    /* Real async: enqueue + block on condvar. */
-    c->promise = promise_create(vl_promise_resolved, vl_promise_rejected, c);
-    if (c->promise == NULL) {
-        return -12;
-    }
-    work_t *work = work_create(vl_work_execute, vl_work_abort, c);
-    if (work == NULL) {
-        promise_destroy(c->promise);
-        c->promise = NULL;
-        return -12;
-    }
-    /* Yield the work's initial ref BEFORE enqueue so the worker's
-       refcounter_reference consumes the yield (not increments count).
-       Same pattern as graph_insert. */
-    refcounter_yield((refcounter_t *)work);
-    if (work_pool_enqueue(pool, work) != 0) {
-        /* Pool stopped / enqueue failed — run inline as a fallback, then
-           destroy the work_t. Two dereferences: first consumes the yield,
-           second decrements count to 0 and frees. We must resolve the
-           promise ourselves since vl_work_run_sync doesn't. */
-        vl_work_run_sync(c);
-        promise_resolve(c->promise, NULL);
-        work_destroy(work);
-        work_destroy(work);
-    }
-    /* Wait for the promise to fire. */
-    platform_lock(&c->mtx);
-    while (!c->done) {
-        platform_condition_wait(&c->mtx, &c->cv);
-    }
-    int rc = c->rc;
-    platform_unlock(&c->mtx);
-    /* Drop our reference to the promise. The worker does NOT destroy the
-       promise (unlike graph_insert's triple_work_execute) — we own it
-       solely so we can wait on its callbacks. */
+static void vl_insert_abort(void *ctx_) {
+    vl_insert_ctx_t *c = (vl_insert_ctx_t *)ctx_;
+    async_error_t *err = ERROR("Vector insert aborted");
+    promise_reject(c->promise, err);
+    error_destroy(err);
     promise_destroy(c->promise);
-    c->promise = NULL;
-    return rc;
+    free(c->id); free(c->vec); free(c->metadata);
+    free(c);
 }
 
-/* Public async variants. */
+static void vl_search_execute(void *ctx_) {
+    vl_search_ctx_t *c = (vl_search_ctx_t *)ctx_;
+    vl_result_t *results = NULL; int n = 0;
+    int rc = vector_layer_search_sync(c->vl, c->vec, c->k, &results, &n);
+    if (rc == 0) {
+        vl_search_result_t *sr = (vl_search_result_t *)get_clear_memory(sizeof(*sr));
+        if (sr == NULL) {
+            async_error_t *err = ERROR("Vector search OOM");
+            promise_reject(c->promise, err);
+            error_destroy(err);
+            if (results) vector_layer_free_results(results, n);
+        } else {
+            sr->results = results;
+            sr->n_results = n;
+            promise_resolve(c->promise, sr);
+        }
+    } else {
+        async_error_t *err = ERROR("Vector search failed");
+        promise_reject(c->promise, err);
+        error_destroy(err);
+    }
+    promise_destroy(c->promise);
+    free(c->vec);
+    free(c);
+}
 
-int vector_layer_insert(vector_layer_t *vl, const char *id, const float *vec,
-                        const uint8_t *metadata, size_t metadata_len) {
-    if (vl == NULL || id == NULL || vec == NULL) return -22;
+static void vl_search_abort(void *ctx_) {
+    vl_search_ctx_t *c = (vl_search_ctx_t *)ctx_;
+    async_error_t *err = ERROR("Vector search aborted");
+    promise_reject(c->promise, err);
+    error_destroy(err);
+    promise_destroy(c->promise);
+    free(c->vec);
+    free(c);
+}
+
+static void vl_delete_execute(void *ctx_) {
+    vl_delete_ctx_t *c = (vl_delete_ctx_t *)ctx_;
+    int rc = vector_layer_delete_sync(c->vl, c->id);
+    if (rc == 0) {
+        promise_resolve(c->promise, NULL);
+    } else {
+        async_error_t *err = ERROR("Vector delete failed");
+        promise_reject(c->promise, err);
+        error_destroy(err);
+    }
+    promise_destroy(c->promise);
+    free(c->id);
+    free(c);
+}
+
+static void vl_delete_abort(void *ctx_) {
+    vl_delete_ctx_t *c = (vl_delete_ctx_t *)ctx_;
+    async_error_t *err = ERROR("Vector delete aborted");
+    promise_reject(c->promise, err);
+    error_destroy(err);
+    promise_destroy(c->promise);
+    free(c->id);
+    free(c);
+}
+
+static void vl_batch_execute(void *ctx_) {
+    vl_batch_ctx_t *c = (vl_batch_ctx_t *)ctx_;
+    int rc = vector_layer_insert_batch_sync(c->vl,
+                                            (const char **)c->ids,
+                                            (const float **)c->vecs,
+                                            (const uint8_t **)c->metadatas,
+                                            c->meta_lens, c->n);
+    if (rc == 0) {
+        promise_resolve(c->promise, NULL);
+    } else {
+        async_error_t *err = ERROR("Vector batch insert failed");
+        promise_reject(c->promise, err);
+        error_destroy(err);
+    }
+    promise_destroy(c->promise);
+    for (int i = 0; i < c->n; i++) {
+        free(c->ids[i]);
+        free(c->vecs[i]);
+        if (c->metadatas) free(c->metadatas[i]);
+    }
+    free(c->ids); free(c->vecs); free(c->metadatas); free(c->meta_lens);
+    free(c);
+}
+
+static void vl_batch_abort(void *ctx_) {
+    vl_batch_ctx_t *c = (vl_batch_ctx_t *)ctx_;
+    async_error_t *err = ERROR("Vector batch insert aborted");
+    promise_reject(c->promise, err);
+    error_destroy(err);
+    promise_destroy(c->promise);
+    for (int i = 0; i < c->n; i++) {
+        free(c->ids[i]);
+        free(c->vecs[i]);
+        if (c->metadatas) free(c->metadatas[i]);
+    }
+    free(c->ids); free(c->vecs); free(c->metadatas); free(c->meta_lens);
+    free(c);
+}
+
+/* Resolve the promise's worker-owned ref in the inline (no-pool) path: run
+ * the sync impl directly and fire the promise. The ctx is freed here. */
+static void vl_insert_run_inline(vl_insert_ctx_t *c) {
+    int rc = vector_layer_insert_sync(c->vl, c->id, c->vec, c->metadata, c->metadata_len);
+    if (rc == 0) promise_resolve(c->promise, NULL);
+    else { async_error_t *e = ERROR("Vector insert failed");
+           promise_reject(c->promise, e); error_destroy(e); }
+    promise_destroy(c->promise);
+    free(c->id); free(c->vec); free(c->metadata); free(c);
+}
+static void vl_search_run_inline(vl_search_ctx_t *c) {
+    vl_result_t *results = NULL; int n = 0;
+    int rc = vector_layer_search_sync(c->vl, c->vec, c->k, &results, &n);
+    if (rc == 0) {
+        vl_search_result_t *sr = (vl_search_result_t *)get_clear_memory(sizeof(*sr));
+        if (sr == NULL) {
+            async_error_t *e = ERROR("Vector search OOM");
+            promise_reject(c->promise, e); error_destroy(e);
+            if (results) vector_layer_free_results(results, n);
+        } else {
+            sr->results = results; sr->n_results = n;
+            promise_resolve(c->promise, sr);
+        }
+    } else {
+        async_error_t *e = ERROR("Vector search failed");
+        promise_reject(c->promise, e); error_destroy(e);
+    }
+    promise_destroy(c->promise);
+    free(c->vec); free(c);
+}
+static void vl_delete_run_inline(vl_delete_ctx_t *c) {
+    int rc = vector_layer_delete_sync(c->vl, c->id);
+    if (rc == 0) promise_resolve(c->promise, NULL);
+    else { async_error_t *e = ERROR("Vector delete failed");
+           promise_reject(c->promise, e); error_destroy(e); }
+    promise_destroy(c->promise);
+    free(c->id); free(c);
+}
+static void vl_batch_run_inline(vl_batch_ctx_t *c) {
+    int rc = vector_layer_insert_batch_sync(c->vl,
+                                            (const char **)c->ids,
+                                            (const float **)c->vecs,
+                                            (const uint8_t **)c->metadatas,
+                                            c->meta_lens, c->n);
+    if (rc == 0) promise_resolve(c->promise, NULL);
+    else { async_error_t *e = ERROR("Vector batch insert failed");
+           promise_reject(c->promise, e); error_destroy(e); }
+    promise_destroy(c->promise);
+    for (int i = 0; i < c->n; i++) {
+        free(c->ids[i]); free(c->vecs[i]);
+        if (c->metadatas) free(c->metadatas[i]);
+    }
+    free(c->ids); free(c->vecs); free(c->metadatas); free(c->meta_lens);
+    free(c);
+}
+
+/* Public async variants — Graph-style: return void, take a caller-owned
+ * promise_t*. See header comment for the contract. */
+
+void vector_layer_insert(vector_layer_t *vl, const char *id, const float *vec,
+                         const uint8_t *metadata, size_t metadata_len,
+                         promise_t *promise) {
+    if (vl == NULL || id == NULL || vec == NULL || promise == NULL) {
+        if (promise) {
+            async_error_t *err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
+        return;
+    }
+    if (vl->db == NULL) {
+        async_error_t *err = ERROR("Layer has no database");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     int dim = vl->format.dim;
-    vl_async_ctx_t *c = (vl_async_ctx_t *)get_clear_memory(sizeof(*c));
-    if (c == NULL) return -12;
-    platform_lock_init(&c->mtx);
-    platform_condition_init(&c->cv);
+    vl_insert_ctx_t *c = (vl_insert_ctx_t *)get_clear_memory(sizeof(*c));
+    if (c == NULL) {
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     c->vl = vl;
-    c->kind = VL_ASYNC_INSERT;
+    c->dim = dim;
+    c->metadata_len = metadata_len;
     c->id = strdup(id);
     c->vec = (float *)get_clear_memory(sizeof(float) * dim);
-    if (c->id == NULL || c->vec == NULL) { vl_async_ctx_destroy(c); return -12; }
+    if (c->id == NULL || c->vec == NULL) {
+        free(c->id); free(c->vec); free(c);
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     memcpy(c->vec, vec, sizeof(float) * dim);
     if (metadata && metadata_len > 0) {
         c->metadata = (uint8_t *)get_memory(metadata_len);
-        if (c->metadata == NULL) { vl_async_ctx_destroy(c); return -12; }
+        if (c->metadata == NULL) {
+            free(c->id); free(c->vec); free(c->metadata); free(c);
+            async_error_t *err = ERROR("OOM");
+            promise_reject(promise, err);
+            error_destroy(err);
+            return;
+        }
         memcpy(c->metadata, metadata, metadata_len);
-        c->metadata_len = metadata_len;
     }
-    int rc = vl_async_run(vl, c);
-    vl_async_ctx_destroy(c);
-    return rc;
+    c->promise = REFERENCE(promise, promise_t);
+
+    work_t *work = work_create(vl_insert_execute, vl_insert_abort, c);
+    if (work == NULL) {
+        /* Fall back to inline — frees ctx + fires promise. */
+        vl_insert_run_inline(c);
+        return;
+    }
+    work_pool_t *pool = vl->subtree ? database_subtree_get_pool(vl->subtree) : vl->db->pool;
+    if (vl->runtime.sync_only || pool == NULL) {
+        vl_insert_run_inline(c);
+        work_destroy(work);
+        return;
+    }
+    refcounter_yield((refcounter_t *)work);
+    if (work_pool_enqueue(pool, work) != 0) {
+        /* Pool rejected — run inline. Two derefs: consume yield + free. */
+        vl_insert_run_inline(c);
+        work_destroy(work);
+        work_destroy(work);
+    }
 }
 
-int vector_layer_search(vector_layer_t *vl, const float *query, int k,
-                        vl_result_t **results, int *n_results) {
-    if (vl == NULL || query == NULL || results == NULL || n_results == NULL) return -22;
+void vector_layer_search(vector_layer_t *vl, const float *query, int k,
+                         promise_t *promise) {
+    if (vl == NULL || query == NULL || promise == NULL) {
+        if (promise) {
+            async_error_t *err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
+        return;
+    }
+    if (vl->db == NULL) {
+        async_error_t *err = ERROR("Layer has no database");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     if (k <= 0) k = vl->runtime.top_k;
     int dim = vl->format.dim;
-    vl_async_ctx_t *c = (vl_async_ctx_t *)get_clear_memory(sizeof(*c));
-    if (c == NULL) return -12;
-    platform_lock_init(&c->mtx);
-    platform_condition_init(&c->cv);
+    vl_search_ctx_t *c = (vl_search_ctx_t *)get_clear_memory(sizeof(*c));
+    if (c == NULL) {
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     c->vl = vl;
-    c->kind = VL_ASYNC_SEARCH;
+    c->dim = dim;
     c->k = k;
     c->vec = (float *)get_clear_memory(sizeof(float) * dim);
-    if (c->vec == NULL) { vl_async_ctx_destroy(c); return -12; }
+    if (c->vec == NULL) {
+        free(c->vec); free(c);
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     memcpy(c->vec, query, sizeof(float) * dim);
-    int rc = vl_async_run(vl, c);
-    /* If the op succeeded, transfer results ownership to the caller. */
-    if (rc == 0) {
-        *results = c->results;
-        *n_results = c->n_results;
-        c->results = NULL;  /* prevent vl_async_ctx_destroy from freeing them */
-    } else {
-        *results = NULL;
-        *n_results = 0;
+    c->promise = REFERENCE(promise, promise_t);
+
+    work_t *work = work_create(vl_search_execute, vl_search_abort, c);
+    if (work == NULL) {
+        vl_search_run_inline(c);
+        return;
     }
-    vl_async_ctx_destroy(c);
-    return rc;
+    work_pool_t *pool = vl->subtree ? database_subtree_get_pool(vl->subtree) : vl->db->pool;
+    if (vl->runtime.sync_only || pool == NULL) {
+        vl_search_run_inline(c);
+        work_destroy(work);
+        return;
+    }
+    refcounter_yield((refcounter_t *)work);
+    if (work_pool_enqueue(pool, work) != 0) {
+        vl_search_run_inline(c);
+        work_destroy(work);
+        work_destroy(work);
+    }
 }
 
-int vector_layer_delete(vector_layer_t *vl, const char *id) {
-    if (vl == NULL || id == NULL) return -22;
-    vl_async_ctx_t *c = (vl_async_ctx_t *)get_clear_memory(sizeof(*c));
-    if (c == NULL) return -12;
-    platform_lock_init(&c->mtx);
-    platform_condition_init(&c->cv);
+void vector_layer_delete(vector_layer_t *vl, const char *id, promise_t *promise) {
+    if (vl == NULL || id == NULL || promise == NULL) {
+        if (promise) {
+            async_error_t *err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
+        return;
+    }
+    if (vl->db == NULL) {
+        async_error_t *err = ERROR("Layer has no database");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
+    vl_delete_ctx_t *c = (vl_delete_ctx_t *)get_clear_memory(sizeof(*c));
+    if (c == NULL) {
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
     c->vl = vl;
-    c->kind = VL_ASYNC_DELETE;
     c->id = strdup(id);
-    if (c->id == NULL) { vl_async_ctx_destroy(c); return -12; }
-    int rc = vl_async_run(vl, c);
-    vl_async_ctx_destroy(c);
-    return rc;
+    if (c->id == NULL) {
+        free(c);
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
+    c->promise = REFERENCE(promise, promise_t);
+
+    work_t *work = work_create(vl_delete_execute, vl_delete_abort, c);
+    if (work == NULL) {
+        vl_delete_run_inline(c);
+        return;
+    }
+    work_pool_t *pool = vl->subtree ? database_subtree_get_pool(vl->subtree) : vl->db->pool;
+    if (vl->runtime.sync_only || pool == NULL) {
+        vl_delete_run_inline(c);
+        work_destroy(work);
+        return;
+    }
+    refcounter_yield((refcounter_t *)work);
+    if (work_pool_enqueue(pool, work) != 0) {
+        vl_delete_run_inline(c);
+        work_destroy(work);
+        work_destroy(work);
+    }
 }
 
-int vector_layer_insert_batch(vector_layer_t *vl, const char **ids, const float **vecs,
-                              const uint8_t **metadatas, const size_t *meta_lens, int n) {
-    if (vl == NULL) return -22;
-    if (n <= 0) return 0;
-    int rc = 0;
-    for (int i = 0; i < n && rc == 0; i++) {
-        const uint8_t *meta = metadatas ? metadatas[i] : NULL;
-        size_t mlen = meta_lens ? meta_lens[i] : 0;
-        rc = vector_layer_insert(vl, ids[i], vecs[i], meta, mlen);
+void vector_layer_insert_batch(vector_layer_t *vl,
+                               const char **ids, const float **vecs,
+                               const uint8_t **metadatas, const size_t *meta_lens,
+                               int n, promise_t *promise) {
+    if (vl == NULL || ids == NULL || vecs == NULL || promise == NULL || n <= 0) {
+        if (promise) {
+            async_error_t *err = ERROR("NULL argument");
+            promise_reject(promise, err);
+            error_destroy(err);
+        }
+        return;
     }
-    return rc;
+    if (vl->db == NULL) {
+        async_error_t *err = ERROR("Layer has no database");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
+    int dim = vl->format.dim;
+    vl_batch_ctx_t *c = (vl_batch_ctx_t *)get_clear_memory(sizeof(*c));
+    if (c == NULL) {
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
+    c->vl = vl;
+    c->n = n;
+    c->dim = dim;
+    c->ids = (char **)get_clear_memory(sizeof(char *) * n);
+    c->vecs = (float **)get_clear_memory(sizeof(float *) * n);
+    c->meta_lens = (size_t *)get_clear_memory(sizeof(size_t) * n);
+    if (metadatas) {
+        c->metadatas = (uint8_t **)get_clear_memory(sizeof(uint8_t *) * n);
+    }
+    if (c->ids == NULL || c->vecs == NULL || c->meta_lens == NULL ||
+        (metadatas && c->metadatas == NULL)) {
+        /* Roll back any partial allocations. */
+        if (c->ids) { for (int i = 0; i < n; i++) free(c->ids[i]); free(c->ids); }
+        if (c->vecs) { for (int i = 0; i < n; i++) free(c->vecs[i]); free(c->vecs); }
+        if (c->metadatas) { for (int i = 0; i < n; i++) free(c->metadatas[i]); free(c->metadatas); }
+        free(c->meta_lens); free(c);
+        async_error_t *err = ERROR("OOM");
+        promise_reject(promise, err);
+        error_destroy(err);
+        return;
+    }
+    for (int i = 0; i < n; i++) {
+        c->ids[i] = strdup(ids[i]);
+        c->vecs[i] = (float *)get_clear_memory(sizeof(float) * dim);
+        if (c->ids[i] == NULL || c->vecs[i] == NULL) {
+            /* Roll back up to i. */
+            for (int j = 0; j <= i; j++) { free(c->ids[j]); free(c->vecs[j]); }
+            if (c->metadatas) { for (int j = 0; j < i; j++) free(c->metadatas[j]); free(c->metadatas); }
+            free(c->ids); free(c->vecs); free(c->meta_lens); free(c);
+            async_error_t *err = ERROR("OOM");
+            promise_reject(promise, err);
+            error_destroy(err);
+            return;
+        }
+        memcpy(c->vecs[i], vecs[i], sizeof(float) * dim);
+        c->meta_lens[i] = meta_lens ? meta_lens[i] : 0;
+        if (metadatas && metadatas[i] && c->meta_lens[i] > 0) {
+            c->metadatas[i] = (uint8_t *)get_memory(c->meta_lens[i]);
+            if (c->metadatas[i] == NULL) {
+                /* Roll back up to i, plus the metadatas already filled. */
+                for (int j = 0; j <= i; j++) { free(c->ids[j]); free(c->vecs[j]); }
+                for (int j = 0; j < i; j++) free(c->metadatas[j]);
+                free(c->metadatas); free(c->ids); free(c->vecs);
+                free(c->meta_lens); free(c);
+                async_error_t *err = ERROR("OOM");
+                promise_reject(promise, err);
+                error_destroy(err);
+                return;
+            }
+            memcpy(c->metadatas[i], metadatas[i], c->meta_lens[i]);
+        } else if (c->metadatas) {
+            c->metadatas[i] = NULL;
+        }
+    }
+    c->promise = REFERENCE(promise, promise_t);
+
+    work_t *work = work_create(vl_batch_execute, vl_batch_abort, c);
+    if (work == NULL) {
+        vl_batch_run_inline(c);
+        return;
+    }
+    work_pool_t *pool = vl->subtree ? database_subtree_get_pool(vl->subtree) : vl->db->pool;
+    if (vl->runtime.sync_only || pool == NULL) {
+        vl_batch_run_inline(c);
+        work_destroy(work);
+        return;
+    }
+    refcounter_yield((refcounter_t *)work);
+    if (work_pool_enqueue(pool, work) != 0) {
+        vl_batch_run_inline(c);
+        work_destroy(work);
+        work_destroy(work);
+    }
 }
 
 int vector_layer_insert_batch_sync(vector_layer_t *vl, const char **ids, const float **vecs,

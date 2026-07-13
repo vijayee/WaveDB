@@ -67,6 +67,14 @@ typedef struct {
     size_t   metadata_len;
 } vl_result_t;
 
+/* Result of an async search — resolved payload of the promise handed to
+ * vector_layer_search. The caller frees `results` via
+ * vector_layer_free_results, then frees the struct itself. */
+typedef struct {
+    vl_result_t *results;
+    int          n_results;
+} vl_search_result_t;
+
 /* Open on an EXISTING database_t (shared key space, e.g. with Graph).
    If subtree is non-NULL, all keys land under that subtree prefix. */
 vector_layer_t* vector_layer_create(const char *index_name,
@@ -90,29 +98,38 @@ void  vector_layer_destroy(vector_layer_t *vl);
 int   vector_layer_reconfigure(vector_layer_t *vl,
                                vector_layer_runtime_t *runtime);
 
-/* Insert is atomic: vector + index entries in one database_batch_sync_raw. */
-int   vector_layer_insert(vector_layer_t *vl, const char *id,
+/* Async variants — Graph-style: return void, take a caller-owned promise_t*.
+ * The caller creates the promise (with resolve/reject callbacks + ctx), passes
+ * it in, and wires it to their runtime. The worker resolves the promise with
+ * NULL (insert/delete/batch) or a vl_search_result_t* (search) on success, or
+ * rejects with an async_error_t* on failure. The caller destroys the promise
+ * on their side after it fires. If no worker pool is available (sync_only mode
+ * or db->pool == NULL), the sync version runs inline and the promise is
+ * resolved before the function returns. */
+void  vector_layer_insert(vector_layer_t *vl, const char *id,
                           const float *vec,
-                          const uint8_t *metadata, size_t metadata_len);   /* async */
+                          const uint8_t *metadata, size_t metadata_len,
+                          promise_t *promise);
 int   vector_layer_insert_sync(vector_layer_t *vl, const char *id,
                                const float *vec,
                                const uint8_t *metadata, size_t metadata_len);
 
-int   vector_layer_insert_batch(vector_layer_t *vl,
+void  vector_layer_insert_batch(vector_layer_t *vl,
                                 const char **ids, const float **vecs,
                                 const uint8_t **metadatas, const size_t *meta_lens,
-                                int n);                                       /* async */
+                                int n, promise_t *promise);
 int   vector_layer_insert_batch_sync(vector_layer_t *vl,
                                      const char **ids, const float **vecs,
                                      const uint8_t **metadatas, const size_t *meta_lens,
                                      int n);
 
-int   vector_layer_search(vector_layer_t *vl, const float *query, int k,
-                          vl_result_t **results, int *n_results);            /* async */
+void  vector_layer_search(vector_layer_t *vl, const float *query, int k,
+                          promise_t *promise);
 int   vector_layer_search_sync(vector_layer_t *vl, const float *query, int k,
                                vl_result_t **results, int *n_results);
 
-int   vector_layer_delete(vector_layer_t *vl, const char *id);               /* async */
+void  vector_layer_delete(vector_layer_t *vl, const char *id,
+                          promise_t *promise);
 int   vector_layer_delete_sync(vector_layer_t *vl, const char *id);
 
 /* train: IVF (re)compute centroids (k-means); SLSH (re)gen projections;
