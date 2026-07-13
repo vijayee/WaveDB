@@ -238,22 +238,26 @@ TEST_F(BnodeCacheTest, EvictionOnMemoryPressure) {
     rc = bnode_cache_write(fcache, 12288, data_b, total_b);
     EXPECT_EQ(rc, 0);
 
-    /* Flush to make A and B clean */
-    rc = bnode_cache_flush_dirty(fcache);
-    EXPECT_EQ(rc, 0);
-    EXPECT_EQ(bnode_cache_dirty_count(fcache), 0u);
-
-    /* Release references so they become evictable */
+    /* Take references on A and B BEFORE flush so the pointers remain valid
+       across the flush (bnode_cache_flush_dirty relocates items to new disk
+       offsets via CoW, updating item->offset in place). Reading at the
+       original logical offsets after flush would fail because the items
+       have moved. */
     bnode_cache_item_t* item_a = bnode_cache_read(fcache, 8192);
     ASSERT_NE(item_a, nullptr);
     bnode_cache_item_t* item_b = bnode_cache_read(fcache, 12288);
     ASSERT_NE(item_b, nullptr);
+
+    /* Flush to make A and B clean (writes them to disk via CoW; item->offset
+       is updated to the real disk offset). */
+    rc = bnode_cache_flush_dirty(fcache);
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(bnode_cache_dirty_count(fcache), 0u);
+
+    /* Release references now that flush is done — items become evictable
+       (clean + ref_count == 0). */
     bnode_cache_release(fcache, item_a);
     bnode_cache_release(fcache, item_b);
-
-    /* After flush, offsets changed. Read at the new offsets to release refs. */
-    /* Since we flushed, offsets may have changed. But item_a/item_b still
-       point to valid cache items with updated offsets. Release them. */
 
     /* Now write node C to exceed the memory limit — should evict A or B */
     const char* payload_c = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
