@@ -551,20 +551,18 @@ static void seek_to_end_path(database_iterator_t* iter) {
                     goto bail;
                 }
                 size_t root_descend = ub - 1;
-                // Position the trie-level frame at root_descend so scan_prev
+                // Position the trie-level frame at root_descend - 1 so scan_prev
                 // (after exhausting this subtree) resumes at the separator
-                // BEFORE this one (the next-larger key in the descending walk
-                // is the previous separator at this trie level). scan_prev
-                // decrements entry_index before processing, so setting
-                // entry_index = root_descend makes scan_prev's first decrement
-                // land at root_descend - 1 — the previous sibling. We do NOT
-                // add the +1 skip that the forward seek uses, because the
-                // forward seek's "+1 skip" accounts for "scan_next increments
-                // before processing"; scan_prev decrements before processing,
-                // so the same offset is achieved by leaving entry_index at
-                // root_descend (the descended entry) — the decrement moves
-                // past it.
-                iter->stack[trie_frame_idx].entry_index = root_descend;
+                // BEFORE the one we descended through. scan_prev decrements
+                // entry_index before processing, so to skip the descended
+                // separator (at root_descend) on pop-back, we must make
+                // scan_prev's first read land at root_descend - 1. Mirror of
+                // the forward seek's "+1 skip" (which accounts for scan_next
+                // incrementing before processing). When root_descend == 0,
+                // root_descend - 1 underflows to SIZE_MAX — the "frame
+                // exhausted" sentinel — so scan_prev pops the trie frame
+                // immediately (correct: no smaller separator at this level).
+                iter->stack[trie_frame_idx].entry_index = root_descend - 1;
                 bnode_entry_t* sep = bnode_get(root_bn, root_descend);
                 if (sep == NULL || !sep->is_bnode_child) {
                     goto bail;
@@ -597,10 +595,14 @@ static void seek_to_end_path(database_iterator_t* iter) {
                     if (push_bnode_frame(iter, cur_bn, iter->stack_depth - 1) < 0) {
                         goto bail;
                     }
-                    // Position this internal frame at k so scan_prev's
-                    // decrement-before-process lands at k-1 (previous sibling)
-                    // after this subtree is exhausted.
-                    iter->stack[iter->stack_depth - 1].entry_index = k;
+                    // Position this internal frame at k - 1 so scan_prev's
+                    // first decrement-and-process lands on the separator BEFORE
+                    // the one we descended through (skipping the descended
+                    // separator at k). When k == 0, k - 1 underflows to SIZE_MAX
+                    // — the "frame exhausted" sentinel — so scan_prev pops this
+                    // internal frame immediately (correct: no smaller separator
+                    // at this level).
+                    iter->stack[iter->stack_depth - 1].entry_index = k - 1;
                     cur_bn = s->child_bnode;
                 }
                 // cur_bn is the leaf bnode for this trie level.
