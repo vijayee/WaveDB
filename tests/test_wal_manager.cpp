@@ -318,8 +318,9 @@ TEST_F(WalManagerTest, Compaction) {
     // Seal file
     thread_wal_seal(twal);
 
-    // Compact
-    int result = compact_wal_files(manager);
+    // Compact (mark_compacted=0 writes a "compacted_" file from sealed entries;
+    // mark_compacted=1 just marks+deletes sealed files without writing a compacted file)
+    int result = compact_wal_files(manager, 0);
     EXPECT_EQ(result, 0);
 
     // Verify compacted file exists
