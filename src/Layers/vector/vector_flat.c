@@ -36,19 +36,28 @@ int vector_flat_insert_sync(vector_layer_t *vl, const char *id, const float *vec
     if (db == NULL) return -22;
     int dim = vl->format.dim;
     size_t vec_bytes = (size_t)dim * sizeof(float);
-    (void)metadata; (void)metadata_len;  /* metadata suffix added in Task 5 */
+    size_t total = vec_bytes + metadata_len;
 
     char *vkey = vl_key_vector(vl->index_name, vl->format.delimiter, id);
     if (vkey == NULL) return -12;
+
+    /* Build value = float[dim] + metadata. */
+    uint8_t *buf = (uint8_t*)malloc(total);
+    if (buf == NULL) { free(vkey); return -12; }
+    memcpy(buf, vec, vec_bytes);
+    if (metadata != NULL && metadata_len > 0) {
+        memcpy(buf + vec_bytes, metadata, metadata_len);
+    }
     int rc = database_put_sync_raw(db, vkey, strlen(vkey), vl->format.delimiter,
-                                   (const uint8_t*)vec, vec_bytes);
+                                   buf, total);
+    free(buf);
     free(vkey);
     if (rc != 0) return rc;
     return flat_increment_count(vl);
 }
 
 /* Brute-force hit entry for top-k sort. */
-typedef struct { float dist; const char *id; } vl_flat_hit_t;
+typedef struct { float dist; const char *id; const uint8_t *value; size_t vlen; } vl_flat_hit_t;
 
 /* qsort comparator for hits by distance ascending. */
 static int vl_hit_cmp(const void *a, const void *b) {
@@ -108,6 +117,8 @@ int vector_flat_search_sync(vector_layer_t *vl, const float *query, int k,
                                  dim, vl->format.distance);
         hits[n_hits].dist = dist;
         hits[n_hits].id = id;
+        hits[n_hits].value = results[i].value;
+        hits[n_hits].vlen = results[i].value_len;
         n_hits++;
     }
 
@@ -125,6 +136,15 @@ int vector_flat_search_sync(vector_layer_t *vl, const float *query, int k,
             out_results[i].distance = hits[i].dist;
             out_results[i].metadata = NULL;
             out_results[i].metadata_len = 0;
+            size_t meta_off = (size_t)dim * sizeof(float);
+            if (hits[i].vlen > meta_off) {
+                size_t meta_len = hits[i].vlen - meta_off;
+                out_results[i].metadata = (uint8_t*)malloc(meta_len);
+                if (out_results[i].metadata != NULL) {
+                    memcpy(out_results[i].metadata, hits[i].value + meta_off, meta_len);
+                    out_results[i].metadata_len = meta_len;
+                }
+            }
         }
     }
     free(hits);
@@ -135,8 +155,31 @@ int vector_flat_search_sync(vector_layer_t *vl, const float *query, int k,
 }
 
 int vector_flat_delete_sync(vector_layer_t *vl, const char *id) {
-    (void)vl; (void)id;
-    return -1;
+    if (vl == NULL || id == NULL) return -22;
+    database_t *db = vl->db;
+    if (db == NULL) return -22;
+    char *vkey = vl_key_vector(vl->index_name, vl->format.delimiter, id);
+    if (vkey == NULL) return -12;
+    int rc = database_delete_sync_raw(db, vkey, strlen(vkey), vl->format.delimiter);
+    free(vkey);
+    if (rc != 0 && rc != -2) return rc;  /* -2 = not found, treat as ok */
+
+    /* Decrement count (floor 0). */
+    char *ckey = vl_key_count(vl->index_name, vl->format.delimiter);
+    if (ckey == NULL) return -12;
+    size_t out_len = 0; uint8_t *buf = NULL; size_t cur = 0;
+    int grc = database_get_sync_raw(db, ckey, strlen(ckey), vl->format.delimiter, &buf, &out_len);
+    if (grc == 0 && buf != NULL && out_len >= sizeof(size_t)) {
+        memcpy(&cur, buf, sizeof(size_t));
+    }
+    if (buf) database_raw_value_free(buf);
+    if (cur > 0) {
+        size_t next = cur - 1;
+        database_put_sync_raw(db, ckey, strlen(ckey), vl->format.delimiter,
+                              (const uint8_t*)&next, sizeof(size_t));
+    }
+    free(ckey);
+    return 0;
 }
 
 int vector_flat_train(vector_layer_t *vl) {

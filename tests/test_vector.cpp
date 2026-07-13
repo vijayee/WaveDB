@@ -231,3 +231,45 @@ TEST_F(VectorLayerTest, FlatExactMatchesBruteForce) {
     EXPECT_EQ(total_hits, 100);  // 10 queries × 10 results, all must hit (recall@10 == 1.0)
     vector_layer_destroy(vl);
 }
+
+TEST_F(VectorLayerTest, FlatDelete) {
+    vector_layer_config_t cfg = flat_config(4);
+    cfg.format.distance = VL_DIST_L2;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    float v[4] = {1, 2, 3, 4};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "a", v, NULL, 0), 0);
+    ASSERT_EQ(vector_layer_insert_sync(vl, "b", v, NULL, 0), 0);
+    EXPECT_EQ(vector_layer_count(vl), 2u);
+    ASSERT_EQ(vector_layer_delete_sync(vl, "a"), 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    // Search should now return only "b".
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, v, 10, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    EXPECT_STREQ(results[0].id, "b");
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, FlatMetadata) {
+    vector_layer_config_t cfg = flat_config(4);
+    cfg.format.distance = VL_DIST_L2;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    float v[4] = {1, 2, 3, 4};
+    uint8_t meta[] = {0xAA, 0xBB, 0xCC};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "a", v, meta, 3), 0);
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, v, 1, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    ASSERT_NE(results[0].metadata, nullptr);
+    ASSERT_EQ(results[0].metadata_len, 3u);
+    EXPECT_EQ(results[0].metadata[0], 0xAA);
+    EXPECT_EQ(results[0].metadata[1], 0xBB);
+    EXPECT_EQ(results[0].metadata[2], 0xCC);
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
