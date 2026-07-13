@@ -408,17 +408,262 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
     return 0;
 }
 
-int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
-    (void)vl; (void)id;
-    return -1;
-}
+/* ---- Train ---- */
 
 int vector_slsh_train(vector_layer_t *vl) {
-    (void)vl;
+    if (vl == NULL) return -22;
+    database_t *db = vl->db;
+    if (db == NULL) return -22;
+    int dim = vl->format.dim;
+    int L = vl->format.slsh_lsh_tables;
+    char d = vl->format.delimiter;
+    if (L <= 0) return -22;
+
+    /* Fixed seed (42) for reproducibility — same projections across
+       reopen/train calls. Uniform [0,1] random projections are fine for the
+       spike; production would use a proper RNG (and likely Gaussian). */
+    srand(42);
+    for (int t = 0; t < L; t++) {
+        float *proj = (float*)malloc((size_t)dim * sizeof(float));
+        if (proj == NULL) return -12;
+        for (int dd = 0; dd < dim; dd++) {
+            proj[dd] = (float)rand() / (float)RAND_MAX;  /* [0, 1] */
+        }
+        char *pkey = vl_key_proj(vl->index_name, d, t);
+        if (pkey == NULL) { free(proj); return -12; }
+        int rc = database_put_sync_raw(db, pkey, strlen(pkey), d,
+                                       (const uint8_t*)proj,
+                                       (size_t)dim * sizeof(float));
+        free(proj); free(pkey);
+        if (rc != 0) return rc;
+    }
     return 0;
 }
 
+/* ---- Rebuild ---- */
+
 int vector_slsh_rebuild(vector_layer_t *vl) {
-    (void)vl;
-    return 0;
+    if (vl == NULL) return -22;
+    database_t *db = vl->db;
+    if (db == NULL) return -22;
+    int dim = vl->format.dim;
+    char d = vl->format.delimiter;
+    size_t vec_bytes = (size_t)dim * sizeof(float);
+    size_t idx_len = strlen(vl->index_name);
+
+    /* 1. Scan vec/{idx}/hash/ for old hash entries (READ-ONLY). */
+    size_t hprefix_len = 4 + idx_len + 6;  /* "vec"+d+idx+d+"hash"+d */
+    char *hprefix = (char*)malloc(hprefix_len + 1);
+    if (hprefix == NULL) return -12;
+    snprintf(hprefix, hprefix_len + 1, "vec%c%s%chash%c", d, vl->index_name, d, d);
+    char *hend = (char*)malloc(hprefix_len + 2);
+    if (hend == NULL) { free(hprefix); return -12; }
+    memcpy(hend, hprefix, hprefix_len);
+    hend[hprefix_len] = '\x7f'; hend[hprefix_len + 1] = '\0';
+
+    raw_result_t *old_hashes = NULL;
+    size_t n_old = 0;
+    int rc = database_scan_range_sync_raw(db, hprefix, hprefix_len, hend,
+                                          hprefix_len + 1, d,
+                                          &old_hashes, &n_old);
+    free(hprefix); free(hend);
+    if (rc != 0) return rc;
+
+    /* 2. Scan vec/{idx}/vector/ for all vectors (READ-ONLY). */
+    size_t vprefix_len = 4 + idx_len + 7;  /* "vec"+d+idx+d+"vector"+d */
+    char *vprefix = (char*)malloc(vprefix_len + 1);
+    if (vprefix == NULL) { database_raw_results_free(old_hashes, n_old); return -12; }
+    snprintf(vprefix, vprefix_len + 1, "vec%c%s%cvector%c", d, vl->index_name, d, d);
+    char *vend = (char*)malloc(vprefix_len + 2);
+    if (vend == NULL) { free(vprefix); database_raw_results_free(old_hashes, n_old); return -12; }
+    memcpy(vend, vprefix, vprefix_len);
+    vend[vprefix_len] = '\x7f'; vend[vprefix_len + 1] = '\0';
+
+    raw_result_t *vectors = NULL;
+    size_t n_vectors = 0;
+    rc = database_scan_range_sync_raw(db, vprefix, vprefix_len, vend,
+                                      vprefix_len + 1, d,
+                                      &vectors, &n_vectors);
+    free(vprefix); free(vend);
+    if (rc != 0) { database_raw_results_free(old_hashes, n_old); return rc; }
+
+    /* 3. Load projections (READ-ONLY). */
+    slsh_proj_cache_t cache;
+    rc = slsh_load_projections(vl, &cache);
+    if (rc != 0) {
+        database_raw_results_free(old_hashes, n_old);
+        database_raw_results_free(vectors, n_vectors);
+        return rc;
+    }
+
+    /* 4. Compute new hash keys for each vector. */
+    char **new_hash_keys = (char**)malloc((n_vectors ? n_vectors : 1) * sizeof(char*));
+    const char **new_id_ptrs = (const char**)malloc((n_vectors ? n_vectors : 1) * sizeof(const char*));
+    if (new_hash_keys == NULL || new_id_ptrs == NULL) {
+        free(new_hash_keys); free(new_id_ptrs);
+        slsh_free_projections(&cache);
+        database_raw_results_free(old_hashes, n_old);
+        database_raw_results_free(vectors, n_vectors);
+        return -12;
+    }
+    size_t n_new = 0;
+    for (size_t i = 0; i < n_vectors; i++) {
+        if (vectors[i].value_len < vec_bytes) continue;
+        /* extract id from key (after last delimiter) */
+        const char *key = vectors[i].key;
+        size_t klen = vectors[i].key_len;
+        const char *id = key + klen;
+        for (size_t j = klen; j > 0; j--) {
+            if (key[j-1] == d) { id = key + j; break; }
+        }
+        uint8_t lsh_key[64]; size_t lsh_len = 0;
+        slsh_compute_key(vl, (const float*)vectors[i].value, &cache,
+                         lsh_key, &lsh_len);
+        char *hkey = vl_key_hash(vl->index_name, d, lsh_key, lsh_len, id);
+        if (hkey == NULL) {
+            for (size_t j = 0; j < n_new; j++) free(new_hash_keys[j]);
+            free(new_hash_keys); free(new_id_ptrs);
+            slsh_free_projections(&cache);
+            database_raw_results_free(old_hashes, n_old);
+            database_raw_results_free(vectors, n_vectors);
+            return -12;
+        }
+        new_hash_keys[n_new] = hkey;
+        new_id_ptrs[n_new] = id;  /* borrows into vectors[i].key */
+        n_new++;
+    }
+    slsh_free_projections(&cache);
+
+    /* 5. Build the batch. Partition old vs new — skip intersection (same-key
+       delete-then-put under MVCC shares the same txn_id and shadows).
+       O(N²) intersection is fine for the spike. */
+    size_t n_ops_max = n_old + n_new;
+    raw_op_t *ops = NULL;
+    if (n_ops_max > 0) {
+        ops = (raw_op_t*)malloc(n_ops_max * sizeof(raw_op_t));
+        if (ops == NULL) {
+            for (size_t j = 0; j < n_new; j++) free(new_hash_keys[j]);
+            free(new_hash_keys); free(new_id_ptrs);
+            database_raw_results_free(old_hashes, n_old);
+            database_raw_results_free(vectors, n_vectors);
+            return -12;
+        }
+    }
+    size_t op_i = 0;
+
+    /* 5a. Deletes for old hash keys not in the new set. Key pointer borrows
+       into old_hashes[i].key (valid until we free old_hashes — AFTER batch). */
+    for (size_t i = 0; i < n_old; i++) {
+        const char *old_key = old_hashes[i].key;
+        int still_present = 0;
+        for (size_t j = 0; j < n_new; j++) {
+            if (strcmp(old_key, new_hash_keys[j]) == 0) {
+                still_present = 1;
+                break;
+            }
+        }
+        if (still_present) continue;  /* unchanged — leave alone */
+        ops[op_i].key = old_key;
+        ops[op_i].key_len = old_hashes[i].key_len;
+        ops[op_i].value = NULL;
+        ops[op_i].value_len = 0;
+        ops[op_i].type = 1;  /* delete */
+        op_i++;
+    }
+
+    /* 5b. Puts for new hash keys not in the old set. */
+    for (size_t j = 0; j < n_new; j++) {
+        const char *new_key = new_hash_keys[j];
+        int already_present = 0;
+        for (size_t i = 0; i < n_old; i++) {
+            if (strcmp(new_key, old_hashes[i].key) == 0) {
+                already_present = 1;
+                break;
+            }
+        }
+        if (already_present) continue;  /* unchanged — leave alone */
+        ops[op_i].key = new_key;
+        ops[op_i].key_len = strlen(new_key);
+        ops[op_i].value = (const uint8_t*)new_id_ptrs[j];
+        ops[op_i].value_len = strlen(new_id_ptrs[j]);
+        ops[op_i].type = 0;  /* put */
+        op_i++;
+    }
+
+    /* 6. Apply the batch atomically. */
+    if (op_i > 0) {
+        rc = database_batch_sync_raw(db, d, ops, op_i);
+    } else {
+        rc = 0;
+    }
+
+    /* 7. Cleanup. */
+    for (size_t j = 0; j < n_new; j++) free(new_hash_keys[j]);
+    free(new_hash_keys);
+    free(new_id_ptrs);
+    free(ops);
+    database_raw_results_free(old_hashes, n_old);
+    database_raw_results_free(vectors, n_vectors);
+    return rc;
+}
+
+/* ---- Delete ---- */
+
+int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
+    if (vl == NULL || id == NULL) return -22;
+    database_t *db = vl->db;
+    if (db == NULL) return -22;
+    int dim = vl->format.dim;
+    char d = vl->format.delimiter;
+    size_t vec_bytes = (size_t)dim * sizeof(float);
+
+    /* 1. Read the vector (READ-ONLY) to compute its lsh_key. */
+    char *vkey = vl_key_vector(vl->index_name, d, id);
+    if (vkey == NULL) return -12;
+    uint8_t *vbuf = NULL; size_t vlen = 0;
+    int rc = database_get_sync_raw(db, vkey, strlen(vkey), d, &vbuf, &vlen);
+    if (rc != 0 || vbuf == NULL || vlen < vec_bytes) {
+        if (vbuf) database_raw_value_free(vbuf);
+        free(vkey);
+        return rc != 0 ? rc : -2;  /* not found */
+    }
+
+    /* 2. Compute lsh_key. */
+    slsh_proj_cache_t cache;
+    rc = slsh_load_projections(vl, &cache);
+    if (rc != 0) { database_raw_value_free(vbuf); free(vkey); return rc; }
+    uint8_t lsh_key[64]; size_t lsh_len = 0;
+    slsh_compute_key(vl, (const float*)vbuf, &cache, lsh_key, &lsh_len);
+    slsh_free_projections(&cache);
+    database_raw_value_free(vbuf);
+
+    char *hkey = vl_key_hash(vl->index_name, d, lsh_key, lsh_len, id);
+    free(vkey);  /* rebuilt below for the batch */
+    if (hkey == NULL) return -12;
+
+    /* 3. Read count (READ-ONLY). */
+    char *cntkey = vl_key_count(vl->index_name, d);
+    if (cntkey == NULL) { free(hkey); return -12; }
+    uint8_t *cbuf = NULL; size_t clen = 0; size_t cur = 0;
+    rc = database_get_sync_raw(db, cntkey, strlen(cntkey), d, &cbuf, &clen);
+    if (rc == 0 && cbuf && clen >= sizeof(size_t)) memcpy(&cur, cbuf, sizeof(size_t));
+    if (cbuf) database_raw_value_free(cbuf);
+
+    /* 4. Build the batch: delete vector + delete hash + put count-1 (floor 0). */
+    vkey = vl_key_vector(vl->index_name, d, id);
+    if (vkey == NULL) { free(hkey); free(cntkey); return -12; }
+    size_t next = cur > 0 ? cur - 1 : 0;
+
+    raw_op_t ops[3];
+    ops[0].key = vkey; ops[0].key_len = strlen(vkey);
+    ops[0].value = NULL; ops[0].value_len = 0; ops[0].type = 1;  /* delete vector */
+    ops[1].key = hkey; ops[1].key_len = strlen(hkey);
+    ops[1].value = NULL; ops[1].value_len = 0; ops[1].type = 1;  /* delete hash */
+    ops[2].key = cntkey; ops[2].key_len = strlen(cntkey);
+    ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t);
+    ops[2].type = 0;  /* put count */
+
+    rc = database_batch_sync_raw(db, d, ops, 3);
+    free(vkey); free(hkey); free(cntkey);
+    return rc;
 }
