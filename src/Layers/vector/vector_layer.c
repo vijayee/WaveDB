@@ -8,14 +8,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-struct vector_layer_t {
-    database_t *db;
-    int owns_db;
-    char *index_name;
-    vector_layer_format_t format;
-    vector_layer_runtime_t runtime;
-};
-
 static int vl_init(vector_layer_t *vl, database_t *db, database_subtree_t *subtree,
                    const char *index_name, vector_layer_config_t *config) {
     if (vl == NULL || index_name == NULL || config == NULL) return -22;

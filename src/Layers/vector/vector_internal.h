@@ -3,6 +3,16 @@
 #include "vector_layer.h"
 #include "../../Database/database.h"
 
+/* Full definition — visible to vector_*.c implementation files, opaque to
+   public consumers of vector_layer.h. */
+struct vector_layer_t {
+    database_t *db;
+    int owns_db;
+    char *index_name;
+    vector_layer_format_t format;
+    vector_layer_runtime_t runtime;
+};
+
 /* Key encoding: malloc'd NUL-terminated key string, caller frees. */
 char* vl_key_vector(const char *idx, char d, const char *id);
 char* vl_key_count(const char *idx, char d);

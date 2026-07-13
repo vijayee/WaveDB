@@ -139,3 +139,19 @@ TEST_F(VectorLayerTest, KeyEncoding) {
     EXPECT_STREQ(k, "vec/test/proj/0000000001");
     free(k);
 }
+
+TEST_F(VectorLayerTest, FlatInsertCount) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    float v[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    for (int i = 0; i < 5; i++) {
+        std::string id = "vec_" + std::to_string(i);
+        int rc = vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0);
+        ASSERT_EQ(rc, 0);
+    }
+    EXPECT_EQ(vector_layer_count(vl), 5u);
+    vector_layer_destroy(vl);
+}
