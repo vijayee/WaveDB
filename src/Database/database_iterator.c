@@ -41,6 +41,7 @@ static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t pat
     iter->stack[iter->stack_depth].entry_index = 0;
     iter->stack[iter->stack_depth].path_index = path_index;
     iter->stack[iter->stack_depth].is_bnode_frame = 0;
+    iter->stack[iter->stack_depth].value_pending = 0;
     iter->stack_depth++;
 
     return 0;
@@ -69,6 +70,7 @@ static int push_bnode_frame(database_iterator_t* iter, bnode_t* bnode, size_t pa
     iter->stack[iter->stack_depth].entry_index = 0;
     iter->stack[iter->stack_depth].path_index = path_index;
     iter->stack[iter->stack_depth].is_bnode_frame = 1;
+    iter->stack[iter->stack_depth].value_pending = 0;
     iter->stack_depth++;
 
     return 0;
@@ -1229,9 +1231,16 @@ static void seek_to_rightmost(database_iterator_t* iter) {
                trie_child case (prefix-shared longer keys sort after this
                entry's value) and the has_value=0 + trie_child case. */
             if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) break;
-            /* Decrement parent so scan_prev doesn't re-process this entry on
-               pop-back. Underflows to SIZE_MAX when count==1 (sentinel). */
-            frame->entry_index--;
+            if (entry->has_value) {
+                /* value_pending: keep entry_index at count-1 (do NOT decrement)
+                   so scan_prev re-reads this entry on pop-back and emits its
+                   value via the value_pending two-visit logic. */
+                frame->value_pending = 1;
+            } else {
+                /* Decrement parent so scan_prev doesn't re-process this entry
+                   on pop-back. Underflows to SIZE_MAX when count==1 (sentinel). */
+                frame->entry_index--;
+            }
             continue;
         }
         /* No trie_child. If has_value=1, this is a value-bearing leaf —
@@ -1313,6 +1322,7 @@ database_iterator_t* database_scan_start_reverse(database_t* db,
         iter->stack[0].entry_index = 0;
         iter->stack[0].path_index = 0;
         iter->stack[0].is_bnode_frame = 0;
+        iter->stack[0].value_pending = 0;
         iter->stack_depth = 1;
         REFERENCE(root, hbtrie_node_t);
     }
@@ -1377,7 +1387,45 @@ int database_scan_prev(database_iterator_t* iter,
 
             if (entry == NULL) continue;
 
+            /* Lazy-load trie_child if needed (reopened db). Needed for the
+               has_value+trie_child descent below, and harmless for the
+               !has_value trie_child branch (which also lazy-loads). */
+            if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                 iter->db->trie->chunk_size,
+                                                 iter->db->trie->btree_node_size);
+            }
+
+            /* has_value + trie_child: two-visit logic (mirror of
+               hbtrie_cursor_prev). First visit descends into the subtree
+               (whose keys sort AFTER this entry's value because the value is
+               a prefix of them), second visit emits the value after the
+               subtree is exhausted. */
+            if (entry->has_value && entry->trie_child != NULL
+                && frame->value_pending == 0) {
+                /* First visit: re-position entry_index at this_index so we
+                   revisit this entry after the subtree is exhausted, set
+                   value_pending, push trie_child, descend. Do NOT emit yet. */
+                frame->entry_index = this_index;
+                frame->value_pending = 1;
+                pushed_child = 1;
+                if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                seek_to_rightmost(iter);
+                break;
+            }
+
             if (entry->has_value) {
+                /* Either no trie_child, or second visit (value_pending == 1)
+                   after the subtree was exhausted. Emit the value. Clear
+                   value_pending (no-op if it was already 0). entry_index was
+                   already decremented above (this_index - 1), which is correct
+                   for both cases: the no-trie_child case resumes at the
+                   previous entry, and the value_pending case has already
+                   emitted the subtree's keys. */
+                frame->value_pending = 0;
                 identifier_t* value = NULL;
                 int has_visible_value = 0;
 
@@ -1413,17 +1461,26 @@ int database_scan_prev(database_iterator_t* iter,
                        entry_index + 1 — the entry we descended through before
                        decrementing. When entry_index underflowed to SIZE_MAX
                        (count==1 descent), SIZE_MAX + 1 wraps to 0 via unsigned
-                       arithmetic, recovering the correct index. Skip
-                       is_bnode_child routing entries (B+tree separators, not
-                       identifier chunks) — mirrors the forward path. */
+                       arithmetic, recovering the correct index. For value_pending
+                       frames (has_value+trie_child descent), entry_index was NOT
+                       decremented — it points AT the descended entry — so use
+                       entry_index directly. Skip is_bnode_child routing entries
+                       (B+tree separators, not identifier chunks) — mirrors the
+                       forward path. */
                     size_t nchunks = 0;
                     for (size_t i = 0; i < iter->stack_depth; i++) {
                         iterator_frame_t* f = &iter->stack[i];
                         bnode_t* f_btree = f->is_bnode_frame ? f->bnode
                                 : (f->node ? f->node->btree : NULL);
                         if (f_btree == NULL) continue;
-                        size_t idx = (i == iter->stack_depth - 1)
-                                ? this_index : f->entry_index + 1;
+                        size_t idx;
+                        if (i == iter->stack_depth - 1) {
+                            idx = this_index;
+                        } else if (f->value_pending) {
+                            idx = f->entry_index;
+                        } else {
+                            idx = f->entry_index + 1;
+                        }
                         if (idx >= bnode_count(f_btree)) continue;
                         bnode_entry_t* e = bnode_get(f_btree, idx);
                         if (e != NULL && e->key != NULL && !e->is_bnode_child) {
@@ -1444,8 +1501,14 @@ int database_scan_prev(database_iterator_t* iter,
                             bnode_t* f_btree = f->is_bnode_frame ? f->bnode
                                     : (f->node ? f->node->btree : NULL);
                             if (f_btree == NULL) continue;
-                            size_t cidx = (i == iter->stack_depth - 1)
-                                    ? this_index : f->entry_index + 1;
+                            size_t cidx;
+                            if (i == iter->stack_depth - 1) {
+                                cidx = this_index;
+                            } else if (f->value_pending) {
+                                cidx = f->entry_index;
+                            } else {
+                                cidx = f->entry_index + 1;
+                            }
                             if (cidx >= bnode_count(f_btree)) continue;
                             bnode_entry_t* e = bnode_get(f_btree, cidx);
                             if (e != NULL && e->key != NULL && !e->is_bnode_child) {

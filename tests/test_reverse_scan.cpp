@@ -34,6 +34,7 @@ extern "C" {
 #include "../src/Database/database.h"
 #include "../src/Database/database_config.h"
 #include "../src/Database/database_iterator.h"
+#include "../src/Database/database_subtree.h"
 }
 
 static size_t rev_test_counter = 0;
@@ -431,6 +432,241 @@ TEST_F(DatabaseReverseTest, RangeReverse) {
     path_destroy(end);
 
     std::vector<std::string> expected = {"cherry", "banana"};
+    ASSERT_EQ(got, expected);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 5: Multi-identifier paths via path_meta. Keys "users/alice",
+// "users/bob", "users/carol" (split on '/' into 2 identifiers each) must
+// reconstruct exactly using path_subscript_meta_t {chunk_count, byte_length}
+// and emit in descending order: carol, bob, alice.
+TEST_F(DatabaseReverseTest, MultiIdentifierPathMeta) {
+    database_config_t* cfg = database_config_default();
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    auto put_path = [&](const std::string& a, const std::string& b) {
+        std::string key = a + "/" + b;
+        int rc = database_put_sync_raw(db, (const char*)key.c_str(), key.size(), '/',
+                                       (const uint8_t*)"V", 1);
+        ASSERT_EQ(rc, 0);
+    };
+    put_path("users", "alice");
+    put_path("users", "bob");
+    put_path("users", "carol");
+
+    database_iterator_t* it = database_scan_start_reverse(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        std::string key;
+        size_t n = path_length(p);
+        for (size_t i = 0; i < n; i++) {
+            identifier_t* id = path_get(p, i);
+            size_t dlen;
+            uint8_t* data = identifier_get_data_copy(id, &dlen);
+            if (i > 0) key += "/";
+            key += std::string((const char*)data, dlen);
+            free(data);
+        }
+        got.push_back(key);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+
+    std::vector<std::string> expected = {
+        "users/carol", "users/bob", "users/alice"
+    };
+    ASSERT_EQ(got, expected);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 5: MVCC version chains in reverse. banana is overwritten with V2;
+// reverse scan must see V2 (latest visible), not V1.
+TEST_F(DatabaseReverseTest, MVCCVersions) {
+    database_config_t* cfg = database_config_default();
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+    // NOT sync_only — we need MVCC for version chains.
+
+    const char* keys[] = {"apple", "banana", "cherry"};
+    for (const char* k : keys) {
+        database_put_sync_raw(db, k, strlen(k), '\0',
+                              (const uint8_t*)"V1", 2);
+    }
+    // Overwrite banana with V2.
+    database_put_sync_raw(db, "banana", 6, '\0',
+                          (const uint8_t*)"V2", 2);
+
+    database_iterator_t* it = database_scan_start_reverse(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got_keys, got_vals;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        identifier_t* id = path_get(p, 0);
+        size_t klen;
+        uint8_t* kdata = identifier_get_data_copy(id, &klen);
+        got_keys.push_back(std::string((const char*)kdata, klen));
+        size_t vlen;
+        uint8_t* vdata = identifier_get_data_copy(v, &vlen);
+        got_vals.push_back(std::string((const char*)vdata, vlen));
+        free(kdata); free(vdata);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+
+    // Descending: cherry, banana, apple. banana should have V2 (latest visible).
+    ASSERT_EQ(got_keys, (std::vector<std::string>{"cherry", "banana", "apple"}));
+    ASSERT_EQ(got_vals, (std::vector<std::string>{"V1", "V2", "V1"}));
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 5: Subtree prefix_skip in reverse. Keys "docs/alpha", "docs/beta",
+// "docs/gamma" stored via subtree (prefix "docs"); reverse subtree scan
+// strips the prefix and emits gamma, beta, alpha.
+TEST_F(DatabaseReverseTest, SubtreePrefixSkip) {
+    database_config_t* cfg = database_config_default();
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+
+    database_subtree_t* subtree = database_subtree_open(db, "docs", '/');
+    ASSERT_NE(subtree, nullptr);
+
+    auto put = [&](const std::string& k) {
+        int rc = database_subtree_put_sync_raw(subtree, k.c_str(), k.size(), '/',
+                                              (const uint8_t*)"V", 1);
+        ASSERT_EQ(rc, 0);
+    };
+    put("alpha");
+    put("beta");
+    put("gamma");
+
+    database_iterator_t* it = database_subtree_scan_start_reverse(subtree, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        ASSERT_GE(path_length(p), 1u);
+        identifier_t* id = path_get(p, 0);
+        size_t dlen;
+        uint8_t* data = identifier_get_data_copy(id, &dlen);
+        got.push_back(std::string((const char*)data, dlen));
+        free(data);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+
+    std::vector<std::string> expected = {"gamma", "beta", "alpha"};
+    ASSERT_EQ(got, expected);
+
+    database_subtree_close(subtree);
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 5: Multi-level B+tree (200 keys, small node size forces splits).
+// Reverse scan must yield all 200 keys in strictly descending order.
+TEST_F(DatabaseReverseTest, MultiLevelBTree) {
+    database_config_t* cfg = database_config_default();
+    database_config_set_btree_node_size(cfg, 256);  // small node size to force splits
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+
+    char key[32];
+    for (int i = 0; i < 200; i++) {
+        snprintf(key, sizeof(key), "key_%03d", i);
+        database_put_sync_raw(db, key, strlen(key), '\0',
+                              (const uint8_t*)"V", 1);
+    }
+
+    database_iterator_t* it = database_scan_start_reverse(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        identifier_t* id = path_get(p, 0);
+        size_t dlen;
+        uint8_t* data = identifier_get_data_copy(id, &dlen);
+        got.push_back(std::string((const char*)data, dlen));
+        free(data);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+
+    ASSERT_EQ(got.size(), 200u);
+    EXPECT_EQ(got[0], "key_199");
+    EXPECT_EQ(got[199], "key_000");
+    bool descending = true;
+    for (size_t i = 1; i < got.size(); i++) {
+        if (got[i] >= got[i-1]) { descending = false; break; }
+    }
+    EXPECT_TRUE(descending);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 5: has_value + trie_child in reverse. "users" has both a value AND a
+// trie_child subtree (alice, bob). In descending order, the subtree's keys
+// (which sort AFTER the bare "users" key) come first, then "users" itself.
+TEST_F(DatabaseReverseTest, ValueWithTrieChild) {
+    database_config_t* cfg = database_config_default();
+    int err = 0;
+    database_t* db = database_create_with_config((char*)test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+
+    // "users" has a value AND a trie_child (the "alice"/"bob" subtree).
+    database_put_sync_raw(db, "users", 5, '/', (const uint8_t*)"V_users", 7);
+    database_put_sync_raw(db, "users/alice", 11, '/', (const uint8_t*)"V_a", 3);
+    database_put_sync_raw(db, "users/bob", 9, '/', (const uint8_t*)"V_b", 3);
+
+    database_iterator_t* it = database_scan_start_reverse(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr; identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        std::string key;
+        size_t n = path_length(p);
+        for (size_t i = 0; i < n; i++) {
+            identifier_t* id = path_get(p, i);
+            size_t dlen;
+            uint8_t* data = identifier_get_data_copy(id, &dlen);
+            if (i > 0) key += "/";
+            key += std::string((const char*)data, dlen);
+            free(data);
+        }
+        got.push_back(key);
+        path_destroy(p);
+        identifier_destroy(v);
+    }
+    database_scan_end(it);
+
+    // Descending: users/bob, users/alice, users.
+    // ("users" < "users/alice" < "users/bob" lexicographically; reverse gives
+    //  users/bob, users/alice, users.)
+    std::vector<std::string> expected = {"users/bob", "users/alice", "users"};
     ASSERT_EQ(got, expected);
 
     database_destroy(db);

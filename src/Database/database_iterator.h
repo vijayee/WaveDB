@@ -24,6 +24,7 @@ typedef struct {
     size_t entry_index;        // Current entry index in B+tree
     size_t path_index;         // Index in path for this frame
     uint8_t is_bnode_frame;   // 1 = bnode frame (descend B+tree), 0 = trie frame
+    uint8_t value_pending;   // 1 = subtree descended, value not yet emitted (reverse only)
 } iterator_frame_t;
 
 /**

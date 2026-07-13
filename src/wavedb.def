@@ -63,6 +63,7 @@ EXPORTS
     database_subtree_open
     database_subtree_put_raw
     database_subtree_put_sync_raw
+    database_subtree_scan_start_reverse
     database_subtree_scan_sync_raw
     database_subtree_snapshot
     database_write_batch

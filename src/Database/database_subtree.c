@@ -931,6 +931,48 @@ database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
     return iter;
 }
 
+database_iterator_t* database_subtree_scan_start_reverse(database_subtree_t* st,
+                                                          path_t* start_path,
+                                                          path_t* end_path) {
+    if (st == NULL) {
+        if (start_path) path_destroy(start_path);
+        if (end_path) path_destroy(end_path);
+        return NULL;
+    }
+
+    path_t* prefixed_start = NULL;
+    path_t* prefixed_end = NULL;
+
+    if (start_path != NULL) {
+        prefixed_start = database_subtree_prepend_path(st, start_path);
+        path_destroy(start_path);
+        if (prefixed_start == NULL) {
+            if (end_path) path_destroy(end_path);
+            return NULL;
+        }
+    }
+
+    if (end_path != NULL) {
+        prefixed_end = database_subtree_prepend_path(st, end_path);
+        path_destroy(end_path);
+        if (prefixed_end == NULL) {
+            if (prefixed_start) path_destroy(prefixed_start);
+            return NULL;
+        }
+    }
+
+    database_iterator_t* iter = database_scan_start_reverse(st->db, prefixed_start, prefixed_end);
+    /* database_scan_start_reverse copies the paths (the iterator owns its
+       copies); we retain ownership of the prefixed originals and must destroy
+       them here. */
+    if (prefixed_start) path_destroy(prefixed_start);
+    if (prefixed_end) path_destroy(prefixed_end);
+    if (iter != NULL) {
+        iter->prefix_skip = subtree_prefix_component_count(st);
+    }
+    return iter;
+}
+
 database_iterator_t* database_subtree_scan_range(database_subtree_t* st,
                                                   const char* start,
                                                   const char* end) {

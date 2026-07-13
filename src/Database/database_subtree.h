@@ -437,6 +437,26 @@ database_iterator_t* database_subtree_scan_start(database_subtree_t* st,
                                                   path_t* end_path);
 
 /**
+ * Start a REVERSE scan over the subtree using path bounds.
+ *
+ * Prepends the subtree prefix to start_path and end_path, then delegates to
+ * database_scan_start_reverse. The returned iterator walks the underlying
+ * database in descending order but strips the subtree prefix from result
+ * paths (via prefix_skip). Callers receive subtree-relative paths in
+ * descending order. Note: prefix stripping only works for entries with
+ * path_meta (new data); legacy entries without metadata still include the
+ * prefix.
+ *
+ * @param st          Subtree to scan
+ * @param start_path  Optional lower bound (NULL = no lower bound). Ownership transferred.
+ * @param end_path    Optional upper bound (NULL = no upper bound). Ownership transferred.
+ * @return Iterator handle, or NULL on failure
+ */
+database_iterator_t* database_subtree_scan_start_reverse(database_subtree_t* st,
+                                                          path_t* start_path,
+                                                          path_t* end_path);
+
+/**
  * Start a scan over the subtree using string-based path bounds.
  *
  * Prepends the subtree prefix to start and end strings, then
