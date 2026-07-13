@@ -42,6 +42,7 @@ typedef struct graph_result_s graph_result_t;
 typedef struct graphql_layer_config_s graphql_layer_config_t;
 typedef struct graphql_layer_s graphql_layer_t;
 typedef struct graphql_result_s graphql_result_t;
+typedef struct vector_layer_s vector_layer_t;
 
 typedef struct {
     const char* key;
@@ -276,6 +277,95 @@ void graphql_result_destroy(graphql_result_t* r);
 const char* graphql_result_to_json(graphql_result_t* result);
 /* libc free for the JSON buffer returned by graphql_result_to_json. */
 void free(void* ptr);
+""")
+
+# ---- Vector layer ----
+# Sync API only is wired from Python (insert/search/delete/train/rebuild/
+# count/reconfigure). The async variants (promise_t* out-params) are deferred
+# — bridging the C promise callback to a Python future needs a callback trampoline
+# and is out of scope for the spike. The cdef entries for the async functions
+# are declared so the symbols resolve, but VectorLayer does not call them.
+ffi.cdef("""
+typedef enum {
+    VL_INDEX_FLAT = 0,
+    VL_INDEX_IVF  = 1,
+    VL_INDEX_SLSH = 2
+} vl_index_type_t;
+
+typedef enum {
+    VL_DIST_L2     = 0,
+    VL_DIST_COSINE = 1,
+    VL_DIST_DOT    = 2
+} vl_distance_t;
+
+typedef struct {
+    vl_index_type_t index_type;
+    int      dim;
+    char     delimiter;
+    vl_distance_t distance;
+    int      ivf_n_clusters;
+    int      slsh_lsh_tables;
+    int      slsh_hash_bits;
+    float    slsh_bucket_width;
+} vector_layer_format_t;
+
+typedef struct {
+    int      top_k;
+    int      sync_only;
+    int      ivf_nprobe;
+    int      ivf_flat_until;
+    int      slsh_scan_radius;
+} vector_layer_runtime_t;
+
+typedef struct {
+    vector_layer_format_t  format;
+    vector_layer_runtime_t runtime;
+} vector_layer_config_t;
+
+typedef struct {
+    char    *id;
+    float    distance;
+    uint8_t *metadata;
+    size_t   metadata_len;
+} vl_result_t;
+
+typedef struct {
+    vl_result_t *results;
+    int          n_results;
+} vl_search_result_t;
+
+vector_layer_t* vector_layer_create(const char *index_name,
+    database_t *db, database_subtree_t *subtree,
+    vector_layer_config_t *config, int *error_code);
+vector_layer_t* vector_layer_open_separate(const char *db_location,
+    const char *index_name, vector_layer_config_t *config,
+    int *error_code);
+void  vector_layer_destroy(vector_layer_t *vl);
+int   vector_layer_reconfigure(vector_layer_t *vl,
+    vector_layer_runtime_t *runtime);
+void  vector_layer_insert(vector_layer_t *vl, const char *id,
+    const float *vec, const uint8_t *metadata, size_t metadata_len,
+    promise_t *promise);
+int   vector_layer_insert_sync(vector_layer_t *vl, const char *id,
+    const float *vec, const uint8_t *metadata, size_t metadata_len);
+void  vector_layer_insert_batch(vector_layer_t *vl,
+    const char **ids, const float **vecs,
+    const uint8_t **metadatas, const size_t *meta_lens,
+    int n, promise_t *promise);
+int   vector_layer_insert_batch_sync(vector_layer_t *vl,
+    const char **ids, const float **vecs,
+    const uint8_t **metadatas, const size_t *meta_lens, int n);
+void  vector_layer_search(vector_layer_t *vl, const float *query, int k,
+    promise_t *promise);
+int   vector_layer_search_sync(vector_layer_t *vl, const float *query, int k,
+    vl_result_t **results, int *n_results);
+void  vector_layer_delete(vector_layer_t *vl, const char *id,
+    promise_t *promise);
+int   vector_layer_delete_sync(vector_layer_t *vl, const char *id);
+int   vector_layer_train(vector_layer_t *vl);
+int   vector_layer_rebuild(vector_layer_t *vl);
+size_t vector_layer_count(vector_layer_t *vl);
+void   vector_layer_free_results(vl_result_t *results, int n);
 """)
 
 

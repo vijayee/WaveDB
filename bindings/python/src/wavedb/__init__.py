@@ -13,11 +13,21 @@ from .exceptions import (
 from .graph_layer import GraphLayer, GraphQuery, GraphResult
 from .graphql_layer import GraphQLLayer, GraphQLError, GraphQLResult
 from .subtree import Subtree
+from .vector_layer import (
+    Distance,
+    Format,
+    IndexType,
+    Runtime,
+    VectorLayer,
+    VectorResult,
+)
 
 __version__ = "0.1.16"
 
 __all__ = [
+    "Distance",
     "EncryptionError",
+    "Format",
     "GraphLayer",
     "GraphQuery",
     "GraphResult",
@@ -26,11 +36,15 @@ __all__ = [
     "GraphQLLayerError",
     "GraphQLResult",
     "IOError_",
+    "IndexType",
     "InvalidPathError",
     "NotFoundError",
+    "Runtime",
     "Subtree",
     "VacuumConfig",
     "VacuumMode",
+    "VectorLayer",
+    "VectorResult",
     "WaveDB",
     "WaveDBConfig",
     "WaveDBEncryption",
