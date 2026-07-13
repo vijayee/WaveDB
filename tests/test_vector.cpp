@@ -389,6 +389,34 @@ TEST_F(VectorLayerTest, IVFTrainRebuild) {
     vector_layer_destroy(vl);
 }
 
+TEST_F(VectorLayerTest, IVFDelete) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_IVF;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.ivf_n_clusters = 3;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.ivf_nprobe = 2;
+    cfg.runtime.ivf_flat_until = 5;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    float v[4] = {1, 2, 3, 4};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "a", v, NULL, 0), 0);
+    ASSERT_EQ(vector_layer_insert_sync(vl, "b", v, NULL, 0), 0);
+    EXPECT_EQ(vector_layer_count(vl), 2u);
+    ASSERT_EQ(vector_layer_delete_sync(vl, "a"), 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    // Search should now return only "b".
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, v, 10, &results, &n), 0);
+    ASSERT_EQ(n, 1);
+    EXPECT_STREQ(results[0].id, "b");
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
+
 TEST_F(VectorLayerTest, SLSHInsertCount) {
     vector_layer_config_t cfg = {};
     cfg.format.index_type = VL_INDEX_SLSH;

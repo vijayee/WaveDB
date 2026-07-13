@@ -21,6 +21,13 @@ static void seek_to_rightmost(database_iterator_t* iter);
  * Push a frame onto the iterator stack.
  */
 static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t path_index) {
+    // Cycle guard: a trie_child pointing to an ancestor would cause infinite
+    // descent (stack growth → OOM). Cap at 200 — far above any real trie depth
+    // (~10 for 6000 keys). This is a safety net for a trie structure bug; the
+    // scan returns an error and the caller handles it.
+    if (iter->stack_depth >= 200) {
+        return -1;
+    }
     // Grow stack if needed
     if (iter->stack_depth >= iter->stack_size) {
         size_t new_size = iter->stack_size * 2;
@@ -397,7 +404,11 @@ static void seek_to_start_path(database_iterator_t* iter) {
                     goto bail;
                 }
                 bnode_t* cur_bn = sep->child_bnode;
+                int __btree_depth = 0;
                 while (atomic_load(&cur_bn->level) > 1) {
+                    if (++__btree_depth > 100) {
+                        goto bail;
+                    }
                     size_t idx;
                     bnode_entry_t* e = bnode_find(cur_bn, chunk, &idx);
                     size_t k;
@@ -928,7 +939,13 @@ int database_scan_next(database_iterator_t* iter,
     uint8_t chunk_size = iter->db->trie ? iter->db->trie->chunk_size : DEFAULT_CHUNK_SIZE;
 
     // Depth-first traversal
+    size_t __loop_guard = 0;
+    const size_t __loop_cap = 1000000;
     while (iter->stack_depth > 0) {
+        if (++__loop_guard > __loop_cap) {
+            iter->finished = 1;
+            return -1;
+        }
         // Get current frame
         iterator_frame_t* frame = &iter->stack[iter->stack_depth - 1];
 
@@ -957,7 +974,12 @@ int database_scan_next(database_iterator_t* iter,
         int pushed_child = 0;
 
         // Process entries at current level
+        size_t __inner_guard = 0;
         while (frame->entry_index < count) {
+            if (++__inner_guard > 10000) {
+                iter->finished = 1;
+                return -1;
+            }
             bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
             // Don't increment entry_index yet - we may need to push a child
 
@@ -981,6 +1003,12 @@ int database_scan_next(database_iterator_t* iter,
                     if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
                         return -2;
                     }
+                    // push_frame() may realloc iter->stack, invalidating the
+                    // cached `frame` pointer. Re-fetch the parent frame (the
+                    // child now sits at stack_depth-1, parent at stack_depth-2).
+                    // Without this, the inner while's re-read of
+                    // frame->entry_index below is a heap-use-after-free.
+                    frame = &iter->stack[iter->stack_depth - 2];
                 }
 
                 identifier_t* value = NULL;
@@ -1156,6 +1184,72 @@ int database_scan_next(database_iterator_t* iter,
                     *out_value = value;
                     return 0;  // Success
                 }
+                /* has_visible_value == 0: tombstone (deleted version). We must
+                   still check bounds — a tombstone past the upper bound means
+                   ALL subsequent entries are also past the upper bound (scan is
+                   in sorted order), so we must STOP here. Without this check,
+                   the scan traverses every tombstone in sibling keyspaces past
+                   the end bound, pushing trie_child frames without popping
+                   (the stack grows unboundedly → OOM) and wasting O(tombstones)
+                   time per scan. This was the root cause of the IVF recall gate
+                   OOM: centroid scans walked through ~1960 cluster tombstones
+                   after the centroid range, growing the stack to 4500+ frames. */
+                {
+                    path_t* __tpath = path_create();
+                    if (__tpath != NULL) {
+                        size_t __nchunks = 0;
+                        for (size_t i = 0; i < iter->stack_depth; i++) {
+                            iterator_frame_t* f = &iter->stack[i];
+                            if (f->entry_index > 0) {
+                                bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
+                                if (f_btree == NULL) continue;
+                                bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
+                                if (e != NULL && e->key != NULL && !e->is_bnode_child) __nchunks++;
+                            }
+                        }
+                        chunk_t** __chunks = __nchunks ? malloc(__nchunks * sizeof(chunk_t*)) : NULL;
+                        if (__nchunks == 0 || __chunks != NULL) {
+                            size_t __idx = 0;
+                            for (size_t i = 0; i < iter->stack_depth; i++) {
+                                iterator_frame_t* f = &iter->stack[i];
+                                if (f->entry_index > 0) {
+                                    bnode_t* f_btree = f->is_bnode_frame ? f->bnode : (f->node ? f->node->btree : NULL);
+                                    if (f_btree == NULL) continue;
+                                    bnode_entry_t* e = bnode_get(f_btree, f->entry_index - 1);
+                                    if (e != NULL && e->key != NULL && !e->is_bnode_child) __chunks[__idx++] = e->key;
+                                }
+                            }
+                            size_t __num_ids = 0;
+                            const path_subscript_meta_t* __pm = bnode_entry_get_path_meta(entry, &__num_ids);
+                            if (__pm != NULL && __num_ids > 0) {
+                                size_t __co = 0;
+                                size_t __skip = iter->prefix_skip;
+                                if (__skip > __num_ids) __skip = __num_ids;
+                                for (size_t i = 0; i < __skip; i++) __co += __pm[i].chunk_count;
+                                for (size_t i = __skip; i < __num_ids; i++) {
+                                    identifier_t* __id = build_identifier_from_chunks(
+                                        __chunks + __co, __pm[i].chunk_count, chunk_size, __pm[i].byte_length);
+                                    if (__id == NULL) break;
+                                    path_append(__tpath, __id);
+                                    identifier_destroy(__id);
+                                    __co += __pm[i].chunk_count;
+                                }
+                            } else {
+                                identifier_t* __id = build_identifier_from_chunks(__chunks, __nchunks, chunk_size, 0);
+                                if (__id != NULL) { path_append(__tpath, __id); identifier_destroy(__id); }
+                            }
+                            free(__chunks);
+                        }
+                        int __bounds = within_bounds(iter, __tpath);
+                        path_destroy(__tpath);
+                        if (__bounds < 0) {
+                            iter->finished = 1;
+                            return -1;
+                        }
+                        /* __bounds == 0 (before lower bound) or == 1 (within
+                           bounds): skip this tombstone, continue scanning. */
+                    }
+                }
             } else if (entry->is_bnode_child) {
                 // Internal B+tree node — push a bnode frame to descend
                 // through the multi-level B+tree. child_bnode is a bnode_t*,
@@ -1290,6 +1384,10 @@ static void seek_to_rightmost(database_iterator_t* iter) {
                trie_child case (prefix-shared longer keys sort after this
                entry's value) and the has_value=0 + trie_child case. */
             if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) break;
+            // push_frame() may realloc iter->stack; re-fetch the parent frame
+            // (child now at stack_depth-1, parent at stack_depth-2) before
+            // writing value_pending / entry_index.
+            frame = &iter->stack[iter->stack_depth - 2];
             if (entry->has_value) {
                 /* value_pending: keep entry_index at count-1 (do NOT decrement)
                    so scan_prev re-reads this entry on pop-back and emits its
@@ -1316,6 +1414,7 @@ static void seek_to_rightmost(database_iterator_t* iter) {
             }
             if (entry->child_bnode == NULL) break;
             if (push_bnode_frame(iter, entry->child_bnode, iter->stack_depth - 1) < 0) break;
+            frame = &iter->stack[iter->stack_depth - 2];  // re-fetch after realloc
             frame->entry_index--;
             continue;
         }
@@ -1324,6 +1423,7 @@ static void seek_to_rightmost(database_iterator_t* iter) {
         }
         if (entry->child != NULL) {
             if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) break;
+            frame = &iter->stack[iter->stack_depth - 2];  // re-fetch after realloc
             frame->entry_index--;
             continue;
         }

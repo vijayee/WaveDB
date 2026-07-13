@@ -331,8 +331,54 @@ int vector_ivf_search_sync(vector_layer_t *vl, const float *query, int k,
 }
 
 int vector_ivf_delete_sync(vector_layer_t *vl, const char *id) {
-    (void)vl; (void)id;
-    return -1;
+    if (vl == NULL || id == NULL) return -22;
+    if (vl->db == NULL) return -22;
+    int dim = vl->format.dim;
+    char d = vl->format.delimiter;
+    size_t vec_bytes = (size_t)dim * sizeof(float);
+
+    /* 1. Read the vector (READ-ONLY) to find its nearest centroid. */
+    char *vkey = vl_key_vector(vl->index_name, d, id);
+    if (vkey == NULL) return -12;
+    uint8_t *vbuf = NULL; size_t vlen = 0;
+    int rc = vl_get(vl, vkey, strlen(vkey), &vbuf, &vlen);
+    if (rc != 0 || vbuf == NULL || vlen < vec_bytes) {
+        if (vbuf) database_raw_value_free(vbuf);
+        free(vkey);
+        return rc != 0 ? rc : -2;  /* not found */
+    }
+    int cid = ivf_nearest_centroid(vl, (const float*)vbuf);
+    database_raw_value_free(vbuf);
+    free(vkey);
+
+    /* 2. Build the cluster membership key. */
+    char *ckey = vl_key_cluster_member(vl->index_name, d, cid, id);
+    if (ckey == NULL) return -12;
+
+    /* 3. Read count (READ-ONLY). */
+    char *cntkey = vl_key_count(vl->index_name, d);
+    if (cntkey == NULL) { free(ckey); return -12; }
+    uint8_t *cbuf = NULL; size_t clen = 0; size_t cur = 0;
+    rc = vl_get(vl, cntkey, strlen(cntkey), &cbuf, &clen);
+    if (rc == 0 && cbuf && clen >= sizeof(size_t)) memcpy(&cur, cbuf, sizeof(size_t));
+    if (cbuf) database_raw_value_free(cbuf);
+
+    /* 4. Build the batch: delete vector + delete cluster membership + put count-1 (floor 0). */
+    vkey = vl_key_vector(vl->index_name, d, id);
+    if (vkey == NULL) { free(ckey); free(cntkey); return -12; }
+    size_t next = cur > 0 ? cur - 1 : 0;
+
+    raw_op_t ops[3];
+    ops[0].key = vkey; ops[0].key_len = strlen(vkey);
+    ops[0].value = NULL; ops[0].value_len = 0; ops[0].type = 1;  /* delete vector */
+    ops[1].key = ckey; ops[1].key_len = strlen(ckey);
+    ops[1].value = NULL; ops[1].value_len = 0; ops[1].type = 1;  /* delete cluster membership */
+    ops[2].key = cntkey; ops[2].key_len = strlen(cntkey);
+    ops[2].value = (const uint8_t*)&next; ops[2].value_len = sizeof(size_t); ops[2].type = 0;  /* put count */
+
+    rc = vl_batch(vl, ops, 3);
+    free(vkey); free(ckey); free(cntkey);
+    return rc;
 }
 
 int vector_ivf_train(vector_layer_t *vl) {
