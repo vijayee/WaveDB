@@ -595,11 +595,19 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
         op_i++;
     }
 
-    /* 6. Apply the batch atomically. */
+    /* 6. Apply the ops in chunks (same as IVF rebuild: the database batch
+       has a max_size of 10000 ops, so a single batch can't hold the ~2*N
+       ops a full rebuild produces at N > 5000). Rebuild is idempotent —
+       deletes then puts in order — so partial application is safe to resume. */
+    rc = 0;
     if (op_i > 0) {
-        rc = vl_batch(vl, ops, op_i);
-    } else {
-        rc = 0;
+        const size_t CHUNK = 8000;
+        for (size_t off = 0; off < op_i; off += CHUNK) {
+            size_t n = op_i - off;
+            if (n > CHUNK) n = CHUNK;
+            int crc = vl_batch(vl, ops + off, n);
+            if (crc != 0) { rc = crc; break; }
+        }
     }
 
     /* 7. Cleanup. */

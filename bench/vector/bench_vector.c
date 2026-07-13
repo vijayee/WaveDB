@@ -100,9 +100,9 @@ int main(int argc, char **argv) {
         cfg.runtime.ivf_flat_until = argc > 6 ? atoi(argv[6]) : 500;
     } else if (strcmp(itype, "slsh") == 0) {
         cfg.format.index_type = VL_INDEX_SLSH;
-        cfg.format.slsh_lsh_tables = 4;
+        cfg.format.slsh_lsh_tables = argc > 8 ? atoi(argv[8]) : 4;
         cfg.format.slsh_hash_bits = 16;
-        cfg.format.slsh_bucket_width = 2.0f;
+        cfg.format.slsh_bucket_width = argc > 9 ? (float)atof(argv[9]) : 2.0f;
         cfg.runtime.slsh_scan_radius = argc > 5 ? atoi(argv[5]) : 50;
         cfg.runtime.slsh_bidirectional = argc > 7 ? atoi(argv[7]) : 1;
     } else {

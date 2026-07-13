@@ -35,11 +35,11 @@ typedef struct {
     char     delimiter;           /* path-segment separator, default '/' */
     vl_distance_t distance;       /* distance metric for assignment + rerank */
     /* IVF format-defining */
-    int      ivf_n_clusters;
+    int      ivf_n_clusters;      /* default 50 (set in vl_init if <= 0) */
     /* SLSH format-defining */
-    int      slsh_lsh_tables;     /* compound hash width (L) */
-    int      slsh_hash_bits;      /* bits per table */
-    float    slsh_bucket_width;   /* LSH projection width W */
+    int      slsh_lsh_tables;     /* compound hash width (L); default 4 */
+    int      slsh_hash_bits;      /* bits per table; default 16 */
+    float    slsh_bucket_width;   /* LSH projection width W; default 2.0 */
 } vector_layer_format_t;
 
 /* Runtime tier — freely mutable via vector_layer_reconfigure. */
@@ -47,10 +47,12 @@ typedef struct {
     int      top_k;               /* default result count */
     int      sync_only;           /* 1 = single-threaded, disable MVCC */
     /* IVF runtime */
-    int      ivf_nprobe;
-    int      ivf_flat_until;      /* exact FLAT below this many vectors */
+    int      ivf_nprobe;          /* default 8 (clears 0.90 recall@10 on 10k/30k x 384) */
+    int      ivf_flat_until;      /* exact FLAT below this many vectors; default 1000 */
     /* SLSH runtime */
-    int      slsh_scan_radius;    /* forward+backward scan depth each direction */
+    int      slsh_scan_radius;    /* forward+backward scan depth each direction; default 200
+                                     (clears 0.90 recall@10 on 10k x 384/768 clustered;
+                                     30k+ needs ~1000 — scale with dataset size) */
     int      slsh_bidirectional;  /* 1 = scan both directions (default);
                                      0 = right-only (lower recall, cheaper) */
 } vector_layer_runtime_t;

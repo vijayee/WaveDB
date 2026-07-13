@@ -19,6 +19,22 @@ static int vl_init(vector_layer_t *vl, database_t *db, database_subtree_t *subtr
     if (config->format.dim <= 0) return -22;
     if (config->format.delimiter == 0) config->format.delimiter = '/';
     if (config->runtime.top_k <= 0) config->runtime.top_k = 10;
+    /* IVF tuned defaults (spike 2026-07-13: nprobe=8 clears 0.90 on
+       10k/30k x 384 clustered; flat_until=1000 is the cold-start threshold
+       below which exact FLAT is cheaper than IVF's centroid scan). */
+    if (config->format.ivf_n_clusters <= 0) config->format.ivf_n_clusters = 50;
+    if (config->runtime.ivf_nprobe <= 0) config->runtime.ivf_nprobe = 8;
+    if (config->runtime.ivf_flat_until <= 0) config->runtime.ivf_flat_until = 1000;
+    /* SLSH tuned defaults (spike 2026-07-13: scan_radius=200 clears 0.90
+       recall@10 on 10k x 384/768 clustered; 30k+ needs radius=1000 — document
+       the scaling. bucket_width=2.0 gives the best recall/latency tradeoff;
+       wider buckets (10.0) hurt latency without improving recall.
+       lsh_tables=4, hash_bits=16 match the spec defaults). */
+    if (config->format.slsh_lsh_tables <= 0) config->format.slsh_lsh_tables = 4;
+    if (config->format.slsh_hash_bits <= 0) config->format.slsh_hash_bits = 16;
+    if (config->format.slsh_bucket_width <= 0) config->format.slsh_bucket_width = 2.0f;
+    if (config->runtime.slsh_scan_radius <= 0) config->runtime.slsh_scan_radius = 200;
+    if (config->runtime.slsh_bidirectional < 0) config->runtime.slsh_bidirectional = 1;
     vl->format = config->format;
     vl->runtime = config->runtime;
     vl->index_name = strdup(index_name);

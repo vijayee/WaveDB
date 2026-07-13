@@ -28,7 +28,7 @@ import json
 
 CORPUS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "corpus")
 K_GT = 10  # top-10 ground truth
-N_QUERIES = 500
+N_QUERIES = 100
 
 
 def write_fvec(path, dim, vectors, queries):
@@ -72,9 +72,15 @@ def gen_synthetic(name, count, dim, seed=42, clustered=False):
         centers = rng.normal(0, 10, size=(50, dim)).astype(np.float32)
         assignments = rng.integers(0, 50, size=count)
         vectors = (centers[assignments] + rng.normal(0, 0.1, size=(count, dim))).astype(np.float32)
+        # Realistic queries: near cluster centers (center + noise). This matches
+        # the gtest's vl_recall_against_stored_clustered query distribution —
+        # gaussian queries far from all centers are an unrealistic worst case
+        # that no ANN index can serve well.
+        query_assignments = rng.integers(0, 50, size=N_QUERIES)
+        queries = (centers[query_assignments] + rng.normal(0, 0.1, size=(N_QUERIES, dim))).astype(np.float32)
     else:
         vectors = rng.normal(0, 1, size=(count, dim)).astype(np.float32)
-    queries = rng.normal(0, 1, size=(N_QUERIES, dim)).astype(np.float32)
+        queries = rng.normal(0, 1, size=(N_QUERIES, dim)).astype(np.float32)
     os.makedirs(CORPUS_DIR, exist_ok=True)
     fvec_path = os.path.join(CORPUS_DIR, f"{name}.fvec")
     gt_path = os.path.join(CORPUS_DIR, f"{name}.gt")

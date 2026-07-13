@@ -362,15 +362,68 @@ int vector_ivf_train(vector_layer_t *vl) {
     if (rc != 0) return rc;
     if (n_vectors == 0) { database_raw_results_free(vectors, n_vectors); return 0; }
 
-    /* 2. Initialize K centroids from the first K vectors (first-K init for
-       reproducibility — the spike's test uses well-separated clusters so
-       first-K converges correctly). */
+    /* 2. Initialize K centroids via k-means++ (D2-weighted sampling). This
+       guarantees diverse initial centroids spread across the dataset, unlike
+       first-K or uniform-random sampling which suffer from the coupon-collector
+       problem: with 50 clusters and 50 samples, only ~32 clusters are
+       represented, and k-means never recovers the missing 18 in high-dim.
+       The spike found first-K/random give recall@10 ~0.02-0.03 at nprobe=8 on
+       10k x 384 clustered data; k-means++ fixes it. Uses an LCG seeded by
+       n_vectors for reproducibility across runs with the same dataset. */
     float *centroids = (float*)calloc((size_t)K * dim, sizeof(float));
     if (centroids == NULL) { database_raw_results_free(vectors, n_vectors); return -12; }
-    for (int c = 0; c < K && c < (int)n_vectors; c++) {
-        if (vectors[c].value_len >= vec_bytes) {
-            memcpy(centroids + c * dim, vectors[c].value, vec_bytes);
+    {
+        uint64_t rng_state = (uint64_t)n_vectors * 2654435761u + 12345u;
+        /* D2[i] = squared distance from vector i to the nearest chosen centroid. */
+        float *d2 = (float*)malloc(n_vectors * sizeof(float));
+        if (d2 == NULL) {
+            free(centroids); database_raw_results_free(vectors, n_vectors); return -12;
         }
+        /* First centroid: uniform random. */
+        rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
+        size_t first = (size_t)((rng_state >> 33) % (uint64_t)n_vectors);
+        if (vectors[first].value_len >= vec_bytes) {
+            memcpy(centroids + 0 * dim, vectors[first].value, vec_bytes);
+        }
+        /* Compute initial D2 to the first centroid. */
+        double d2_sum = 0.0;
+        for (size_t i = 0; i < n_vectors; i++) {
+            d2[i] = 1e30f;
+            if (vectors[i].value_len >= vec_bytes) {
+                float dd = vl_distance((const float*)vectors[i].value,
+                                       centroids + 0 * dim, dim, vl->format.distance);
+                d2[i] = dd * dd;
+                d2_sum += (double)d2[i];
+            }
+        }
+        /* Pick remaining K-1 centroids via D2-weighted sampling. */
+        for (int c = 1; c < K && c < (int)n_vectors; c++) {
+            rng_state = rng_state * 6364136223846793005ULL + 1442695040888963407ULL;
+            /* rng_state >> 11 yields a 53-bit value in [0, 2^53-1]. Normalize
+               to [0,1) then scale by d2_sum for D2-weighted sampling. */
+            double r = ((double)(rng_state >> 11) / (double)0x1FFFFFFFFFFFFFLL) * d2_sum;
+            double cum = 0.0;
+            size_t pick = 0;
+            for (size_t i = 0; i < n_vectors; i++) {
+                cum += (double)d2[i];
+                if (cum >= r) { pick = i; break; }
+            }
+            if (vectors[pick].value_len >= vec_bytes) {
+                memcpy(centroids + c * dim, vectors[pick].value, vec_bytes);
+            }
+            /* Update D2 with the new centroid. */
+            d2_sum = 0.0;
+            for (size_t i = 0; i < n_vectors; i++) {
+                if (vectors[i].value_len >= vec_bytes) {
+                    float dd = vl_distance((const float*)vectors[i].value,
+                                           centroids + c * dim, dim, vl->format.distance);
+                    float dd2 = dd * dd;
+                    if (dd2 < d2[i]) d2[i] = dd2;
+                    d2_sum += (double)d2[i];
+                }
+            }
+        }
+        free(d2);
     }
 
     /* 3. Iterate k-means: assign each vector to nearest centroid, recompute. */
@@ -671,12 +724,22 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
         op_i++;
     }
 
-    /* 6. Apply the batch atomically: all deletes + all puts in ONE call.
-       MVCC: a fresh scan after this commit sees the new memberships. */
+    /* 6. Apply the ops in chunks. The database batch has a max_size of 10000
+       ops (BATCH_DEFAULT_MAX_SIZE), so a single batch can't hold the ~2*N
+       ops a full rebuild produces at N > 5000. Chunk into batches of 8000
+       (safe margin). Rebuild is idempotent — deletes then puts in order —
+       so partial application is safe to resume via a subsequent rebuild.
+       MVCC: each chunk commits independently; a fresh scan after all chunks
+       sees the new memberships. */
+    rc = 0;
     if (op_i > 0) {
-        rc = vl_batch(vl, ops, op_i);
-    } else {
-        rc = 0;
+        const size_t CHUNK = 8000;
+        for (size_t off = 0; off < op_i; off += CHUNK) {
+            size_t n = op_i - off;
+            if (n > CHUNK) n = CHUNK;
+            int crc = vl_batch(vl, ops + off, n);
+            if (crc != 0) { rc = crc; break; }
+        }
     }
 
     /* 7. Cleanup. Free new membership keys, ops array, centroid cache, and
