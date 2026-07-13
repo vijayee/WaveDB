@@ -445,7 +445,12 @@ int vector_ivf_train(vector_layer_t *vl) {
     free(assignments);
     free(centroids);
     database_raw_results_free(vectors, n_vectors);
-    return 0;
+
+    /* 5. Rebuild cluster memberships so the index is immediately usable for
+       search. Without this, vectors inserted pre-train remain in their
+       initial (default cid=0) bucket and search probes the wrong clusters.
+       Rebuild is idempotent — a subsequent explicit rebuild is a no-op. */
+    return vector_ivf_rebuild(vl);
 }
 
 int vector_ivf_rebuild(vector_layer_t *vl) {

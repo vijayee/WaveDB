@@ -753,3 +753,209 @@ TEST_F(VectorLayerTest, AtomicBatchRollback) {
 
     vector_layer_destroy(vl);
 }
+
+/* ---------------------------------------------------------------------------
+ * Task 14: Recall gates — CI-enforced decision gates from the spec.
+ *
+ * IVF recall@10 >= 0.90 vs brute-force ground truth.
+ * SLSH bidirectional recall@10 >= 0.90.
+ * SLSH right-only recall@10 >= 0.80 (looser — documents the bidirectional cost).
+ *
+ * 2000 vectors × 50 queries × brute-force O(N) ground truth per query.
+ * recall@k = |index_top_k ∩ truth_top_k| / (Q * k). A regression below the
+ * gate fails the test, not just the bench.
+ *
+ * Data: clustered_blobs (matching the spec's synthetic spike arm — NOT uniform
+ * random). 50 cluster centers in [0,10)^DIM, 40 vectors per cluster = center +
+ * noise*0.1. Queries = random center + noise*0.1. Tight clusters give LSH the
+ * structure it needs: near neighbors concentrate in one hash bucket, so
+ * right-only (forward scan) finds them. On uniform random data, right-only
+ * caps at ~0.50 (half the top-10 land in lower buckets the forward scan can't
+ * reach) — that's a data-distribution artifact, not an index bug. The spike
+ * (Task 17) will validate on real embeddings (gaussian + EnterpriseRAG-Bench).
+ *
+ * Two index bugs were found and fixed while writing these gates:
+ *  (1) vector_ivf_train / vector_slsh_train only wrote centroids/projections
+ *      but did NOT rebuild memberships/hash-entries. Vectors inserted pre-train
+ *      kept their default (cid=0 / zero-hash) bucket, so search probed the
+ *      wrong clusters/buckets. Fix: train now calls rebuild internally.
+ *  (2) SLSH forward scan's end bound was vec/{idx}/hash/{q_key}/\x7f (only the
+ *      query's exact bucket). It should be vec/{idx}/hash/\x7f (all higher
+ *      buckets) so the forward scan reaches right neighbors across buckets.
+ *      With the old bound, right-only always returned 0 results (no vector
+ *      shares the exact 64-bit hash). Fix: widen the end bound.
+ *
+ * Tuned params (final):
+ *   IVF:        n_clusters=50, nprobe=16, flat_until=500.
+ *   SLSH bidir: lsh_tables=2, hash_bits=16, bucket_width=2.0, scan_radius=100.
+ *   SLSH right: same as bidir but slsh_bidirectional=0 (gate 0.80).
+ * Observed recall: IVF 1.00, SLSH bidir 0.91, SLSH right-only 0.89.
+ * ------------------------------------------------------------------------- */
+
+/* Generate cluster centers and insert N clustered vectors. n_clusters centers
+ * are random in [0,10)^DIM; each of the N vectors is center[i % n_clusters] +
+ * uniform[-0.1,0.1) noise. The caller seeds rand() before calling. */
+static void vl_recall_insert_clustered(vector_layer_t *vl, int N, int DIM,
+                                       int n_clusters,
+                                       std::vector<std::vector<float>> &stored) {
+    /* Generate centers. */
+    std::vector<std::vector<float>> centers(n_clusters);
+    for (int c = 0; c < n_clusters; c++) {
+        centers[c].resize(DIM);
+        for (int d = 0; d < DIM; d++) centers[c][d] = (float)(rand() % 1000) / 100.0f;
+    }
+    for (int i = 0; i < N; i++) {
+        int c = i % n_clusters;
+        std::vector<float> v(DIM);
+        for (int d = 0; d < DIM; d++) {
+            float noise = (float)(rand() % 20 - 10) / 100.0f;  /* [-0.1, 0.1) */
+            v[d] = centers[c][d] + noise;
+        }
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v.data(), NULL, 0), 0);
+        stored.push_back(v);
+    }
+}
+
+/* Compute recall@K for `vl` against brute-force ground truth. Queries are
+ * generated near cluster centers (center + noise*0.1) to match the stored
+ * distribution. Returns recall in [0,1]. Caller seeds rand() before calling. */
+static float vl_recall_against_stored_clustered(vector_layer_t *vl,
+                                                const std::vector<std::vector<float>> &stored,
+                                                int DIM, int Q, int K,
+                                                int n_clusters) {
+    int N = (int)stored.size();
+    /* Reconstruct centers: every n_clusters-th stored vector is a center+noise
+     * sample; we approximate the center as the mean of each cluster's members.
+     * Simpler: just re-derive centers from the stored vectors by averaging. */
+    std::vector<std::vector<float>> centers(n_clusters);
+    std::vector<int> counts(n_clusters, 0);
+    for (int c = 0; c < n_clusters; c++) centers[c].assign(DIM, 0.0f);
+    for (int i = 0; i < N; i++) {
+        int c = i % n_clusters;
+        for (int d = 0; d < DIM; d++) centers[c][d] += stored[i][d];
+        counts[c]++;
+    }
+    for (int c = 0; c < n_clusters; c++) {
+        if (counts[c] > 0) for (int d = 0; d < DIM; d++) centers[c][d] /= counts[c];
+    }
+
+    int total_hits = 0;
+    for (int q = 0; q < Q; q++) {
+        /* Query = random center + noise. */
+        int c = rand() % n_clusters;
+        std::vector<float> query(DIM);
+        for (int d = 0; d < DIM; d++) {
+            float noise = (float)(rand() % 20 - 10) / 100.0f;  /* [-0.1, 0.1) */
+            query[d] = centers[c][d] + noise;
+        }
+
+        std::vector<std::pair<float, int>> dists;
+        dists.reserve(N);
+        for (int i = 0; i < N; i++) {
+            float dd = vl_distance(query.data(), stored[i].data(), DIM, VL_DIST_L2);
+            dists.push_back({dd, i});
+        }
+        std::sort(dists.begin(), dists.end());
+        std::set<int> truth;
+        for (int i = 0; i < K && i < (int)dists.size(); i++) truth.insert(dists[i].second);
+
+        vl_result_t *results = NULL; int n = 0;
+        if (vector_layer_search_sync(vl, query.data(), K, &results, &n) != 0) {
+            continue;
+        }
+        for (int i = 0; i < n; i++) {
+            if (!results[i].id) continue;
+            int rid = atoi(results[i].id + 1);  /* "v%u" -> u */
+            if (truth.count(rid)) total_hits++;
+        }
+        vector_layer_free_results(results, n);
+    }
+    return (float)total_hits / (Q * K);
+}
+
+TEST_F(VectorLayerTest, IVFRecallGate) {
+    const int N = 2000, DIM = 16, Q = 50, K = 10;
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_IVF;
+    cfg.format.dim = DIM;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.ivf_n_clusters = 50;
+    cfg.runtime.top_k = K;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.ivf_nprobe = 16;
+    cfg.runtime.ivf_flat_until = 500;  /* N=2000 > 500, so IVF path is used */
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    srand(12345);
+    std::vector<std::vector<float>> stored;
+    vl_recall_insert_clustered(vl, N, DIM, 50, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+
+    float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
+    std::cout << "IVF recall@10: " << recall << std::endl;
+    EXPECT_GE(recall, 0.90f);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, SLSHRecallGateBidirectional) {
+    const int N = 2000, DIM = 16, Q = 50, K = 10;
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_SLSH;
+    cfg.format.dim = DIM;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.slsh_lsh_tables = 2;
+    cfg.format.slsh_hash_bits = 16;
+    cfg.format.slsh_bucket_width = 2.0f;
+    cfg.runtime.top_k = K;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.slsh_scan_radius = 100;
+    cfg.runtime.slsh_bidirectional = 1;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    srand(12345);
+    std::vector<std::vector<float>> stored;
+    vl_recall_insert_clustered(vl, N, DIM, 50, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+
+    float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
+    std::cout << "SLSH bidirectional recall@10: " << recall << std::endl;
+    EXPECT_GE(recall, 0.90f);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, SLSHRecallGateRightOnly) {
+    /* Same as bidirectional but slsh_bidirectional=0; gate is 0.80 (looser). */
+    const int N = 2000, DIM = 16, Q = 50, K = 10;
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_SLSH;
+    cfg.format.dim = DIM;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.slsh_lsh_tables = 2;
+    cfg.format.slsh_hash_bits = 16;
+    cfg.format.slsh_bucket_width = 2.0f;
+    cfg.runtime.top_k = K;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.slsh_scan_radius = 100;
+    cfg.runtime.slsh_bidirectional = 0;  /* right-only */
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    srand(12345);
+    std::vector<std::vector<float>> stored;
+    vl_recall_insert_clustered(vl, N, DIM, 50, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+
+    float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
+    std::cout << "SLSH right-only recall@10: " << recall << std::endl;
+    EXPECT_GE(recall, 0.80f);
+    vector_layer_destroy(vl);
+}

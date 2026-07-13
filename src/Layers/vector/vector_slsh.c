@@ -239,12 +239,20 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
     if (fwd_prefix_str == NULL) return -12;
     size_t fwd_prefix_len = strlen(fwd_prefix_str);
 
-    /* Forward end = prefix + "\x7f" — "everything under prefix" upper bound. */
-    char *fwd_end_str = (char*)malloc(fwd_prefix_len + 2);
+    /* Forward end = "vec{d}{idx}{d}hash{d}\x7f" — upper bound of ALL hash
+       buckets, so the forward scan reaches right neighbors in higher buckets
+       (not just entries within the query's exact bucket). With per-vector
+       unique hashes (typical for hash_bits=16, L=4 → 64-bit keys), the
+       query's own bucket is usually empty; right neighbors live in the next
+       buckets lexicographically. */
+    size_t idx_len = strlen(vl->index_name);
+    size_t hash_pfx_len = 3 + 1 + idx_len + 1 + 4 + 1;  /* "vec"+d+idx+d+"hash"+d */
+    char *fwd_end_str = (char*)malloc(hash_pfx_len + 2);
     if (fwd_end_str == NULL) { free(fwd_prefix_str); return -12; }
-    memcpy(fwd_end_str, fwd_prefix_str, fwd_prefix_len);
-    fwd_end_str[fwd_prefix_len] = '\x7f';
-    fwd_end_str[fwd_prefix_len + 1] = '\0';
+    snprintf(fwd_end_str, hash_pfx_len + 1, "vec%c%s%chash%c",
+             d, vl->index_name, d, d);
+    fwd_end_str[hash_pfx_len] = '\x7f';
+    fwd_end_str[hash_pfx_len + 1] = '\0';
 
     /* Build path_t objects for the scan bounds. database_scan_start copies
        the paths internally, so we can destroy them after the call. */
@@ -432,7 +440,12 @@ int vector_slsh_train(vector_layer_t *vl) {
         free(proj); free(pkey);
         if (rc != 0) return rc;
     }
-    return 0;
+
+    /* Rebuild hash entries so the index is immediately usable for search.
+       Without this, vectors inserted pre-train keep their zero LSH key (all
+       in one bucket) and search's bucket lookup misses them. Rebuild is
+       idempotent — a subsequent explicit rebuild is a no-op. */
+    return vector_slsh_rebuild(vl);
 }
 
 /* ---- Rebuild ---- */
