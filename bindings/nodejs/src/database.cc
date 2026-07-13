@@ -52,6 +52,7 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("flush", &WaveDB::Flush),
     InstanceMethod("openSubtree", &WaveDB::OpenSubtree),
     InstanceMethod("deleteSubtree", &WaveDB::DeleteSubtree),
+    InstanceMethod("_getDbPtr", &WaveDB::GetDbPtr),
   });
 
   constructor_ = Napi::Persistent(func);
@@ -1559,6 +1560,17 @@ Napi::Value WaveDB::DeleteSubtree(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
+}
+
+// --- Cross-addon database pointer accessor (for VectorLayer embedded mode) ---
+
+Napi::Value WaveDB::GetDbPtr(const Napi::CallbackInfo& info) {
+  if (!db_) {
+    Napi::Error::New(info.Env(), "DATABASE_CLOSED: Database is closed")
+        .ThrowAsJavaScriptException();
+    return info.Env().Null();
+  }
+  return Napi::BigInt::New(info.Env(), reinterpret_cast<uint64_t>(db_));
 }
 
 // --- Lifecycle ---

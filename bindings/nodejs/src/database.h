@@ -55,6 +55,9 @@ private:
   Napi::Value OpenSubtree(const Napi::CallbackInfo& info);
   Napi::Value DeleteSubtree(const Napi::CallbackInfo& info);
 
+  // Cross-addon pointer accessor (for VectorLayer embedded mode)
+  Napi::Value GetDbPtr(const Napi::CallbackInfo& info);
+
   // Helper: create an AsyncOpContext with a JS Promise and optional callback
   AsyncOpContext* CreateOpContext(Napi::Env env, AsyncOpType type, const Napi::CallbackInfo& info, int callbackArgIndex);
 

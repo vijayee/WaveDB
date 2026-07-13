@@ -754,6 +754,21 @@ class WaveDB {
     if (typeof prefix !== 'string' || !prefix) throw new TypeError('Prefix is required');
     this._db.deleteSubtree(prefix, delimiter);
   }
+
+  /**
+   * Internal: expose the underlying database_t* pointer as a BigInt.
+   *
+   * Used by the VectorLayer embedded-mode wrapper to share the same
+   * underlying database_t with the C vector layer. Not part of the
+   * public API — do not call from application code.
+   *
+   * @returns {bigint} Raw database_t* pointer value
+   * @throws {WaveDBError} If database is closed
+   */
+  _getDbPtr() {
+    if (this._closed) throw new IOError('Database is closed');
+    return this._db._getDbPtr();
+  }
 }
 
 module.exports = {

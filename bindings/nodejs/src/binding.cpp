@@ -17,6 +17,7 @@
 // memory_pool_free (the pointer is in the other .node's BSS, not recognized
 // as a pool pointer, so free() is called on a BSS address → crash).
 Napi::Object InitGraph(Napi::Env env, Napi::Object exports);
+Napi::Object InitVectorLayer(Napi::Env env, Napi::Object exports);
 Napi::Object InitModule(Napi::Env env, Napi::Object exports);
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
@@ -24,6 +25,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   Iterator::Init(env, exports);
   Subtree::Init(env, exports);
   InitGraph(env, exports);
+  InitVectorLayer(env, exports);
   InitModule(env, exports);
   return exports;
 }

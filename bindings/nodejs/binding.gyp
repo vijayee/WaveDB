@@ -59,6 +59,12 @@
       "c_src/src/Layers/graphql/graphql_result.c",
       "c_src/src/Layers/graphql/graphql_schema.c",
       "c_src/src/Layers/graphql/graphql_types.c",
+      "c_src/src/Layers/vector/vector_layer.c",
+      "c_src/src/Layers/vector/vector_distance.c",
+      "c_src/src/Layers/vector/vector_flat.c",
+      "c_src/src/Layers/vector/vector_internal.c",
+      "c_src/src/Layers/vector/vector_ivf.c",
+      "c_src/src/Layers/vector/vector_slsh.c",
       "c_src/src/RefCounter/refcounter.c",
       "c_src/src/Storage/bnode_cache.c",
       "c_src/src/Storage/encryption.c",
@@ -127,7 +133,8 @@
       "src/graphql_result_js.cc",
       "src/graph_result_js.cc",
       "src/graph_layer.cc",
-      "src/graphql_layer.cc"
+      "src/graphql_layer.cc",
+      "src/vector_layer.cc"
     ],
     "include_dirs": [
       "<!(node -p \"require('node-addon-api').include_dir.split(require('path').sep).join('/')\")",
