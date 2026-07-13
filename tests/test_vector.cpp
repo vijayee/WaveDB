@@ -22,6 +22,7 @@
 
 extern "C" {
 #include "../src/Layers/vector/vector_layer.h"
+#include "../src/Layers/vector/vector_internal.h"
 #include "../src/Database/database.h"
 #include "../src/Database/database_config.h"
 }
@@ -104,4 +105,37 @@ TEST_F(VectorLayerTest, RejectsInvalidDim) {
     vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
     EXPECT_EQ(vl, nullptr);
     EXPECT_LT(err, 0);
+}
+
+TEST_F(VectorLayerTest, KeyEncoding) {
+    char *k = vl_key_vector("test", '/', "alice");
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/vector/alice");
+    free(k);
+
+    k = vl_key_count("test", '/');
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/count");
+    free(k);
+
+    k = vl_key_centroid("test", '/', 42);
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/centroid/0000000042");
+    free(k);
+
+    k = vl_key_cluster_member("test", '/', 42, "alice");
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/cluster/0000000042/alice");
+    free(k);
+
+    uint8_t lsh[] = {0xab, 0xcd};
+    k = vl_key_hash("test", '/', lsh, 2, "alice");
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/hash/abcd/alice");
+    free(k);
+
+    k = vl_key_proj("test", '/', 1);
+    ASSERT_NE(k, nullptr);
+    EXPECT_STREQ(k, "vec/test/proj/0000000001");
+    free(k);
 }

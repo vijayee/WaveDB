@@ -14,21 +14,53 @@ char* vl_key_count(const char *idx, char d) {
     return buf;
 }
 
-/* Stubs — Task 2 implements these. */
 char* vl_key_vector(const char *idx, char d, const char *id) {
-    (void)idx; (void)d; (void)id; return NULL;
+    if (idx == NULL || id == NULL) return NULL;
+    size_t cap = 4 + strlen(idx) + 8 + strlen(id) + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    snprintf(buf, cap, "vec%c%s%cvector%c%s", d, idx, d, d, id);
+    return buf;
 }
+
 char* vl_key_centroid(const char *idx, char d, int cid) {
-    (void)idx; (void)d; (void)cid; return NULL;
+    if (idx == NULL) return NULL;
+    size_t cap = 4 + strlen(idx) + 10 + 11 + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    snprintf(buf, cap, "vec%c%s%ccentroid%c%010d", d, idx, d, d, cid);
+    return buf;
 }
+
 char* vl_key_cluster_member(const char *idx, char d, int cid, const char *id) {
-    (void)idx; (void)d; (void)cid; (void)id; return NULL;
+    if (idx == NULL || id == NULL) return NULL;
+    size_t cap = 4 + strlen(idx) + 9 + 11 + 1 + strlen(id) + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    snprintf(buf, cap, "vec%c%s%ccluster%c%010d%c%s", d, idx, d, d, cid, d, id);
+    return buf;
 }
+
 char* vl_key_hash(const char *idx, char d, const uint8_t *lsh, size_t llen, const char *id) {
-    (void)idx; (void)d; (void)lsh; (void)llen; (void)id; return NULL;
+    if (idx == NULL || lsh == NULL || id == NULL) return NULL;
+    size_t cap = 4 + strlen(idx) + 6 + 2*llen + 1 + strlen(id) + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    int off = snprintf(buf, cap, "vec%c%s%chash%c", d, idx, d, d);
+    for (size_t i = 0; i < llen && off < (int)cap; i++) {
+        off += snprintf(buf + off, cap - off, "%02x", lsh[i]);
+    }
+    snprintf(buf + off, cap - off, "%c%s", d, id);
+    return buf;
 }
+
 char* vl_key_proj(const char *idx, char d, int t) {
-    (void)idx; (void)d; (void)t; return NULL;
+    if (idx == NULL) return NULL;
+    size_t cap = 4 + strlen(idx) + 6 + 11 + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    snprintf(buf, cap, "vec%c%s%cproj%c%010d", d, idx, d, d, t);
+    return buf;
 }
 
 vl_result_t* vl_results_alloc(int n) {
