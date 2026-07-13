@@ -80,11 +80,21 @@ expected worst case (neighbors spread across clusters).
 | clu_30000_384 | 1000 | 0.975 | 45 | 519 | 869 | 1780 | **PASS** (>=0.90) |
 
 SLSH bidir clears 0.90 at radius=200 on 10k x 384/768. At 30k, radius=200
-covers only 1.3% of the dataset and fails; radius=1000 clears. Scan radius
-must scale with dataset size: ~200 for 10k, ~1000 for 30k. bucket_width=2.0
-gives better latency than 10.0 with equal recall.
+covers only 1.3% of the dataset and fails; radius=1000 clears. **Scan radius
+is now adaptive** (Task 17b): `actual = max(slsh_scan_radius, count/30)`, so
+30k auto-scales to ~1000 without reconfiguration. bucket_width=2.0 gives
+better latency than 10.0 with equal recall.
 
-### SLSH right-only (bidirectional=0)
+### SLSH right-only — REMOVED (Task 17b)
+
+The `slsh_bidirectional` flag and the right-only code path were removed. The
+spike showed right-only never cleared the 0.80 gate at any tested radius
+(~0.50 recall — see the table below for historical reference). Right-only was
+a fallback from before the engine supported backward scan (Plan 1); now that
+backward iteration is built and working, right-only is obsolete. SLSH always
+scans bidirectionally.
+
+Historical right-only results (for reference; no longer reachable):
 
 | Corpus | scan_radius | recall@10 | p50 (ms) | p99 (ms) | insert ops/s | storage/vec (bytes) | Gate |
 |---|---|---|---|---|---|---|---|
@@ -92,11 +102,6 @@ gives better latency than 10.0 with equal recall.
 | clu_10000_384 | 1000 | 0.502 | 20 | 49 | 937 | 1776 | FAIL (<0.80) |
 | clu_30000_384 | 200 | 0.301 | 2.4 | 7 | 998 | 1780 | FAIL (<0.80) |
 | clu_30000_384 | 1000 | 0.563 | 22 | 35 | 1125 | 1780 | FAIL (<0.80) |
-
-Right-only gives ~half the recall of bidirectional at the same radius. Does NOT
-clear 0.80 at any tested radius. Ships as an escape hatch for tight-latency
-budgets where ~0.50 recall is acceptable; NOT gate-compliant. Users needing
-0.80 should use bidirectional=1.
 
 ### FLAT (baseline)
 
@@ -117,12 +122,15 @@ tie-breaking at equal distances). Latency scales linearly with N*dim.
   corpora. Latency 22-76ms p50 (3-10x faster than FLAT). Default nprobe=8.
 
 - **SLSH bidirectional: SHIP.** Clears 0.90 at radius=200 on 10k x 384/768.
-  Fails at 30k without radius=1000. Default radius=200 (documented: raise to
-  1000 for 30k, ~2000 for 50k). Latency 5-45ms p50.
+  Fails at 30k without radius=1000. **Scan radius is now adaptive**
+  (Task 17b): `actual = max(slsh_scan_radius, count/30)`, so 30k auto-scales
+  to ~1000 without reconfiguration. Latency 5-45ms p50.
 
-- **SLSH right-only: SHIP as escape hatch (gate FAIL documented).** Does not
-  clear 0.80 at any tested radius (~0.50 recall). Ships with bidirectional=1
-  as default; right-only is a sub-gate-latency escape hatch.
+- **SLSH right-only: REMOVED (Task 17b).** The `slsh_bidirectional` flag and
+  the right-only code path were removed. The spike showed right-only never
+  cleared the 0.80 gate at any tested radius (~0.50 recall). Obsolete now that
+  the engine supports backward scan (Plan 1). SLSH always scans
+  bidirectionally.
 
 ## Tuned defaults (applied to vl_init in vector_layer.c + header comments)
 
@@ -132,8 +140,7 @@ tie-breaking at equal distances). Latency scales linearly with N*dim.
 - `slsh_lsh_tables` = 4
 - `slsh_hash_bits` = 16
 - `slsh_bucket_width` = 2.0
-- `slsh_scan_radius` = 200
-- `slsh_bidirectional` = 1
+- `slsh_scan_radius` = 200 (FLOOR; actual = max(200, count/30) — adaptive)
 
 ## Notes / caveats
 
@@ -141,10 +148,10 @@ tie-breaking at equal distances). Latency scales linearly with N*dim.
   gates apply to clustered data (realistic embedding workload). Users with
   uniform/gaussian data should use FLAT.
 
-- **SLSH scan radius scales with dataset size.** radius=200 clears 0.90 at 10k
-  but fails at 30k (0.557). radius=1000 clears at 30k (0.975). Default 200 is
-  tuned for 10k; 30k+ users should reconfigure to 1000+. Future: make radius
-  adaptive (scale with vector_layer_count).
+- **SLSH scan radius is adaptive (Task 17b).** `actual = max(slsh_scan_radius,
+  count/30)`. radius=200 clears 0.90 at 10k but fails at 30k (0.557); the
+  adaptive floor auto-scales 30k to ~1000 (0.975). Users no longer need to
+  manually reconfigure for larger datasets. The configured value is a floor.
 
 - **k-means++ is O(K^2 * N * dim)** for D2 init. At 50k x 1536 ~ 192B ops.
   Spike skipped 1536-dim for this reason. Future: sample N for D2 init.

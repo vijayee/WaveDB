@@ -1,4 +1,4 @@
-/* vector_slsh.c — SK-LSH bidirectional (uses engine backward scan).
+/* vector_slsh.c — SK-LSH bidirectional scan (always forward+backward).
  * Task 1: stubs only. Task 9: insert (atomic batch — vector + hash + count).
  * Tasks 10-11 implement search/train/rebuild/delete.
  *
@@ -255,10 +255,13 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
     fwd_end_str[hash_pfx_len + 1] = '\0';
 
     /* Build path_t objects for the scan bounds. database_scan_start copies
-       the paths internally, so we can destroy them after the call. */
+       the paths internally, so we can destroy them after the call. NOTE:
+       fwd_end_str holds "vec{d}{idx}{d}hash{d}\x7f" which is hash_pfx_len + 1
+       bytes of content (the \x7f is at index hash_pfx_len) — NOT
+       fwd_prefix_len + 1 (that would overread the buffer when qk_len > 0). */
     path_t *fwd_start_path = path_create_from_raw(fwd_prefix_str, fwd_prefix_len,
                                                    d, vl->db->chunk_size);
-    path_t *fwd_end_path = path_create_from_raw(fwd_end_str, fwd_prefix_len + 1,
+    path_t *fwd_end_path = path_create_from_raw(fwd_end_str, hash_pfx_len + 1,
                                                  d, vl->db->chunk_size);
     free(fwd_prefix_str);
     free(fwd_end_str);
@@ -268,11 +271,22 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
         return -12;
     }
 
-    /* 3. Forward scan for right neighbors (depth scan_radius). */
+    /* 3. Forward scan for right neighbors (depth `radius`). */
     char **candidate_ids = NULL;
     size_t n_candidates = 0, cap_candidates = 0;
-    int radius = vl->runtime.slsh_scan_radius;
-    if (radius <= 0) radius = 10;
+
+    /* Adaptive scan radius: the configured value is a floor; the actual radius
+       scales with dataset size so users don't need to manually reconfigure for
+       larger datasets. count/30 gives ~333 for 10k, ~1000 for 30k, ~1666 for
+       50k (validated against the spike: 30k needed radius=1000 to clear 0.90). */
+    size_t count = vector_layer_count(vl);
+    int configured = vl->runtime.slsh_scan_radius;
+    if (configured <= 0) configured = 200;  /* default floor */
+    int radius = configured;
+    if (count > 0) {
+        int adaptive = (int)(count / 30);
+        if (adaptive > radius) radius = adaptive;
+    }
 
     database_iterator_t *fwd = vl_scan_start(vl, fwd_start_path, fwd_end_path);
     if (fwd != NULL) {
@@ -294,10 +308,13 @@ int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
         database_scan_end(fwd);
     }
 
-    /* 4. Backward scan for left neighbors (depth scan_radius), if bidirectional.
+    /* 4. Backward scan for left neighbors (depth `radius`). SLSH always scans
+       bidirectionally now — the right-only mode was removed (it never cleared
+       the 0.80 gate, ~0.50 recall, and is obsolete now that the engine supports
+       backward iteration).
        Reverse scan: end = fwd_start_path (positions at largest key < end_path),
        start = "vec{d}{idx}{d}hash{d}" — lower bound covers all hash buckets. */
-    if (vl->runtime.slsh_bidirectional) {
+    {
         /* Build lower-bound prefix: "vec{d}{idx}{d}hash{d}". */
         size_t idx_len = strlen(vl->index_name);
         size_t hash_pfx_len = 3 + 1 + idx_len + 1 + 4 + 1;  /* "vec"+d+idx+d+"hash"+d */

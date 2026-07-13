@@ -401,7 +401,6 @@ TEST_F(VectorLayerTest, SLSHInsertCount) {
     cfg.runtime.top_k = 10;
     cfg.runtime.sync_only = 1;
     cfg.runtime.slsh_scan_radius = 10;
-    cfg.runtime.slsh_bidirectional = 1;
     int err = 0;
     vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
     ASSERT_NE(vl, nullptr);
@@ -426,7 +425,6 @@ TEST_F(VectorLayerTest, SLSHSearchBidirectional) {
     cfg.runtime.top_k = 10;
     cfg.runtime.sync_only = 1;
     cfg.runtime.slsh_scan_radius = 10;
-    cfg.runtime.slsh_bidirectional = 1;
     int err = 0;
     vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
     ASSERT_NE(vl, nullptr);
@@ -457,7 +455,6 @@ TEST_F(VectorLayerTest, SLSHTrainRebuild) {
     cfg.runtime.top_k = 10;
     cfg.runtime.sync_only = 1;
     cfg.runtime.slsh_scan_radius = 10;
-    cfg.runtime.slsh_bidirectional = 1;
     int err = 0;
     vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
     ASSERT_NE(vl, nullptr);
@@ -472,36 +469,6 @@ TEST_F(VectorLayerTest, SLSHTrainRebuild) {
     // Rebuild rehashes all vectors with the new projections.
     ASSERT_EQ(vector_layer_rebuild(vl), 0);
     // Search still works post-train (vectors are now in selective buckets).
-    float q[4] = {50, 50, 50, 50};
-    vl_result_t *results = NULL; int n = 0;
-    ASSERT_EQ(vector_layer_search_sync(vl, q, 5, &results, &n), 0);
-    ASSERT_GT(n, 0);
-    vector_layer_free_results(results, n);
-    vector_layer_destroy(vl);
-}
-
-TEST_F(VectorLayerTest, SLSHSearchRightOnly) {
-    vector_layer_config_t cfg = {};
-    cfg.format.index_type = VL_INDEX_SLSH;
-    cfg.format.dim = 4;
-    cfg.format.delimiter = '/';
-    cfg.format.distance = VL_DIST_L2;
-    cfg.format.slsh_lsh_tables = 2;
-    cfg.format.slsh_hash_bits = 8;
-    cfg.format.slsh_bucket_width = 1.0f;
-    cfg.runtime.top_k = 10;
-    cfg.runtime.sync_only = 1;
-    cfg.runtime.slsh_scan_radius = 10;
-    cfg.runtime.slsh_bidirectional = 0;  // right-only
-    int err = 0;
-    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
-    ASSERT_NE(vl, nullptr);
-    srand(7);
-    for (int i = 0; i < 20; i++) {
-        float v[4] = {(float)(rand()%100), (float)(rand()%100), (float)(rand()%100), (float)(rand()%100)};
-        std::string id = "v" + std::to_string(i);
-        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0), 0);
-    }
     float q[4] = {50, 50, 50, 50};
     vl_result_t *results = NULL; int n = 0;
     ASSERT_EQ(vector_layer_search_sync(vl, q, 5, &results, &n), 0);
@@ -787,9 +754,8 @@ TEST_F(VectorLayerTest, AtomicBatchRollback) {
  *
  * Tuned params (final):
  *   IVF:        n_clusters=50, nprobe=16, flat_until=500.
- *   SLSH bidir: lsh_tables=2, hash_bits=16, bucket_width=2.0, scan_radius=100.
- *   SLSH right: same as bidir but slsh_bidirectional=0 (gate 0.80).
- * Observed recall: IVF 1.00, SLSH bidir 0.91, SLSH right-only 0.89.
+ *   SLSH:       lsh_tables=2, hash_bits=16, bucket_width=2.0, scan_radius=100.
+ * Observed recall: IVF 1.00, SLSH 0.91.
  * ------------------------------------------------------------------------- */
 
 /* Generate cluster centers and insert N clustered vectors. n_clusters centers
@@ -901,7 +867,12 @@ TEST_F(VectorLayerTest, IVFRecallGate) {
     vector_layer_destroy(vl);
 }
 
-TEST_F(VectorLayerTest, SLSHRecallGateBidirectional) {
+TEST_F(VectorLayerTest, SLSHRecallGate) {
+    /* SLSH now scans bidirectionally always (right-only mode removed — it
+       never cleared the 0.80 gate, ~0.50 recall). The scan radius is adaptive:
+       actual = max(slsh_scan_radius, count/30). With N=2000 and configured
+       radius=100, the adaptive floor is 2000/30 = 66, so actual = 100 (the
+       configured floor wins). Gate 0.90. */
     const int N = 2000, DIM = 16, Q = 50, K = 10;
     vector_layer_config_t cfg = {};
     cfg.format.index_type = VL_INDEX_SLSH;
@@ -914,7 +885,6 @@ TEST_F(VectorLayerTest, SLSHRecallGateBidirectional) {
     cfg.runtime.top_k = K;
     cfg.runtime.sync_only = 1;
     cfg.runtime.slsh_scan_radius = 100;
-    cfg.runtime.slsh_bidirectional = 1;
     int err = 0;
     vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
     ASSERT_NE(vl, nullptr);
@@ -925,37 +895,7 @@ TEST_F(VectorLayerTest, SLSHRecallGateBidirectional) {
     ASSERT_EQ(vector_layer_train(vl), 0);
 
     float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
-    std::cout << "SLSH bidirectional recall@10: " << recall << std::endl;
+    std::cout << "SLSH recall@10: " << recall << std::endl;
     EXPECT_GE(recall, 0.90f);
-    vector_layer_destroy(vl);
-}
-
-TEST_F(VectorLayerTest, SLSHRecallGateRightOnly) {
-    /* Same as bidirectional but slsh_bidirectional=0; gate is 0.80 (looser). */
-    const int N = 2000, DIM = 16, Q = 50, K = 10;
-    vector_layer_config_t cfg = {};
-    cfg.format.index_type = VL_INDEX_SLSH;
-    cfg.format.dim = DIM;
-    cfg.format.delimiter = '/';
-    cfg.format.distance = VL_DIST_L2;
-    cfg.format.slsh_lsh_tables = 2;
-    cfg.format.slsh_hash_bits = 16;
-    cfg.format.slsh_bucket_width = 2.0f;
-    cfg.runtime.top_k = K;
-    cfg.runtime.sync_only = 1;
-    cfg.runtime.slsh_scan_radius = 100;
-    cfg.runtime.slsh_bidirectional = 0;  /* right-only */
-    int err = 0;
-    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
-    ASSERT_NE(vl, nullptr);
-
-    srand(12345);
-    std::vector<std::vector<float>> stored;
-    vl_recall_insert_clustered(vl, N, DIM, 50, stored);
-    ASSERT_EQ(vector_layer_train(vl), 0);
-
-    float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
-    std::cout << "SLSH right-only recall@10: " << recall << std::endl;
-    EXPECT_GE(recall, 0.80f);
     vector_layer_destroy(vl);
 }

@@ -1,6 +1,10 @@
 /* C bench driver for the vector layer spike.
-   Usage: ./bench_vector <corpus> <index_type:flat|ivf|slsh> <k> [nprobe] [scan_radius] [flat_until] [bidirectional]
+   Usage: ./bench_vector <corpus> <index_type:flat|ivf|slsh> <k> [nprobe] [scan_radius] [flat_until] [lsh_tables] [bucket_width]
    Outputs JSON: recall@10, p50, p99, insert_throughput, storage_per_vector.
+
+   SLSH scan radius is adaptive: actual = max(scan_radius, count/30). The
+   configured scan_radius is a floor; pass a low value to verify the adaptive
+   floor kicks in (e.g. scan_radius=50 on a 30k corpus -> actual=1000).
 
    Reads bench/vector/corpus/{corpus}.fvec + {corpus}.gt. */
 #include "../../src/Layers/vector/vector_layer.h"
@@ -46,7 +50,7 @@ static int dbl_cmp(const void *a, const void *b) {
 
 int main(int argc, char **argv) {
     if (argc < 4) {
-        fprintf(stderr, "Usage: %s <corpus> <index_type:flat|ivf|slsh> <k> [nprobe] [scan_radius] [flat_until] [bidirectional]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <corpus> <index_type:flat|ivf|slsh> <k> [nprobe] [scan_radius] [flat_until] [lsh_tables] [bucket_width]\n", argv[0]);
         return 1;
     }
     const char *corpus = argv[1];
@@ -100,11 +104,10 @@ int main(int argc, char **argv) {
         cfg.runtime.ivf_flat_until = argc > 6 ? atoi(argv[6]) : 500;
     } else if (strcmp(itype, "slsh") == 0) {
         cfg.format.index_type = VL_INDEX_SLSH;
-        cfg.format.slsh_lsh_tables = argc > 8 ? atoi(argv[8]) : 4;
+        cfg.format.slsh_lsh_tables = argc > 7 ? atoi(argv[7]) : 4;
         cfg.format.slsh_hash_bits = 16;
-        cfg.format.slsh_bucket_width = argc > 9 ? (float)atof(argv[9]) : 2.0f;
+        cfg.format.slsh_bucket_width = argc > 8 ? (float)atof(argv[8]) : 2.0f;
         cfg.runtime.slsh_scan_radius = argc > 5 ? atoi(argv[5]) : 50;
-        cfg.runtime.slsh_bidirectional = argc > 7 ? atoi(argv[7]) : 1;
     } else {
         fprintf(stderr, "unknown index_type: %s\n", itype);
         free(vectors); free(queries); free(gt); return 1;

@@ -175,11 +175,14 @@ seek to position + **bidirectional expansion** using the new backward scan.
    `scan_radius` -> left candidates.
 5. Dedup, fetch vectors, **exact rerank**, top-k.
 
-**`slsh_bidirectional` runtime toggle** — 1 (default) = scan both directions
-(full recall); 0 = right-only (forward scan only, no `prev`, lower recall,
-useful for write-light/read-cheap cases). This replaces the old
-`slsh_dual_index` field — semantics changed: no longer about writing a second
-index, just about whether the query scans both directions.
+**Adaptive scan radius (Task 17b)** — the actual scan radius used in steps 3-4
+is `max(slsh_scan_radius, vector_layer_count(vl) / 30)`. The configured
+`slsh_scan_radius` is a floor; the adaptive part scales with dataset size so
+users don't need to manually reconfigure for larger datasets (~333 for 10k,
+~1000 for 30k, ~1666 for 50k — validated against the spike). SLSH always
+scans bidirectionally; the `slsh_bidirectional` toggle was removed (right-only
+mode never cleared the 0.80 gate, ~0.50 recall, and is obsolete now that the
+engine supports backward iteration).
 
 **Insert (atomic batch)** — one `database_batch_sync_raw` (2 ops):
 - put `vec/{index}/vector/{id}` -> raw vector
@@ -318,9 +321,8 @@ typedef struct {
     int      ivf_nprobe;
     int      ivf_flat_until;      /* exact FLAT below this many vectors */
     /* SLSH runtime */
-    int      slsh_scan_radius;    /* forward+backward scan depth each direction */
-    int      slsh_bidirectional;  /* 1 = scan both directions (default);
-                                     0 = right-only (lower recall, cheaper) */
+    int      slsh_scan_radius;    /* FLOOR on forward+backward scan depth each
+                                     direction; actual = max(this, count/30) */
 } vector_layer_runtime_t;
 
 typedef struct {
@@ -583,7 +585,6 @@ acceptable, not which wins:
 | FLAT | recall@10 == 1.0 (by definition) | n/a — baseline |
 | IVF | recall@10 >= 0.90 @ nprobe <= 8 on 50k x 384 | Raise `flat_until` default, document the failure, ship with a higher default threshold; do NOT drop IVF. |
 | SLSH bidirectional | recall@10 >= 0.90 @ scan_radius in doc's range | Tighten default `scan_radius`, document; ship regardless. |
-| SLSH right-only (`slsh_bidirectional=0`) | recall@10 >= 0.80 (looser, documents the bidirectional cost) | Default `slsh_bidirectional=1`, document right-only as a write-light escape hatch only. |
 
 The spike's output is `bench/vector/REPORT.md` with the table per arm, plus
 the `vector_layer_config_t` defaults in `vector_layer.h` updated to the
@@ -678,10 +679,9 @@ via the `VectorLayer` wrapper; round-trip metadata; error mapping via
 - Does IVF clear `recall >= 0.90@10` at `nprobe <= 8` on 50k x 384, and is the
   centroid-scan cost acceptable as cluster count grows? (Sets default `nprobe`.)
 - Does SLSH bidirectional clear the gate at a `scan_radius` that's cheap
-  enough? (Sets default `scan_radius`.)
-- Does SLSH right-only (`slsh_bidirectional=0`) clear 0.80 at acceptable
-  latency? (Decides whether right-only is a documented escape hatch or gets
-  dropped from defaults.)
+  enough? (Sets default `scan_radius`.) — **Resolved:** yes at radius=200 for
+  10k; the radius is now adaptive (`max(configured, count/30)`) so 30k+
+  auto-scales. Right-only was removed (never cleared 0.80).
 - What `flat_until` keeps cold-start exact without dominating memory at
   scale? (Sets default `flat_until`.)
 - 384 vs 768 vs 1536: does recall degrade enough at higher dim to force a

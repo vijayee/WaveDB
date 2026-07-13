@@ -16,7 +16,7 @@ typedef struct vector_layer_t vector_layer_t;
 typedef enum {
     VL_INDEX_FLAT = 0,   /* exact brute-force; baseline + IVF cold-start */
     VL_INDEX_IVF  = 1,   /* inverted file */
-    VL_INDEX_SLSH = 2    /* SK-LSH bidirectional (uses engine backward scan) */
+    VL_INDEX_SLSH = 2    /* SK-LSH bidirectional scan (always forward+backward) */
 } vl_index_type_t;
 
 typedef enum {
@@ -50,11 +50,14 @@ typedef struct {
     int      ivf_nprobe;          /* default 8 (clears 0.90 recall@10 on 10k/30k x 384) */
     int      ivf_flat_until;      /* exact FLAT below this many vectors; default 1000 */
     /* SLSH runtime */
-    int      slsh_scan_radius;    /* forward+backward scan depth each direction; default 200
-                                     (clears 0.90 recall@10 on 10k x 384/768 clustered;
-                                     30k+ needs ~1000 — scale with dataset size) */
-    int      slsh_bidirectional;  /* 1 = scan both directions (default);
-                                     0 = right-only (lower recall, cheaper) */
+    int      slsh_scan_radius;    /* FLOOR on forward+backward scan depth each
+                                     direction; default 200 (clears 0.90 recall@10
+                                     on 10k x 384/768 clustered). The actual radius
+                                     used is max(slsh_scan_radius, count/30) — the
+                                     adaptive part scales with dataset size so users
+                                     don't need to manually reconfigure for larger
+                                     datasets (~333 for 10k, ~1000 for 30k, ~1666
+                                     for 50k). */
 } vector_layer_runtime_t;
 
 typedef struct {
