@@ -409,3 +409,64 @@ TEST_F(VectorLayerTest, SLSHInsertCount) {
     EXPECT_EQ(vector_layer_count(vl), 5u);
     vector_layer_destroy(vl);
 }
+
+TEST_F(VectorLayerTest, SLSHSearchBidirectional) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_SLSH;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.slsh_lsh_tables = 2;
+    cfg.format.slsh_hash_bits = 8;
+    cfg.format.slsh_bucket_width = 1.0f;
+    cfg.runtime.top_k = 10;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.slsh_scan_radius = 10;
+    cfg.runtime.slsh_bidirectional = 1;
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    srand(7);
+    for (int i = 0; i < 20; i++) {
+        float v[4] = {(float)(rand()%100), (float)(rand()%100), (float)(rand()%100), (float)(rand()%100)};
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0), 0);
+    }
+    ASSERT_EQ(vector_layer_train(vl), 0);  // no-op stub until Task 11
+    float q[4] = {50, 50, 50, 50};
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, q, 5, &results, &n), 0);
+    ASSERT_GT(n, 0);
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, SLSHSearchRightOnly) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_SLSH;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.slsh_lsh_tables = 2;
+    cfg.format.slsh_hash_bits = 8;
+    cfg.format.slsh_bucket_width = 1.0f;
+    cfg.runtime.top_k = 10;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.slsh_scan_radius = 10;
+    cfg.runtime.slsh_bidirectional = 0;  // right-only
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    srand(7);
+    for (int i = 0; i < 20; i++) {
+        float v[4] = {(float)(rand()%100), (float)(rand()%100), (float)(rand()%100), (float)(rand()%100)};
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0), 0);
+    }
+    float q[4] = {50, 50, 50, 50};
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, q, 5, &results, &n), 0);
+    ASSERT_GT(n, 0);
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}

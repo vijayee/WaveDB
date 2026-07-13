@@ -11,6 +11,9 @@
  *   4. ONE batch of 3 ops: vector + hash entry + count. */
 #include "vector_internal.h"
 #include "../../Database/database.h"
+#include "../../Database/database_iterator.h"
+#include "../../HBTrie/path.h"
+#include "../../HBTrie/identifier.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -165,10 +168,244 @@ int vector_slsh_insert_sync(vector_layer_t *vl, const char *id, const float *vec
     return rc;
 }
 
+/* ---- Search ---- */
+
+/* Extract the id from a hash key path: vec/{idx}/hash/{hex-lsh}/{id} — id is
+   the last path identifier. Returns a malloc'd NUL-terminated string, or
+   NULL on failure. */
+static char* slsh_extract_id_from_path(path_t *p) {
+    size_t n = path_length(p);
+    if (n == 0) return NULL;
+    identifier_t *last_id = path_get(p, n - 1);
+    if (last_id == NULL) return NULL;
+    size_t dlen = 0;
+    uint8_t *data = identifier_get_data_copy(last_id, &dlen);
+    if (data == NULL) return NULL;
+    char *id = (char*)malloc(dlen + 1);
+    if (id == NULL) { free(data); return NULL; }
+    memcpy(id, data, dlen);
+    id[dlen] = '\0';
+    free(data);
+    return id;
+}
+
+/* Append a candidate id to the dynamic array, deduping against existing
+ * entries. Returns 0 on success, -12 on alloc failure. On success, ownership
+ * of `id` is transferred to the array (either stored or freed as a dup). */
+static int slsh_append_candidate(char ***arr, size_t *n, size_t *cap, char *id) {
+    if (id == NULL) return 0;
+    for (size_t i = 0; i < *n; i++) {
+        if (strcmp((*arr)[i], id) == 0) { free(id); return 0; }
+    }
+    if (*n == *cap) {
+        size_t ncap = *cap == 0 ? 16 : *cap * 2;
+        char **narr = (char**)realloc(*arr, ncap * sizeof(char*));
+        if (narr == NULL) { free(id); return -12; }
+        *arr = narr; *cap = ncap;
+    }
+    (*arr)[*n] = id;
+    (*n)++;
+    return 0;
+}
+
+typedef struct { float dist; char *id; uint8_t *metadata; size_t meta_len; } vl_slsh_cand_t;
+
+static int vl_slsh_cand_cmp(const void *a, const void *b) {
+    float da = ((const vl_slsh_cand_t*)a)->dist;
+    float db = ((const vl_slsh_cand_t*)b)->dist;
+    return (da > db) - (da < db);
+}
+
 int vector_slsh_search_sync(vector_layer_t *vl, const float *query, int k,
                             vl_result_t **out, int *out_n) {
-    (void)vl; (void)query; (void)k; (void)out; (void)out_n;
-    return -1;
+    if (vl == NULL || query == NULL || out == NULL || out_n == NULL) return -22;
+    *out = NULL; *out_n = 0;
+    database_t *db = vl->db;
+    if (db == NULL) return -22;
+    if (k <= 0) return 0;
+    int dim = vl->format.dim;
+    char d = vl->format.delimiter;
+    size_t vec_bytes = (size_t)dim * sizeof(float);
+
+    /* 1. Load projections + compute q_key (READ-ONLY). */
+    slsh_proj_cache_t cache;
+    int rc = slsh_load_projections(vl, &cache);
+    if (rc != 0) return rc;
+    uint8_t q_key[64]; size_t qk_len = 0;
+    slsh_compute_key(vl, query, &cache, q_key, &qk_len);
+    slsh_free_projections(&cache);
+
+    /* 2. Build the q_key bucket prefix: "vec{d}{idx}{d}hash{d}{q_key_hex}{d}".
+       vl_key_hash with empty id produces exactly this (trailing delimiter
+       before empty id). */
+    char *fwd_prefix_str = vl_key_hash(vl->index_name, d, q_key, qk_len, "");
+    if (fwd_prefix_str == NULL) return -12;
+    size_t fwd_prefix_len = strlen(fwd_prefix_str);
+
+    /* Forward end = prefix + "\x7f" — "everything under prefix" upper bound. */
+    char *fwd_end_str = (char*)malloc(fwd_prefix_len + 2);
+    if (fwd_end_str == NULL) { free(fwd_prefix_str); return -12; }
+    memcpy(fwd_end_str, fwd_prefix_str, fwd_prefix_len);
+    fwd_end_str[fwd_prefix_len] = '\x7f';
+    fwd_end_str[fwd_prefix_len + 1] = '\0';
+
+    /* Build path_t objects for the scan bounds. database_scan_start copies
+       the paths internally, so we can destroy them after the call. */
+    path_t *fwd_start_path = path_create_from_raw(fwd_prefix_str, fwd_prefix_len,
+                                                   d, db->chunk_size);
+    path_t *fwd_end_path = path_create_from_raw(fwd_end_str, fwd_prefix_len + 1,
+                                                 d, db->chunk_size);
+    free(fwd_prefix_str);
+    free(fwd_end_str);
+    if (fwd_start_path == NULL || fwd_end_path == NULL) {
+        if (fwd_start_path) path_destroy(fwd_start_path);
+        if (fwd_end_path) path_destroy(fwd_end_path);
+        return -12;
+    }
+
+    /* 3. Forward scan for right neighbors (depth scan_radius). */
+    char **candidate_ids = NULL;
+    size_t n_candidates = 0, cap_candidates = 0;
+    int radius = vl->runtime.slsh_scan_radius;
+    if (radius <= 0) radius = 10;
+
+    database_iterator_t *fwd = database_scan_start(db, fwd_start_path, fwd_end_path);
+    if (fwd != NULL) {
+        path_t *p = NULL; identifier_t *v = NULL;
+        for (int r = 0; r < radius && database_scan_next(fwd, &p, &v) == 0; r++) {
+            char *id = slsh_extract_id_from_path(p);
+            int arc = slsh_append_candidate(&candidate_ids, &n_candidates,
+                                             &cap_candidates, id);
+            if (arc != 0) {
+                if (p) path_destroy(p);
+                if (v) identifier_destroy(v);
+                p = NULL; v = NULL;
+                break;
+            }
+            if (p) path_destroy(p);
+            if (v) identifier_destroy(v);
+            p = NULL; v = NULL;
+        }
+        database_scan_end(fwd);
+    }
+
+    /* 4. Backward scan for left neighbors (depth scan_radius), if bidirectional.
+       Reverse scan: end = fwd_start_path (positions at largest key < end_path),
+       start = "vec{d}{idx}{d}hash{d}" — lower bound covers all hash buckets. */
+    if (vl->runtime.slsh_bidirectional) {
+        /* Build lower-bound prefix: "vec{d}{idx}{d}hash{d}". */
+        size_t idx_len = strlen(vl->index_name);
+        size_t hash_pfx_len = 3 + 1 + idx_len + 1 + 4 + 1;  /* "vec"+d+idx+d+"hash"+d */
+        char *hash_pfx_str = (char*)malloc(hash_pfx_len + 1);
+        if (hash_pfx_str != NULL) {
+            snprintf(hash_pfx_str, hash_pfx_len + 1, "vec%c%s%chash%c",
+                     d, vl->index_name, d, d);
+            path_t *bwd_start_path = path_create_from_raw(hash_pfx_str, hash_pfx_len,
+                                                          d, db->chunk_size);
+            free(hash_pfx_str);
+            if (bwd_start_path != NULL) {
+                /* database_scan_start_reverse takes ownership of the path_t args;
+                   we still own fwd_start_path (the iterator copies), so reuse it. */
+                database_iterator_t *bwd = database_scan_start_reverse(db,
+                                                                       bwd_start_path,
+                                                                       fwd_start_path);
+                path_destroy(bwd_start_path);
+                if (bwd != NULL) {
+                    path_t *p = NULL; identifier_t *v = NULL;
+                    for (int r = 0; r < radius && database_scan_prev(bwd, &p, &v) == 0; r++) {
+                        char *id = slsh_extract_id_from_path(p);
+                        int arc = slsh_append_candidate(&candidate_ids, &n_candidates,
+                                                         &cap_candidates, id);
+                        if (arc != 0) {
+                            if (p) path_destroy(p);
+                            if (v) identifier_destroy(v);
+                            p = NULL; v = NULL;
+                            break;
+                        }
+                        if (p) path_destroy(p);
+                        if (v) identifier_destroy(v);
+                        p = NULL; v = NULL;
+                    }
+                    database_scan_end(bwd);
+                }
+            }
+        }
+    }
+
+    path_destroy(fwd_start_path);
+    path_destroy(fwd_end_path);
+
+    /* 5. Fetch candidate vectors, exact rerank, top-k. */
+    vl_slsh_cand_t *hits = NULL;
+    if (n_candidates > 0) {
+        hits = (vl_slsh_cand_t*)malloc(n_candidates * sizeof(vl_slsh_cand_t));
+        if (hits == NULL) {
+            for (size_t j = 0; j < n_candidates; j++) free(candidate_ids[j]);
+            free(candidate_ids);
+            return -12;
+        }
+    }
+    size_t n_hits = 0;
+    for (size_t i = 0; i < n_candidates; i++) {
+        char *vkey = vl_key_vector(vl->index_name, d, candidate_ids[i]);
+        if (vkey == NULL) { free(candidate_ids[i]); continue; }
+        uint8_t *vbuf = NULL; size_t vlen = 0;
+        int grc = database_get_sync_raw(db, vkey, strlen(vkey), d, &vbuf, &vlen);
+        free(vkey);
+        if (grc != 0 || vbuf == NULL || vlen < vec_bytes) {
+            if (vbuf) database_raw_value_free(vbuf);
+            free(candidate_ids[i]);
+            continue;
+        }
+        float dist = vl_distance(query, (const float*)vbuf, dim, vl->format.distance);
+        uint8_t *meta = NULL; size_t meta_len = 0;
+        if (vlen > vec_bytes) {
+            meta_len = vlen - vec_bytes;
+            meta = (uint8_t*)malloc(meta_len);
+            if (meta != NULL) memcpy(meta, vbuf + vec_bytes, meta_len);
+            else meta_len = 0;
+        }
+        database_raw_value_free(vbuf);
+        hits[n_hits].dist = dist;
+        hits[n_hits].id = candidate_ids[i];  /* transfer ownership */
+        hits[n_hits].metadata = meta;
+        hits[n_hits].meta_len = meta_len;
+        n_hits++;
+    }
+    free(candidate_ids);
+
+    /* Sort by distance ascending, take top-k. */
+    if (n_hits > 1) {
+        qsort(hits, n_hits, sizeof(vl_slsh_cand_t), vl_slsh_cand_cmp);
+    }
+    int n = (int)(n_hits < (size_t)k ? n_hits : (size_t)k);
+    vl_result_t *out_results = NULL;
+    if (n > 0) {
+        out_results = vl_results_alloc(n);
+        if (out_results == NULL) {
+            for (size_t i = 0; i < n_hits; i++) {
+                free(hits[i].id);
+                free(hits[i].metadata);
+            }
+            free(hits);
+            return -12;
+        }
+        for (int i = 0; i < n; i++) {
+            out_results[i].id = hits[i].id;
+            out_results[i].distance = hits[i].dist;
+            out_results[i].metadata = hits[i].metadata;
+            out_results[i].metadata_len = hits[i].meta_len;
+        }
+        for (size_t i = (size_t)n; i < n_hits; i++) {
+            free(hits[i].id);
+            free(hits[i].metadata);
+        }
+    }
+    free(hits);
+
+    *out = out_results;
+    *out_n = n;
+    return 0;
 }
 
 int vector_slsh_delete_sync(vector_layer_t *vl, const char *id) {
