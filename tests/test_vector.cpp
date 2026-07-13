@@ -337,3 +337,50 @@ TEST_F(VectorLayerTest, IVFSearch) {
     vector_layer_free_results(results, n);
     vector_layer_destroy(vl);
 }
+
+TEST_F(VectorLayerTest, IVFTrainRebuild) {
+    vector_layer_config_t cfg = {};
+    cfg.format.index_type = VL_INDEX_IVF;
+    cfg.format.dim = 4;
+    cfg.format.delimiter = '/';
+    cfg.format.distance = VL_DIST_L2;
+    cfg.format.ivf_n_clusters = 3;
+    cfg.runtime.sync_only = 1;
+    cfg.runtime.ivf_nprobe = 3;       // probe all 3 clusters
+    cfg.runtime.ivf_flat_until = 5;   // count=20 > 5, so use IVF path (not flat fallback)
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+
+    // Insert 20 vectors in 3 well-separated clusters.
+    srand(7);
+    float centers[3][4] = {{10,0,0,0}, {0,10,0,0}, {0,0,10,0}};
+    std::vector<std::string> ids;
+    std::vector<std::vector<float>> stored;
+    for (int i = 0; i < 20; i++) {
+        int c = i % 3;
+        float v[4];
+        for (int d = 0; d < 4; d++) v[d] = centers[c][d] + ((float)(rand()%10))/10.0f;
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v, NULL, 0), 0);
+        ids.push_back(id);
+        stored.push_back(std::vector<float>(v, v+4));
+    }
+
+    // Train to compute centroids.
+    ASSERT_EQ(vector_layer_train(vl), 0);
+
+    // Rebuild memberships to match new centroids.
+    ASSERT_EQ(vector_layer_rebuild(vl), 0);
+
+    // Search near cluster 0 — top results should be from cluster 0 (distance < 5).
+    float q[4] = {10, 0, 0, 0};
+    vl_result_t *results = NULL; int n = 0;
+    ASSERT_EQ(vector_layer_search_sync(vl, q, 5, &results, &n), 0);
+    ASSERT_GT(n, 0);
+    for (int i = 0; i < n; i++) {
+        EXPECT_LT(results[i].distance, 5.0f) << "result " << i << " id=" << results[i].id;
+    }
+    vector_layer_free_results(results, n);
+    vector_layer_destroy(vl);
+}
