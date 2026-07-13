@@ -130,3 +130,19 @@ EXPORTS
     refcounter_count
     refcounter_dereference
     refcounter_reference
+    vector_layer_count
+    vector_layer_create
+    vector_layer_delete
+    vector_layer_delete_sync
+    vector_layer_destroy
+    vector_layer_free_results
+    vector_layer_insert
+    vector_layer_insert_batch
+    vector_layer_insert_batch_sync
+    vector_layer_insert_sync
+    vector_layer_open_separate
+    vector_layer_rebuild
+    vector_layer_reconfigure
+    vector_layer_search
+    vector_layer_search_sync
+    vector_layer_train

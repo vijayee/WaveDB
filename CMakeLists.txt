@@ -129,6 +129,14 @@ set(WAVEDB_SOURCES
     src/Layers/graph/graph_schema_parser.c
     src/Layers/graph/graph_optimizer.c
     src/Layers/graph/graph_stats.c
+
+    # Layers - Vector
+    src/Layers/vector/vector_layer.c
+    src/Layers/vector/vector_internal.c
+    src/Layers/vector/vector_distance.c
+    src/Layers/vector/vector_flat.c
+    src/Layers/vector/vector_ivf.c
+    src/Layers/vector/vector_slsh.c
 )
 
 # Create WaveDB library
@@ -405,6 +413,11 @@ if(BUILD_TESTS)
     add_executable(test_reverse_scan tests/test_reverse_scan.cpp)
     target_link_libraries(test_reverse_scan wavedb gtest gtest_main)
     add_test(NAME test_reverse_scan COMMAND test_reverse_scan)
+
+    # Test for Vector Layer
+    add_executable(test_vector tests/test_vector.cpp)
+    target_link_libraries(test_vector wavedb gtest gtest_main)
+    add_test(NAME test_vector COMMAND test_vector)
 
     # Test for Graph DSL Parser
     add_executable(test_graph_parser tests/test_graph_parser.cpp)
