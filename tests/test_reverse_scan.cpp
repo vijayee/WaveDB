@@ -302,6 +302,18 @@ TEST_F(HBTrieReverseTest, CursorPrevValueWithTrieChildIntermediateLevel) {
 // API with a NUL delimiter (so each key is a single path identifier);
 // multi-chunk keys (e.g. "elderberry" = 3 chunks at chunk_size=4) exercise
 // the rightmost-descent across trie levels.
+// Build a single-identifier path from a C string (chunk_size defaults to 4
+// via identifier_create(buf, 0)). Used by DatabaseReverseTest for range bounds.
+static path_t* path_from_str(const char* s) {
+    path_t* p = path_create();
+    buffer_t* buf = buffer_create_from_pointer_copy((uint8_t*)s, strlen(s));
+    identifier_t* id = identifier_create(buf, 0);
+    buffer_destroy(buf);
+    path_append(p, id);
+    identifier_destroy(id);
+    return p;
+}
+
 class DatabaseReverseTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -358,6 +370,67 @@ TEST_F(DatabaseReverseTest, BasicDescendingOrder) {
     std::vector<std::string> expected = {
         "elderberry", "date", "cherry", "banana", "apple"
     };
+    ASSERT_EQ(got, expected);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
+}
+
+// Task 4: Reverse range scan with [start, end) bounds.
+//
+// Keys: apple, banana, cherry, date, elderberry.
+// Reverse scan over [banana, date) walked backward must emit the in-range
+// keys in descending order: cherry, banana.
+//   - start_path = "banana"  -> lower bound (inclusive): stop once we walk
+//     past it (path < start_path).
+//   - end_path   = "date"    -> upper bound (exclusive): seek positions at
+//     the largest key < "date" (cherry); "date" and "elderberry" are excluded.
+TEST_F(DatabaseReverseTest, RangeReverse) {
+    database_config_t* cfg = database_config_default();
+    ASSERT_NE(cfg, nullptr);
+    database_config_set_sync_only(cfg, 1);
+    int err = 0;
+    database_t* db = database_create_with_config(test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    const char* keys[] = {"apple", "banana", "cherry", "date", "elderberry"};
+    for (const char* k : keys) {
+        size_t klen = strlen(k);
+        int rc = database_put_sync_raw(db, k, klen, '\0',
+                                       (const uint8_t*)"V", 1);
+        ASSERT_EQ(rc, 0);
+    }
+
+    // Reverse scan over [banana, date) walked backward.
+    // Emits: cherry, banana (descending, in [banana, date)).
+    path_t* start = path_from_str("banana");
+    path_t* end = path_from_str("date");
+    database_iterator_t* it = database_scan_start_reverse(db, start, end);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr;
+    identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        ASSERT_NE(p, nullptr);
+        ASSERT_GE(path_length(p), 1u);
+        identifier_t* id = path_get(p, 0);
+        ASSERT_NE(id, nullptr);
+        size_t dlen = 0;
+        uint8_t* data = identifier_get_data_copy(id, &dlen);
+        ASSERT_NE(data, nullptr);
+        got.push_back(std::string((const char*)data, dlen));
+        free(data);
+        path_destroy(p);
+        identifier_destroy(v);
+        p = nullptr; v = nullptr;
+    }
+    database_scan_end(it);
+    path_destroy(start);
+    path_destroy(end);
+
+    std::vector<std::string> expected = {"cherry", "banana"};
     ASSERT_EQ(got, expected);
 
     database_destroy(db);

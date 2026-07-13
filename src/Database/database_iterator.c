@@ -13,6 +13,10 @@
 // Initial stack size
 #define INITIAL_STACK_SIZE 16
 
+// Forward declaration — seek_to_end_path falls back to seek_to_rightmost on
+// any uncertainty (defined later in this file).
+static void seek_to_rightmost(database_iterator_t* iter);
+
 /**
  * Push a frame onto the iterator stack.
  */
@@ -108,6 +112,38 @@ static int within_bounds(database_iterator_t* iter, path_t* path) {
     // Check lower bound: if path < start_path, skip this entry
     if (iter->start_path != NULL) {
         if (path_compare(path, iter->start_path) < 0) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+/**
+ * Check if a path is within the scan bounds for a REVERSE (descending) scan.
+ * Same half-open interval [start_path, end_path) as forward, but the STOP / SKIP
+ * meanings are swapped because we walk descending:
+ *   1  if start_path <= path < end_path (within bounds — emit)
+ *  -1  if path < start_path (we've walked past the lower bound — STOP iteration)
+ *   0  if path >= end_path (we're at or above the upper bound — SKIP; shouldn't
+ *      happen post-seek but a broad seek may land at or above end)
+ *
+ * Mirror of within_bounds with start/end roles swapped in the return codes.
+ */
+static int within_bounds_reverse(database_iterator_t* iter, path_t* path) {
+    if (path == NULL) return 0;
+
+    // Lower bound: if path < start_path, we've walked past the start — stop.
+    if (iter->start_path != NULL) {
+        if (path_compare(path, iter->start_path) < 0) {
+            return -1;
+        }
+    }
+
+    // Upper bound: if path >= end_path, skip (we should be below end_path after
+    // the seek, but a broad seek may land at or above end).
+    if (iter->end_path != NULL) {
+        if (path_compare(path, iter->end_path) >= 0) {
             return 0;
         }
     }
@@ -434,6 +470,260 @@ bail:
     if (iter->stack_depth > 0) {
         iter->stack[0].entry_index = 0;
     }
+}
+
+/**
+ * Seek the iterator stack to the rightmost leaf whose key < end_path, for
+ * reverse scans. Mirror of seek_to_start_path with upper-bound + rightmost
+ * descent.
+ *
+ * For each chunk of end_path we compute the upper bound = the index of the
+ * first entry whose chunk >= end's chunk (bnode_find's lower_bound). The entry
+ * we want is `ub - 1` (the last entry strictly less than end's chunk). If
+ * `ub == 0` there's no entry < end's chunk at this level — bail.
+ *
+ * On exact match with end's chunk: skip it (we want strictly less than end).
+ *
+ * Safety: on any uncertainty (NULL child, lazy-load failure, no entry < chunk
+ * at this level), pop seek-pushed frames and fall back to seek_to_rightmost
+ * (correct-but-slow; never drops a key < end_path). within_bounds_reverse
+ * filters any keys >= end_path that seek_to_rightmost lands on.
+ */
+static void seek_to_end_path(database_iterator_t* iter) {
+    if (iter == NULL || iter->end_path == NULL || iter->db == NULL) {
+        return;
+    }
+    if (iter->stack_depth == 0) {
+        return;
+    }
+    hbtrie_t* trie = iter->db->trie;
+    if (trie == NULL) {
+        return;
+    }
+    uint8_t chunk_size = trie->chunk_size;
+    file_bnode_cache_t* fcache = trie->fcache;
+    uint32_t btree_node_size = trie->btree_node_size;
+
+    size_t saved_depth = iter->stack_depth;  // only the root frame is present
+
+    size_t path_len_ids = path_length(iter->end_path);
+    if (path_len_ids == 0) {
+        seek_to_rightmost(iter);
+        return;
+    }
+
+    hbtrie_node_t* current = iter->stack[0].node;  // root hbtrie_node
+    if (current == NULL || current->btree == NULL) {
+        return;
+    }
+    // Stack index of the trie-level frame for `current`: the root frame (0)
+    // initially, then the trie frame pushed by the last matched-descend.
+    size_t trie_frame_idx = 0;
+
+    for (size_t i = 0; i < path_len_ids; i++) {
+        identifier_t* identifier = path_get(iter->end_path, i);
+        if (identifier == NULL) {
+            goto bail;
+        }
+        size_t nchunk = identifier_chunk_count(identifier);
+        if (nchunk == 0) {
+            goto bail;
+        }
+        for (size_t j = 0; j < nchunk; j++) {
+            chunk_t* chunk = identifier_get_chunk(identifier, j);
+            if (chunk == NULL) {
+                goto bail;
+            }
+            int is_last = (j == nchunk - 1) && (i == path_len_ids - 1);
+
+            bnode_t* root_bn = current->btree;
+            size_t root_index;
+            bnode_entry_t* root_entry = bnode_find(root_bn, chunk, &root_index);
+            (void)root_entry;
+            size_t ub = root_index;  // first entry >= end's chunk
+
+            if (atomic_load(&root_bn->level) > 1) {
+                // Internal root: descend through the separator whose child holds
+                // keys < end's chunk. Separator at ub-1 (if ub>0) is the largest
+                // separator < end's chunk; its child holds all keys in
+                // [sep.key, next_sep.key) which are all < end.
+                if (ub == 0) {
+                    goto bail;
+                }
+                size_t root_descend = ub - 1;
+                // Position the trie-level frame at root_descend so scan_prev
+                // (after exhausting this subtree) resumes at the separator
+                // BEFORE this one (the next-larger key in the descending walk
+                // is the previous separator at this trie level). scan_prev
+                // decrements entry_index before processing, so setting
+                // entry_index = root_descend makes scan_prev's first decrement
+                // land at root_descend - 1 — the previous sibling. We do NOT
+                // add the +1 skip that the forward seek uses, because the
+                // forward seek's "+1 skip" accounts for "scan_next increments
+                // before processing"; scan_prev decrements before processing,
+                // so the same offset is achieved by leaving entry_index at
+                // root_descend (the descended entry) — the decrement moves
+                // past it.
+                iter->stack[trie_frame_idx].entry_index = root_descend;
+                bnode_entry_t* sep = bnode_get(root_bn, root_descend);
+                if (sep == NULL || !sep->is_bnode_child) {
+                    goto bail;
+                }
+                if (sep->child_bnode == NULL && sep->child_disk_offset != 0 && fcache != NULL) {
+                    bnode_entry_lazy_load_bnode_child(sep, fcache, chunk_size, btree_node_size);
+                }
+                if (sep->child_bnode == NULL) {
+                    goto bail;
+                }
+                bnode_t* cur_bn = sep->child_bnode;
+                while (atomic_load(&cur_bn->level) > 1) {
+                    size_t idx;
+                    bnode_entry_t* e = bnode_find(cur_bn, chunk, &idx);
+                    (void)e;
+                    if (idx == 0) {
+                        goto bail;  // no separator < chunk at this level
+                    }
+                    size_t k = idx - 1;  // last separator < chunk
+                    bnode_entry_t* s = bnode_get(cur_bn, k);
+                    if (s == NULL || !s->is_bnode_child) {
+                        goto bail;
+                    }
+                    if (s->child_bnode == NULL && s->child_disk_offset != 0 && fcache != NULL) {
+                        bnode_entry_lazy_load_bnode_child(s, fcache, chunk_size, btree_node_size);
+                    }
+                    if (s->child_bnode == NULL) {
+                        goto bail;
+                    }
+                    if (push_bnode_frame(iter, cur_bn, iter->stack_depth - 1) < 0) {
+                        goto bail;
+                    }
+                    // Position this internal frame at k so scan_prev's
+                    // decrement-before-process lands at k-1 (previous sibling)
+                    // after this subtree is exhausted.
+                    iter->stack[iter->stack_depth - 1].entry_index = k;
+                    cur_bn = s->child_bnode;
+                }
+                // cur_bn is the leaf bnode for this trie level.
+                size_t ub_leaf;
+                bnode_entry_t* entry = bnode_find(cur_bn, chunk, &ub_leaf);
+                (void)entry;
+                if (ub_leaf == 0) {
+                    goto bail;
+                }
+                if (push_bnode_frame(iter, cur_bn, iter->stack_depth - 1) < 0) {
+                    goto bail;
+                }
+                size_t leaf_idx = iter->stack_depth - 1;
+                // Position at the last entry < chunk. scan_prev reads at
+                // entry_index, then decrements, so the first emitted entry is
+                // ub_leaf - 1.
+                iter->stack[leaf_idx].entry_index = ub_leaf - 1;
+                if (is_last) {
+                    return;  // positioned — scan_prev emits from leaf_idx
+                }
+                // end_path continues deeper — descend into the entry's child
+                // (the entry at ub_leaf - 1, whose chunk < end's chunk).
+                bnode_entry_t* leaf_entry = bnode_get(cur_bn, ub_leaf - 1);
+                if (leaf_entry == NULL) {
+                    goto bail;
+                }
+                hbtrie_node_t* next = NULL;
+                if (leaf_entry->has_value) {
+                    if (leaf_entry->trie_child == NULL && leaf_entry->child_disk_offset != 0 && fcache != NULL) {
+                        bnode_entry_lazy_load_trie_child(leaf_entry, fcache, chunk_size, btree_node_size);
+                    }
+                    next = leaf_entry->trie_child;
+                } else {
+                    if (leaf_entry->child == NULL && leaf_entry->child_disk_offset != 0 && fcache != NULL) {
+                        bnode_entry_lazy_load_hbtrie_child(leaf_entry, fcache, chunk_size, btree_node_size);
+                    }
+                    next = leaf_entry->child;
+                }
+                if (next == NULL) {
+                    // No deeper trie level but end_path continues — end_path is
+                    // not a stored key. The current leaf entry (ub_leaf - 1) is
+                    // the largest key < end_path at this trie level. Returning
+                    // here leaves scan_prev positioned to emit it.
+                    return;
+                }
+                if (push_frame(iter, next, iter->stack_depth - 1) < 0) {
+                    goto bail;
+                }
+                current = next;
+                trie_frame_idx = iter->stack_depth - 1;
+                // Descend into the rightmost entry of the new trie level —
+                // the deepest keys in this subtree are < end_path's next chunk
+                // (which we'll handle on the next loop iteration). For now,
+                // position at the rightmost so if the next chunk's bnode_find
+                // bails (no entry < chunk at the next level), scan_prev starts
+                // from the rightmost of this subtree.
+                iter->stack[trie_frame_idx].entry_index = bnode_count(next->btree) - 1;
+            } else {
+                // Leaf root (single-level B+tree): the trie-level frame IS the
+                // leaf frame. Apply the seek decision directly to it.
+                if (ub == 0) {
+                    goto bail;
+                }
+                iter->stack[trie_frame_idx].entry_index = ub - 1;
+                if (is_last) {
+                    return;  // positioned — scan_prev emits from trie_frame_idx
+                }
+                // end_path continues deeper — descend into the entry's child.
+                bnode_entry_t* leaf_entry = bnode_get(root_bn, ub - 1);
+                if (leaf_entry == NULL) {
+                    goto bail;
+                }
+                hbtrie_node_t* next = NULL;
+                if (leaf_entry->has_value) {
+                    if (leaf_entry->trie_child == NULL && leaf_entry->child_disk_offset != 0 && fcache != NULL) {
+                        bnode_entry_lazy_load_trie_child(leaf_entry, fcache, chunk_size, btree_node_size);
+                    }
+                    next = leaf_entry->trie_child;
+                } else {
+                    if (leaf_entry->child == NULL && leaf_entry->child_disk_offset != 0 && fcache != NULL) {
+                        bnode_entry_lazy_load_hbtrie_child(leaf_entry, fcache, chunk_size, btree_node_size);
+                    }
+                    next = leaf_entry->child;
+                }
+                if (next == NULL) {
+                    return;
+                }
+                if (push_frame(iter, next, iter->stack_depth - 1) < 0) {
+                    goto bail;
+                }
+                current = next;
+                trie_frame_idx = iter->stack_depth - 1;
+                iter->stack[trie_frame_idx].entry_index = bnode_count(next->btree) - 1;
+            }
+        }
+    }
+    // Every chunk of end_path matched exactly with a child trie level (and we
+    // positioned each trie-level frame at the rightmost entry, which scan_prev
+    // will decrement-and-process). The deepest trie frame sits at the rightmost
+    // entry of the last descended level; its rightmost leaf shares all of
+    // end_path as a prefix, so every key under it is < end_path (since end_path
+    // is a strict prefix-extension — wait, this is wrong for the equal case).
+    // Actually: we got here because end_path's chunks ALL matched exactly with
+    // a child descent (so end_path is a stored key OR a strict prefix of longer
+    // keys). We want the largest key < end_path, which is the rightmost leaf
+    // of the subtree rooted just before end_path's last chunk's match. The
+    // descent above positioned the deepest trie frame at the rightmost entry
+    // of the last descended child; scan_prev will decrement-and-emit, giving
+    // the rightmost key of that subtree — which is < end_path. Correct.
+    return;
+
+bail:
+    // Restore the original walk-from-end state: pop every frame the seek
+    // pushed and reset the root frame to the rightmost entry, then let
+    // seek_to_rightmost position us at the global rightmost. within_bounds_reverse
+    // filters any keys >= end_path.
+    while (iter->stack_depth > saved_depth) {
+        pop_frame(iter);
+    }
+    if (iter->stack_depth > 0) {
+        iter->stack[0].entry_index = 0;
+    }
+    seek_to_rightmost(iter);
 }
 
 database_iterator_t* database_scan_start(database_t* db,
@@ -1027,9 +1317,16 @@ database_iterator_t* database_scan_start_reverse(database_t* db,
 
     refcounter_init((refcounter_t*)iter);
 
-    /* Task 3: no end_path seek yet — always position at the rightmost leaf.
-       Task 4 will add a seek_to_end_path that clamps to the upper bound. */
-    seek_to_rightmost(iter);
+    /* Position at the rightmost leaf. If an end_path bound is given, clamp
+       to the largest key < end_path via seek_to_end_path; otherwise descend
+       from the global rightmost. seek_to_end_path falls back to
+       seek_to_rightmost on any uncertainty (within_bounds_reverse filters any
+       keys >= end_path). */
+    if (iter->end_path != NULL) {
+        seek_to_end_path(iter);
+    } else {
+        seek_to_rightmost(iter);
+    }
 
     return iter;
 }
@@ -1221,9 +1518,14 @@ int database_scan_prev(database_iterator_t* iter,
 
                     if (chunks) free(chunks);
 
-                    /* Task 3: no bounds checking (bounds land in Task 4).
-                       Always in-bounds. */
-                    int bounds = 1;
+                    /* Reverse-scan bounds check. Same [start, end) half-open
+                       interval as forward, but STOP/SKIP meanings are swapped
+                       for the descending walk:
+                         -1 = STOP: path < start_path (walked past lower bound)
+                          0 = SKIP: path >= end_path (at/above upper bound;
+                                    shouldn't happen post-seek but guard)
+                          1 = emit. */
+                    int bounds = within_bounds_reverse(iter, result_path);
                     if (bounds < 0) {
                         path_destroy(result_path);
                         identifier_destroy(value);
