@@ -8,6 +8,7 @@
 #include "../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 // Initial stack size
 #define INITIAL_STACK_SIZE 16
@@ -889,17 +890,420 @@ int database_scan_next(database_iterator_t* iter,
     iter->finished = 1;
     return -1;
 }
-/* Stub implementations — replaced by full versions in Task 3. */
+/* Position the iterator stack at the rightmost value-bearing leaf, by always
+   descending into the last entry of each bnode. Used when no end_path bound
+   is given (reverse scan from the largest key in the db).
+
+   Mirror of the no-start_path forward path (root frame at entry_index 0), but
+   rightmost instead of leftmost. After descending through entry `count-1` of
+   a frame, the frame's entry_index is decremented (to count-2, or SIZE_MAX
+   when count==1) so that database_scan_prev — which decrements entry_index
+   AFTER reading the current entry — does not re-process the descended entry
+   when it pops back to this frame. Path reconstruction then uses
+   `entry_index + 1` to recover the descended entry's chunk (with unsigned
+   wraparound giving 0 when entry_index underflowed to SIZE_MAX). */
+static void seek_to_rightmost(database_iterator_t* iter) {
+    if (iter == NULL || iter->stack_depth == 0) return;
+    hbtrie_t* trie = iter->db ? iter->db->trie : NULL;
+    if (trie == NULL) return;
+    uint8_t chunk_size = trie->chunk_size;
+    file_bnode_cache_t* fcache = trie->fcache;
+    uint32_t btree_node_size = trie->btree_node_size;
+
+    while (iter->stack_depth > 0) {
+        iterator_frame_t* frame = &iter->stack[iter->stack_depth - 1];
+        bnode_t* btree = NULL;
+        if (frame->is_bnode_frame) {
+            btree = frame->bnode;
+        } else {
+            hbtrie_node_t* node = frame->node;
+            if (node == NULL || node->btree == NULL) break;
+            btree = node->btree;
+        }
+        if (btree == NULL) break;
+        size_t count = bnode_count(btree);
+        if (count == 0) break;
+
+        frame->entry_index = count - 1;
+        bnode_entry_t* entry = bnode_get(btree, count - 1);
+        if (entry == NULL) break;
+
+        /* Lazy-load trie_child if needed (reopened db). */
+        if (entry->trie_child == NULL && entry->child_disk_offset != 0 && fcache != NULL) {
+            bnode_entry_lazy_load_trie_child(entry, fcache, chunk_size, btree_node_size);
+        }
+        if (entry->trie_child != NULL) {
+            /* Descend into trie_child. This covers BOTH the has_value=1 +
+               trie_child case (prefix-shared longer keys sort after this
+               entry's value) and the has_value=0 + trie_child case. */
+            if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) break;
+            /* Decrement parent so scan_prev doesn't re-process this entry on
+               pop-back. Underflows to SIZE_MAX when count==1 (sentinel). */
+            frame->entry_index--;
+            continue;
+        }
+        /* No trie_child. If has_value=1, this is a value-bearing leaf —
+           positioned, stop. MUST check before the `child` branch: the
+           `child`/`value`/`versions` fields share a union, so when
+           has_value=1, entry->child reads the value pointer (not a child
+           hbtrie_node) and descending would type-confuse the pointer. */
+        if (entry->has_value) {
+            break;
+        }
+        if (entry->is_bnode_child) {
+            if (entry->child_bnode == NULL && entry->child_disk_offset != 0 && fcache != NULL) {
+                bnode_entry_lazy_load_bnode_child(entry, fcache, chunk_size, btree_node_size);
+            }
+            if (entry->child_bnode == NULL) break;
+            if (push_bnode_frame(iter, entry->child_bnode, iter->stack_depth - 1) < 0) break;
+            frame->entry_index--;
+            continue;
+        }
+        if (entry->child == NULL && entry->child_disk_offset != 0 && fcache != NULL) {
+            bnode_entry_lazy_load_hbtrie_child(entry, fcache, chunk_size, btree_node_size);
+        }
+        if (entry->child != NULL) {
+            if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) break;
+            frame->entry_index--;
+            continue;
+        }
+        /* No value, no child — empty leaf, stop. */
+        break;
+    }
+}
+
 database_iterator_t* database_scan_start_reverse(database_t* db,
                                                    path_t* start_path,
                                                    path_t* end_path) {
-    (void)db; (void)start_path; (void)end_path;
-    return NULL;
+    if (db == NULL) {
+        return NULL;
+    }
+
+    /* Block new cursor creation while vacuum is in progress — mirrors
+       database_scan_start so vacuum's wait-loop can drain open cursors. */
+    platform_lock(&db->cursor_count_mutex);
+    while (atomic_load(&db->vacuum_in_progress) != 0) {
+        platform_condition_timedwait(&db->cursor_count_mutex, &db->cursor_cvar, 0);
+    }
+    platform_unlock(&db->cursor_count_mutex);
+
+    database_iterator_t* iter = get_clear_memory(sizeof(database_iterator_t));
+    if (iter == NULL) {
+        return NULL;
+    }
+
+    iter->db = db;
+    iter->reverse = 1;
+    atomic_fetch_add(&db->open_cursor_count, 1);
+    iter->start_path = start_path ? path_copy(start_path) : NULL;
+    iter->end_path = end_path ? path_copy(end_path) : NULL;
+    iter->current_path = path_create();
+    iter->finished = 0;
+
+    iter->stack = get_clear_memory(INITIAL_STACK_SIZE * sizeof(iterator_frame_t));
+    if (iter->stack == NULL) {
+        if (iter->start_path) path_destroy(iter->start_path);
+        if (iter->end_path) path_destroy(iter->end_path);
+        if (iter->current_path) path_destroy(iter->current_path);
+        atomic_fetch_sub(&db->open_cursor_count, 1);
+        free(iter);
+        return NULL;
+    }
+    iter->stack_size = INITIAL_STACK_SIZE;
+    iter->stack_depth = 0;
+
+    iter->read_txn_id = tx_manager_get_last_committed(db->tx_manager);
+
+    hbtrie_node_t* root = db->trie ? atomic_load_ptr(&db->trie->root, hbtrie_node_t*) : NULL;
+    if (root) {
+        iter->stack[0].node = root;
+        iter->stack[0].bnode = NULL;
+        iter->stack[0].entry_index = 0;
+        iter->stack[0].path_index = 0;
+        iter->stack[0].is_bnode_frame = 0;
+        iter->stack_depth = 1;
+        REFERENCE(root, hbtrie_node_t);
+    }
+
+    refcounter_init((refcounter_t*)iter);
+
+    /* Task 3: no end_path seek yet — always position at the rightmost leaf.
+       Task 4 will add a seek_to_end_path that clamps to the upper bound. */
+    seek_to_rightmost(iter);
+
+    return iter;
 }
 
 int database_scan_prev(database_iterator_t* iter,
                        path_t** out_path,
                        identifier_t** out_value) {
-    (void)iter; (void)out_path; (void)out_value;
-    return -2;
+    if (iter == NULL || out_path == NULL || out_value == NULL) {
+        return -2;
+    }
+    *out_path = NULL;
+    *out_value = NULL;
+
+    if (iter->finished || iter->stack_depth == 0) {
+        return -1;
+    }
+
+    uint8_t chunk_size = iter->db->trie ? iter->db->trie->chunk_size : DEFAULT_CHUNK_SIZE;
+
+    while (iter->stack_depth > 0) {
+        iterator_frame_t* frame = &iter->stack[iter->stack_depth - 1];
+
+        bnode_t* btree = NULL;
+        if (frame->is_bnode_frame) {
+            btree = frame->bnode;
+            if (btree == NULL) { pop_frame(iter); continue; }
+        } else {
+            hbtrie_node_t* node = frame->node;
+            if (node == NULL || node->btree == NULL) { pop_frame(iter); continue; }
+            btree = node->btree;
+        }
+
+        size_t count = bnode_count(btree);
+        int pushed_child = 0;
+
+        /* SIZE_MAX is the underflow sentinel: entry_index decremented past 0
+           means this frame is exhausted. */
+        while (frame->entry_index != SIZE_MAX && frame->entry_index < count) {
+            if (frame->entry_index >= count) {
+                if (count == 0) break;
+                frame->entry_index = count - 1;
+            }
+            bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
+            size_t this_index = frame->entry_index;
+            frame->entry_index--;  /* decrement BEFORE processing (mirror of hbtrie_cursor_prev) */
+
+            if (entry == NULL) continue;
+
+            if (entry->has_value) {
+                identifier_t* value = NULL;
+                int has_visible_value = 0;
+
+                /* MVCC visibility. In sync_only mode has_versions==0, so the
+                   legacy `else` branch is taken. Task 5 will exercise the
+                   version-chain branch. */
+                if (entry->has_versions && entry->versions) {
+                    version_entry_t* visible = version_entry_find_visible(
+                        entry->versions, iter->read_txn_id);
+                    if (visible && !visible->is_deleted) {
+                        has_visible_value = 1;
+                        if (visible->value) {
+                            value = REFERENCE(visible->value, identifier_t);
+                        }
+                    }
+                } else {
+                    has_visible_value = 1;
+                    if (entry->value) {
+                        value = REFERENCE(entry->value, identifier_t);
+                    }
+                }
+
+                /* Synthesize a non-NULL empty identifier for presence-marker
+                   leaves (has_value=1, value==NULL after V3 deserialize). */
+                if (has_visible_value && value == NULL) {
+                    value = identifier_create_empty(chunk_size);
+                    if (value == NULL) has_visible_value = 0;
+                }
+
+                if (has_visible_value) {
+                    /* Collect chunks from the stack. Top frame uses this_index
+                       (the entry we just emitted). Non-top frames use
+                       entry_index + 1 — the entry we descended through before
+                       decrementing. When entry_index underflowed to SIZE_MAX
+                       (count==1 descent), SIZE_MAX + 1 wraps to 0 via unsigned
+                       arithmetic, recovering the correct index. Skip
+                       is_bnode_child routing entries (B+tree separators, not
+                       identifier chunks) — mirrors the forward path. */
+                    size_t nchunks = 0;
+                    for (size_t i = 0; i < iter->stack_depth; i++) {
+                        iterator_frame_t* f = &iter->stack[i];
+                        bnode_t* f_btree = f->is_bnode_frame ? f->bnode
+                                : (f->node ? f->node->btree : NULL);
+                        if (f_btree == NULL) continue;
+                        size_t idx = (i == iter->stack_depth - 1)
+                                ? this_index : f->entry_index + 1;
+                        if (idx >= bnode_count(f_btree)) continue;
+                        bnode_entry_t* e = bnode_get(f_btree, idx);
+                        if (e != NULL && e->key != NULL && !e->is_bnode_child) {
+                            nchunks++;
+                        }
+                    }
+
+                    chunk_t** chunks = NULL;
+                    if (nchunks > 0) {
+                        chunks = (chunk_t**)malloc(nchunks * sizeof(chunk_t*));
+                        if (chunks == NULL) {
+                            identifier_destroy(value);
+                            return -2;
+                        }
+                        size_t idx = 0;
+                        for (size_t i = 0; i < iter->stack_depth; i++) {
+                            iterator_frame_t* f = &iter->stack[i];
+                            bnode_t* f_btree = f->is_bnode_frame ? f->bnode
+                                    : (f->node ? f->node->btree : NULL);
+                            if (f_btree == NULL) continue;
+                            size_t cidx = (i == iter->stack_depth - 1)
+                                    ? this_index : f->entry_index + 1;
+                            if (cidx >= bnode_count(f_btree)) continue;
+                            bnode_entry_t* e = bnode_get(f_btree, cidx);
+                            if (e != NULL && e->key != NULL && !e->is_bnode_child) {
+                                chunks[idx++] = e->key;
+                            }
+                        }
+                    }
+
+                    path_t* result_path = path_create();
+                    if (result_path == NULL) {
+                        if (chunks) free(chunks);
+                        identifier_destroy(value);
+                        return -2;
+                    }
+
+                    /* Use path_meta from the leaf entry for exact byte lengths
+                       (mirrors the forward scan). Without this, multi-chunk
+                       keys whose length isn't a multiple of chunk_size (e.g.
+                       "apple" = 5 bytes) would be null-padded and fail
+                       exact-length comparisons. Falls back to the legacy
+                       padded branch only when path_meta is absent. */
+                    size_t num_identifiers = 0;
+                    const path_subscript_meta_t* path_meta =
+                        bnode_entry_get_path_meta(entry, &num_identifiers);
+
+                    if (path_meta != NULL && num_identifiers > 0) {
+                        size_t chunk_offset = 0;
+                        size_t skip = iter->prefix_skip;
+                        if (skip > num_identifiers) skip = num_identifiers;
+                        for (size_t i = 0; i < skip; i++) {
+                            chunk_offset += path_meta[i].chunk_count;
+                        }
+                        for (size_t i = skip; i < num_identifiers; i++) {
+                            size_t id_chunks = path_meta[i].chunk_count;
+                            size_t id_byte_length = path_meta[i].byte_length;
+                            identifier_t* id = build_identifier_from_chunks(
+                                chunks + chunk_offset, id_chunks, chunk_size, id_byte_length);
+                            if (id == NULL) {
+                                if (chunks) free(chunks);
+                                path_destroy(result_path);
+                                identifier_destroy(value);
+                                return -2;
+                            }
+                            int rc = path_append(result_path, id);
+                            identifier_destroy(id);
+                            if (rc != 0) {
+                                if (chunks) free(chunks);
+                                path_destroy(result_path);
+                                identifier_destroy(value);
+                                return -2;
+                            }
+                            chunk_offset += id_chunks;
+                        }
+                    } else {
+                        identifier_t* key_id = build_identifier_from_chunks(
+                            chunks, nchunks, chunk_size, 0);
+                        if (key_id == NULL) {
+                            if (chunks) free(chunks);
+                            path_destroy(result_path);
+                            identifier_destroy(value);
+                            return -2;
+                        }
+                        int rc = path_append(result_path, key_id);
+                        identifier_destroy(key_id);
+                        if (rc != 0) {
+                            if (chunks) free(chunks);
+                            path_destroy(result_path);
+                            identifier_destroy(value);
+                            return -2;
+                        }
+                    }
+
+                    if (chunks) free(chunks);
+
+                    /* Task 3: no bounds checking (bounds land in Task 4).
+                       Always in-bounds. */
+                    int bounds = 1;
+                    if (bounds < 0) {
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        iter->finished = 1;
+                        return -1;
+                    }
+                    if (bounds == 0) {
+                        path_destroy(result_path);
+                        identifier_destroy(value);
+                        continue;
+                    }
+
+                    *out_path = result_path;
+                    *out_value = value;
+                    return 0;
+                }
+                /* has_value but no visible value (MVCC tombstone) — skip.
+                   entry_index already decremented; continue inner loop. */
+            } else if (entry->is_bnode_child) {
+                /* Multi-level B+tree internal node — push bnode frame and
+                   position at its rightmost entry. Task 3's basic test (5
+                   small keys) doesn't trigger multi-level B+trees; full
+                   multi-level handling lands in Task 5. */
+                if (entry->child_bnode == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_bnode_child(entry, iter->db->trie->fcache,
+                                                      iter->db->trie->chunk_size,
+                                                      iter->db->trie->btree_node_size);
+                }
+                if (entry->child_bnode == NULL) continue;
+                pushed_child = 1;
+                if (push_bnode_frame(iter, entry->child_bnode, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                iterator_frame_t* child = &iter->stack[iter->stack_depth - 1];
+                bnode_t* cb = child->bnode;
+                child->entry_index = (bnode_count(cb) == 0) ? SIZE_MAX
+                                                           : bnode_count(cb) - 1;
+                break;
+            } else if (entry->child != NULL || entry->child_disk_offset != 0) {
+                /* Trie child (hbtrie_node_t*) — descend. entry_index already
+                   decremented, so pop-back resumes at the previous entry. */
+                if (entry->child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_hbtrie_child(entry, iter->db->trie->fcache,
+                                                       iter->db->trie->chunk_size,
+                                                       iter->db->trie->btree_node_size);
+                }
+                if (entry->child == NULL) continue;
+                pushed_child = 1;
+                if (push_frame(iter, entry->child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                seek_to_rightmost(iter);
+                break;
+            } else if (entry->trie_child || entry->child_disk_offset != 0) {
+                /* trie_child without has_value — descend. */
+                if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                    && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
+                    bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
+                                                     iter->db->trie->chunk_size,
+                                                     iter->db->trie->btree_node_size);
+                }
+                if (entry->trie_child == NULL) continue;
+                pushed_child = 1;
+                if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                    return -2;
+                }
+                seek_to_rightmost(iter);
+                break;
+            }
+            /* No value, no child — skip. entry_index already decremented. */
+        }
+
+        /* Frame exhausted (underflowed past 0) and no child pushed — pop. */
+        if (!pushed_child && (frame->entry_index == SIZE_MAX || frame->entry_index >= count)) {
+            pop_frame(iter);
+        }
+    }
+
+    iter->finished = 1;
+    return -1;
 }

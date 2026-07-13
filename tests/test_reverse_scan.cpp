@@ -13,12 +13,30 @@
 #include <string>
 #include <vector>
 
+#if _WIN32
+#include <io.h>
+#include <direct.h>
+#include <process.h>
+#define getpid() _getpid()
+#define mkdir(path, mode) _mkdir(path)
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#endif
+
 extern "C" {
 #include "../src/HBTrie/hbtrie.h"
 #include "../src/HBTrie/mvcc.h"
+#include "../src/HBTrie/path.h"
+#include "../src/HBTrie/identifier.h"
 #include "../src/Buffer/buffer.h"
 #include "../src/Workers/transaction_id.h"
+#include "../src/Database/database.h"
+#include "../src/Database/database_config.h"
+#include "../src/Database/database_iterator.h"
 }
+
+static size_t rev_test_counter = 0;
 
 class HBTrieReverseTest : public ::testing::Test {
 protected:
@@ -276,4 +294,72 @@ TEST_F(HBTrieReverseTest, CursorPrevValueWithTrieChildIntermediateLevel) {
     //    broken, "bbbb" would appear before "Y"/"X" (or not at all).
     EXPECT_EQ(got[3].first, std::string("bbbb", 4));
     EXPECT_EQ(got[3].second, 2u);
+}
+
+// Task 3: Database-level reverse scan with no bounds and single-identifier
+// keys. database_scan_start_reverse + database_scan_prev must yield the 5
+// inserted keys in strictly descending order. Keys are inserted via the raw
+// API with a NUL delimiter (so each key is a single path identifier);
+// multi-chunk keys (e.g. "elderberry" = 3 chunks at chunk_size=4) exercise
+// the rightmost-descent across trie levels.
+class DatabaseReverseTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        test_dir = "/tmp/wavedb_dbrev_" + std::to_string(getpid()) + "_" +
+                   std::to_string(rev_test_counter++);
+        mkdir(test_dir.c_str(), 0700);
+    }
+    void TearDown() override {
+        std::string cmd = "rm -rf " + test_dir;
+        system(cmd.c_str());
+    }
+    std::string test_dir;
+};
+
+TEST_F(DatabaseReverseTest, BasicDescendingOrder) {
+    database_config_t* cfg = database_config_default();
+    ASSERT_NE(cfg, nullptr);
+    database_config_set_sync_only(cfg, 1);
+    int err = 0;
+    database_t* db = database_create_with_config(test_dir.c_str(), cfg, &err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(err, 0);
+
+    const char* keys[] = {"apple", "banana", "cherry", "date", "elderberry"};
+    for (const char* k : keys) {
+        size_t klen = strlen(k);
+        int rc = database_put_sync_raw(db, k, klen, '\0',
+                                       (const uint8_t*)"V", 1);
+        ASSERT_EQ(rc, 0);
+    }
+
+    database_iterator_t* it = database_scan_start_reverse(db, NULL, NULL);
+    ASSERT_NE(it, nullptr);
+
+    std::vector<std::string> got;
+    path_t* p = nullptr;
+    identifier_t* v = nullptr;
+    while (database_scan_prev(it, &p, &v) == 0) {
+        ASSERT_NE(p, nullptr);
+        ASSERT_GE(path_length(p), 1u);
+        identifier_t* id = path_get(p, 0);
+        ASSERT_NE(id, nullptr);
+        size_t dlen = 0;
+        uint8_t* data = identifier_get_data_copy(id, &dlen);
+        ASSERT_NE(data, nullptr);
+        got.push_back(std::string((const char*)data, dlen));
+        free(data);
+        path_destroy(p);
+        identifier_destroy(v);
+        p = nullptr; v = nullptr;
+    }
+    database_scan_end(it);
+
+    std::vector<std::string> expected = {
+        "elderberry", "date", "cherry", "banana", "apple"
+    };
+    ASSERT_EQ(got, expected);
+
+    database_destroy(db);
+    database_config_destroy(cfg);
 }
