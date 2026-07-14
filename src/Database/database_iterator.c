@@ -999,16 +999,20 @@ int database_scan_next(database_iterator_t* iter,
                                                      iter->db->trie->chunk_size,
                                                      iter->db->trie->btree_node_size);
                 }
-                if (entry->trie_child) {
-                    if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
-                        return -2;
+                int pushed_trie_child = 0;
+                {
+                    size_t parent_frame_idx = iter->stack_depth - 1;
+                    if (entry->trie_child) {
+                        if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) {
+                            return -2;
+                        }
+                        pushed_trie_child = 1;
+                        // push_frame() may realloc iter->stack, invalidating the
+                        // cached `frame` pointer. Re-fetch the parent frame by its
+                        // absolute index (NOT stack_depth-2, which is wrong once
+                        // more than one frame has been pushed in this pass).
+                        frame = &iter->stack[parent_frame_idx];
                     }
-                    // push_frame() may realloc iter->stack, invalidating the
-                    // cached `frame` pointer. Re-fetch the parent frame (the
-                    // child now sits at stack_depth-1, parent at stack_depth-2).
-                    // Without this, the inner while's re-read of
-                    // frame->entry_index below is a heap-use-after-free.
-                    frame = &iter->stack[iter->stack_depth - 2];
                 }
 
                 identifier_t* value = NULL;
@@ -1174,9 +1178,15 @@ int database_scan_next(database_iterator_t* iter,
                         return -1;
                     }
                     if (bounds == 0) {
-                        // Before lower bound — skip this entry, keep scanning
+                        // Before lower bound — skip this entry, keep scanning.
+                        // If we pushed a trie_child, descend into it now: its
+                        // subtree extends this prefix and may reach the range.
                         path_destroy(result_path);
                         identifier_destroy(value);
+                        if (pushed_trie_child) {
+                            pushed_child = 1;
+                            break;
+                        }
                         continue;
                     }
 
@@ -1249,6 +1259,20 @@ int database_scan_next(database_iterator_t* iter,
                         /* __bounds == 0 (before lower bound) or == 1 (within
                            bounds): skip this tombstone, continue scanning. */
                     }
+                }
+                if (pushed_trie_child) {
+                    /* Tombstoned prefix with a live subtree: descend into the
+                       pushed child NOW, exactly like the other descend branches.
+                       Continuing to walk the parent here left the pushed frame
+                       ignored on the stack; the stack_depth-2 re-fetch above then
+                       pointed at the pushed child instead of the parent on the
+                       next push, walking the parent's entries with the child's
+                       entry_index — an infinite re-push loop (the "trie cycle"
+                       of docs/trie-cycle-investigation.md). Descending here is
+                       also the correct emit order: subtree keys extend this
+                       prefix, so they sort before the parent's next entry. */
+                    pushed_child = 1;
+                    break;
                 }
             } else if (entry->is_bnode_child) {
                 // Internal B+tree node — push a bnode frame to descend

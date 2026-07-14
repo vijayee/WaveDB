@@ -334,6 +334,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_batch_scan_padding wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_batch_scan_padding COMMAND test_batch_scan_padding)
 
+    # Scan over tombstoned prefix entries with live subtrees (frame-confusion regression)
+    add_executable(test_scan_tombstone_descend tests/test_scan_tombstone_descend.cpp)
+    target_link_libraries(test_scan_tombstone_descend wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_scan_tombstone_descend COMMAND test_scan_tombstone_descend)
+
     add_executable(test_subtree_close_crash tests/test_subtree_close_crash.cpp)
     target_link_libraries(test_subtree_close_crash wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_subtree_close_crash COMMAND test_subtree_close_crash)

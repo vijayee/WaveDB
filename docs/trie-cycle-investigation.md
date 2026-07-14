@@ -1,6 +1,13 @@
 # Trie Cycle Investigation — Known Bug
 
-**Status:** Mitigated (cycle guard prevents hang/OOM). Root cause not yet fixed.
+> **SUPERSEDED (2026-07-13):** Root cause found and fixed — see
+> [`trie-cycle-resolution.md`](trie-cycle-resolution.md). The trie never
+> develops a cycle; the observed loop was iterator frame confusion in
+> `database_scan_next` on tombstoned prefix entries with `trie_child`.
+> The observations below remain accurate; the "memory safety" root-cause
+> hypothesis does not. Kept for history.
+
+**Status:** ~~Mitigated (cycle guard prevents hang/OOM). Root cause not yet fixed.~~ Fixed — see `trie-cycle-resolution.md`.
 **Date:** 2026-07-13
 **Related commit:** `6d02324` (fix(iterator): bounds-check tombstones + cycle guard)
 
