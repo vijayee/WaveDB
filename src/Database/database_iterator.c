@@ -789,6 +789,40 @@ bail:
     seek_to_rightmost(iter);
 }
 
+// Resolve the read transaction ID a scan should snapshot.
+//
+// In normal (multi-writer MVCC) mode the iterator snapshots
+// tx_manager_get_last_committed(), and version_entry_find_visible() walks each
+// entry's version chain to pick the newest version with txn_id <= read_txn_id.
+//
+// In sync_only mode this breaks. Sync commits deliberately bypass
+// tx_manager_commit (the fast put/get paths skip the tx_manager for speed), so
+// the tx_manager's last_committed_txn_id is never advanced -- it stays at its
+// zero init forever. Meanwhile the entries' versions ARE stamped with real
+// txn_ids (via transaction_id_get_next). find_visible() with read_txn_id == 0
+// then hides EVERY versioned entry: the fast path's `head.txn_id <= 0` test is
+// false (real txn_ids are > 0), the slow path finds no version with txn_id <=
+// 0, and it returns NULL. A delete-then-re-put (or any update) turns a key
+// from a legacy single-value leaf into a versioned leaf, so it vanishes from
+// the scan -- while point-get still sees it, because database_get_sync's
+// sync_only fast path uses hbtrie_find_unsafe(), which ignores read_txn_id and
+// returns the head (newest) version directly.
+//
+// The fix: in sync_only mode give the scan a sentinel MAX read_txn_id so
+// find_visible()'s fast path (`head.txn_id <= read_txn_id`) always succeeds
+// and returns the head -- live head -> visible, tombstone head -> NULL. That
+// is exactly hbtrie_find_unsafe()'s sync_only visibility, so scans and point
+// gets agree again. Safe because sync_only is single-writer: every stamped
+// version is the latest committed state, so newest-version-wins is correct,
+// and read_txn_id is consumed only by find_visible() (no sentinel check is
+// ever applied to an iterator's read_txn_id).
+static transaction_id_t scan_read_txn_id(database_t* db) {
+    if (db != NULL && db->sync_only) {
+        return TXN_ID_SENTINEL;
+    }
+    return tx_manager_get_last_committed(db ? db->tx_manager : NULL);
+}
+
 database_iterator_t* database_scan_start(database_t* db,
                                           path_t* start_path,
                                           path_t* end_path) {
@@ -836,7 +870,7 @@ database_iterator_t* database_scan_start(database_t* db,
 
     // Initialize read transaction ID from database's transaction manager
     // For synchronous scans, we use the current transaction context
-    iter->read_txn_id = tx_manager_get_last_committed(db->tx_manager);
+    iter->read_txn_id = scan_read_txn_id(db);
 
     // Push root node onto stack
     hbtrie_node_t* root = db->trie ? atomic_load_ptr(&db->trie->root, hbtrie_node_t*) : NULL;
@@ -1474,7 +1508,7 @@ database_iterator_t* database_scan_start_reverse(database_t* db,
     iter->stack_size = INITIAL_STACK_SIZE;
     iter->stack_depth = 0;
 
-    iter->read_txn_id = tx_manager_get_last_committed(db->tx_manager);
+    iter->read_txn_id = scan_read_txn_id(db);
 
     hbtrie_node_t* root = db->trie ? atomic_load_ptr(&db->trie->root, hbtrie_node_t*) : NULL;
     if (root) {
