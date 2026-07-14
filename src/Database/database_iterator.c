@@ -21,13 +21,6 @@ static void seek_to_rightmost(database_iterator_t* iter);
  * Push a frame onto the iterator stack.
  */
 static int push_frame(database_iterator_t* iter, hbtrie_node_t* node, size_t path_index) {
-    // Cycle guard: a trie_child pointing to an ancestor would cause infinite
-    // descent (stack growth → OOM). Cap at 200 — far above any real trie depth
-    // (~10 for 6000 keys). This is a safety net for a trie structure bug; the
-    // scan returns an error and the caller handles it.
-    if (iter->stack_depth >= 200) {
-        return -1;
-    }
     // Grow stack if needed
     if (iter->stack_depth >= iter->stack_size) {
         size_t new_size = iter->stack_size * 2;
@@ -404,11 +397,7 @@ static void seek_to_start_path(database_iterator_t* iter) {
                     goto bail;
                 }
                 bnode_t* cur_bn = sep->child_bnode;
-                int __btree_depth = 0;
                 while (atomic_load(&cur_bn->level) > 1) {
-                    if (++__btree_depth > 100) {
-                        goto bail;
-                    }
                     size_t idx;
                     bnode_entry_t* e = bnode_find(cur_bn, chunk, &idx);
                     size_t k;
@@ -939,13 +928,7 @@ int database_scan_next(database_iterator_t* iter,
     uint8_t chunk_size = iter->db->trie ? iter->db->trie->chunk_size : DEFAULT_CHUNK_SIZE;
 
     // Depth-first traversal
-    size_t __loop_guard = 0;
-    const size_t __loop_cap = 1000000;
     while (iter->stack_depth > 0) {
-        if (++__loop_guard > __loop_cap) {
-            iter->finished = 1;
-            return -1;
-        }
         // Get current frame
         iterator_frame_t* frame = &iter->stack[iter->stack_depth - 1];
 
@@ -974,12 +957,7 @@ int database_scan_next(database_iterator_t* iter,
         int pushed_child = 0;
 
         // Process entries at current level
-        size_t __inner_guard = 0;
         while (frame->entry_index < count) {
-            if (++__inner_guard > 10000) {
-                iter->finished = 1;
-                return -1;
-            }
             bnode_entry_t* entry = bnode_get(btree, frame->entry_index);
             // Don't increment entry_index yet - we may need to push a child
 

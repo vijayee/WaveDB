@@ -3550,20 +3550,7 @@ int database_scan_sync_raw(database_t* db,
     raw_result_t* out = malloc(capacity * sizeof(raw_result_t));
     if (!out) { database_scan_end(iter); return -1; }
 
-    /* Safety cap: a runaway forward scan (iterator not terminating at scale)
-       would otherwise realloc `out` until OOM. 100K is far above any real
-       test dataset (largest is N=2000); hitting it means an iterator
-       termination bug. Returns -1 so the caller surfaces an error instead
-       of crashing the machine. */
-    const size_t SCAN_RANGE_HARD_CAP = 100000;
     while (true) {
-        if (n >= SCAN_RANGE_HARD_CAP) {
-            log_error("scan_range_sync_raw: hit hard cap %zu — iterator not terminating", SCAN_RANGE_HARD_CAP);
-            for (size_t j = 0; j < n; j++) { free(out[j].key); free(out[j].value); }
-            free(out);
-            database_scan_end(iter);
-            return -1;
-        }
         path_t* out_path = NULL;
         identifier_t* out_value = NULL;
         int rc = database_scan_next(iter, &out_path, &out_value);
@@ -3674,20 +3661,7 @@ int database_scan_range_sync_raw(database_t* db,
     raw_result_t* out = malloc(capacity * sizeof(raw_result_t));
     if (!out) { database_scan_end(iter); return -1; }
 
-    /* Safety cap: a runaway forward scan (iterator not terminating at scale)
-       would otherwise realloc `out` until OOM. 100K is far above any real
-       test dataset (largest is N=2000); hitting it means an iterator
-       termination bug. Returns -1 so the caller surfaces an error instead
-       of crashing the machine. */
-    const size_t SCAN_RANGE_HARD_CAP = 100000;
     while (true) {
-        if (n >= SCAN_RANGE_HARD_CAP) {
-            log_error("scan_range_sync_raw: hit hard cap %zu — iterator not terminating", SCAN_RANGE_HARD_CAP);
-            for (size_t j = 0; j < n; j++) { free(out[j].key); free(out[j].value); }
-            free(out);
-            database_scan_end(iter);
-            return -1;
-        }
         path_t* out_path = NULL;
         identifier_t* out_value = NULL;
         int rc = database_scan_next(iter, &out_path, &out_value);
