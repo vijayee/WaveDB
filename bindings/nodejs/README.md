@@ -611,7 +611,7 @@ vl.reconfigure(new Runtime({ topK: 20, ivfNprobe: 16 }));
 
 | Field | Type | Default | Effect on recall / latency / storage |
 |---|---|---|---|
-| `indexType` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
+| `indexType` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.986 on clustered / 0.37-0.60 on gaussian; SLSH 0.982 on clustered (adaptive). FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
 | `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
 | `delimiter` | string | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
 | `distance` | `Distance` | COSINE | Used for assignment + rerank; match your embedding model (COSINE for normalized, L2 for general, DOT for inner-product) |
@@ -635,6 +635,7 @@ vl.reconfigure(new Runtime({ topK: 20, ivfNprobe: 16 }));
 ```javascript
 const { VectorLayer, Format, Runtime, IndexType, Distance } = require('wavedb');
 
+// --- Dedicated database (no key-space sharing) ---
 const vl = VectorLayer.openSeparate(
   '/path/to/vecdb',
   'embeddings',
@@ -655,16 +656,70 @@ vl.insertSync('doc/2', [0.08,  0.11 /* ... */]);
 // periodically as the dataset grows; FLAT is a no-op.
 vl.train();
 
+// Rebuild cluster memberships / hash entries after train. Called
+// automatically by train(); call explicitly after changing data without
+// retraining to refresh index structure.
+vl.rebuild();
+
 // Search — returns an array of results sorted by distance.
 const results = vl.searchSync([0.10, 0.05 /* ... */], 10);
 for (const r of results) {
   console.log(r.id, r.distance, r.metadata);
 }
 
+// Delete a vector by id.
+vl.deleteSync('doc/1');
+
 // Mutate the runtime tier at any time.
 vl.reconfigure(new Runtime({ topK: 20, ivfNprobe: 16 }));
 
 vl.close();
+```
+
+### Async API (syncOnly=0)
+
+With `syncOnly: 0`, insert/search/delete return Promises instead of
+blocking. Each method has a non-`Sync` variant:
+
+```javascript
+const vl = VectorLayer.openSeparate(
+  '/path/to/vecdb', 'embeddings',
+  new Format({ indexType: IndexType.IVF, dim: 384, distance: Distance.COSINE }),
+  new Runtime({ topK: 10, syncOnly: 0, ivfNprobe: 8 }),  // async worker pool
+);
+
+// Async insert returns a Promise.
+await vl.insert('doc/1', [0.12, -0.04 /* ... */]);
+
+// Async search returns a Promise<SearchResult[]>.
+const results = await vl.search([0.10, 0.05 /* ... */], 10);
+
+// Async delete.
+await vl.delete('doc/1');
+
+vl.close();
+```
+
+### Subtree mode (shared database)
+
+To run a vector index inside an existing WaveDB database without a
+separate directory, use `VectorLayer.open` with a `Subtree`:
+
+```javascript
+const { Database, Subtree, VectorLayer, Format, Runtime, IndexType, Distance } = require('wavedb');
+
+const db = Database.create('/path/to/wavedb', {});
+const subtree = db.openSubtree('my_index_space');
+
+const vl = VectorLayer.open(
+  subtree, 'embeddings',
+  new Format({ indexType: IndexType.IVF, dim: 384, distance: Distance.COSINE }),
+  new Runtime({ topK: 10, syncOnly: 1 }),
+);
+// vl shares db's WAL, memory pool, and worker pool. Close vl before db.
+vl.close();
+subtree.close();
+db.close();
 ```
 
 ## License

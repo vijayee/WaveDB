@@ -322,7 +322,7 @@ vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
 
 | Field | Type | Default | Effect on recall / latency / storage |
 |---|---|---|---|
-| `index_type` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT. Immutable after create — to change it, see [### Migration](#migration) (explicit `migrate()`, not a config flip; reopening with a wrong type raises) |
+| `index_type` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.986 on clustered / 0.37-0.60 on gaussian; SLSH 0.982 on clustered (adaptive). FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT. Immutable after create — to change it, see [### Migration](#migration) (explicit `migrate()`, not a config flip; reopening with a wrong type raises) |
 | `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
 | `delimiter` | str | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
 | `distance` | `Distance` | COSINE | Used for assignment + rerank; match your embedding model (COSINE for normalized, L2 for general, DOT for inner-product) |
@@ -346,6 +346,7 @@ vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
 ```python
 from wavedb import VectorLayer, Format, Runtime, IndexType, Distance
 
+# --- Dedicated database (no key-space sharing) ---
 vl = VectorLayer.open_separate(
     "/path/to/vecdb", "embeddings",
     Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE,
@@ -361,10 +362,18 @@ vl.insert_sync("doc/2", [0.08,  0.11, ...])
 # periodically as the dataset grows; FLAT is a no-op.
 vl.train()
 
+# Rebuild cluster memberships / hash entries after train. Called
+# automatically by train(); call explicitly after changing data without
+# retraining to refresh index structure.
+vl.rebuild()
+
 # Search — returns a list[VectorResult] sorted by distance.
 results = vl.search_sync([0.10, 0.05, ...], k=10)
 for r in results:
     print(r.id_str, r.distance, r.metadata)
+
+# Delete a vector by id.
+vl.delete_sync("doc/1")
 
 # Mutate the runtime tier at any time.
 vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
@@ -471,6 +480,56 @@ callbacks stay alive but dormant. There is no `remove`; this is by design.
 Not registering any callback never breaks the API: `migrate()` and all
 log-emitting paths work correctly with zero callbacks (the only effect is that
 log lines go to stderr, suppressible with `set_quiet`).
+
+### Async API (sync_only=0)
+
+With `sync_only=0`, insert/search/delete use a worker pool and return
+`Future` objects instead of blocking. Each method has a `_async` variant
+that takes a callback, or returns a `concurrent.futures.Future`.
+
+```python
+vl = VectorLayer.open_separate(
+    "/path/to/vecdb", "embeddings",
+    Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE),
+    Runtime(top_k=10, sync_only=0, ivf_nprobe=8),  # async worker pool
+)
+
+# Async insert returns a Future.
+fut = vl.insert("doc/1", [0.12, -0.04, ...])
+fut.result()  # blocks until committed
+
+# Async search returns a Future resolving to list[VectorResult].
+fut = vl.search([0.10, 0.05, ...], k=10)
+results = fut.result()
+
+# Async delete.
+fut = vl.delete("doc/1")
+fut.result()
+
+vl.close()
+```
+
+### Subtree mode (shared database)
+
+To run a vector index inside an existing WaveDB database without a
+separate directory, use `VectorLayer.open` with a `Subtree`:
+
+```python
+from wavedb import Database, DatabaseConfig, Subtree, VectorLayer
+
+db = Database.create("/path/to/wavedb", DatabaseConfig())
+subtree = db.open_subtree("my_index_space")
+
+vl = VectorLayer.open(
+    subtree, "embeddings",
+    Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE),
+    Runtime(top_k=10, sync_only=1),
+)
+# vl shares db's WAL, memory pool, and worker pool. Close vl before db.
+vl.close()
+subtree.close()
+db.close()
+```
 
 ## License
 
