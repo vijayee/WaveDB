@@ -23,6 +23,30 @@ char* vl_key_centroid(const char *idx, char d, int cid);
 char* vl_key_cluster_member(const char *idx, char d, int cid, const char *id);
 char* vl_key_hash(const char *idx, char d, const uint8_t *lsh, size_t llen, const char *id);
 char* vl_key_proj(const char *idx, char d, int t);
+/* Reserved self-describing leaf: vec/{idx}/__format (sibling of `count`,
+   lexically excluded from every vector scan -- '_' (0x5F) sorts before
+   'c'/'h'/'v'). Stores the index-type word ("flat"/"ivf"/"slsh"). */
+char* vl_key_format(const char *idx, char d);
+
+/* Persisted-__format helpers. vl_put_string stores strlen(value) bytes (no
+   NUL terminator -- mirrors GraphQL's layer_put_string at
+   graphql_schema.c:49). vl_get_string returns a malloc'd NUL-terminated copy
+   of the stored string, or NULL if the key is absent / on error (caller frees
+   with free()). */
+int  vl_put_string(vector_layer_t *vl, const char *path, size_t plen,
+                   const char *value);
+char* vl_get_string(vector_layer_t *vl, const char *path, size_t plen);
+
+/* Index-type word <-> enum. name returns "flat"/"ivf"/"slsh" (or NULL for an
+   unknown enum value). parse maps a non-NUL-terminated word of `len` bytes to
+   the enum, or -1 for garbage/unknown. */
+const char* vl_index_type_name(int t);
+int  vl_index_type_parse(const char *s, size_t len);
+
+/* Read the persisted __format word and map it to a vl_index_type_t. Returns
+   the enum (FLAT/IVF/SLSH) on success, or -1 if the key is absent, and -2 if
+   present-but-garbage (corrupt index -- a hard error, not "absent"). */
+int vl_read_format_type(vector_layer_t *vl);
 
 /* Distance dispatch. */
 float vl_distance(const float *a, const float *b, int dim, vl_distance_t metric);

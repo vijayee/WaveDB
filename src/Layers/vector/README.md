@@ -11,10 +11,12 @@ by the Python/Dart/Node bindings. Three index types:
   forward+backward scan. Handles uniform distributions well.
 
 Config is split into a **format tier** (immutable after create — drop the
-subtree / separate db and recreate to change) and a **runtime tier** (freely
+subtree / separate db and recreate to change, or migrate in place via
+`vector_layer_migrate` which updates `__format`) and a **runtime tier** (freely
 mutable via `vector_layer_reconfigure`). The C signature of
 `vector_layer_reconfigure` accepts only the runtime tier; format mutation is
-structurally impossible without drop+recreate.
+structurally impossible without drop+recreate, EXCEPT the explicit
+`vector_layer_migrate` operation (the only way to change `index_type`).
 
 See `docs/superpowers/specs/2026-07-12-vector-layer-design.md` for the full
 design spec and `bench/vector/REPORT.md` for the spike data backing the
@@ -26,7 +28,7 @@ effect columns below.
 
 | Field | Type | Default | Effect on recall | Effect on latency | Effect on storage | When to tune |
 |---|---|---|---|---|---|---|
-| `index_type` | enum | FLAT | FLAT = 1.0 (exact); IVF ~0.96-0.99 on clustered, ~0.36-0.48 on gaussian; SLSH ~0.91-0.95 on clustered (10k), drops on uniform | FLAT O(N); IVF O(nprobe·N/K); SLSH O(radius) | FLAT 1x; IVF +~86 bytes/vec over FLAT (centroids + membership); SLSH +~89 bytes/vec (hash entries) | Choose per workload: FLAT for small/exact, IVF for clustered, SLSH for uniform |
+| `index_type` | enum | FLAT | FLAT = 1.0 (exact); IVF ~0.96-0.99 on clustered, ~0.36-0.48 on gaussian; SLSH ~0.91-0.95 on clustered (10k), drops on uniform | FLAT O(N); IVF O(nprobe·N/K); SLSH O(radius) | FLAT 1x; IVF +~86 bytes/vec over FLAT (centroids + membership); SLSH +~89 bytes/vec (hash entries) | Choose per workload: FLAT for small/exact, IVF for clustered, SLSH for uniform. Immutable after create; to change, `vector_layer_migrate` (not a config flip — reopening with a wrong type returns `VL_EFORMAT_MISMATCH`) |
 | `dim` | int | — (required) | Higher dim → curse of dimensionality → lower ANN recall (gaussian especially) | Linear in dim (FLAT p50 64ms@384 → 162ms@768 on 10k) | Linear in dim (1687 → 3231 bytes/vec FLAT, 1773 → 3325 IVF, 1776 → 3321 SLSH) | Match your embedding model exactly |
 | `delimiter` | char | '/' | — (negligible) | — (negligible) | — (negligible) | Rarely; only if '/' conflicts with your id scheme |
 | `distance` | enum | COSINE | — (used for assignment + rerank; choice does not change recall at fixed index) | — (negligible — same float ops) | — (negligible) | Match your embedding model's metric (COSINE for normalized embeddings, L2 for general, DOT for inner-product) |
@@ -122,6 +124,57 @@ resolve with `NULL` (insert/delete/batch) or a `vl_search_result_t*`
 promise resolves before the call returns. Full signature reference and the
 async error contract are in the spec:
 `docs/superpowers/specs/2026-07-12-vector-layer-design.md`.
+
+### Migration (`vector_layer_migrate` + `vector_layer_get_format`)
+
+`vector_layer_migrate(vl, new_fmt)` is an **explicit, destructive operation** —
+the only way to change an index's `index_type` in place. It validates
+`new_fmt` (`dim` + `delimiter` must match the layer's current in-memory values;
+stored vectors / key-paths depend on them), deletes ALL aux child prefixes
+(`cluster/` + `centroid/` + `hash/` + `proj/` — non-existent ones are no-op
+scans) via idempotent 8000-op delete batches, writes the `__format` leaf to the
+new type word (the recovery anchor: disk + memory written in the same step),
+adopts `new_fmt`, then trains (IVF/SLSH; FLAT is a no-op). Stored vectors
+(`vec/{idx}/vector/{id}`), `count`, and `__format` survive every migrate (delete
+is by child prefix, never the parent `vec/{idx}/`). `dim`/`delimiter` are fixed
+for the index's life; `index_type` / `distance` / `ivf_n_clusters` / `slsh_*`
+may change. The no-op-on-identical guard is intentionally removed so re-running
+`migrate(target)` always completes a half-built index (convergence after a
+crash); `train()` / `rebuild()` remain the cheaper same-type retrain path.
+
+**Crash safety:** NOT atomic. `__format` is the recovery anchor — a crash
+leaves `__format` = target type, old aux deleted, new aux partially built, all
+vectors intact (no data loss). Reopen reads `__format` = target and opens as
+the target type (degraded-but-correctly-labeled); re-run `migrate(target)` to
+converge (idempotent).
+
+`vector_layer_get_format(vl, out)` returns the in-memory `vector_layer_format_t`
+(type confirmed against the on-disk `__format` leaf at open; the rest is
+caller-supplied).
+
+**Self-describing index type / `__format` reserved leaf.** The index type is
+persisted as one NUL-terminated string (`"flat"` / `"ivf"` / `"slsh"`) at the
+reserved leaf `vec/{idx}/__format` (sibling of `count`, mirroring GraphQL's
+`__meta/version` single-string convention). Set on create, validated on open
+(`vl_init` writes the passed type when the leaf is absent — a brand-new or
+pre-0.2.1 index — and returns `VL_EFORMAT_MISMATCH` (-1001) when the passed
+`index_type` does not match the persisted leaf, instead of silently degrading).
+A present-but-garbage leaf is treated as a corrupt index (same loud error). The
+leaf MUST remain a sibling leaf at `vec/{idx}/__format`, never under a scanned
+child prefix (`vector/` / `cluster/` / `hash/` / `centroid/` / `proj/`) — its
+lexical position (`_` = 0x5F sorts before `c` = 0x63) excludes it from every
+vector scan for free, exactly like `count`. Only the type is persisted;
+`dim` / `delimiter` / `distance` / cluster / slsh params are caller-supplied and
+NOT validated against disk (documented caveat — moot for callers using
+constants).
+
+**Progress.** `migrate()` (and `train()` / `rebuild()`) emit `log_info` events
+in the uniform format `vector\t{phase}\t{current}\t{total}` (phases: `scan` /
+`delete` / `train` / `rebuild` / `done`), per 8000-op chunk. Surface them to a
+binding via `wavedb_log_add_callback` (`src/Util/log_bridge.c` formats the
+`va_list` in C; `log_set_quiet` / `log_set_level` control the default stderr
+path). With no callback registered, migrate still returns 0 (log_info is a
+no-op when quiet, or a stderr print when not — neither depends on a callback).
 
 ## Build
 

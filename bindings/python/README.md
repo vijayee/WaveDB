@@ -291,7 +291,8 @@ Approximate-nearest-neighbour (ANN) vector similarity search on top of
 WaveDB, in the same process. Three index types: **FLAT** (exact
 brute-force), **IVF** (k-means inverted file), **SLSH** (sortable compound
 LSH with bidirectional scan). Config is split into a **format tier**
-(immutable after create — drop + recreate to change) and a **runtime tier**
+(immutable after create, except `index_type` via the explicit `migrate()` —
+see [### Migration](#migration)) and a **runtime tier**
 (mutable via `VectorLayer.reconfigure`). See
 [`src/Layers/vector/README.md`](../../src/Layers/vector/README.md) for the
 authoritative C-layer config reference with spike-measured impact columns;
@@ -321,7 +322,7 @@ vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
 
 | Field | Type | Default | Effect on recall / latency / storage |
 |---|---|---|---|
-| `index_type` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
+| `index_type` | `IndexType` | FLAT | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT. Immutable after create — to change it, see [### Migration](#migration) (explicit `migrate()`, not a config flip; reopening with a wrong type raises) |
 | `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
 | `delimiter` | str | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
 | `distance` | `Distance` | COSINE | Used for assignment + rerank; match your embedding model (COSINE for normalized, L2 for general, DOT for inner-product) |
@@ -370,6 +371,106 @@ vl.reconfigure(Runtime(top_k=20, ivf_nprobe=16))
 
 vl.close()
 ```
+
+### Migration
+
+`vl.migrate(new_fmt)` is a **deliberate operation you invoke explicitly** to
+change an index's `index_type` in place (C: `vector_layer_migrate`). It is the
+**only** way to change the index type. It restructures the aux keys in place,
+retrains, and writes the persisted `__format` leaf. A config flip cannot
+migrate — and reopening with a different `index_type` now **raises**, it does
+not silently degrade and does not migrate.
+
+**Self-describing index type.** The layer's `index_type` is persisted in a
+reserved `vec/{idx}/__format` string leaf (value `"flat"` / `"ivf"` / `"slsh"`,
+mirroring the GraphQL `__meta/version` single-string convention). Set on
+create, updated on migrate. Only the type is persisted; `dim` / `delimiter` /
+`distance` and the cluster/slsh params stay caller-supplied (constants for most
+users). Inspect the current type with `vl.get_format()`.
+
+> **WARNING:** opening an existing index with a **mismatched** `index_type`
+> now **raises** `WaveDBError` — it does NOT silently degrade and does NOT
+> migrate. To change the index type you MUST call `migrate()`. (Pre-0.2.1
+> indexes without a `__format` leaf are upgraded to self-describing on the
+> first reopen with a type.) Caveat: a mismatched `dim` / `delimiter` /
+> `distance` is NOT caught (they are not persisted) — pass them correctly.
+
+```python
+from wavedb import VectorLayer, Format, IndexType, Distance, Runtime
+
+vl = VectorLayer.open_separate(
+    "/path/to/vecdb", "embeddings",
+    Format(index_type=IndexType.FLAT, dim=384, distance=Distance.COSINE),
+    Runtime(sync_only=1),
+)
+# ...insert vectors...
+
+# Explicit, in-place migration FLAT -> IVF. dim + delimiter must match the
+# layer (stored vectors / key-paths depend on them); index_type, distance,
+# ivf_n_clusters, and slsh_* may change. Stored vectors, count, and metadata
+# are preserved; only the aux keys churn + the index retrains.
+vl.migrate(Format(index_type=IndexType.IVF, dim=384, distance=Distance.COSINE,
+                  ivf_n_clusters=50))
+assert vl.get_format().index_type == IndexType.IVF
+vl.reconfigure(Runtime(ivf_nprobe=8))
+```
+
+Cost is O(N) aux churn + train; there is no O(N) vector copy. Constraints:
+`dim` and `delimiter` must match the current layer (`migrate` raises
+`WaveDBError` otherwise, leaving the layer unchanged).
+
+**Crash safety.** Migration is NOT atomic. `__format` is the recovery anchor
+(written at the adoption step with disk + memory in sync): a crash leaves
+`__format` = target type, old aux deleted, new aux partially built, and **all
+vectors intact** (no data loss). Reopen reads `__format` = target and opens as
+the target type (degraded-but-correctly-labeled); **re-run
+`migrate(target_fmt)` to converge**. The same-type short-circuit is
+intentionally removed so re-running always completes a half-built index; use
+`train()` / `rebuild()` for a cheaper same-type retrain (no `__format`
+rewrite).
+
+**Progress.** Register a handler before `migrate()` so you are not waiting
+ignorably:
+
+```python
+import wavedb
+wavedb.set_quiet(True)  # suppress default stderr log output
+wavedb.set_progress_handler(lambda phase, cur, total:
+    print(f"{phase}: {cur}/{total}"))
+vl.migrate(Format(index_type=IndexType.IVF, dim=384, ivf_n_clusters=50))
+# -> delete: 0/0  (FLAT source has no aux)
+#    train: 1/100
+#    rebuild: 2000/2000
+#    done: 2000/2000
+```
+
+### Logging and progress
+
+WaveDB emits internal log events via an rxi-style logger (`src/Util/log.c`).
+The Python binding exposes it through `wavedb.log`:
+
+- `wavedb.set_log_callback(handler, level=LogLevel.INFO)` — register
+  `handler(level: int, message: str)` for every log event at or above `level`.
+  Fires synchronously on the calling thread; **the handler MUST NOT call back
+  into WaveDB** (reentrancy). Process-lifetime registration.
+- `wavedb.set_progress_handler(handler, level=LogLevel.INFO)` — convenience
+  wrapper that filters events to the vector progress format
+  ``vector\t{phase}\t{current}\t{total}`` (phases: `scan` / `delete` / `train` /
+  `rebuild` / `done`), calling `handler(phase: str, current: int, total: int)`.
+  Emitted per 8000-op chunk by `migrate()` and by direct `train()` / `rebuild()`.
+- `wavedb.set_quiet(enable=True)` — suppress rxi's default stderr log output
+  (registered callbacks still fire; the two paths are independent).
+- `wavedb.LogLevel` — `TRACE/DEBUG/INFO/WARN/ERROR/FATAL` (an `IntEnum`).
+
+**Lifecycle / re-registration.** rxi's callback registry is append-only with no
+remove, so every Python callback is kept alive for the process lifetime (a
+freed callback would be a use-after-free). Re-registering a handler **disarms**
+prior registrations so only the latest fires (no double-fire); the old
+callbacks stay alive but dormant. There is no `remove`; this is by design.
+
+Not registering any callback never breaks the API: `migrate()` and all
+log-emitting paths work correctly with zero callbacks (the only effect is that
+log lines go to stderr, suppressible with `set_quiet`).
 
 ## License
 

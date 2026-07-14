@@ -25,10 +25,19 @@ typedef enum {
     VL_DIST_DOT    = 2
 } vl_distance_t;
 
-/* Format tier — IMMUTABLE after create. To change any field here, drop the
-   subtree (or separate db) and recreate the layer. vector_layer_reconfigure
-   accepts only the runtime tier; the C signature makes format mutation
-   structurally impossible. */
+/* Returned by vector_layer_create / open_separate (via *error_code) when an
+   existing index is reopened with an index_type that does not match the
+   persisted __format leaf. A loud error (not silent degradation): only
+   vector_layer_migrate changes the type on disk. */
+#define VL_EFORMAT_MISMATCH (-1001)
+
+/* Format tier — IMMUTABLE after create EXCEPT via the explicit
+   vector_layer_migrate() operation (the only way to change index_type /
+   ivf_n_clusters / slsh_* / distance in place; it restructures the aux keys +
+   retrains + updates __format). dim and delimiter are fixed for the life of
+   the index (the stored vectors / key paths depend on them) and migrate
+   rejects a change to them. vector_layer_reconfigure accepts only the
+   runtime tier; the C signature makes runtime-only mutation obvious. */
 typedef struct {
     vl_index_type_t index_type;
     int      dim;                 /* vector dimensionality */
@@ -98,10 +107,49 @@ vector_layer_t* vector_layer_open_separate(const char *db_location,
 void  vector_layer_destroy(vector_layer_t *vl);
 
 /* Reconfigure runtime-tunable params only. Format tier is immutable after
-   create; to change index_type/dim/delimiter/ivf_n_clusters/slsh_*, drop the
-   subtree (or separate db) and recreate. */
+   create; to change index_type/dim/delimiter/ivf_n_clusters/slsh_*, call
+   vector_layer_migrate (NOT reconfigure -- reconfigure is runtime-only and
+   cannot change the format). dim/delimiter are fixed for the index's life. */
 int   vector_layer_reconfigure(vector_layer_t *vl,
                                vector_layer_runtime_t *runtime);
+
+/* Read the layer's in-memory Format (index_type confirmed against the
+   persisted __format leaf at open). out must point to a caller-owned
+   vector_layer_format_t. Returns 0 on success, -22 on NULL args. */
+int   vector_layer_get_format(vector_layer_t *vl,
+                               vector_layer_format_t *out);
+
+/* MIGRATION IS A DESTRUCTIVE, EXPLICIT OPERATION -- the ONLY way to change
+ * the index type. Reopening with a mismatched index_type returns
+ * VL_EFORMAT_MISMATCH (it does NOT migrate and no longer silently degrades);
+ * only migrate() restructures the aux keys + retrains + updates __format.
+ *
+ * new_fmt->dim and new_fmt->delimiter MUST match the layer's current values
+ * (stored vectors/key paths depend on them); other fields (index_type,
+ * ivf_n_clusters, slsh_*, distance) may change. Deletes the OLD type's aux
+ * child prefixes (cluster/+centroid/ for IVF, hash/+proj/ for SLSH; FLAT none),
+ * writes __format = new type (the recovery anchor -- disk+memory in sync),
+ * adopts new_fmt, then trains the new index. Stored vectors, count, and
+ * __format are preserved (delete is by specific child prefix, never the
+ * parent vec/{idx}/).
+ *
+ * Crash safety: NOT atomic across the whole op. __format is the recovery
+ * anchor: a crash leaves __format=target + half-built aux + all vectors
+ * intact (no data loss). Re-run migrate(new_fmt) to converge (idempotent).
+ * The no-op-on-identical guard is intentionally REMOVED so a re-run always
+ * completes a half-built index; use train()/rebuild() for a cheaper same-type
+ * retrain that does NOT rewrite __format.
+ *
+ * Progress: emits log_info events "vector\t{phase}\t{current}\t{total}"
+ * (phases scan/delete/train/rebuild/done) per 8000-op chunk. Register a
+ * callback via wavedb_log_add_callback (see src/Util/log.h). Works correctly
+ * with NO callback registered (events simply go to stderr unless suppressed
+ * via log_set_quiet).
+ *
+ * Returns 0 on success, -22 on NULL args or dim/delimiter mismatch, or a
+ * propagated train/scan error. */
+int   vector_layer_migrate(vector_layer_t *vl,
+                           const vector_layer_format_t *new_fmt);
 
 /* Async variants — Graph-style: return void, take a caller-owned promise_t*.
  * The caller creates the promise (with resolve/reject callbacks + ctx), passes

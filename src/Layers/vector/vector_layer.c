@@ -10,6 +10,7 @@
 #include "../../Workers/work.h"
 #include "../../Workers/pool.h"
 #include "../../RefCounter/refcounter.h"
+#include "../../Util/log.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -51,6 +52,49 @@ static int vl_init(vector_layer_t *vl, database_t *db, database_subtree_t *subtr
         vl->subtree = NULL;
     }
     vl->owns_db = 0;
+
+    /* Self-describing index type via the reserved vec/{idx}/__format leaf
+     * (mirrors GraphQL's __meta/version single-string convention). On create /
+     * first reopen of a 0.2.0 index the leaf is absent -> write the passed
+     * type. On reopen of a self-describing index the leaf is present ->
+     * validate the passed index_type matches disk; a mismatch is a LOUD
+     * error (VL_EFORMAT_MISMATCH), not silent degradation, and not a migrate.
+     * A present-but-garbage leaf is a corrupt index -> same loud error.
+     * Only dim/delimiter/distance/cluster/slsh params are NOT persisted
+     * (caller-supplied); the type is the part that determines aux-key
+     * interpretation, so it is the part worth validating. */
+    {
+        int persisted = vl_read_format_type(vl);  /* enum | -1 absent | -2 corrupt */
+        if (persisted == -2) {
+            if (vl->subtree) { database_subtree_close(vl->subtree); vl->subtree = NULL; }
+            vl->db = NULL;
+            return VL_EFORMAT_MISMATCH;
+        }
+        if (persisted < 0) {
+            /* Absent: brand-new index, or a 0.2.0 index being upgraded to
+             * self-describing. Persist the passed type word. */
+            char *fkey = vl_key_format(vl->index_name, vl->format.delimiter);
+            if (fkey == NULL) {
+                if (vl->subtree) { database_subtree_close(vl->subtree); vl->subtree = NULL; }
+                vl->db = NULL;
+                return -12;
+            }
+            const char *name = vl_index_type_name(vl->format.index_type);
+            int rc = vl_put_string(vl, fkey, strlen(fkey), name ? name : "flat");
+            free(fkey);
+            if (rc != 0) {
+                if (vl->subtree) { database_subtree_close(vl->subtree); vl->subtree = NULL; }
+                vl->db = NULL;
+                return rc;
+            }
+        } else if (persisted != (int)vl->format.index_type) {
+            /* Present but type mismatch: refuse to open as the wrong type. */
+            if (vl->subtree) { database_subtree_close(vl->subtree); vl->subtree = NULL; }
+            vl->db = NULL;
+            return VL_EFORMAT_MISMATCH;
+        }
+        /* else: present and matches -> nothing to do. */
+    }
     return 0;
 }
 
@@ -209,6 +253,133 @@ int vector_layer_rebuild(vector_layer_t *vl) {
         case VL_INDEX_SLSH: return vector_slsh_rebuild(vl);
     }
     return -22;
+}
+
+int vector_layer_get_format(vector_layer_t *vl, vector_layer_format_t *out) {
+    if (vl == NULL || out == NULL) return -22;
+    *out = vl->format;
+    return 0;
+}
+
+/* Delete every key under a child prefix (prefix includes its trailing
+ * delimiter) via chunked 8000-op delete batches. The scan is fully
+ * materialized BEFORE any write (mirrors vector_ivf_rebuild -- never interleave
+ * scans with writes), so the borrowed result key pointers stay valid until we
+ * free `results` at the end. Idempotent: an already-empty prefix scans zero
+ * keys and returns 0 with no writes. Emits a "vector\t{phase}\t{cur}\t{total}"
+ * log_info per chunk (only when count > 0); with no callback registered the
+ * event merely goes to stderr (suppress via log_set_quiet). Returns 0 / rc. */
+static int vl_delete_prefix(vector_layer_t *vl, const char *prefix, size_t plen,
+                             const char *phase) {
+    char *end = (char*)malloc(plen + 2);
+    if (end == NULL) return -12;
+    memcpy(end, prefix, plen);
+    end[plen] = '\x7f'; end[plen + 1] = '\0';
+
+    raw_result_t *results = NULL;
+    size_t count = 0;
+    int rc = vl_scan_range(vl, prefix, plen, end, plen + 1, &results, &count);
+    free(end);
+    if (rc != 0) return rc;
+    if (count == 0) { database_raw_results_free(results, count); return 0; }
+
+    const size_t CHUNK = 8000;
+    size_t chunk_cap = count < CHUNK ? count : CHUNK;
+    raw_op_t *ops = (raw_op_t*)malloc(chunk_cap * sizeof(raw_op_t));
+    if (ops == NULL) { database_raw_results_free(results, count); return -12; }
+
+    size_t deleted = 0;
+    rc = 0;
+    for (size_t off = 0; off < count && rc == 0; off += CHUNK) {
+        size_t n = count - off;
+        if (n > CHUNK) n = CHUNK;
+        for (size_t i = 0; i < n; i++) {
+            ops[i].key = results[off + i].key;
+            ops[i].key_len = results[off + i].key_len;
+            ops[i].value = NULL;
+            ops[i].value_len = 0;
+            ops[i].type = 1;  /* delete */
+        }
+        rc = vl_batch(vl, ops, n);
+        if (rc == 0) {
+            deleted += n;
+            log_info("vector\t%s\t%zu\t%zu", phase, deleted, count);
+        }
+    }
+    free(ops);
+    database_raw_results_free(results, count);
+    return rc;
+}
+
+/* Build "vec{d}{idx}{d}{child}{d}" and delete every key under it. Non-existent
+ * child prefixes scan zero keys -> no-op. */
+static int vl_delete_child(vector_layer_t *vl, const char *child) {
+    char d = vl->format.delimiter;
+    size_t idx_len = strlen(vl->index_name);
+    size_t child_len = strlen(child);
+    size_t plen = 3 + 1 + idx_len + 1 + child_len + 1;
+    char *prefix = (char*)malloc(plen + 1);
+    if (prefix == NULL) return -12;
+    snprintf(prefix, plen + 1, "vec%c%s%c%s%c", d, vl->index_name, d, child, d);
+    int rc = vl_delete_prefix(vl, prefix, plen, "delete");
+    free(prefix);
+    return rc;
+}
+
+int vector_layer_migrate(vector_layer_t *vl, const vector_layer_format_t *new_fmt) {
+    if (vl == NULL || new_fmt == NULL) return -22;
+    if (vl->db == NULL) return -22;
+    /* dim + delimiter are fixed for the index's life (stored vectors / key
+     * paths depend on them). Other format fields may change. */
+    if (new_fmt->dim != vl->format.dim) return -22;
+    if (new_fmt->delimiter != vl->format.delimiter) return -22;
+    if (new_fmt->index_type < VL_INDEX_FLAT || new_fmt->index_type > VL_INDEX_SLSH)
+        return -22;
+
+    char d = vl->format.delimiter;
+    int rc = 0;
+
+    /* 1. Delete ALL aux child prefixes unconditionally (cluster/, centroid/,
+     * hash/, proj/). Non-existent ones are no-op scans. This is more robust
+     * than deleting only the CURRENT type's aux: a crash mid-migrate leaves
+     * __format=target but possibly stale aux from the prior type, and on the
+     * recovery reopen vl->format.index_type becomes the target -- so a re-run
+     * that only deleted the "current" type's aux would never clean the stale
+     * foreign aux. Deleting all four every time converges from any state.
+     * count / vector / __format are sibling leaves, never touched (we delete
+     * by child prefix, never the parent vec/{idx}/). */
+    rc = vl_delete_child(vl, "cluster");
+    if (rc == 0) rc = vl_delete_child(vl, "centroid");
+    if (rc == 0) rc = vl_delete_child(vl, "hash");
+    if (rc == 0) rc = vl_delete_child(vl, "proj");
+    if (rc != 0) return rc;
+
+    /* 2. Adoption step = recovery anchor: write __format = new type word to
+     * disk, then adopt new_fmt in memory in the SAME step (disk+memory sync).
+     * A crash here leaves __format=target + clean aux + all vectors intact. */
+    {
+        char *fkey = vl_key_format(vl->index_name, d);
+        if (fkey == NULL) return -12;
+        const char *name = vl_index_type_name(new_fmt->index_type);
+        rc = vl_put_string(vl, fkey, strlen(fkey), name ? name : "flat");
+        free(fkey);
+        if (rc != 0) return rc;
+    }
+    vl->format = *new_fmt;
+
+    /* 3. Train the new index (writes centroids/projections + rebuilds
+     * memberships/hashes for IVF/SLSH; FLAT has no aux to build). train()
+     * emits its own "vector\ttrain\t.." / "vector\trebuild\t.." progress from
+     * the index-specific loops. Works with no callback registered. */
+    if (new_fmt->index_type == VL_INDEX_IVF || new_fmt->index_type == VL_INDEX_SLSH) {
+        rc = vector_layer_train(vl);
+        if (rc != 0) return rc;
+    }
+
+    /* 4. Done. Report final count so a UI can confirm completion. */
+    size_t final_count = vector_layer_count(vl);
+    log_info("vector\tdone\t%zu\t%zu", final_count, final_count);
+    return 0;
 }
 
 /* ── Async API (Task 12b: true promise-based async) ───────────────────

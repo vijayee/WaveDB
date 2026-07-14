@@ -399,6 +399,16 @@ int   vector_layer_train(vector_layer_t *vl);
 int   vector_layer_rebuild(vector_layer_t *vl);
 size_t vector_layer_count(vector_layer_t *vl);
 void   vector_layer_free_results(vl_result_t *results, int n);
+int    vector_layer_get_format(vector_layer_t *vl,
+    vector_layer_format_t *out);
+int    vector_layer_migrate(vector_layer_t *vl,
+    const vector_layer_format_t *new_fmt);
+
+/* ---- Logging / progress (src/Util/log.h via log_bridge.c) ---- */
+typedef void (*wavedb_log_cb)(int level, const char *message, void *udata);
+int  wavedb_log_add_callback(wavedb_log_cb fn, void *udata, int level);
+void log_set_quiet(_Bool enable);
+void log_set_level(int level);
 """)
 
 

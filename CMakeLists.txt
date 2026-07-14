@@ -52,6 +52,7 @@ set(WAVEDB_SOURCES
     # Util
     src/Util/allocator.c
     src/Util/log.c
+    src/Util/log_bridge.c
     src/Util/vec.c
     src/Util/hash.c
     src/Util/threadding.c

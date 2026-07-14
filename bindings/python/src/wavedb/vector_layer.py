@@ -64,11 +64,15 @@ class Distance:
 
 @dataclass
 class Format:
-    """Immutable format tier — set at create time, cannot be changed after.
+    """Immutable format tier — set at create time.
 
-    To change any field here, drop the layer (and its subtree / separate db)
-    and recreate. `vector_layer_reconfigure` accepts a Runtime only; the C
-    signature makes format mutation structurally impossible.
+    `dim` and `delimiter` are immutable for the life of the index (the stored
+    vectors and key-paths depend on them). `index_type` is immutable EXCEPT
+    via the explicit `VectorLayer.migrate()` operation, which restructures
+    the aux keys in place and updates the persisted `__format` leaf -- it is
+    NOT a config flip, and reopening with a different `index_type` now raises.
+    `distance`/`ivf_n_clusters`/`slsh_*` may also change via `migrate()`.
+    `vector_layer_reconfigure` accepts a Runtime only.
     """
 
     index_type: int
@@ -286,6 +290,72 @@ class VectorLayer:
         rc = lib.vector_layer_reconfigure(self._ptr, rt_c)
         if rc < 0:
             raise map_error(rc, "vector_layer_reconfigure failed")
+        return rc
+
+    def get_format(self) -> Format:
+        """Return the layer's current Format.
+
+        The `index_type` is the value persisted in the on-disk `__format` leaf
+        (validated against the caller's type at open time); the remaining
+        fields are the caller-supplied values from open (dim/delimiter/distance
+        and cluster/slsh params are NOT persisted by WaveDB).
+        """
+        self._check_open()
+        out = ffi.new("vector_layer_format_t*")
+        rc = lib.vector_layer_get_format(self._ptr, out)
+        if rc < 0:
+            raise map_error(rc, "vector_layer_get_format failed")
+        delim = out.delimiter
+        if isinstance(delim, (bytes, bytearray)):
+            delim_str = bytes(delim).decode("utf-8", "replace")
+        else:
+            delim_str = chr(int(delim))
+        return Format(
+            index_type=int(out.index_type),
+            dim=int(out.dim),
+            delimiter=delim_str,
+            distance=int(out.distance),
+            ivf_n_clusters=int(out.ivf_n_clusters),
+            slsh_lsh_tables=int(out.slsh_lsh_tables),
+            slsh_hash_bits=int(out.slsh_hash_bits),
+            slsh_bucket_width=float(out.slsh_bucket_width),
+        )
+
+    def migrate(self, fmt: Format) -> int:
+        """Migrate this layer to a new index type in place (EXPLICIT op).
+
+        This is the ONLY way to change the index type. Reopening an existing
+        index with a different `index_type` now RAISES (WaveDBError) -- it does
+        NOT silently degrade and does NOT migrate; you must call `migrate()`.
+
+        `dim` and `delimiter` must match the current layer (the stored vectors
+        and key-paths depend on them); `index_type`, `ivf_n_clusters`,
+        `slsh_*`, and `distance` may change. The operation deletes the old
+        index-type's aux keys, writes the `__format` leaf to the new type
+        (recovery anchor), and trains the new index. Stored vectors, `count`,
+        and metadata are preserved.
+
+        Crash safety: NOT atomic. `__format` is the recovery anchor (disk +
+        memory written in the same step); a crash leaves the index labeled as
+        the target type with partially-built aux and all vectors intact.
+        Re-run `migrate(target)` to converge (idempotent). The same-type
+        short-circuit is intentionally removed so re-running always completes a
+        half-built index; use `train()`/`rebuild()` for a cheaper same-type
+        retrain.
+
+        Progress: register `wavedb.set_progress_handler(...)` (and optionally
+        `wavedb.set_quiet(True)`) before calling. Events are emitted as
+        ``vector\\t{phase}\\t{current}\\t{total}`` (scan/delete/train/rebuild/
+        done), per 8000-op chunk.
+        """
+        self._check_open()
+        if not isinstance(fmt, Format):
+            raise TypeError(f"fmt must be Format, got {type(fmt).__name__}")
+        c_fmt = ffi.new("vector_layer_format_t*")
+        _fill_format(c_fmt, fmt)
+        rc = lib.vector_layer_migrate(self._ptr, c_fmt)
+        if rc < 0:
+            raise map_error(rc, "vector_layer_migrate failed")
         return rc
 
     # ---- lifecycle ----

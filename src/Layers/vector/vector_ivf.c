@@ -5,6 +5,7 @@
  * then batching all writes atomically. Never interleave scans with writes. */
 #include "vector_internal.h"
 #include "../../Database/database.h"
+#include "../../Util/log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -482,6 +483,7 @@ int vector_ivf_train(vector_layer_t *vl) {
 
     int max_iters = 10;
     for (int iter = 0; iter < max_iters; iter++) {
+        log_info("vector\ttrain\t%d\t%d", iter + 1, max_iters);
         int changed = 0;
         for (size_t i = 0; i < n_vectors; i++) {
             if (vectors[i].value_len < vec_bytes) { assignments[i] = 0; continue; }
@@ -780,11 +782,14 @@ int vector_ivf_rebuild(vector_layer_t *vl) {
     rc = 0;
     if (op_i > 0) {
         const size_t CHUNK = 8000;
+        size_t done = 0;
         for (size_t off = 0; off < op_i; off += CHUNK) {
             size_t n = op_i - off;
             if (n > CHUNK) n = CHUNK;
             int crc = vl_batch(vl, ops + off, n);
             if (crc != 0) { rc = crc; break; }
+            done += n;
+            log_info("vector\trebuild\t%zu\t%zu", done, op_i);
         }
     }
 

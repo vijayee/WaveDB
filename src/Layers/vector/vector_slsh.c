@@ -10,6 +10,7 @@
  *   3. Read current count — read-only.
  *   4. ONE batch of 3 ops: vector + hash entry + count. */
 #include "vector_internal.h"
+#include "../../Util/log.h"
 #include "../../Database/database.h"
 #include "../../Database/database_iterator.h"
 #include "../../HBTrie/path.h"
@@ -445,6 +446,7 @@ int vector_slsh_train(vector_layer_t *vl) {
        spike; production would use a proper RNG (and likely Gaussian). */
     srand(42);
     for (int t = 0; t < L; t++) {
+        log_info("vector\ttrain\t%d\t%d", t + 1, L);
         float *proj = (float*)malloc((size_t)dim * sizeof(float));
         if (proj == NULL) return -12;
         for (int dd = 0; dd < dim; dd++) {
@@ -619,11 +621,14 @@ int vector_slsh_rebuild(vector_layer_t *vl) {
     rc = 0;
     if (op_i > 0) {
         const size_t CHUNK = 8000;
+        size_t done = 0;
         for (size_t off = 0; off < op_i; off += CHUNK) {
             size_t n = op_i - off;
             if (n > CHUNK) n = CHUNK;
             int crc = vl_batch(vl, ops + off, n);
             if (crc != 0) { rc = crc; break; }
+            done += n;
+            log_info("vector\trebuild\t%zu\t%zu", done, op_i);
         }
     }
 

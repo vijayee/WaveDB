@@ -118,6 +118,8 @@ EXPORTS
     identifier_destroy
     identifier_get_data_copy
     identifier_to_buffer
+    log_set_level
+    log_set_quiet
     path_append
     path_create
     path_destroy
@@ -136,13 +138,16 @@ EXPORTS
     vector_layer_delete_sync
     vector_layer_destroy
     vector_layer_free_results
+    vector_layer_get_format
     vector_layer_insert
     vector_layer_insert_batch
     vector_layer_insert_batch_sync
     vector_layer_insert_sync
+    vector_layer_migrate
     vector_layer_open_separate
     vector_layer_rebuild
     vector_layer_reconfigure
     vector_layer_search
     vector_layer_search_sync
     vector_layer_train
+    wavedb_log_add_callback

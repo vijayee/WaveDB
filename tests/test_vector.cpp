@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 #include <set>
+#include <map>
 #include <algorithm>
 #include <utility>
 #include <future>
@@ -33,6 +34,7 @@ extern "C" {
 #include "../src/Database/database_config.h"
 #include "../src/Workers/promise.h"
 #include "../src/Workers/error.h"
+#include "../src/Util/log.h"
 }
 
 static int vl_test_counter = 0;
@@ -43,6 +45,10 @@ protected:
         test_dir = "/tmp/wavedb_vltest_" + std::to_string(getpid()) + "_" +
                    std::to_string(vl_test_counter++);
         mkdir(test_dir.c_str(), 0700);
+        /* Per-chunk log_info progress from migrate/train/rebuild would spam
+         * gtest stderr; suppress the default stderr path. Registered C
+         * callbacks still fire (quiet is independent of callbacks in rxi). */
+        log_set_quiet(1);
     }
     void TearDown() override {
         std::string cmd = "rm -rf " + test_dir;
@@ -58,6 +64,35 @@ protected:
         cfg.format.distance = VL_DIST_COSINE;
         cfg.runtime.top_k = 10;
         cfg.runtime.sync_only = 1;
+        return cfg;
+    }
+
+    vector_layer_config_t ivf_config(int dim, int n_clusters) {
+        vector_layer_config_t cfg = {};
+        cfg.format.index_type = VL_INDEX_IVF;
+        cfg.format.dim = dim;
+        cfg.format.delimiter = '/';
+        cfg.format.distance = VL_DIST_L2;
+        cfg.format.ivf_n_clusters = n_clusters;
+        cfg.runtime.top_k = 10;
+        cfg.runtime.sync_only = 1;
+        cfg.runtime.ivf_nprobe = n_clusters;  /* probe all clusters */
+        cfg.runtime.ivf_flat_until = 100000;  /* never fall back to flat */
+        return cfg;
+    }
+
+    vector_layer_config_t slsh_config(int dim) {
+        vector_layer_config_t cfg = {};
+        cfg.format.index_type = VL_INDEX_SLSH;
+        cfg.format.dim = dim;
+        cfg.format.delimiter = '/';
+        cfg.format.distance = VL_DIST_L2;
+        cfg.format.slsh_lsh_tables = 2;
+        cfg.format.slsh_hash_bits = 8;
+        cfg.format.slsh_bucket_width = 1.0f;
+        cfg.runtime.top_k = 10;
+        cfg.runtime.sync_only = 1;
+        cfg.runtime.slsh_scan_radius = 100;
         return cfg;
     }
 };
@@ -925,5 +960,490 @@ TEST_F(VectorLayerTest, SLSHRecallGate) {
     float recall = vl_recall_against_stored_clustered(vl, stored, DIM, Q, K, 50);
     std::cout << "SLSH recall@10: " << recall << std::endl;
     EXPECT_GE(recall, 0.90f);
+    vector_layer_destroy(vl);
+}
+
+// ===========================================================================
+// __format persistence + open-time validation + explicit migrate
+// (spec: docs/superpowers/specs/...; plan mellow-jumping-token.md)
+//
+// __format is a reserved string leaf at vec/{idx}/__format ("flat"/"ivf"/
+// "slsh"), sibling of count, lexically excluded from all vector scans. Set
+// on create, validated on open (mismatch -> VL_EFORMAT_MISMATCH, NOT silent
+// degrade), updated by the explicit vector_layer_migrate() only.
+// ===========================================================================
+
+/* Small-scale clustered insert for migrate tests (DIM=4, 3 clusters). */
+static void vl_mtest_insert(vector_layer_t *vl, int N,
+                            std::vector<std::vector<float>> &stored) {
+    srand(7);
+    static const float centers[3][4] = {
+        {10.0f, 0.0f, 0.0f, 0.0f},
+        {0.0f, 10.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 10.0f, 0.0f},
+    };
+    for (int i = 0; i < N; i++) {
+        int c = i % 3;
+        std::vector<float> v(4);
+        for (int d = 0; d < 4; d++) v[d] = centers[c][d] + (float)(rand() % 20 - 10) / 100.0f;
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v.data(), NULL, 0), 0);
+        stored.push_back(v);
+    }
+}
+
+/* FLAT search sanity: querying near cluster 0 returns only ids whose stored
+ * vector is in cluster 0 (distance small). Returns the set of returned ids. */
+static std::set<std::string> vl_mtest_search_ids(vector_layer_t *vl, const float *q, int k) {
+    vl_result_t *results = NULL; int n = 0;
+    std::set<std::string> ids;
+    if (vector_layer_search_sync(vl, q, k, &results, &n) != 0) return ids;
+    for (int i = 0; i < n; i++) {
+        if (results[i].id) ids.insert(std::string(results[i].id));
+    }
+    vector_layer_free_results(results, n);
+    return ids;
+}
+
+// 1. Create writes __format.
+TEST_F(VectorLayerTest, CreateWritesFormat) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    ASSERT_EQ(err, 0);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    vector_layer_format_t gf;
+    ASSERT_EQ(vector_layer_get_format(vl, &gf), 0);
+    EXPECT_EQ(gf.index_type, VL_INDEX_FLAT);
+    EXPECT_EQ(gf.dim, 4);
+    vector_layer_destroy(vl);
+}
+
+// 2. Reopen validates a matching type.
+TEST_F(VectorLayerTest, ReopenValidatesMatchingType) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<float> v = {1.0f, 2.0f, 3.0f, 4.0f};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "v0", v.data(), NULL, 0), 0);
+    vector_layer_destroy(vl);
+
+    vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    ASSERT_EQ(err, 0);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    vector_layer_destroy(vl);
+}
+
+// 3. Reopen with a mismatched type RAISES (not silent degradation).
+TEST_F(VectorLayerTest, ReopenMismatchedTypeRaises) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    vector_layer_destroy(vl);
+
+    vector_layer_config_t bad = ivf_config(4, 3);  /* same dim, different type */
+    vl = vector_layer_open_separate(test_dir.c_str(), "test", &bad, &err);
+    EXPECT_EQ(vl, nullptr);
+    EXPECT_EQ(err, VL_EFORMAT_MISMATCH);
+}
+
+// 4. A legacy (pre-0.2.1) index has no __format; first reopen writes it from
+//    the passed type, and a subsequent mismatched reopen then raises.
+TEST_F(VectorLayerTest, LegacyIndexUpgradesOnReopen) {
+    database_config_t *dbcfg = database_config_default();
+    ASSERT_NE(dbcfg, nullptr);
+    database_config_set_sync_only(dbcfg, 1);
+    int db_err = 0;
+    database_t *db = database_create_with_config(test_dir.c_str(), dbcfg, &db_err);
+    ASSERT_NE(db, nullptr);
+    ASSERT_EQ(db_err, 0);
+
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_create("test", db, NULL, &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<float> v = {1.0f, 2.0f, 3.0f, 4.0f};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "v0", v.data(), NULL, 0), 0);
+    vector_layer_destroy(vl);
+
+    /* Strip the __format leaf -> simulate a 0.2.0 index (count + vector). */
+    const char *fkey = "vec/test/__format";
+    ASSERT_EQ(database_delete_sync_raw(db, fkey, strlen(fkey), '/'), 0);
+
+    /* Reopen FLAT: absent -> writes __format="flat" from the passed type. */
+    vl = vector_layer_create("test", db, NULL, &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    ASSERT_EQ(err, 0);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    vector_layer_destroy(vl);
+
+    /* Now __format="flat" on disk -> reopening as IVF raises (loud mismatch). */
+    vector_layer_config_t bad = ivf_config(4, 3);
+    vl = vector_layer_create("test", db, NULL, &bad, &err);
+    EXPECT_EQ(vl, nullptr);
+    EXPECT_EQ(err, VL_EFORMAT_MISMATCH);
+
+    database_destroy(db);
+    database_config_destroy(dbcfg);
+}
+
+// 5-10. Migrate between every type pair: count preserved, search sane.
+TEST_F(VectorLayerTest, MigrateFlatToIvf) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    size_t n = vector_layer_count(vl);
+    ASSERT_EQ(n, 60u);
+
+    vector_layer_format_t nf = ivf_config(4, 3).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
+
+    /* reconfigure to the IVF runtime (nprobe=3 covers all 3 clusters). */
+    vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    float q[4] = {10.0f, 0.0f, 0.0f, 0.0f};
+    auto ids = vl_mtest_search_ids(vl, q, 5);
+    EXPECT_GT(ids.size(), 0u);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, MigrateFlatToSlsh) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = slsh_config(4).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_SLSH);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, MigrateIvfToFlat) {
+    vector_layer_config_t cfg = ivf_config(4, 3);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = flat_config(4).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    /* FLAT exact: top-1 for a stored vector is itself. */
+    float q[4] = {stored[10][0], stored[10][1], stored[10][2], stored[10][3]};
+    auto ids = vl_mtest_search_ids(vl, q, 1);
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(*ids.begin(), std::string("v10"));
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, MigrateIvfToSlsh) {
+    vector_layer_config_t cfg = ivf_config(4, 3);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = slsh_config(4).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_SLSH);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, MigrateSlshToFlat) {
+    vector_layer_config_t cfg = slsh_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = flat_config(4).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    vector_layer_destroy(vl);
+}
+
+TEST_F(VectorLayerTest, MigrateSlshToIvf) {
+    vector_layer_config_t cfg = slsh_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = ivf_config(4, 3).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
+    vector_layer_destroy(vl);
+}
+
+// 11. Migrate rejects a dim mismatch; layer unchanged + __format unchanged.
+TEST_F(VectorLayerTest, MigrateRejectsDimMismatch) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<float> v = {1.0f, 2.0f, 3.0f, 4.0f};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "v0", v.data(), NULL, 0), 0);
+    vector_layer_format_t nf = ivf_config(8, 3).format;  /* dim 8 != 4 */
+    EXPECT_EQ(vector_layer_migrate(vl, &nf), -22);
+    /* Layer unchanged and still usable. */
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    EXPECT_EQ(vector_layer_count(vl), 1u);
+    auto ids = vl_mtest_search_ids(vl, v.data(), 1);
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(*ids.begin(), std::string("v0"));
+    vector_layer_destroy(vl);
+}
+
+// 12. Same-type migrate rebuilds in place (no short-circuit).
+TEST_F(VectorLayerTest, MigrateSameTypeRebuildsInPlace) {
+    vector_layer_config_t cfg = ivf_config(4, 3);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = ivf_config(4, 3).format;  /* same type */
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
+    vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    float q[4] = {10.0f, 0.0f, 0.0f, 0.0f};
+    auto ids = vl_mtest_search_ids(vl, q, 5);
+    EXPECT_GT(ids.size(), 0u);
+    vector_layer_destroy(vl);
+}
+
+// 13. Round trip FLAT->IVF->SLSH->FLAT->IVF; count preserved each hop; final
+//     IVF top-1 self-query matches.
+TEST_F(VectorLayerTest, MigrateRoundTrip) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    size_t n = vector_layer_count(vl);
+
+    float q[4] = {stored[10][0], stored[10][1], stored[10][2], stored[10][3]};
+    auto baseline = vl_mtest_search_ids(vl, q, 1);
+    ASSERT_EQ(baseline.size(), 1u);
+    EXPECT_EQ(*baseline.begin(), std::string("v10"));
+
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    ASSERT_EQ(vector_layer_migrate(vl, &slsh_config(4).format), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    ASSERT_EQ(vector_layer_migrate(vl, &flat_config(4).format), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
+
+    vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    /* Self-query: the exact stored vector is in some cluster; with nprobe
+     * covering all clusters the exact vector (distance 0) is top-1. */
+    auto final_ids = vl_mtest_search_ids(vl, q, 1);
+    ASSERT_EQ(final_ids.size(), 1u);
+    EXPECT_EQ(*final_ids.begin(), std::string("v10"));
+    vector_layer_destroy(vl);
+}
+
+// 14. Migrate retains metadata byte-for-byte.
+TEST_F(VectorLayerTest, MigrateRetainsMetadata) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    srand(99);
+    static const float centers[3][4] = {
+        {10.0f, 0.0f, 0.0f, 0.0f}, {0.0f, 10.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 10.0f, 0.0f}};
+    std::map<int, std::vector<uint8_t>> metas;
+    std::map<int, std::vector<float>> vecs;
+    for (int i = 0; i < 15; i++) {
+        int c = i % 3;
+        std::vector<float> v(4);
+        for (int d = 0; d < 4; d++) v[d] = centers[c][d] + (float)(rand() % 20 - 10) / 100.0f;
+        uint8_t meta[2] = {(uint8_t)i, (uint8_t)(i ^ 0xFF)};
+        std::string id = "v" + std::to_string(i);
+        ASSERT_EQ(vector_layer_insert_sync(vl, id.c_str(), v.data(), meta, 2), 0);
+        metas[i] = std::vector<uint8_t>(meta, meta + 2);
+        vecs[i] = v;
+    }
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    EXPECT_EQ(vector_layer_count(vl), 15u);
+    int hits = 0;
+    for (int i = 0; i < 15; i++) {
+        vl_result_t *res = NULL; int n = 0;
+        ASSERT_EQ(vector_layer_search_sync(vl, vecs[i].data(), 1, &res, &n), 0);
+        ASSERT_EQ(n, 1);
+        std::string id(res[0].id ? res[0].id : "");
+        if (id == ("v" + std::to_string(i)) && res[0].metadata_len == 2 &&
+            memcmp(res[0].metadata, metas[i].data(), 2) == 0) {
+            hits++;
+        }
+        vector_layer_free_results(res, n);
+    }
+    EXPECT_EQ(hits, 15);
+    vector_layer_destroy(vl);
+}
+
+// 15. Migrate writes __format to disk (recovery anchor); reopen-by-type works.
+TEST_F(VectorLayerTest, MigrateWritesFormatToDisk) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_destroy(vl);
+
+    /* Disk says ivf: reopen IVF ok, reopen FLAT raises. */
+    vector_layer_config_t ivf = ivf_config(4, 3);
+    vl = vector_layer_open_separate(test_dir.c_str(), "test", &ivf, &err);
+    ASSERT_NE(vl, nullptr);
+    ASSERT_EQ(err, 0);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
+    vector_layer_destroy(vl);
+
+    vector_layer_config_t flat = flat_config(4);
+    vl = vector_layer_open_separate(test_dir.c_str(), "test", &flat, &err);
+    EXPECT_EQ(vl, nullptr);
+    EXPECT_EQ(err, VL_EFORMAT_MISMATCH);
+}
+
+// 16. Re-running migrate(target) converges (idempotence / crash-recovery proxy).
+TEST_F(VectorLayerTest, MigrateRerunConverges) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t ivf = ivf_config(4, 3).format;
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf), 0);
+    vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    float q[4] = {10.0f, 0.0f, 0.0f, 0.0f};
+    auto ids1 = vl_mtest_search_ids(vl, q, 5);
+
+    /* Re-run migrate(IVF) -> converges; count + top-5 set unchanged. */
+    ASSERT_EQ(vector_layer_migrate(vl, &ivf), 0);
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    auto ids2 = vl_mtest_search_ids(vl, q, 5);
+    EXPECT_EQ(ids1, ids2);
+    vector_layer_destroy(vl);
+}
+
+// 17. Migrate emits log_info progress (vector\t{phase}\t{current}\t{total}).
+static std::vector<std::string> g_progress_lines;
+static void progress_collect_cb(log_Event *ev) {
+    char buf[1024];
+    vsnprintf(buf, sizeof buf, ev->fmt, ev->ap);
+    g_progress_lines.push_back(std::string(buf));
+}
+TEST_F(VectorLayerTest, MigrateEmitsProgress) {
+    g_progress_lines.clear();
+    ASSERT_EQ(log_add_callback(progress_collect_cb, NULL, LOG_LEVEL_INFO), 0);
+
+    vector_layer_config_t cfg = ivf_config(4, 3);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 9000, stored);  /* >8000 -> multiple 8000-op chunks */
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+
+    /* IVF -> SLSH exercises delete (IVF aux) + train (SLSH proj) + rebuild + done. */
+    ASSERT_EQ(vector_layer_migrate(vl, &slsh_config(4).format), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    vector_layer_destroy(vl);
+
+    ASSERT_FALSE(g_progress_lines.empty());
+    std::set<std::string> phases;
+    std::vector<int> rebuild_cur;
+    int done_cur = -1, done_tot = -1;
+    for (const std::string &line : g_progress_lines) {
+        std::vector<std::string> parts;
+        size_t start = 0, end;
+        while ((end = line.find('\t', start)) != std::string::npos) {
+            parts.push_back(line.substr(start, end - start));
+            start = end + 1;
+        }
+        parts.push_back(line.substr(start));
+        if (parts.size() != 4 || parts[0] != "vector") continue;
+        phases.insert(parts[1]);
+        if (parts[1] == "rebuild") rebuild_cur.push_back(atoi(parts[2].c_str()));
+        if (parts[1] == "done") { done_cur = atoi(parts[2].c_str()); done_tot = atoi(parts[3].c_str()); }
+    }
+    EXPECT_NE(phases.count("delete"), 0u);
+    EXPECT_NE(phases.count("train"), 0u);
+    EXPECT_NE(phases.count("rebuild"), 0u);
+    EXPECT_NE(phases.count("done"), 0u);
+    /* Within rebuild, current is non-decreasing. */
+    auto sorted_cur = rebuild_cur;
+    std::sort(sorted_cur.begin(), sorted_cur.end());
+    EXPECT_EQ(rebuild_cur, sorted_cur);
+    /* done's current == total == count. */
+    EXPECT_EQ(done_cur, (int)n);
+    EXPECT_EQ(done_tot, (int)n);
+}
+
+// 18. The __format leaf is never swept into a FLAT search (defense-in-depth).
+TEST_F(VectorLayerTest, FormatLeafExcludedFromSearch) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<float> v = {1.0f, 2.0f, 3.0f, 4.0f};
+    ASSERT_EQ(vector_layer_insert_sync(vl, "v0", v.data(), NULL, 0), 0);
+
+    /* Overwrite the __format sibling leaf with long garbage bytes that could
+     * be mis-parsed as a vector if a scan ever swept it in. */
+    std::string garbage(128, 'X');
+    const char *fkey = "vec/test/__format";
+    ASSERT_EQ(vl_put_string(vl, fkey, strlen(fkey), garbage.c_str()), 0);
+
+    /* FLAT brute-force scan over vector/ must return only real vector ids,
+     * never the garbage leaf's bytes. */
+    auto ids = vl_mtest_search_ids(vl, v.data(), 10);
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(*ids.begin(), std::string("v0"));
     vector_layer_destroy(vl);
 }

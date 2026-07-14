@@ -63,6 +63,73 @@ char* vl_key_proj(const char *idx, char d, int t) {
     return buf;
 }
 
+char* vl_key_format(const char *idx, char d) {
+    if (idx == NULL) return NULL;
+    /* "vec" + d + idx + d + "__format" + '\0' */
+    size_t cap = 3 + 1 + strlen(idx) + 1 + 8 + 1;
+    char *buf = (char*)malloc(cap);
+    if (buf == NULL) return NULL;
+    snprintf(buf, cap, "vec%c%s%c__format", d, idx, d);
+    return buf;
+}
+
+const char* vl_index_type_name(int t) {
+    switch (t) {
+        case VL_INDEX_FLAT: return "flat";
+        case VL_INDEX_IVF:  return "ivf";
+        case VL_INDEX_SLSH: return "slsh";
+        default: return NULL;
+    }
+}
+
+int vl_index_type_parse(const char *s, size_t len) {
+    if (s == NULL) return -1;
+    if (len == 4 && memcmp(s, "flat", 4) == 0) return VL_INDEX_FLAT;
+    if (len == 3 && memcmp(s, "ivf",  3) == 0) return VL_INDEX_IVF;
+    if (len == 4 && memcmp(s, "slsh", 4) == 0) return VL_INDEX_SLSH;
+    return -1;
+}
+
+int vl_put_string(vector_layer_t *vl, const char *path, size_t plen,
+                   const char *value) {
+    if (vl == NULL || path == NULL || value == NULL) return -22;
+    size_t vlen = strlen(value);
+    return vl_put(vl, path, plen, (const uint8_t*)value, vlen);
+}
+
+char* vl_get_string(vector_layer_t *vl, const char *path, size_t plen) {
+    if (vl == NULL || path == NULL) return NULL;
+    uint8_t *vbuf = NULL; size_t vlen = 0;
+    int rc = vl_get(vl, path, plen, &vbuf, &vlen);
+    if (rc != 0 || vbuf == NULL) {
+        if (vbuf) database_raw_value_free(vbuf);
+        return NULL;  /* absent or error */
+    }
+    char *out = (char*)malloc(vlen + 1);
+    if (out == NULL) {
+        database_raw_value_free(vbuf);
+        return NULL;
+    }
+    memcpy(out, vbuf, vlen);
+    out[vlen] = '\0';
+    database_raw_value_free(vbuf);
+    return out;
+}
+
+int vl_read_format_type(vector_layer_t *vl) {
+    if (vl == NULL) return -1;
+    char d = vl->format.delimiter;
+    char *key = vl_key_format(vl->index_name, d);
+    if (key == NULL) return -1;
+    char *word = vl_get_string(vl, key, strlen(key));
+    free(key);
+    if (word == NULL) return -1;  /* absent (brand-new / 0.2.0 index) */
+    int t = vl_index_type_parse(word, strlen(word));
+    free(word);
+    if (t < 0) return -2;  /* present but garbage -> corrupt index */
+    return t;  /* enum (FLAT/IVF/SLSH) */
+}
+
 vl_result_t* vl_results_alloc(int n) {
     if (n <= 0) return NULL;
     return (vl_result_t*)get_clear_memory((size_t)n * sizeof(vl_result_t));

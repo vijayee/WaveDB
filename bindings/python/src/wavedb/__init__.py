@@ -12,6 +12,7 @@ from .exceptions import (
 )
 from .graph_layer import GraphLayer, GraphQuery, GraphResult
 from .graphql_layer import GraphQLLayer, GraphQLError, GraphQLResult
+from .log import LogLevel, set_log_callback, set_progress_handler, set_quiet
 from .subtree import Subtree
 from .vector_layer import (
     Distance,
@@ -22,7 +23,7 @@ from .vector_layer import (
     VectorResult,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "Distance",
@@ -38,6 +39,7 @@ __all__ = [
     "IOError_",
     "IndexType",
     "InvalidPathError",
+    "LogLevel",
     "NotFoundError",
     "Runtime",
     "Subtree",
@@ -49,4 +51,7 @@ __all__ = [
     "WaveDBConfig",
     "WaveDBEncryption",
     "WaveDBError",
+    "set_log_callback",
+    "set_progress_handler",
+    "set_quiet",
 ]
