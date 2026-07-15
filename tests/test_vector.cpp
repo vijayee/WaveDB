@@ -15,6 +15,8 @@
 #include <utility>
 #include <future>
 #include <chrono>
+#include <filesystem>  // temp_directory_path / remove_all (portable test dirs; the
+                       // library builds on Windows/MSVC, so the tests must too)
 
 #if _WIN32
 #include <io.h>
@@ -42,17 +44,22 @@ static int vl_test_counter = 0;
 class VectorLayerTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir = "/tmp/wavedb_vltest_" + std::to_string(getpid()) + "_" +
-                   std::to_string(vl_test_counter++);
-        mkdir(test_dir.c_str(), 0700);
+        /* Portable temp dir (was "/tmp/..." + `rm -rf`, which only worked on
+         * Unix). temp_directory_path() -> %TEMP% on Windows, /tmp on Unix;
+         * create_directory/remove_all are portable C++17. */
+        std::filesystem::path base = std::filesystem::temp_directory_path();
+        test_dir = (base / ("wavedb_vltest_" + std::to_string(getpid()) + "_" +
+                            std::to_string(vl_test_counter++))).string();
+        std::error_code ec;
+        std::filesystem::create_directory(test_dir, ec);
         /* Per-chunk log_info progress from migrate/train/rebuild would spam
          * gtest stderr; suppress the default stderr path. Registered C
          * callbacks still fire (quiet is independent of callbacks in rxi). */
         log_set_quiet(1);
     }
     void TearDown() override {
-        std::string cmd = "rm -rf " + test_dir;
-        system(cmd.c_str());
+        std::error_code ec;
+        std::filesystem::remove_all(test_dir, ec);
     }
     std::string test_dir;
 
@@ -1243,6 +1250,51 @@ TEST_F(VectorLayerTest, MigrateSameTypeRebuildsInPlace) {
     vector_layer_destroy(vl);
 }
 
+// 12b. Same-type rebuild for SLSH (mirrors 12 for IVF): delete SLSH aux
+//      (hash/+proj/) + retrain in place; count + type preserved, search sane.
+TEST_F(VectorLayerTest, MigrateSlshToSlsh) {
+    vector_layer_config_t cfg = slsh_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    ASSERT_EQ(vector_layer_train(vl), 0);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = slsh_config(4).format;  /* same type */
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_SLSH);
+    vector_layer_runtime_t rt = slsh_config(4).runtime;
+    ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
+    float q[4] = {10.0f, 0.0f, 0.0f, 0.0f};
+    auto ids = vl_mtest_search_ids(vl, q, 5);
+    EXPECT_GT(ids.size(), 0u);
+    vector_layer_destroy(vl);
+}
+
+// 12c. Same-type rebuild for FLAT (FLAT has no aux to delete and train is a
+//      no-op, so migrate must still succeed, preserve count, and stay FLAT).
+TEST_F(VectorLayerTest, MigrateFlatToFlat) {
+    vector_layer_config_t cfg = flat_config(4);
+    int err = 0;
+    vector_layer_t *vl = vector_layer_open_separate(test_dir.c_str(), "test", &cfg, &err);
+    ASSERT_NE(vl, nullptr);
+    std::vector<std::vector<float>> stored;
+    vl_mtest_insert(vl, 60, stored);
+    size_t n = vector_layer_count(vl);
+    vector_layer_format_t nf = flat_config(4).format;  /* same type */
+    ASSERT_EQ(vector_layer_migrate(vl, &nf), 0);
+    EXPECT_EQ(vector_layer_count(vl), n);
+    EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_FLAT);
+    /* FLAT exact: top-1 for a stored vector is itself. */
+    float q[4] = {stored[10][0], stored[10][1], stored[10][2], stored[10][3]};
+    auto ids = vl_mtest_search_ids(vl, q, 1);
+    ASSERT_EQ(ids.size(), 1u);
+    EXPECT_EQ(*ids.begin(), std::string("v10"));
+    vector_layer_destroy(vl);
+}
+
 // 13. Round trip FLAT->IVF->SLSH->FLAT->IVF; count preserved each hop; final
 //     IVF top-1 self-query matches.
 TEST_F(VectorLayerTest, MigrateRoundTrip) {
@@ -1389,6 +1441,13 @@ TEST_F(VectorLayerTest, MigrateEmitsProgress) {
     vl_mtest_insert(vl, 9000, stored);  /* >8000 -> multiple 8000-op chunks */
     ASSERT_EQ(vector_layer_train(vl), 0);
     size_t n = vector_layer_count(vl);
+
+    /* The initial train() above also emits `rebuild` progress (IVF rebuild),
+       and each rebuild call restarts its own `done` counter at 0. Collecting
+       across both calls makes `rebuild_cur` globally non-monotonic (counter
+       resets between calls). Clear here so only the MIGRATE's progress is
+       asserted -- migrate is what this test exercises. */
+    g_progress_lines.clear();
 
     /* IVF -> SLSH exercises delete (IVF aux) + train (SLSH proj) + rebuild + done. */
     ASSERT_EQ(vector_layer_migrate(vl, &slsh_config(4).format), 0);
