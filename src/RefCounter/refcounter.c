@@ -41,11 +41,20 @@ void refcounter_dereference(refcounter_t* refcounter) {
             return;  // Consumed a yield, don't decrement count
         }
     }
-    // No yield to consume, decrement count
-    uint16_t count_val = atomic_load(&refcounter->count);
-    if (count_val > 0) {
-        atomic_fetch_sub(&refcounter->count, 1);
+    // No yield to consume, decrement count using a CAS loop to prevent
+    // underflow. The old code did atomic_load + atomic_fetch_sub which had
+    // a TOCTOU race: two threads could both read count=1, both pass the
+    // >0 check, and both decrement — underflowing the count to 65535.
+    // This caused use-after-free → double-free chains in the memory pool.
+    // The CAS loop ensures the count never goes below 0.
+    uint16_t expected = (uint16_t)atomic_load(&refcounter->count);
+    while (expected > 0) {
+        if (atomic_compare_exchange_weak(&refcounter->count, &expected, (uint16_t)(expected - 1))) {
+            return;  // Successfully decremented
+        }
+        // CAS failed — expected was updated with the current value, retry
     }
+    // count is already 0 — do nothing (underflow prevented)
 }
 
 uint16_t refcounter_count(refcounter_t* refcounter) {

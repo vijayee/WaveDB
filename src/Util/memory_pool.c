@@ -32,6 +32,14 @@ static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
     cls->total_blocks = total_blocks;
     cls->free_blocks = total_blocks;
 
+    // Allocate per-block freed flags. Semantics: 1=freed (has been returned
+    // to the pool via memory_pool_free), 0=in-use (allocated or never-yet-used).
+    // calloc zeros all flags to 0 at init, which is correct: no block has been
+    // freed yet. Blocks in the initial free list are "available", not "freed" —
+    // the flag tracks whether a specific allocation has been returned, not
+    // whether the block is currently in the free list.
+    cls->freed_flags = (uint8_t*)calloc(total_blocks, sizeof(uint8_t));
+
     // Initialize free list - all blocks are free
     cls->free_list = (memory_pool_block_t*)pool;
     memory_pool_block_t* current = cls->free_list;
@@ -46,6 +54,10 @@ static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
 // Destroy a size class pool
 static void memory_pool_class_destroy(memory_pool_class_t* cls) {
     platform_lock_destroy(&cls->lock);
+    if (cls->freed_flags) {
+        free(cls->freed_flags);
+        cls->freed_flags = NULL;
+    }
 }
 
 // Initialize thread-local caches
@@ -91,6 +103,16 @@ static void* memory_pool_class_alloc(memory_pool_class_t* cls) {
     cls->free_list = block->next;
     cls->free_blocks--;
 
+    // Clear the freed flag (block is now in-use)
+    size_t index = ((size_t)((uint8_t*)block - cls->pool_start)) / cls->block_size;
+    if (cls->freed_flags) {
+        cls->freed_flags[index] = 0;
+    }
+
+    // Clear next pointer so stale free-list data can't trigger false
+    // double-free detection when the block is freed again.
+    block->next = NULL;
+
     // Validate the next pointer is either NULL or within the pool's range.
     // Catches free-list corruption from double-free or use-after-free
     // during database destruction — resets the class to prevent crash.
@@ -112,6 +134,14 @@ static void* memory_pool_class_alloc(memory_pool_class_t* cls) {
 }
 
 // Free to a specific class
+// NOTE: This function is called from two contexts:
+//   1. memory_pool_free() — when the TLS cache is full. The freed_flags
+//      check has already been done by the caller; we just push.
+//   2. memory_pool_tls_drain() — moving blocks from TLS cache to the
+//      global pool. The freed_flags are already set; we just push.
+// In neither case should we check/set freed_flags here — the caller
+// manages the flag. We keep the guard (inside the lock) as a secondary
+// cycle-prevention safety net.
 static int memory_pool_class_free(memory_pool_class_t* cls, void* ptr) {
     // Check if pointer is in this pool's range
     uint8_t* start = cls->pool_start;
@@ -121,17 +151,19 @@ static int memory_pool_class_free(memory_pool_class_t* cls, void* ptr) {
         return 0;  // Not in this pool
     }
 
+    platform_lock(&cls->lock);
+
     // Check for double-free: if the block's next pointer already points to
     // the current free_list, it was likely already freed. Skip to prevent
-    // corrupting the free list with a cycle.
+    // corrupting the free list with a cycle. This check is now inside the
+    // lock to avoid a data race on cls->free_list.
     memory_pool_block_t* block = (memory_pool_block_t*)ptr;
     if (block->next == cls->free_list && cls->free_list != NULL) {
         // Likely double-free — block already at head of free list
+        platform_unlock(&cls->lock);
         log_warn("memory_pool: possible double-free detected (ptr=%p)", ptr);
         return 1;  // Pretend success to prevent caller from calling free()
     }
-
-    platform_lock(&cls->lock);
 
     // Push to free list
     block->next = cls->free_list;
@@ -222,6 +254,11 @@ void memory_pool_destroy(void) {
     g_pool.initialized = 0;
 }
 
+// Forward declarations for helper functions used by alloc/free
+static int memory_pool_find_class(void* ptr, size_t* out_index);
+static int memory_pool_check_and_set_freed(void* ptr);
+static void memory_pool_clear_freed(void* ptr);
+
 // Allocate memory from pool
 void* memory_pool_alloc(size_t size) {
     if (!g_pool.initialized) {
@@ -242,6 +279,7 @@ void* memory_pool_alloc(size_t size) {
             // Try TLS cache first (lock-free)
             if (tls_small.count > 0) {
                 ptr = tls_small.cache[--tls_small.count];
+                memory_pool_clear_freed(ptr);
                 g_pool.stats.small_allocs++;
                 g_pool.stats.small_pool_hits++;
                 return ptr;
@@ -261,6 +299,7 @@ void* memory_pool_alloc(size_t size) {
             // Try TLS cache first (lock-free)
             if (tls_medium.count > 0) {
                 ptr = tls_medium.cache[--tls_medium.count];
+                memory_pool_clear_freed(ptr);
                 g_pool.stats.medium_allocs++;
                 g_pool.stats.medium_pool_hits++;
                 return ptr;
@@ -280,6 +319,7 @@ void* memory_pool_alloc(size_t size) {
             // Try TLS cache first (lock-free)
             if (tls_large.count > 0) {
                 ptr = tls_large.cache[--tls_large.count];
+                memory_pool_clear_freed(ptr);
                 g_pool.stats.large_allocs++;
                 g_pool.stats.large_pool_hits++;
                 return ptr;
@@ -323,6 +363,54 @@ static int memory_pool_ptr_in_any_pool(void* ptr) {
     return 0;
 }
 
+// Find the class index and block index for a pool-allocated pointer.
+// Returns the class index (0-2) or -1 if not in any pool.
+static int memory_pool_find_class(void* ptr, size_t* out_index) {
+    for (int i = 0; i < 3; i++) {
+        memory_pool_class_t* cls = &g_pool.classes[i];
+        uint8_t* start = cls->pool_start;
+        uint8_t* end = start + cls->block_size * cls->total_blocks;
+        if ((uint8_t*)ptr >= start && (uint8_t*)ptr < end) {
+            *out_index = ((size_t)((uint8_t*)ptr - start)) / cls->block_size;
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Check and set the freed flag for a block. Returns 1 if the block was
+// already freed (double-free), 0 if not. If the block is not in any pool,
+// returns 0 and does nothing.
+static int memory_pool_check_and_set_freed(void* ptr) {
+    size_t index;
+    int class_idx = memory_pool_find_class(ptr, &index);
+    if (class_idx < 0) {
+        return 0;  // Not in any pool
+    }
+    memory_pool_class_t* cls = &g_pool.classes[class_idx];
+    if (!cls->freed_flags) {
+        return 0;  // Flags not allocated (shouldn't happen)
+    }
+    if (cls->freed_flags[index]) {
+        return 1;  // Already freed — double-free detected
+    }
+    cls->freed_flags[index] = 1;
+    return 0;
+}
+
+// Clear the freed flag for a block (called after allocation).
+static void memory_pool_clear_freed(void* ptr) {
+    size_t index;
+    int class_idx = memory_pool_find_class(ptr, &index);
+    if (class_idx < 0) {
+        return;  // Not in any pool
+    }
+    memory_pool_class_t* cls = &g_pool.classes[class_idx];
+    if (cls->freed_flags) {
+        cls->freed_flags[index] = 0;
+    }
+}
+
 // Free memory to pool
 void memory_pool_free(void* ptr, size_t size) {
     if (!ptr) {
@@ -345,6 +433,18 @@ void memory_pool_free(void* ptr, size_t size) {
     // Only cache pointers that belong to a pool's static array.
     // Malloc'd fallback pointers must be freed directly to avoid leaks.
     int in_pool = memory_pool_ptr_in_any_pool(ptr);
+
+    // Double-free detection: check and set the freed flag BEFORE pushing
+    // to the TLS cache or global pool. This catches double-frees at the
+    // entry point, preventing free-list corruption. The flag is cleared
+    // on allocation (in memory_pool_alloc / memory_pool_class_alloc).
+    if (in_pool) {
+        if (memory_pool_check_and_set_freed(ptr)) {
+            log_warn("memory_pool: double-free detected, skipping free (ptr=%p)",
+                     ptr);
+            return;  // Block was already freed — don't push again
+        }
+    }
 
     // Try TLS cache first (lock-free) — only for pool-allocated pointers
     if (in_pool) {

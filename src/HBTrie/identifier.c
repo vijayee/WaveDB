@@ -23,6 +23,12 @@ identifier_t* identifier_create(buffer_t* buf, size_t chunk_size) {
   identifier_t* id = (identifier_t*)memory_pool_alloc(sizeof(identifier_t));
   if (id == NULL) {
     id = get_clear_memory(sizeof(identifier_t));
+  } else {
+    // Zero the struct immediately so the refcounter field (first 8 bytes)
+    // doesn't retain stale free-list data from the pool. Without this, an
+    // error-path free before refcounter_init could leave a stale pointer
+    // in block->next, triggering false double-free detection.
+    memset(id, 0, sizeof(identifier_t));
   }
   id->length = length;
   id->chunk_size = chunk_size;
@@ -67,6 +73,12 @@ identifier_t* identifier_create_from_raw(const uint8_t* data, size_t len, size_t
     id = get_clear_memory(sizeof(identifier_t));
   }
   if (id == NULL) return NULL;
+
+  // Zero the struct immediately so the refcounter field (first 8 bytes)
+  // doesn't retain stale free-list data from the pool. Without this, an
+  // error-path free before refcounter_init could leave a stale pointer
+  // in block->next, triggering false double-free detection.
+  memset(id, 0, sizeof(identifier_t));
 
   id->length = len;
   id->chunk_size = chunk_size;
@@ -288,6 +300,9 @@ identifier_t* cbor_to_identifier_old(cbor_item_t* item, size_t chunk_size) {
     id = get_clear_memory(sizeof(identifier_t));
   }
   if (id == NULL) return NULL;
+
+  // Zero the struct immediately (prevents stale free-list data in refcounter)
+  memset(id, 0, sizeof(identifier_t));
 
   id->chunk_size = (chunk_size == 0) ? DEFAULT_CHUNK_SIZE : chunk_size;
   vec_init(&id->chunks);

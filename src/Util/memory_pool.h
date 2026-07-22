@@ -72,6 +72,7 @@ typedef struct {
     size_t block_size;                // Size of each block
     size_t total_blocks;               // Total number of blocks
     size_t free_blocks;                // Number of free blocks
+    uint8_t* freed_flags;              // Per-block freed flag (1=freed, 0=in-use)
 } memory_pool_class_t;
 
 // Global memory pool
