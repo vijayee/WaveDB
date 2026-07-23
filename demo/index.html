@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WaveDB — Live Demo</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <a class="logo" href="https://github.com/vijayee/WaveDB" target="_blank" rel="noopener">
+    <img src="assets/wave-fuji.svg" alt="WaveDB logo" />
+    <span>WaveDB</span>
+  </a>
+
+  <main class="deck" id="deck">
+    <!-- Slide 1: Cover -->
+    <section class="slide active cover" data-slide="0">
+      <div class="slide-content">
+        <img class="logo-mark" src="assets/wave-fuji.svg" alt="WaveDB logo" />
+        <h1>WaveDB</h1>
+        <p class="tagline">A hierarchical, expressive, JSON-first database</p>
+        <p class="lead">Inspired by MUMPS and ForestDB, WaveDB stores objects instead of rows, speaks GraphQL, thinks in graphs, and searches by vector similarity — all in one embeddable engine.</p>
+      </div>
+    </section>
+
+    <!-- Slide 2: What is WaveDB -->
+    <section class="slide" data-slide="1">
+      <div class="slide-content">
+        <h2>What is WaveDB?</h2>
+        <p class="lead">WaveDB was built to make databases more accessible. The core is a hierarchical B+Trie key-value store that lets you put, get, and traverse rich JSON objects without normalization or SQL joins.</p>
+        <ul class="features">
+          <li><strong>Hierarchical keys</strong><br />Paths like users/alice/profile land exactly where you expect.</li>
+          <li><strong>JSON objects</strong><br />Store arrays, maps, and scalars together — no shredding.</li>
+          <li><strong>Schema layers</strong><br />GraphQL, Graph, and Vector layers share one storage engine.</li>
+          <li><strong>Embeddable</strong><br />Bindings for Node.js, Python, and Dart.</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- Slide 3: Base Layer -->
+    <section class="slide" data-slide="2">
+      <div class="slide-content">
+        <h2>Base Layer — Objects &amp; Keys</h2>
+        <div class="split">
+          <div class="narrative">
+            <p class="lead">Everything starts with the core database. Use hierarchical keys and store plain values or whole JSON objects atomically.</p>
+            <div class="callout">
+              <p><strong>Try it:</strong> edit the code and click <em>Run</em> to store an object, a plain value, and a batch update in the live mock engine.</p>
+            </div>
+          </div>
+          <div class="demo-panel">
+            <div class="editor-label">Live Code</div>
+            <textarea class="code-editor" spellcheck="false">const db = new WaveDB(':memory:');
+
+// Store a JSON object under a hierarchical key
+db.putObject('users/alice', {
+  name: 'Alice',
+  roles: ['admin', 'dev'],
+  tags: { remote: true }
+});
+
+// Store a raw value beside it
+db.putSync('users/alice/email', 'alice@wavedb.dev');
+
+// Read them back
+console.log('object:', db.getObjectSync('users/alice'));
+console.log('email:', db.getSync('users/alice/email'));
+
+// Atomic batch write of scalar keys
+db.batchSync([
+  { type: 'put', key: 'users/bob/email', value: 'bob@wavedb.dev' },
+  { type: 'put', key: 'users/bob/role', value: 'reader' }
+]);
+console.log('bob email:', db.getSync('users/bob/email'));
+console.log('bob role:', db.getSync('users/bob/role'));
+
+db.close();</textarea>
+            <button class="run-btn">▶ Run</button>
+            <div class="terminal"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 4: GraphQL Layer -->
+    <section class="slide" data-slide="3">
+      <div class="slide-content">
+        <h2>GraphQL Layer — Schema &amp; Query</h2>
+        <div class="split">
+          <div class="narrative">
+            <p class="lead">Define a GraphQL schema, mutate data, and query it back — all synchronously or asynchronously. WaveDB turns your SDL into storage paths automatically.</p>
+            <div class="callout">
+              <p><strong>Try it:</strong> create a Person, then query it by name. The schema is parsed once and reused for every operation.</p>
+            </div>
+          </div>
+          <div class="demo-panel">
+            <div class="editor-label">Live Code</div>
+            <textarea class="code-editor" spellcheck="false">const gql = new GraphQLLayer(null); // in-memory
+
+gql.parseSchema(`
+  type Person {
+    name: String
+    age: Int
+  }
+  type Query {
+    person(name: String): Person
+  }
+  type Mutation {
+    createPerson(name: String, age: Int): Person
+  }
+`);
+
+const created = gql.mutateSync(`mutation {
+  createPerson(name: "Alice", age: 30) { name age }
+}`);
+console.log('created:', created.data.createPerson);
+
+const found = gql.querySync(`{
+  person(name: "Alice") { name age }
+}`);
+console.log('found:', found.data.person);
+
+gql.close();</textarea>
+            <button class="run-btn">▶ Run</button>
+            <div class="terminal"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 5: Graph Layer -->
+    <section class="slide" data-slide="4">
+      <div class="slide-content">
+        <h2>Graph Layer — Triples &amp; Traversal</h2>
+        <div class="split">
+          <div class="narrative">
+            <p class="lead">Model relationships as triples: <em>subject —predicate→ object</em>. Use a Gremlin-style DSL to insert, query, count, and delete vertices and edges.</p>
+            <div class="callout">
+              <p><strong>Try it:</strong> insert some people and a knows edge, query Alice's circle, then delete Bob.</p>
+            </div>
+          </div>
+          <div class="demo-panel">
+            <div class="editor-label">Live Code</div>
+            <textarea class="code-editor" spellcheck="false">const graph = new GraphLayer(':memory:');
+
+// Create vertices and edges as triples
+graph.insertSync('alice', 'name', 'Alice');
+graph.insertSync('alice', 'age', '30');
+graph.insertSync('alice', 'knows', 'bob');
+graph.insertSync('bob', 'name', 'Bob');
+graph.insertSync('bob', 'knows', 'alice');
+
+// Query: every vertex named Alice
+const alices = graph.exec(g.V().Has('name', 'Alice').All());
+console.log('Alices:', alices);
+
+// Count Bob
+console.log('Bob count:', graph.count(g.V().Has('name', 'Bob').All()));
+
+// Delete Bob and re-count
+graph.deleteSync('bob', 'name', 'Bob');
+console.log('Bob count after delete:', graph.count(g.V().Has('name', 'Bob').All()));
+
+graph.close();</textarea>
+            <button class="run-btn">▶ Run</button>
+            <div class="terminal"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 6: Vector Layer -->
+    <section class="slide" data-slide="5">
+      <div class="slide-content">
+        <h2>Vector Layer — Vibe Search</h2>
+        <div class="split">
+          <div class="narrative">
+            <p class="lead">Vector databases shine when you want <em>semantic</em> matches instead of exact keywords. Here we insert four tracks with mock mood embeddings and search by vibe.</p>
+            <div class="callout">
+              <p><strong>Try it:</strong> the query "upbeat dance track" should surface the party anthem and workout hype, not the sad ballad.</p>
+            </div>
+          </div>
+          <div class="demo-panel">
+            <div class="editor-label">Live Code</div>
+            <textarea class="code-editor" spellcheck="false">const vl = VectorLayer.openSeparate(
+  ':memory:',
+  'tracks',
+  { dims: 8 },
+  { indexType: VectorLayer.IndexType.FLAT }
+);
+
+const tracks = [
+  { id: 'party',  text: '🎉 Party anthem — energetic dance music' },
+  { id: 'chill',  text: '😌 Chill lo-fi — mellow calm beats' },
+  { id: 'sad',    text: '💔 Heartbreak ballad — sad acoustic' },
+  { id: 'hype',   text: '🔥 Workout hype — intense energetic' }
+];
+
+for (const t of tracks) {
+  vl.insertSync(t.id, mockEmbed(t.text));
+}
+
+const query = mockEmbed('upbeat dance track');
+const hits = vl.searchSync(query, 2);
+
+console.log('Top vibe matches:');
+hits.forEach(h => console.log(`  ${h.id}  (distance ${h.distance.toFixed(3)})`));
+
+vl.close();</textarea>
+            <button class="run-btn">▶ Run</button>
+            <div class="terminal"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 7: Conclusion -->
+    <section class="slide" data-slide="6">
+      <div class="slide-content">
+        <h2>Take WaveDB for a spin</h2>
+        <p class="lead">WaveDB is open source and ready to embed. Explore the repository, try the Node.js/Python/Dart bindings, and reach out if you'd like to collaborate.</p>
+        <div class="link-card">
+          <a href="https://github.com/vijayee/WaveDB" target="_blank" rel="noopener">🌊 GitHub Repository</a>
+          <a class="email" href="mailto:victor.j.morrow@gmail.com">✉ victor.j.morrow@gmail.com</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+  <div class="counter" id="counter">1 / 7</div>
+
+  <div class="nav">
+    <button id="prev" aria-label="Previous slide">◀</button>
+    <button id="next" aria-label="Next slide">▶</button>
+  </div>
+
+  <script src="demo.js"></script>
+</body>
+</html>
