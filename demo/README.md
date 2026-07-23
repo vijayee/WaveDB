@@ -4,6 +4,8 @@ A self-contained HTML5 slide deck and live-code playground that introduces WaveD
 
 ## How to run
 
+### Browser mode (mock engine)
+
 No build step or native dependency is required. Just open `index.html` in a modern browser:
 
 ```bash
@@ -23,6 +25,23 @@ cd demo
 python -m http.server 8080
 # then visit http://localhost:8080
 ```
+
+### Electron mode (real WaveDB engine)
+
+The `demo/electron/` harness loads the same slide deck but runs the native WaveDB engine in the main process. The renderer communicates with it over synchronous IPC.
+
+Prerequisites:
+- Node.js and the WaveDB Node.js bindings are built (`bindings/nodejs/build/Release/*.node`).
+- If the native binaries were built for a different Node version than Electron ships, run `npm run rebuild` below.
+
+```bash
+cd demo/electron
+npm install          # installs Electron + electron-rebuild
+npm run rebuild      # rebuilds the native binding for Electron (if needed)
+npm start            # launches the presentation
+```
+
+When running in Electron, a `⚡ Real WaveDB engine` badge appears in the top-right corner and every live code snippet executes against the real C++ database.
 
 ## What it demonstrates
 

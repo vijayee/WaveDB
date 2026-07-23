@@ -151,15 +151,15 @@ graph.insertSync('bob', 'name', 'Bob');
 graph.insertSync('bob', 'knows', 'alice');
 
 // Query: every vertex named Alice
-const alices = graph.exec(g.V().Has('name', 'Alice').All());
+const alices = g.V().Has('name', 'Alice').All();
 console.log('Alices:', alices);
 
 // Count Bob
-console.log('Bob count:', graph.count(g.V().Has('name', 'Bob').All()));
+console.log('Bob count:', graph.count(g.V().Has('name', 'Bob').Count()));
 
 // Delete Bob and re-count
 graph.deleteSync('bob', 'name', 'Bob');
-console.log('Bob count after delete:', graph.count(g.V().Has('name', 'Bob').All()));
+console.log('Bob count after delete:', graph.count(g.V().Has('name', 'Bob').Count()));
 
 graph.close();</textarea>
             <button class="run-btn">▶ Run</button>

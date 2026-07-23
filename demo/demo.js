@@ -1,7 +1,6 @@
 /**
- * WaveDB HTML5 Demo — in-browser mock APIs and slide runner.
- * These mocks approximate the Node.js binding signatures so the
- * live code examples run without a native build or backend.
+ * WaveDB HTML5 Demo — runs in a browser with mocked APIs, or in Electron
+ * talking to the real native engine over IPC.
  */
 
 (function () {
@@ -42,219 +41,284 @@
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Mock WaveDB
+  // Mode detection
   // ─────────────────────────────────────────────────────────────
 
-  class WaveDB {
-    constructor(path, options = {}) {
-      if (path === undefined || path === null || (typeof path !== 'string')) {
-        throw new Error('Database path is required');
-      }
-      this._path = path;
-      this._delimiter = options.delimiter || '/';
-      this._store = new Map();
-      this._closed = false;
-    }
+  const isElectron = typeof window !== 'undefined' &&
+                     window.electronAPI &&
+                     window.electronAPI.isElectron;
 
-    _checkOpen() {
-      if (this._closed) throw new Error('Database is closed');
-    }
-
-    _nk(key) { return normalizeKey(key, this._delimiter); }
-
-    putSync(key, value) {
-      this._checkOpen();
-      this._store.set(this._nk(key), value);
-    }
-
-    getSync(key) {
-      this._checkOpen();
-      return this._store.has(this._nk(key)) ? this._store.get(this._nk(key)) : null;
-    }
-
-    delSync(key) {
-      this._checkOpen();
-      this._store.delete(this._nk(key));
-    }
-
-    batchSync(ops) {
-      this._checkOpen();
-      for (const op of ops) {
-        const k = this._nk(op.key);
-        if (op.type === 'put') this._store.set(k, op.value);
-        else if (op.type === 'del') this._store.delete(k);
-      }
-    }
-
-    putObject(key, obj) {
-      this._checkOpen();
-      this._store.set(this._nk(key), { __wave_object: true, value: obj });
-    }
-
-    getObjectSync(key) {
-      this._checkOpen();
-      const k = this._nk(key);
-      if (!this._store.has(k)) return null;
-      const v = this._store.get(k);
-      if (v && typeof v === 'object' && v.__wave_object) return v.value;
-      try {
-        return JSON.parse(v);
-      } catch (e) {
-        return v;
-      }
-    }
-
-    close() { this._closed = true; }
-  }
+  let WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer;
 
   // ─────────────────────────────────────────────────────────────
-  // Mock GraphQL Layer
+  // Browser mocks (used when not in Electron)
   // ─────────────────────────────────────────────────────────────
 
-  class GraphQLLayer {
-    constructor(path, options = {}) {
-      this._schema = null;
-      this._last = null;
-      this._closed = false;
-    }
-
-    _checkOpen() { if (this._closed) throw new Error('GraphQL layer is closed'); }
-
-    parseSchema(sdl) {
-      this._checkOpen();
-      this._schema = sdl;
-    }
-
-    mutateSync(mutation) {
-      this._checkOpen();
-      const call = mutation.match(/(\w+)\s*\(([^)]*)\)/);
-      if (!call) return { success: false, errors: ['No mutation call found'] };
-      const [, name, argStr] = call;
-      const args = parseArgs(argStr);
-      this._last = args;
-      return { success: true, data: { [name]: args } };
-    }
-
-    querySync(query) {
-      this._checkOpen();
-      const call = query.match(/(\w+)\s*\(([^)]*)\)/);
-      if (!call) {
-        if (this._last) return { success: true, data: { person: this._last } };
-        return { success: false, errors: ['No query call found'] };
+  if (!isElectron) {
+    class WaveDBMock {
+      constructor(path, options = {}) {
+        if (path === undefined || path === null || (typeof path !== 'string')) {
+          throw new Error('Database path is required');
+        }
+        this._path = path;
+        this._delimiter = options.delimiter || '/';
+        this._store = new Map();
+        this._closed = false;
       }
-      const [, , argStr] = call;
-      const args = parseArgs(argStr);
-      const name = args.name || (this._last && this._last.name);
-      if (this._last && this._last.name === name) {
-        return { success: true, data: { person: this._last } };
+
+      _checkOpen() { if (this._closed) throw new Error('Database is closed'); }
+      _nk(key) { return normalizeKey(key, this._delimiter); }
+
+      putSync(key, value) {
+        this._checkOpen();
+        this._store.set(this._nk(key), value);
       }
-      return { success: true, data: { person: null } };
-    }
 
-    close() { this._closed = true; }
-  }
+      getSync(key) {
+        this._checkOpen();
+        return this._store.has(this._nk(key)) ? this._store.get(this._nk(key)) : null;
+      }
 
-  // ─────────────────────────────────────────────────────────────
-  // Mock Graph Layer + g traversal DSL
-  // ─────────────────────────────────────────────────────────────
+      delSync(key) {
+        this._checkOpen();
+        this._store.delete(this._nk(key));
+      }
 
-  class Query {
-    constructor(layer) {
-      this._layer = layer;
-      this._steps = [];
-    }
-    V(id) {
-      if (id !== undefined) this._steps.push(`V("${id}")`);
-      else this._steps.push('V()');
-      return this;
-    }
-    Out(pred) { this._steps.push(`Out("${pred}")`); return this; }
-    In(pred) { this._steps.push(`In("${pred}")`); return this; }
-    Has(pred, val) { this._steps.push(`Has("${pred}","${val}")`); return this; }
-    Limit(n) { this._steps.push(`Limit(${n})`); return this; }
-    Count() { this._steps.push(`Count()`); return this; }
-    All() { this._steps.push(`All()`); return this; }
-    _toDSL() { return `g.${this._steps.join('.')}`; }
-    toString() { return this._toDSL(); }
-  }
-
-  const QUERY_METHODS = new Set([
-    'V', 'Out', 'In', 'Has', 'Limit', 'Count', 'All', 'toString'
-  ]);
-
-  const g = new Proxy({}, {
-    get(_target, prop) {
-      if (prop === Symbol.toPrimitive || prop === 'inspect' || prop === 'then') return undefined;
-      if (!QUERY_METHODS.has(prop)) return undefined;
-      return function (...args) {
-        const q = new Query(null);
-        return q[prop](...args);
-      };
-    }
-  });
-
-  class GraphLayer {
-    constructor(path, options = {}) {
-      this._triples = [];
-      this._closed = false;
-    }
-
-    _checkOpen() { if (this._closed) throw new Error('GraphLayer is closed'); }
-
-    insertSync(s, p, o) {
-      this._checkOpen();
-      this._triples.push([s, p, o]);
-    }
-
-    deleteSync(s, p, o) {
-      this._checkOpen();
-      this._triples = this._triples.filter(t => !(t[0] === s && t[1] === p && t[2] === o));
-    }
-
-    _runDSL(dsl) {
-      if (dsl instanceof Query) dsl = dsl._toDSL();
-      const steps = dsl.replace(/^g\./, '').split('.');
-      let subject = null;
-      let has = [];
-      let wantsCount = false;
-
-      for (const step of steps) {
-        if (step.startsWith('V(')) {
-          const id = step.match(/V\("([^"]*)"\)/)?.[1];
-          if (id !== undefined) subject = id;
-        } else if (step.startsWith('Has(')) {
-          const m = step.match(/Has\("([^"]*)","([^"]*)"\)/);
-          if (m) has.push({ pred: m[1], val: m[2] });
-        } else if (step === 'Count()') {
-          wantsCount = true;
+      batchSync(ops) {
+        this._checkOpen();
+        for (const op of ops) {
+          const k = this._nk(op.key);
+          if (op.type === 'put') this._store.set(k, op.value);
+          else if (op.type === 'del') this._store.delete(k);
         }
       }
 
-      const matches = new Set();
-      for (const [s, p, o] of this._triples) {
-        if (subject !== null && s !== subject) continue;
-        if (has.length && !has.every(h => {
-          if (h.pred === p && h.val === o) return true;
-          // value lookup: predicate 'name' with value 'Alice' matches subject's triple
-          return this._triples.some(t => t[0] === s && t[1] === h.pred && t[2] === h.val);
-        })) continue;
-        matches.add(s);
+      putObject(key, obj) {
+        this._checkOpen();
+        this._store.set(this._nk(key), { __wave_object: true, value: obj });
       }
-      const arr = Array.from(matches);
-      return wantsCount ? arr.length : arr;
+
+      getObjectSync(key) {
+        this._checkOpen();
+        const k = this._nk(key);
+        if (!this._store.has(k)) return null;
+        const v = this._store.get(k);
+        if (v && typeof v === 'object' && v.__wave_object) return v.value;
+        try { return JSON.parse(v); } catch (e) { return v; }
+      }
+
+      close() { this._closed = true; }
     }
 
-    exec(dsl) { this._checkOpen(); return this._runDSL(dsl); }
-    count(dsl) {
-      this._checkOpen();
-      const r = this._runDSL(dsl);
-      return Array.isArray(r) ? r.length : r;
+    class GraphQLLayerMock {
+      constructor(path, options = {}) {
+        this._schema = null;
+        this._last = null;
+        this._closed = false;
+      }
+
+      _checkOpen() { if (this._closed) throw new Error('GraphQL layer is closed'); }
+
+      parseSchema(sdl) {
+        this._checkOpen();
+        this._schema = sdl;
+      }
+
+      mutateSync(mutation) {
+        this._checkOpen();
+        const call = mutation.match(/(\w+)\s*\(([^)]*)\)/);
+        if (!call) return { success: false, errors: ['No mutation call found'] };
+        const [, name, argStr] = call;
+        const args = parseArgs(argStr);
+        this._last = args;
+        return { success: true, data: { [name]: args } };
+      }
+
+      querySync(query) {
+        this._checkOpen();
+        const call = query.match(/(\w+)\s*\(([^)]*)\)/);
+        if (!call) {
+          if (this._last) return { success: true, data: { person: this._last } };
+          return { success: false, errors: ['No query call found'] };
+        }
+        const [, , argStr] = call;
+        const args = parseArgs(argStr);
+        const name = args.name || (this._last && this._last.name);
+        if (this._last && this._last.name === name) {
+          return { success: true, data: { person: this._last } };
+        }
+        return { success: true, data: { person: null } };
+      }
+
+      close() { this._closed = true; }
     }
-    close() { this._closed = true; }
+
+    let defaultGraphMock = null;
+
+    class QueryMock {
+      constructor(layer) {
+        this._layer = layer || defaultGraphMock;
+        this._steps = [];
+      }
+      V(id) {
+        if (id !== undefined) this._steps.push(`V("${id}")`);
+        else this._steps.push('V()');
+        return this;
+      }
+      Out(pred) { this._steps.push(`Out("${pred}")`); return this; }
+      In(pred) { this._steps.push(`In("${pred}")`); return this; }
+      Has(pred, val) { this._steps.push(`Has("${pred}","${val}")`); return this; }
+      Limit(n) { this._steps.push(`Limit(${n})`); return this; }
+      Count() { this._steps.push(`Count()`); return this; }
+      All() {
+        this._steps.push('All()');
+        if (!this._layer) throw new Error('No GraphLayer created; g queries need a default graph');
+        return this._layer._runDSL(this._toDSL());
+      }
+      _toDSL() { return `g.${this._steps.join('.')}`; }
+      toString() { return this._toDSL(); }
+    }
+
+    const QUERY_METHODS_MOCK = new Set(['V','Out','In','Has','Limit','Count','All','toString']);
+    const gMock = new Proxy({}, {
+      get(_target, prop) {
+        if (prop === Symbol.toPrimitive || prop === 'inspect' || prop === 'then') return undefined;
+        if (!QUERY_METHODS_MOCK.has(prop)) return undefined;
+        return function (...args) {
+          const q = new QueryMock(defaultGraphMock);
+          return q[prop](...args);
+        };
+      }
+    });
+
+    class GraphLayerMock {
+      constructor(path, options = {}) {
+        this._triples = [];
+        this._closed = false;
+        defaultGraphMock = this;
+      }
+
+      _checkOpen() { if (this._closed) throw new Error('GraphLayer is closed'); }
+
+      insertSync(s, p, o) {
+        this._checkOpen();
+        this._triples.push([s, p, o]);
+      }
+
+      deleteSync(s, p, o) {
+        this._checkOpen();
+        this._triples = this._triples.filter(t => !(t[0] === s && t[1] === p && t[2] === o));
+      }
+
+      _runDSL(dsl) {
+        if (dsl instanceof QueryMock) dsl = dsl._toDSL();
+        const steps = dsl.replace(/^g\./, '').split('.');
+        let subject = null;
+        let has = [];
+        let wantsCount = false;
+
+        for (const step of steps) {
+          if (step.startsWith('V(')) {
+            const id = step.match(/V\("([^"]*)"\)/)?.[1];
+            if (id !== undefined) subject = id;
+          } else if (step.startsWith('Has(')) {
+            const m = step.match(/Has\("([^"]*)","([^"]*)"\)/);
+            if (m) has.push({ pred: m[1], val: m[2] });
+          } else if (step === 'Count()') {
+            wantsCount = true;
+          }
+        }
+
+        const matches = new Set();
+        for (const [s, p, o] of this._triples) {
+          if (subject !== null && s !== subject) continue;
+          if (has.length && !has.every(h =>
+            this._triples.some(t => t[0] === s && t[1] === h.pred && t[2] === h.val)
+          )) continue;
+          matches.add(s);
+        }
+        const arr = Array.from(matches);
+        return wantsCount ? arr.length : arr;
+      }
+
+      exec(dsl) { this._checkOpen(); return this._runDSL(dsl); }
+      count(dsl) {
+        this._checkOpen();
+        const r = this._runDSL(dsl);
+        return Array.isArray(r) ? r.length : r;
+      }
+      close() { this._closed = true; }
+    }
+
+    class VectorLayerMock {
+      static IndexType = { FLAT: 0, IVF: 1, SLSH: 2 };
+      static Distance = { L2: 0, COSINE: 1, DOT: 2 };
+
+      static openSeparate(dbLocation, indexName, format = {}, runtime = {}) {
+        const vl = new VectorLayerMock();
+        vl._vectors = [];
+        vl._dims = format.dims || 8;
+        vl._distanceMetric = runtime.distance || VectorLayerMock.Distance.COSINE;
+        return vl;
+      }
+
+      static open(indexName, db, format = {}, runtime = {}) {
+        return VectorLayerMock.openSeparate(null, indexName, format, runtime);
+      }
+
+      _checkOpen() { if (this._closed) throw new Error('VectorLayer is closed'); }
+
+      insertSync(id, vec, metadata) {
+        this._checkOpen();
+        if (!(vec instanceof Float32Array)) throw new TypeError('vec must be a Float32Array');
+        this._vectors = this._vectors.filter(v => v.id !== id);
+        this._vectors.push({ id, vec: Float32Array.from(vec), metadata: metadata || null });
+      }
+
+      _dist(a, b) {
+        if (this._distanceMetric === VectorLayerMock.Distance.COSINE) {
+          const dot = a.reduce((s, x, i) => s + x * b[i], 0);
+          const na = Math.sqrt(a.reduce((s, x) => s + x * x, 0));
+          const nb = Math.sqrt(b.reduce((s, x) => s + x * x, 0));
+          return 1 - dot / (na * nb);
+        }
+        return Math.sqrt(a.reduce((s, x, i) => s + (x - b[i]) ** 2, 0));
+      }
+
+      searchSync(query, k) {
+        this._checkOpen();
+        if (!(query instanceof Float32Array)) throw new TypeError('query must be a Float32Array');
+        return this._vectors
+          .map(v => ({ id: v.id, distance: this._dist(query, v.vec), metadata: v.metadata }))
+          .sort((a, b) => a.distance - b.distance)
+          .slice(0, k);
+      }
+
+      deleteSync(id) {
+        this._checkOpen();
+        this._vectors = this._vectors.filter(v => v.id !== id);
+      }
+
+      count() { this._checkOpen(); return this._vectors.length; }
+      train() {}
+      rebuild() {}
+      close() { this._closed = true; }
+    }
+
+    WaveDB = WaveDBMock;
+    GraphQLLayer = GraphQLLayerMock;
+    GraphLayer = GraphLayerMock;
+    g = gMock;
+    VectorLayer = VectorLayerMock;
+  } else {
+    // ───────────────────────────────────────────────────────────
+    // Real native engine via Electron preload
+    // ───────────────────────────────────────────────────────────
+    ({ WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer } = window.electronAPI);
   }
 
   // ─────────────────────────────────────────────────────────────
-  // Mock Vector Layer + deterministic embeddings
+  // Shared mockEmbed helper
   // ─────────────────────────────────────────────────────────────
 
   const CONCEPTS = {
@@ -278,7 +342,7 @@
     music: [0.4, 0.4, 0.4, 0.4, 0, 0, 0, 0]
   };
 
-  function normalize(v) {
+  function normalizeVec(v) {
     const len = Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1;
     return v.map(x => x / len);
   }
@@ -294,71 +358,13 @@
       }
     }
     if (hits === 0) {
-      // fallback: deterministic hash-based vector
       for (let i = 0; i < dims; i++) {
         let n = 0;
         for (let j = 0; j < text.length; j++) n += text.charCodeAt(j) * (i + 1) * (j + 1);
         vec[i] = (n % 1000) / 1000;
       }
     }
-    return new Float32Array(normalize(vec));
-  }
-
-  class VectorLayer {
-    static IndexType = { FLAT: 0, IVF: 1, SLSH: 2 };
-    static Distance = { L2: 0, COSINE: 1, DOT: 2 };
-
-    static openSeparate(dbLocation, indexName, format = {}, runtime = {}) {
-      const vl = new VectorLayer();
-      vl._vectors = [];
-      vl._dims = format.dims || 8;
-      vl._distanceMetric = runtime.distance || VectorLayer.Distance.COSINE;
-      return vl;
-    }
-
-    static open(indexName, db, format = {}, runtime = {}) {
-      return VectorLayer.openSeparate(null, indexName, format, runtime);
-    }
-
-    _checkOpen() { if (this._closed) throw new Error('VectorLayer is closed'); }
-
-    insertSync(id, vec, metadata) {
-      this._checkOpen();
-      if (!(vec instanceof Float32Array)) throw new TypeError('vec must be a Float32Array');
-      this._vectors = this._vectors.filter(v => v.id !== id);
-      this._vectors.push({ id, vec: Float32Array.from(vec), metadata: metadata || null });
-    }
-
-    _dist(a, b) {
-      if (this._distanceMetric === VectorLayer.Distance.COSINE) {
-        const dot = a.reduce((s, x, i) => s + x * b[i], 0);
-        const na = Math.sqrt(a.reduce((s, x) => s + x * x, 0));
-        const nb = Math.sqrt(b.reduce((s, x) => s + x * x, 0));
-        return 1 - dot / (na * nb);
-      }
-      // L2 fallback
-      return Math.sqrt(a.reduce((s, x, i) => s + (x - b[i]) ** 2, 0));
-    }
-
-    searchSync(query, k) {
-      this._checkOpen();
-      if (!(query instanceof Float32Array)) throw new TypeError('query must be a Float32Array');
-      const ranked = this._vectors
-        .map(v => ({ id: v.id, distance: this._dist(query, v.vec), metadata: v.metadata }))
-        .sort((a, b) => a.distance - b.distance)
-        .slice(0, k);
-      return ranked;
-    }
-
-    deleteSync(id) {
-      this._checkOpen();
-      this._vectors = this._vectors.filter(v => v.id !== id);
-    }
-
-    count() { this._checkOpen(); return this._vectors.length; }
-    train() {}
-    rebuild() {}
-    close() { this._closed = true; }
+    return new Float32Array(normalizeVec(vec));
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -456,14 +462,24 @@
     }
   });
 
-  // Expose mocks for verification / debugging
-  if (typeof window !== 'undefined') {
+  // Expose mocks for verification / debugging in browser mode
+  if (!isElectron && typeof window !== 'undefined') {
     window.WaveDB = WaveDB;
     window.GraphQLLayer = GraphQLLayer;
     window.GraphLayer = GraphLayer;
     window.g = g;
     window.VectorLayer = VectorLayer;
     window.mockEmbed = mockEmbed;
+  }
+
+  // Add a small Electron indicator so the user knows which engine is running
+  if (isElectron) {
+    const indicator = document.createElement('div');
+    indicator.textContent = '⚡ Real WaveDB engine';
+    indicator.style.cssText =
+      'position:fixed;top:18px;right:22px;z-index:100;background:#2c2f4a;color:#f9f8ee;' +
+      'padding:6px 12px;border-radius:20px;font-weight:700;font-size:0.8rem;';
+    document.body.appendChild(indicator);
   }
 
   showSlide(0);
