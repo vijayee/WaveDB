@@ -36,12 +36,14 @@ Prerequisites:
 
 ```bash
 cd demo/electron
-npm install          # installs Electron + electron-rebuild
-npm run rebuild      # rebuilds the native binding for Electron (if needed)
+npm install          # installs Electron + rebuild tools
+npm run rebuild      # rebuilds the native binding for Electron's Node ABI
 npm start            # launches the presentation
 ```
 
 When running in Electron, a `⚡ Real WaveDB engine` badge appears in the top-right corner and every live code snippet executes against the real C++ database.
+
+If `npm install` fails to download the Electron binary or the native module does not load, see [`electron/TROUBLESHOOTING.md`](electron/TROUBLESHOOTING.md).
 
 ## What it demonstrates
 
