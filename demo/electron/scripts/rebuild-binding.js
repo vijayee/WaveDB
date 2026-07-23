@@ -5,6 +5,23 @@ const { execSync } = require('child_process');
 
 const bindingsDir = path.resolve(__dirname, '..', '..', '..', 'bindings', 'nodejs');
 
+// The binding.gyp references sources under bindings/nodejs/c_src/, which is
+// a trimmed copy of the monorepo sources. Make sure it is up to date before
+// rebuilding, otherwise recently added source directories (e.g. vector) will
+// be missing.
+console.log('Ensuring c_src sources are copied...');
+try {
+  execSync('node scripts/copy-sources.js', {
+    cwd: bindingsDir,
+    stdio: 'inherit',
+    shell: true,
+    windowsHide: true
+  });
+} catch (err) {
+  console.error('copy-sources.js failed:', err.message);
+  process.exit(err.status || 1);
+}
+
 // Resolve the Electron version from the locally installed package.
 const electronModuleDir = path.resolve(__dirname, '..', 'node_modules', 'electron');
 let electronVersion;
