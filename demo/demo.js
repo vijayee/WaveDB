@@ -381,10 +381,19 @@
     slides.forEach((s, idx) => s.classList.toggle('active', idx === current));
     document.getElementById('progress-bar').style.width = `${((current + 1) / slides.length) * 100}%`;
     document.getElementById('counter').textContent = `${current + 1} / ${slides.length}`;
+
+    // Mermaid cannot render while a slide is display:none, so render diagrams
+    // on the slide the moment it becomes visible.
+    const activeSlide = slides[current];
+    const mermaidNodes = activeSlide ? Array.from(activeSlide.querySelectorAll('pre.mermaid')) : [];
+    if (mermaidNodes.length && typeof mermaid !== 'undefined' && mermaid.run) {
+      mermaid.run({ nodes: mermaidNodes }).catch(err => {
+        console.error('Mermaid render error:', err);
+      });
+    }
   }
 
-  function runCode(textarea, terminal) {
-    const code = textarea.value;
+  function runCodeFromString(code, terminal) {
     terminal.innerHTML = '';
 
     const append = (type, parts) => {
@@ -423,14 +432,78 @@
       });
   }
 
-  document.querySelectorAll('.demo-panel').forEach(panel => {
-    const editor = panel.querySelector('.code-editor');
-    const term = panel.querySelector('.terminal');
-    const btn = panel.querySelector('.run-btn');
-    if (btn) {
-      btn.addEventListener('click', () => runCode(editor, term));
-    }
-  });
+  // Backwards-compatible wrapper for any caller still passing a textarea node.
+  function runCode(textarea, terminal) {
+    runCodeFromString(textarea.value, terminal);
+  }
+
+  function setupEditors() {
+    document.querySelectorAll('.code-wrapper').forEach(wrapper => {
+      const editor = wrapper.querySelector('.code-editor');
+      const highlight = wrapper.querySelector('.code-highlight');
+      const panel = wrapper.closest('.demo-panel');
+      const term = panel ? panel.querySelector('.terminal') : null;
+      const btn = panel ? panel.querySelector('.run-btn') : null;
+      if (!editor || !highlight) return;
+
+      function escapeHtml(text) {
+        return text
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/\n$/g, '\n\n');
+      }
+
+      function updateHighlight() {
+        if (typeof hljs === 'undefined') return;
+        const code = editor.value;
+        let highlighted;
+        try {
+          highlighted = hljs.highlight(code, { language: 'javascript' }).value;
+        } catch (err) {
+          highlighted = escapeHtml(code);
+        }
+        highlight.innerHTML = highlighted;
+      }
+
+      function syncScroll() {
+        highlight.scrollTop = editor.scrollTop;
+        highlight.scrollLeft = editor.scrollLeft;
+      }
+
+      function insertText(text) {
+        const start = editor.selectionStart;
+        const end = editor.selectionEnd;
+        const before = editor.value.slice(0, start);
+        const after = editor.value.slice(end);
+        editor.value = before + text + after;
+        editor.selectionStart = editor.selectionEnd = start + text.length;
+        editor.dispatchEvent(new Event('input', { bubbles: true }));
+        editor.focus();
+      }
+
+      editor.addEventListener('input', updateHighlight);
+      editor.addEventListener('scroll', syncScroll);
+      editor.addEventListener('keydown', e => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          insertText('  ');
+        }
+      });
+
+      // Initial highlight.
+      updateHighlight();
+      syncScroll();
+
+      if (btn && term) {
+        btn.addEventListener('click', () => {
+          runCodeFromString(editor.value, term);
+        });
+      }
+    });
+  }
+
+  setupEditors();
 
   document.getElementById('prev').addEventListener('click', () => showSlide(current - 1));
   document.getElementById('next').addEventListener('click', () => showSlide(current + 1));

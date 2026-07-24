@@ -145,28 +145,69 @@ p, li {
   color: var(--periwinkle-dark);
 }
 
-.code-editor {
+.code-wrapper {
+  position: relative;
   flex: 1;
   min-height: 160px;
+}
+
+.code-editor,
+.code-highlight {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
   font-family: "Fira Code", "Consolas", "Monaco", monospace;
   font-size: 0.92rem;
   line-height: 1.45;
-  background: var(--panel);
-  color: var(--ink);
-  border: 2px solid var(--cream-dark);
   border-radius: 12px;
   padding: 14px 16px;
-  resize: none;
-  outline: none;
-  box-shadow: var(--shadow);
   white-space: pre;
   overflow: auto;
   tab-size: 2;
+  border: 2px solid var(--cream-dark);
+}
+
+.code-editor {
+  z-index: 2;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--ink);
+  resize: none;
+  outline: none;
+  box-shadow: var(--shadow);
+}
+
+.code-editor::selection {
+  background: rgba(130, 144, 199, 0.35);
+  color: transparent;
 }
 
 .code-editor:focus {
   border-color: var(--periwinkle);
 }
+
+.code-editor:focus + .code-highlight {
+  border-color: var(--periwinkle);
+}
+
+.code-highlight {
+  z-index: 1;
+  background: var(--panel);
+  color: var(--ink);
+  pointer-events: none;
+}
+
+.code-highlight .hljs-keyword { color: #d96b7d; font-weight: 700; }
+.code-highlight .hljs-built_in,
+.code-highlight .hljs-title.class_ { color: #7471bd; }
+.code-highlight .hljs-string { color: #5b8a5b; }
+.code-highlight .hljs-number { color: #c17a4e; }
+.code-highlight .hljs-comment { color: #9a9db0; font-style: italic; }
+.code-highlight .hljs-function { color: #7471bd; }
+.code-highlight .hljs-property { color: #4f5378; }
+.code-highlight .hljs-punctuation { color: #6b6f8e; }
 
 .terminal {
   min-height: 140px;
@@ -340,6 +381,149 @@ ul.features {
 }
 
 .link-card .email:hover { background: var(--coral-dark); }
+
+.comparison-figure {
+  margin: 1rem 0;
+  text-align: center;
+}
+
+.comparison-figure img {
+  max-width: 100%;
+  max-height: 48vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  background: var(--panel);
+}
+
+.comparison-figure figcaption {
+  margin-top: 0.75rem;
+  font-size: 0.95rem;
+  color: var(--ink-light);
+  font-style: italic;
+}
+
+.hbtrie-split {
+  align-items: start;
+}
+
+.hbtrie-figure {
+  margin: 0.5rem 0 0;
+  text-align: center;
+}
+
+.hbtrie-figure img {
+  max-width: 100%;
+  max-height: 34vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  background: var(--panel);
+}
+
+.hbtrie-figure figcaption {
+  margin-top: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--ink-light);
+  font-style: italic;
+}
+
+.mermaid-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 0;
+}
+
+.mermaid-panel .mermaid {
+  flex: 0 0 auto;
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 1rem;
+  box-shadow: var(--shadow);
+  text-align: center;
+  overflow: hidden;
+}
+
+.mermaid-panel .mermaid svg {
+  max-width: 100%;
+  max-height: 32vh;
+  height: auto;
+}
+
+.features.compact {
+  margin: 0;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.features.compact li {
+  padding: 10px 14px;
+  font-size: 0.95rem;
+}
+
+.tables {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-top: 0.5rem;
+}
+
+.perf-table {
+  background: var(--panel);
+  border-radius: 14px;
+  padding: 1rem 1.25rem;
+  box-shadow: var(--shadow);
+  overflow: auto;
+}
+
+.perf-table h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  color: var(--coral-dark);
+}
+
+.perf-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.perf-table th,
+.perf-table td {
+  text-align: right;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--cream-dark);
+}
+
+.perf-table th:first-child,
+.perf-table td:first-child {
+  text-align: left;
+}
+
+.perf-table thead th {
+  color: var(--periwinkle-dark);
+  font-weight: 700;
+  border-bottom: 2px solid var(--periwinkle);
+}
+
+.perf-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.link-card a {
+  margin: 0.4rem;
+}
+
+@media (max-width: 1100px) {
+  .tables {
+    grid-template-columns: 1fr;
+  }
+}
 
 @media (max-width: 900px) {
   .split {

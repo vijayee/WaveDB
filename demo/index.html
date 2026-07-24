@@ -37,8 +37,59 @@
       </div>
     </section>
 
-    <!-- Slide 3: Base Layer -->
+    <!-- Slide 3: SQL vs NoSQL -->
     <section class="slide" data-slide="2">
+      <div class="slide-content">
+        <h2>Where does WaveDB fit? SQL vs NoSQL</h2>
+        <p class="lead">Traditional SQL databases enforce rigid schemas, fixed tables, and strict relationships. NoSQL databases trade that rigidity for flexibility: document stores, key-value stores, wide-column stores, and graph databases each optimize for different shapes of data.</p>
+        <figure class="comparison-figure">
+          <img src="assets/differences-between-sql-databases-and-nosql-databases.png" alt="Diagram comparing SQL and NoSQL databases" />
+          <figcaption>SQL databases use structured tables and fixed schemas; NoSQL systems favor flexible, scalable data models.</figcaption>
+        </figure>
+        <p class="lead">WaveDB is a <strong>NoSQL</strong> engine at heart — hierarchical keys, JSON objects, graph triples, and vector embeddings coexist without a fixed schema — while still giving you ACID durability and synchronous, embeddable access.</p>
+      </div>
+    </section>
+
+    <!-- Slide 4: HBTrie Data Structure -->
+    <section class="slide" data-slide="3">
+      <div class="slide-content">
+        <h2>Inside WaveDB: Hierarchical B⁺Trie (HB⁺Trie)</h2>
+        <div class="split hbtrie-split">
+          <div class="narrative">
+            <p class="lead">A WaveDB key is a <strong>path</strong> made of identifiers, and each identifier is a sequence of fixed-size <strong>chunks</strong>. An HB⁺Trie is a tree of B⁺trees: each level searches one chunk, and the result points to the next B⁺tree (or to the final document).</p>
+            <figure class="hbtrie-figure">
+              <img src="assets/HBTrie.jpg" alt="HB⁺Trie diagram showing chunked keys and nested B⁺trees" />
+              <figcaption>Variable-length keys are split into chunks; each chunk drives a B⁺tree lookup at the matching trie level.</figcaption>
+            </figure>
+          </div>
+          <div class="mermaid-panel">
+            <p class="lead">Example path: <code>users/alice/profile</code></p>
+            <pre class="mermaid">flowchart TD
+Root("Root HBTrie")
+Level1("HBTrie users")
+Level2("HBTrie users alice")
+Doc("Document or Value")
+Prod("HBTrie products")
+ProdDoc("Document or Value")
+Root -- "users" --> Level1
+Level1 -- "alice" --> Level2
+Level2 -- "profile" --> Doc
+Root -- "products" --> Prod
+Prod -- "item-42" --> ProdDoc
+</pre>
+            <ul class="features compact">
+              <li><strong>Path</strong>: a sequence of identifiers</li>
+              <li><strong>Identifier</strong>: chunked string, e.g. <code>users</code></li>
+              <li><strong>HB⁺Trie node</strong>: one B⁺tree per identifier level</li>
+              <li><strong>Leaf</strong>: document, scalar, or nested trie</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 5: Base Layer -->
+    <section class="slide" data-slide="4">
       <div class="slide-content">
         <h2>Base Layer — Objects &amp; Keys</h2>
         <div class="split">
@@ -50,7 +101,7 @@
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <textarea class="code-editor" spellcheck="false">const db = new WaveDB(':memory:');
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const db = new WaveDB(':memory:');
 
 // Store a JSON object under a hierarchical key
 db.putObject('users/alice', {
@@ -74,7 +125,7 @@ db.batchSync([
 console.log('bob email:', db.getSync('users/bob/email'));
 console.log('bob role:', db.getSync('users/bob/role'));
 
-db.close();</textarea>
+db.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
             <div class="terminal"></div>
           </div>
@@ -82,8 +133,8 @@ db.close();</textarea>
       </div>
     </section>
 
-    <!-- Slide 4: GraphQL Layer -->
-    <section class="slide" data-slide="3">
+    <!-- Slide 6: GraphQL Layer -->
+    <section class="slide" data-slide="5">
       <div class="slide-content">
         <h2>GraphQL Layer — Schema &amp; Query</h2>
         <div class="split">
@@ -95,7 +146,7 @@ db.close();</textarea>
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <textarea class="code-editor" spellcheck="false">const gql = new GraphQLLayer(null); // in-memory
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const gql = new GraphQLLayer(null); // in-memory
 
 gql.parseSchema(`
   type Person {
@@ -120,7 +171,7 @@ const found = gql.querySync(`{
 }`);
 console.log('found:', found.data.person);
 
-gql.close();</textarea>
+gql.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
             <div class="terminal"></div>
           </div>
@@ -128,8 +179,8 @@ gql.close();</textarea>
       </div>
     </section>
 
-    <!-- Slide 5: Graph Layer -->
-    <section class="slide" data-slide="4">
+    <!-- Slide 7: Graph Layer -->
+    <section class="slide" data-slide="6">
       <div class="slide-content">
         <h2>Graph Layer — Triples &amp; Traversal</h2>
         <div class="split">
@@ -141,7 +192,7 @@ gql.close();</textarea>
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <textarea class="code-editor" spellcheck="false">const graph = new GraphLayer(':memory:');
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const graph = new GraphLayer(':memory:');
 
 // Create vertices and edges as triples
 graph.insertSync('alice', 'name', 'Alice');
@@ -161,7 +212,7 @@ console.log('Bob count:', graph.count(g.V().Has('name', 'Bob').Count()));
 graph.deleteSync('bob', 'name', 'Bob');
 console.log('Bob count after delete:', graph.count(g.V().Has('name', 'Bob').Count()));
 
-graph.close();</textarea>
+graph.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
             <div class="terminal"></div>
           </div>
@@ -169,8 +220,8 @@ graph.close();</textarea>
       </div>
     </section>
 
-    <!-- Slide 6: Vector Layer -->
-    <section class="slide" data-slide="5">
+    <!-- Slide 8: Vector Layer -->
+    <section class="slide" data-slide="7">
       <div class="slide-content">
         <h2>Vector Layer — Vibe Search</h2>
         <div class="split">
@@ -182,7 +233,7 @@ graph.close();</textarea>
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <textarea class="code-editor" spellcheck="false">const vl = VectorLayer.openSeparate(
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const vl = VectorLayer.openSeparate(
   ':memory:',
   'tracks',
   { dims: 8 },
@@ -206,7 +257,7 @@ const hits = vl.searchSync(query, 2);
 console.log('Top vibe matches:');
 hits.forEach(h => console.log(`  ${h.id}  (distance ${h.distance.toFixed(3)})`));
 
-vl.close();</textarea>
+vl.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
             <div class="terminal"></div>
           </div>
@@ -214,13 +265,55 @@ vl.close();</textarea>
       </div>
     </section>
 
-    <!-- Slide 7: Conclusion -->
-    <section class="slide" data-slide="6">
+    <!-- Slide 9: Performance -->
+    <section class="slide" data-slide="8">
+      <div class="slide-content">
+        <h2>Performance</h2>
+        <p class="lead">Benchmarks on AMD Ryzen 9700X (8-core Zen 5), Windows 11, 50MB LRU cache, ASYNC WAL mode, GCC 15.1 -O3. 5-run averages.</p>
+        <div class="tables">
+          <div class="perf-table">
+            <h3>Sync Operations (single-threaded)</h3>
+            <table>
+              <thead>
+                <tr><th>Operation</th><th>Throughput</th><th>P50 Latency</th><th>P99 Latency</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Get</td><td>2.61M ops/sec</td><td>474 ns</td><td>490 ns</td></tr>
+                <tr><td>Put</td><td>498K ops/sec</td><td>2.02 µs</td><td>4.80 µs</td></tr>
+                <tr><td>Delete</td><td>183K ops/sec</td><td>3.52 µs</td><td>7.33 µs</td></tr>
+                <tr><td>Mixed (70% read)</td><td>2.94M ops/sec</td><td>459 ns</td><td>490 ns</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="perf-table">
+            <h3>Concurrent Throughput (4 worker threads)</h3>
+            <table>
+              <thead>
+                <tr><th>Threads</th><th>Write</th><th>Read</th><th>Mixed (70R/20W/10D)</th></tr>
+              </thead>
+              <tbody>
+                <tr><td>1</td><td>275K ops/sec</td><td>1.48M ops/sec</td><td>312K ops/sec</td></tr>
+                <tr><td>2</td><td>484K ops/sec</td><td>2.48M ops/sec</td><td>535K ops/sec</td></tr>
+                <tr><td>4</td><td>647K ops/sec</td><td>4.59M ops/sec</td><td>709K ops/sec</td></tr>
+                <tr><td>8</td><td>811K ops/sec</td><td>4.47M ops/sec</td><td>873K ops/sec</td></tr>
+                <tr><td>16</td><td>949K ops/sec</td><td>2.85M ops/sec</td><td>982K ops/sec</td></tr>
+                <tr><td>32</td><td>1.02M ops/sec</td><td>2.88M ops/sec</td><td>1.06M ops/sec</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Slide 10: Conclusion -->
+    <section class="slide" data-slide="9">
       <div class="slide-content">
         <h2>Take WaveDB for a spin</h2>
-        <p class="lead">WaveDB is open source and ready to embed. Explore the repository, try the Node.js/Python/Dart bindings, and reach out if you'd like to collaborate.</p>
+        <p class="lead">WaveDB is open source and ready to embed. Explore the repository, try the bindings, and reach out if you'd like to collaborate.</p>
         <div class="link-card">
           <a href="https://github.com/vijayee/WaveDB" target="_blank" rel="noopener">🌊 GitHub Repository</a>
+          <a href="https://www.npmjs.com/package/@vijayee/wavedb" target="_blank" rel="noopener">⬢ Node.js Binding</a>
+          <a href="https://pypi.org/project/wavedb/" target="_blank" rel="noopener">🐍 Python Binding</a>
           <a class="email" href="mailto:victor.j.morrow@gmail.com">✉ victor.j.morrow@gmail.com</a>
         </div>
       </div>
@@ -228,13 +321,19 @@ vl.close();</textarea>
   </main>
 
   <div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
-  <div class="counter" id="counter">1 / 7</div>
+  <div class="counter" id="counter">1 / 10</div>
 
   <div class="nav">
     <button id="prev" aria-label="Previous slide">◀</button>
     <button id="next" aria-label="Next slide">▶</button>
   </div>
 
+  <script src="electron/node_modules/mermaid/dist/mermaid.min.js"></script>
+  <script>
+    mermaid.initialize({ startOnLoad: false, theme: 'base', themeVariables: { primaryColor: '#f9f8ee', primaryTextColor: '#2c2f4a', primaryBorderColor: '#8290c7', lineColor: '#7471bd', secondaryColor: '#eb8897', tertiaryColor: '#e6e0cb' } });
+  </script>
+  <script src="electron/node_modules/highlight.js/highlight.min.js"></script>
+  <script src="electron/node_modules/highlight.js/javascript.min.js"></script>
   <script src="demo.js"></script>
 </body>
 </html>
