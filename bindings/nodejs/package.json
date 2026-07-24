@@ -39,7 +39,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/vijayee/WaveDB.git",
+    "url": "git+https://github.com/vijayee/WaveDB.git",
     "directory": "bindings/nodejs"
   },
   "files": [
