@@ -52,6 +52,23 @@ npm install -g node-gyp
 
 This confirms the native binding was not rebuilt for Electron. Run `npm run rebuild` in `demo/electron`.
 
+## Windows: `Cannot open include file: 'openssl/evp.h'`
+
+The published `@vijayee/wavedb` package does not bundle OpenSSL headers, so the default Windows build disables OpenSSL (`WAVEDB_NO_OPENSSL`). This is enough for the demo.
+
+If you want encryption support on Windows, install OpenSSL and opt in before installing:
+
+```powershell
+$env:WAVEDB_OPENSSL="1"
+$env:OPENSSL_ROOT="C:\Program Files\OpenSSL-Win64"
+npm install
+```
+
+Supported `OPENSSL_ROOT` layouts (auto-searched if `OPENSSL_ROOT` is not set):
+
+- Shining Light Productions installer: `C:\OpenSSL-Win64` or `C:\Program Files\OpenSSL-Win64`
+- vcpkg: `C:\vcpkg\installed\x64-windows`
+
 ## Windows: `'true' is not recognized`
 
 This was a bug in earlier versions of the demo's `package.json` that used POSIX `|| true`. The current scripts are Windows-compatible and no longer produce this error.

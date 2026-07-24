@@ -1,4 +1,8 @@
 {
+  "variables": {
+    "wavedb_openssl%": "<!(node -p \"process.env.WAVEDB_OPENSSL || ''\")",
+    "openssl_root%": "<!(node -p \"process.env.OPENSSL_ROOT || ''\")"
+  },
   "targets": [{
     "target_name": "wavedb_c_lib",
     "type": "static_library",
@@ -107,18 +111,40 @@
     "cflags": ["-O3"],
     "conditions": [
       ["OS=='win'", {
-        "defines": [
-          "CBOR_STATIC_DEFINE",
-          "CBOR_RESTRICT_SPECIFIER=",
-          "WIN32_LEAN_AND_MEAN",
-          "_WINSOCKAPI_",
-          "WAVEDB_NO_OPENSSL"
-        ],
-        "msvs_settings": {
-          "VCCLCompilerTool": {
-            "AdditionalOptions": ["/O2"]
-          }
-        }
+        "conditions": [
+          ["wavedb_openssl=='1'", {
+            "defines": [
+              "CBOR_STATIC_DEFINE",
+              "CBOR_RESTRICT_SPECIFIER=",
+              "WIN32_LEAN_AND_MEAN",
+              "_WINSOCKAPI_"
+            ],
+            "include_dirs": [
+              "<(openssl_root)/include",
+              "C:/OpenSSL-Win64/include",
+              "C:/Program Files/OpenSSL-Win64/include",
+              "C:/vcpkg/installed/x64-windows/include"
+            ],
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "AdditionalOptions": ["/O2"]
+              }
+            }
+          }, {
+            "defines": [
+              "CBOR_STATIC_DEFINE",
+              "CBOR_RESTRICT_SPECIFIER=",
+              "WIN32_LEAN_AND_MEAN",
+              "_WINSOCKAPI_",
+              "WAVEDB_NO_OPENSSL"
+            ],
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "AdditionalOptions": ["/O2"]
+              }
+            }
+          }]
+        ]
       }]
     ]
   }, {
@@ -170,21 +196,56 @@
         ]
       }],
       ["OS=='win'", {
-        "defines": [
-          "WIN32_LEAN_AND_MEAN",
-          "_WINSOCKAPI_",
-          "WAVEDB_NO_OPENSSL"
-        ],
-        "libraries": [
-          "ws2_32.lib",
-          "bcrypt.lib"
-        ],
-        "msvs_settings": {
-          "VCCLCompilerTool": {
-            "ExceptionHandling": "1",
-            "AdditionalOptions": ["/O2"]
-          }
-        }
+        "conditions": [
+          ["wavedb_openssl=='1'", {
+            "defines": [
+              "WIN32_LEAN_AND_MEAN",
+              "_WINSOCKAPI_"
+            ],
+            "include_dirs": [
+              "<(openssl_root)/include",
+              "C:/OpenSSL-Win64/include",
+              "C:/Program Files/OpenSSL-Win64/include",
+              "C:/vcpkg/installed/x64-windows/include"
+            ],
+            "libraries": [
+              "ws2_32.lib",
+              "bcrypt.lib",
+              "libcrypto.lib",
+              "libssl.lib"
+            ],
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "ExceptionHandling": "1",
+                "AdditionalOptions": ["/O2"]
+              },
+              "VCLinkerTool": {
+                "AdditionalLibraryDirectories": [
+                  "<(openssl_root)/lib",
+                  "C:/OpenSSL-Win64/lib/VC",
+                  "C:/Program Files/OpenSSL-Win64/lib/VC",
+                  "C:/vcpkg/installed/x64-windows/lib"
+                ]
+              }
+            }
+          }, {
+            "defines": [
+              "WIN32_LEAN_AND_MEAN",
+              "_WINSOCKAPI_",
+              "WAVEDB_NO_OPENSSL"
+            ],
+            "libraries": [
+              "ws2_32.lib",
+              "bcrypt.lib"
+            ],
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "ExceptionHandling": "1",
+                "AdditionalOptions": ["/O2"]
+              }
+            }
+          }]
+        ]
       }]
     ]
   }]

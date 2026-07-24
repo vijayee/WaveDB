@@ -36,6 +36,10 @@ try {
 console.log(`Rebuilding WaveDB binding for Electron ${electronVersion}...`);
 console.log(`Bindings directory: ${bindingsDir}`);
 
+// The published tarball does not bundle OpenSSL headers, so the default
+// Windows build of @vijayee/wavedb skips OpenSSL. Users who want encryption
+// can install OpenSSL, set WAVEDB_OPENSSL=1 and OPENSSL_ROOT, and rerun
+// `npm install` / `npm run rebuild`.
 const cmd = [
   'node-gyp',
   'rebuild',
