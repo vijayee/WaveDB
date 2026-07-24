@@ -1311,13 +1311,17 @@ TEST_F(VectorLayerTest, MigrateRoundTrip) {
     ASSERT_EQ(baseline.size(), 1u);
     EXPECT_EQ(*baseline.begin(), std::string("v10"));
 
-    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_config_t cfg_ivf1 = ivf_config(4, 3);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_ivf1.format), 0);
     EXPECT_EQ(vector_layer_count(vl), n);
-    ASSERT_EQ(vector_layer_migrate(vl, &slsh_config(4).format), 0);
+    vector_layer_config_t cfg_slsh1 = slsh_config(4);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_slsh1.format), 0);
     EXPECT_EQ(vector_layer_count(vl), n);
-    ASSERT_EQ(vector_layer_migrate(vl, &flat_config(4).format), 0);
+    vector_layer_config_t cfg_flat1 = flat_config(4);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_flat1.format), 0);
     EXPECT_EQ(vector_layer_count(vl), n);
-    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_config_t cfg_ivf2 = ivf_config(4, 3);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_ivf2.format), 0);
     EXPECT_EQ(vector_layer_count(vl), n);
     EXPECT_EQ(vl_read_format_type(vl), VL_INDEX_IVF);
 
@@ -1352,7 +1356,8 @@ TEST_F(VectorLayerTest, MigrateRetainsMetadata) {
         metas[i] = std::vector<uint8_t>(meta, meta + 2);
         vecs[i] = v;
     }
-    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_config_t cfg_ivf1 = ivf_config(4, 3);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_ivf1.format), 0);
     vector_layer_runtime_t rt = ivf_config(4, 3).runtime;
     ASSERT_EQ(vector_layer_reconfigure(vl, &rt), 0);
     EXPECT_EQ(vector_layer_count(vl), 15u);
@@ -1380,7 +1385,8 @@ TEST_F(VectorLayerTest, MigrateWritesFormatToDisk) {
     ASSERT_NE(vl, nullptr);
     std::vector<std::vector<float>> stored;
     vl_mtest_insert(vl, 60, stored);
-    ASSERT_EQ(vector_layer_migrate(vl, &ivf_config(4, 3).format), 0);
+    vector_layer_config_t cfg_ivf1 = ivf_config(4, 3);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_ivf1.format), 0);
     vector_layer_destroy(vl);
 
     /* Disk says ivf: reopen IVF ok, reopen FLAT raises. */
@@ -1450,7 +1456,8 @@ TEST_F(VectorLayerTest, MigrateEmitsProgress) {
     g_progress_lines.clear();
 
     /* IVF -> SLSH exercises delete (IVF aux) + train (SLSH proj) + rebuild + done. */
-    ASSERT_EQ(vector_layer_migrate(vl, &slsh_config(4).format), 0);
+    vector_layer_config_t cfg_slsh1 = slsh_config(4);
+    ASSERT_EQ(vector_layer_migrate(vl, &cfg_slsh1.format), 0);
     EXPECT_EQ(vector_layer_count(vl), n);
     vector_layer_destroy(vl);
 
