@@ -1,0 +1,19 @@
+{
+  "name": "wavedb-demo-electron",
+  "version": "0.1.0",
+  "description": "WaveDB presentation demo running the real native engine in Electron",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "rebuild": "node scripts/rebuild-binding.js",
+    "rebuild:manual": "cd ../../bindings/nodejs && node-gyp rebuild --target=ELECTRON_VERSION --dist-url=https://electronjs.org/headers",
+    "postinstall": "node node_modules/electron/install.js && npm run rebuild"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-rebuild": "^3.2.9"
+  },
+  "dependencies": {
+    "@vijayee/wavedb": "^0.15.1"
+  }
+}

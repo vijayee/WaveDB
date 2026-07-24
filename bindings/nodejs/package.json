@@ -50,5 +50,12 @@
     "scripts/",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "exports": {
+    "graph": "lib/graph.js",
+    "graphql": "lib/graphql.js",
+    "vector_layer": "lib/vector_layer.js",
+    "iterator": "lib/iterator.js",
+    "subtree": "lib/subtree.js"
+  }
 }

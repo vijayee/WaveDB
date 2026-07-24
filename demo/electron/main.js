@@ -3,10 +3,10 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
-const { WaveDB } = require('../../bindings/nodejs/lib/wavedb.js');
-const { GraphQLLayer } = require('../../bindings/nodejs/lib/graphql.js');
-const { GraphLayer, g, setDefaultGraph } = require('../../bindings/nodejs/lib/graph.js');
-const { VectorLayer } = require('../../bindings/nodejs/lib/vector_layer.js');
+const { WaveDB } = require('@vijayee/wavedb');
+const { GraphQLLayer } = require('@vijayee/wavedb/graphql');
+const { GraphLayer, g, setDefaultGraph } = require('@vijayee/wavedb/graph');
+const { VectorLayer } = require('@vijayee/wavedb/vector_layer');
 
 const HANDLES = {
   waveDb: new Map(),
