@@ -37,6 +37,7 @@ private:
 
   // Object operations
   Napi::Value PutObject(const Napi::CallbackInfo& info);
+  Napi::Value PutObjectSync(const Napi::CallbackInfo& info);
   Napi::Value GetObject(const Napi::CallbackInfo& info);
   Napi::Value GetObjectSync(const Napi::CallbackInfo& info);
 

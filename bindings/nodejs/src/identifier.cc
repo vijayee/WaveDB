@@ -17,6 +17,15 @@ bool ValueFromJSDynamic(Napi::Env env, Napi::Value value, std::string& out) {
         Napi::Buffer<uint8_t> buffer = value.As<Napi::Buffer<uint8_t>>();
         out = std::string(reinterpret_cast<const char*>(buffer.Data()), buffer.Length());
         return true;
+    } else if (value.IsNumber()) {
+        // Store numbers as strings so object/array flattening can round-trip
+        // through the scalar key-value store. JSON encoding would also work,
+        // but a simple decimal string keeps reconstruction predictable.
+        out = std::to_string(value.As<Napi::Number>().DoubleValue());
+        return true;
+    } else if (value.IsBoolean()) {
+        out = value.As<Napi::Boolean>().Value() ? "1" : "0";
+        return true;
     } else {
         Napi::TypeError::New(env, "Value must be string or Buffer").ThrowAsJavaScriptException();
         return false;

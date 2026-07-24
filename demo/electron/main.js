@@ -82,9 +82,9 @@ ipcMain.on('WAVEDB_BATCH_SYNC', (event, handle, ops) => {
   });
 });
 
-ipcMain.on('WAVEDB_PUT_OBJECT', (event, handle, key, obj) => {
+ipcMain.on('WAVEDB_PUT_OBJECT_SYNC', (event, handle, key, obj) => {
   event.returnValue = respond(() => {
-    getHandle('waveDb', handle).putObject(key, obj);
+    getHandle('waveDb', handle).putObjectSync(key, obj);
     return null;
   });
 });
@@ -248,7 +248,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: false
     }
   });
 

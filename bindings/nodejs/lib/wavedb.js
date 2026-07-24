@@ -616,6 +616,25 @@ class WaveDB {
   }
 
   /**
+   * Store a JSON object synchronously
+   *
+   * @param {string|Array} key - Key path
+   * @param {Object} obj - Object to store
+   * @returns {void}
+   * @throws {WaveDBError} If operation fails
+   */
+  putObjectSync(key, obj) {
+    if (this._closed) {
+      throw new IOError('Database is closed');
+    }
+    try {
+      return this._db.putObjectSync(key, obj);
+    } catch (err) {
+      throw convertError(err);
+    }
+  }
+
+  /**
    * Create a read stream
    *
    * @param {Object} [options] - Stream options

@@ -48,7 +48,13 @@
                      window.electronAPI &&
                      window.electronAPI.isElectron;
 
-  let WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer;
+  let WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer, require;
+
+  function browserRequire(id) {
+    if (id === 'path') return { join: (...parts) => parts.join('/') };
+    if (id === 'os') return { tmpdir: () => '/tmp' };
+    throw new Error(`Module not available in browser mock: ${id}`);
+  }
 
   // ─────────────────────────────────────────────────────────────
   // Browser mocks (used when not in Electron)
@@ -213,32 +219,65 @@
       _runDSL(dsl) {
         if (dsl instanceof QueryMock) dsl = dsl._toDSL();
         const steps = dsl.replace(/^g\./, '').split('.');
-        let subject = null;
-        let has = [];
-        let wantsCount = false;
+        let current = null;
+
+        const parseStringArg = (step, name) => {
+          const m = step.match(new RegExp(`${name}\\(["']([^"']*)["']\\)`));
+          return m ? m[1] : undefined;
+        };
 
         for (const step of steps) {
+          if (step === 'All()' || step === 'Count()') {
+            const arr = current ? Array.from(current) : [];
+            return step === 'Count()' ? arr.length : arr;
+          }
+
           if (step.startsWith('V(')) {
-            const id = step.match(/V\("([^"]*)"\)/)?.[1];
-            if (id !== undefined) subject = id;
+            const id = parseStringArg(step, 'V');
+            current = new Set(id !== undefined ? [id] : []);
+          } else if (step.startsWith('Out(')) {
+            const pred = parseStringArg(step, 'Out');
+            const next = new Set();
+            if (current && pred !== undefined) {
+              for (const s of current) {
+                for (const [ss, pp, oo] of this._triples) {
+                  if (ss === s && pp === pred) next.add(oo);
+                }
+              }
+            }
+            current = next;
+          } else if (step.startsWith('In(')) {
+            const pred = parseStringArg(step, 'In');
+            const next = new Set();
+            if (current && pred !== undefined) {
+              for (const o of current) {
+                for (const [ss, pp, oo] of this._triples) {
+                  if (oo === o && pp === pred) next.add(ss);
+                }
+              }
+            }
+            current = next;
           } else if (step.startsWith('Has(')) {
-            const m = step.match(/Has\("([^"]*)","([^"]*)"\)/);
-            if (m) has.push({ pred: m[1], val: m[2] });
-          } else if (step === 'Count()') {
-            wantsCount = true;
+            const pred = parseStringArg(step, 'Has');
+            const commaIdx = step.indexOf(',');
+            const val = commaIdx > 0 ? step.slice(commaIdx + 1, -1).trim().replace(/^["']|["']$/g, '') : undefined;
+            const next = new Set();
+            if (current) {
+              for (const s of current) {
+                if (this._triples.some(t => t[0] === s && t[1] === pred && t[2] === val)) {
+                  next.add(s);
+                }
+              }
+            } else {
+              for (const [s, p, o] of this._triples) {
+                if (p === pred && o === val) next.add(s);
+              }
+            }
+            current = next;
           }
         }
 
-        const matches = new Set();
-        for (const [s, p, o] of this._triples) {
-          if (subject !== null && s !== subject) continue;
-          if (has.length && !has.every(h =>
-            this._triples.some(t => t[0] === s && t[1] === h.pred && t[2] === h.val)
-          )) continue;
-          matches.add(s);
-        }
-        const arr = Array.from(matches);
-        return wantsCount ? arr.length : arr;
+        return current ? Array.from(current) : [];
       }
 
       exec(dsl) { this._checkOpen(); return this._runDSL(dsl); }
@@ -310,11 +349,12 @@
     GraphLayer = GraphLayerMock;
     g = gMock;
     VectorLayer = VectorLayerMock;
+    require = browserRequire;
   } else {
     // ───────────────────────────────────────────────────────────
     // Real native engine via Electron preload
     // ───────────────────────────────────────────────────────────
-    ({ WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer } = window.electronAPI);
+    ({ WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer, require } = window.electronAPI);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -415,12 +455,10 @@
     const run = async () => {
       const fn = new Function(
         'console', 'WaveDB', 'GraphQLLayer', 'GraphLayer', 'g', 'VectorLayer', 'mockEmbed',
-        `"use strict";
-        return (async () => {
-          ${code}
-        })();`
+        'require',
+        '"use strict";\nreturn (async () => {\n' + code + '\n})();'
       );
-      return await fn(sandboxConsole, WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer, mockEmbed);
+      return await fn(sandboxConsole, WaveDB, GraphQLLayer, GraphLayer, g, VectorLayer, mockEmbed, require);
     };
 
     run()

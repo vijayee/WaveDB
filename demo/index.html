@@ -101,10 +101,11 @@ Prod -- "item-42" --> ProdDoc
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const db = new WaveDB(':memory:');
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const dbPath = require('path').join(require('os').tmpdir(), 'wavedb-demo-base-' + Date.now() + '.db');
+const db = new WaveDB(dbPath);
 
 // Store a JSON object under a hierarchical key
-db.putObject('users/alice', {
+db.putObjectSync('users/alice', {
   name: 'Alice',
   roles: ['admin', 'dev'],
   tags: { remote: true }
@@ -149,12 +150,12 @@ db.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div
             <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const gql = new GraphQLLayer(null); // in-memory
 
 gql.parseSchema(`
-  type Person {
+  type Person @plural(name: "people") {
     name: String
     age: Int
   }
   type Query {
-    person(name: String): Person
+    people(name: String): [Person]
   }
   type Mutation {
     createPerson(name: String, age: Int): Person
@@ -164,12 +165,12 @@ gql.parseSchema(`
 const created = gql.mutateSync(`mutation {
   createPerson(name: "Alice", age: 30) { name age }
 }`);
-console.log('created:', created.data.createPerson);
+console.log('created:', created.data.Person);
 
-const found = gql.querySync(`{
-  person(name: "Alice") { name age }
+const found = gql.querySync(`query {
+  people { name age }
 }`);
-console.log('found:', found.data.person);
+console.log('found:', found.data.people);
 
 gql.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
@@ -192,25 +193,25 @@ gql.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></di
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const graph = new GraphLayer(':memory:');
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const graphPath = require('path').join(require('os').tmpdir(), 'wavedb-demo-graph-' + Date.now() + '.db');
+const graph = new GraphLayer(graphPath);
 
 // Create vertices and edges as triples
 graph.insertSync('alice', 'name', 'Alice');
 graph.insertSync('alice', 'age', '30');
 graph.insertSync('alice', 'knows', 'bob');
 graph.insertSync('bob', 'name', 'Bob');
-graph.insertSync('bob', 'knows', 'alice');
 
-// Query: every vertex named Alice
-const alices = g.V().Has('name', 'Alice').All();
-console.log('Alices:', alices);
+// Traverse from Alice through the 'knows' edge
+const circle = g.V('alice').Out('knows').All();
+console.log("Alice's circle:", circle);
 
-// Count Bob
-console.log('Bob count:', graph.count(g.V().Has('name', 'Bob').Count()));
+// Count vertices named Bob
+console.log('Bob count:', graph.count(g.V('bob').Has('name', 'Bob').Count()));
 
-// Delete Bob and re-count
+// Delete Bob's name triple and re-count
 graph.deleteSync('bob', 'name', 'Bob');
-console.log('Bob count after delete:', graph.count(g.V().Has('name', 'Bob').Count()));
+console.log('Bob count after delete:', graph.count(g.V('bob').Has('name', 'Bob').Count()));
 
 graph.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></div>
             <button class="run-btn">▶ Run</button>
@@ -233,11 +234,12 @@ graph.close();</textarea><pre class="code-highlight" aria-hidden="true"></pre></
           </div>
           <div class="demo-panel">
             <div class="editor-label">Live Code</div>
-            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const vl = VectorLayer.openSeparate(
-  ':memory:',
+            <div class="code-wrapper"><textarea class="code-editor" spellcheck="false">const vectorPath = require('path').join(require('os').tmpdir(), 'wavedb-demo-vector-' + Date.now() + '.db');
+const vl = VectorLayer.openSeparate(
+  vectorPath,
   'tracks',
-  { dims: 8 },
-  { indexType: VectorLayer.IndexType.FLAT }
+  { dim: 8 },
+  { indexType: 0, distance: 1 }
 );
 
 const tracks = [

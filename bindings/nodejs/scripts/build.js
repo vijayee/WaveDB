@@ -137,9 +137,113 @@ function patchVcxprojForMSVC() {
   }
 }
 
+// ── OpenSSL detection ──
+
+function hasOpenSSLHeaders(root) {
+  return fs.existsSync(path.join(root, 'include', 'openssl', 'evp.h'));
+}
+
+function findOpenSSLWindows() {
+  const candidates = [
+    process.env.OPENSSL_ROOT,
+    'C:\\OpenSSL-Win64',
+    'C:\\Program Files\\OpenSSL-Win64',
+    'C:\\Program Files (x86)\\OpenSSL-Win64',
+    'C:\\ProgramData\\chocolatey\\lib\\openssl\\tools',
+    'C:\\vcpkg\\installed\\x64-windows',
+    'C:\\vcpkg\\installed\\x86-windows',
+    'C:\\msys64\\ucrt64',
+    'C:\\msys64\\mingw64',
+    'C:\\msys64\\mingw32',
+  ].filter(Boolean);
+
+  for (const root of candidates) {
+    if (hasOpenSSLHeaders(root)) {
+      return root;
+    }
+    // Some installers nest under an extra 'OpenSSL' folder
+    const nested = path.join(root, 'OpenSSL');
+    if (hasOpenSSLHeaders(nested)) {
+      return nested;
+    }
+  }
+
+  // Try to read a few common registry keys
+  const regKeys = [
+    'HKLM\\SOFTWARE\\OpenSSL',
+    'HKLM\\SOFTWARE\\WOW6432Node\\OpenSSL',
+    'HKLM\\SOFTWARE\\ShiningLight\\OpenSSL',
+    'HKLM\\SOFTWARE\\WOW6432Node\\ShiningLight\\OpenSSL',
+  ];
+  for (const key of regKeys) {
+    try {
+      const out = execSync(`reg query "${key}" /s`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const m = out.match(/InstallDir\s+REG_SZ\s+(.+)/m) || out.match(/(\w:\\[^\n]+OpenSSL[^\n]*)/mi);
+      if (m) {
+        const dir = m[1].trim();
+        if (hasOpenSSLHeaders(dir)) return dir;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
+function findOpenSSLUnix() {
+  if (process.env.OPENSSL_ROOT) return process.env.OPENSSL_ROOT;
+
+  const candidates = [
+    '/usr',
+    '/usr/local',
+    '/opt/homebrew/opt/openssl',
+    '/opt/homebrew/opt/openssl@3',
+    '/opt/homebrew/opt/openssl@1.1',
+  ];
+
+  for (const root of candidates) {
+    if (hasOpenSSLHeaders(root)) return root;
+  }
+
+  try {
+    const out = execSync('pkg-config --variable=prefix openssl', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim();
+    if (out && hasOpenSSLHeaders(out)) return out;
+  } catch (e) {
+    // ignore
+  }
+
+  return null;
+}
+
+function configureOpenSSL() {
+  if (process.env.WAVEDB_OPENSSL === '0' || process.env.WAVEDB_NO_OPENSSL === '1') {
+    console.log('OpenSSL explicitly disabled via WAVEDB_OPENSSL=0 / WAVEDB_NO_OPENSSL=1.');
+    return;
+  }
+
+  const root = isWin ? findOpenSSLWindows() : findOpenSSLUnix();
+  if (root) {
+    console.log(`Detected OpenSSL at: ${root}`);
+    process.env.WAVEDB_OPENSSL = '1';
+    process.env.OPENSSL_ROOT = root;
+    return;
+  }
+
+  if (isWin) {
+    console.log('OpenSSL not detected on Windows; building without OpenSSL (WAVEDB_NO_OPENSSL).');
+    process.env.WAVEDB_NO_OPENSSL = '1';
+  } else {
+    console.log('OpenSSL not detected; attempting system default link flags (-lcrypto -lssl).');
+    // On Unix we still try to link against system OpenSSL even if headers weren't
+    // found in the candidate prefixes. If that fails, the user can set WAVEDB_OPENSSL=0.
+  }
+}
+
 // ── Main build flow ──
 
 ensureCSources();
+configureOpenSSL();
 
 const nodeGyp = findNodeGyp();
 

@@ -4,7 +4,10 @@
 
 #include <napi.h>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <string>
+#include <errno.h>
 #ifndef _MSC_VER
 #include <unistd.h>
 #endif
@@ -43,6 +46,7 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("delSync", &WaveDB::DeleteSync),
     InstanceMethod("batchSync", &WaveDB::BatchSync),
     InstanceMethod("putObject", &WaveDB::PutObject),
+    InstanceMethod("putObjectSync", &WaveDB::PutObjectSync),
     InstanceMethod("getObject", &WaveDB::GetObject),
     InstanceMethod("getObjectSync", &WaveDB::GetObjectSync),
     InstanceMethod("createReadStream", &WaveDB::CreateReadStream),
@@ -1136,6 +1140,41 @@ static bool FlattenObjectRaw(Napi::Env env,
   return true;
 }
 
+static bool FlattenObject(Napi::Env env,
+                           Napi::Object obj,
+                           const std::string& key_prefix,
+                           std::vector<std::string>& key_strings,
+                           std::vector<std::string>& val_strings,
+                           char delimiter) {
+  std::vector<std::string> path_parts;
+  if (!key_prefix.empty()) {
+    size_t start = 0;
+    size_t pos;
+    while ((pos = key_prefix.find(delimiter, start)) != std::string::npos) {
+      std::string segment = key_prefix.substr(start, pos - start);
+      if (!segment.empty()) path_parts.push_back(segment);
+      start = pos + 1;
+    }
+    std::string last = key_prefix.substr(start);
+    if (!last.empty()) path_parts.push_back(last);
+  }
+  return FlattenObjectRaw(env, obj, path_parts, key_strings, val_strings, delimiter);
+}
+
+static bool BuildBatchOps(std::vector<raw_op_t>& ops,
+                          const std::vector<std::string>& key_strings,
+                          const std::vector<std::string>& val_strings) {
+  ops.resize(key_strings.size());
+  for (size_t i = 0; i < key_strings.size(); i++) {
+    ops[i].type = 0;
+    ops[i].key = key_strings[i].c_str();
+    ops[i].key_len = key_strings[i].size();
+    ops[i].value = reinterpret_cast<const uint8_t*>(val_strings[i].c_str());
+    ops[i].value_len = val_strings[i].size();
+  }
+  return true;
+}
+
 Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -1225,6 +1264,111 @@ Napi::Value WaveDB::PutObject(const Napi::CallbackInfo& info) {
   return deferred.Promise();
 }
 
+Napi::Value WaveDB::PutObjectSync(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (!db_) {
+    Napi::Error::New(env, "DATABASE_CLOSED: Database is closed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (info.Length() < 2) {
+    Napi::TypeError::New(env, "Key prefix and object required").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string key_prefix = KeyFromJSDynamic(env, info[0], delimiter_);
+  if (env.IsExceptionPending()) return env.Null();
+
+  if (!info[1].IsObject()) {
+    Napi::TypeError::New(env, "Object required as second argument").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Object obj = info[1].As<Napi::Object>();
+  std::vector<std::string> key_strings;
+  std::vector<std::string> val_strings;
+  std::vector<std::string> path_parts;
+
+  // Seed path_parts with key prefix segments
+  if (!key_prefix.empty()) {
+    size_t start = 0;
+    size_t pos;
+    while ((pos = key_prefix.find(delimiter_, start)) != std::string::npos) {
+      std::string segment = key_prefix.substr(start, pos - start);
+      if (!segment.empty()) path_parts.push_back(segment);
+      start = pos + 1;
+    }
+    std::string last = key_prefix.substr(start);
+    if (!last.empty()) path_parts.push_back(last);
+  }
+
+  bool ok;
+  try {
+    ok = FlattenObjectRaw(env, obj, path_parts, key_strings, val_strings, delimiter_);
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  if (!ok || env.IsExceptionPending()) return env.Null();
+
+  if (key_strings.empty()) {
+    return env.Undefined();
+  }
+
+  // Build raw_op_t array from finalized string vectors (no more push_backs,
+  // so c_str() pointers are stable)
+  std::vector<raw_op_t> ops(key_strings.size());
+  for (size_t i = 0; i < key_strings.size(); i++) {
+    ops[i].type = 0;
+    ops[i].key = key_strings[i].c_str();
+    ops[i].key_len = key_strings[i].size();
+    ops[i].value = reinterpret_cast<const uint8_t*>(val_strings[i].c_str());
+    ops[i].value_len = val_strings[i].size();
+  }
+
+  int rc = database_batch_sync_raw(db_, delimiter_, ops.data(), ops.size());
+  if (rc != 0) {
+    Napi::Error::New(env, "IO_ERROR: Batch put failed").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  return env.Undefined();
+}
+
+/* Descend into a reconstructed JS value by a delimiter-delimited prefix.
+ * Used by GetObject/GetObjectSync so getObjectSync('users/alice') returns
+ * the object stored under that path, not the whole tree rooted at "".
+ */
+static Napi::Value StripPrefix(Napi::Env env, Napi::Value value,
+                                const std::string& prefix, char delimiter) {
+  if (prefix.empty()) return value;
+
+  size_t start = 0;
+  Napi::Value current = value;
+  for (size_t i = 0; i <= prefix.size(); ++i) {
+    if (i == prefix.size() || prefix[i] == delimiter) {
+      if (i == start) {
+        start = i + 1;
+        continue;
+      }
+      std::string segment = prefix.substr(start, i - start);
+
+      if (!current.IsObject()) {
+        return env.Null();
+      }
+      Napi::Object obj = current.As<Napi::Object>();
+      if (!obj.Has(segment)) {
+        return env.Null();
+      }
+      current = obj.Get(segment);
+      start = i + 1;
+    }
+  }
+  return current;
+}
+
 Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -1272,7 +1416,23 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
         }
       }
       if (printable) {
-        val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), val_len));
+        // Try to restore numeric values stored by putObject/putObjectSync
+        std::string val_str(reinterpret_cast<const char*>(results[i].value), val_len);
+        if (val_str == "1" && val_len == 1) {
+          val = Napi::Boolean::New(env, true);
+        } else if (val_str == "0" && val_len == 1) {
+          val = Napi::Boolean::New(env, false);
+        } else {
+          char* end = nullptr;
+          errno = 0;
+          double d = std::strtod(val_str.c_str(), &end);
+          if (end == val_str.c_str() + val_str.size() && errno == 0 &&
+              std::isfinite(d) && val_str.find_first_of("eE.") == std::string::npos) {
+            val = Napi::Number::New(env, d);
+          } else {
+            val = Napi::String::New(env, val_str);
+          }
+        }
       } else {
         val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, val_len);
       }
@@ -1304,14 +1464,15 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
   database_raw_results_free(results, count);
 
   Napi::Value converted = ConvertArrays(env, result_obj);
+  Napi::Value stripped = StripPrefix(env, converted, prefix_str, delimiter_);
 
   // Create Promise first, then invoke callback
   Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
-  deferred.Resolve(converted);
+  deferred.Resolve(stripped);
 
   if (!env.IsExceptionPending() && info.Length() > 1 && info[1].IsFunction()) {
     Napi::Function callback = info[1].As<Napi::Function>();
-    callback.Call({ env.Null(), converted });
+    callback.Call({ env.Null(), stripped });
   }
 
   return deferred.Promise();
@@ -1365,7 +1526,23 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
         }
       }
       if (printable) {
-        val = Napi::String::New(env, std::string(reinterpret_cast<const char*>(results[i].value), val_len));
+        // Try to restore numeric/boolean values stored by putObject/putObjectSync
+        std::string val_str(reinterpret_cast<const char*>(results[i].value), val_len);
+        if (val_str == "1" && val_len == 1) {
+          val = Napi::Boolean::New(env, true);
+        } else if (val_str == "0" && val_len == 1) {
+          val = Napi::Boolean::New(env, false);
+        } else {
+          char* end = nullptr;
+          errno = 0;
+          double d = std::strtod(val_str.c_str(), &end);
+          if (end == val_str.c_str() + val_str.size() && errno == 0 &&
+              std::isfinite(d) && val_str.find_first_of("eE.") == std::string::npos) {
+            val = Napi::Number::New(env, d);
+          } else {
+            val = Napi::String::New(env, val_str);
+          }
+        }
       } else {
         val = Napi::Buffer<uint8_t>::Copy(env, results[i].value, val_len);
       }
@@ -1397,7 +1574,8 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
 
   database_raw_results_free(results, count);
 
-  return ConvertArrays(env, result_obj);
+  Napi::Value converted = ConvertArrays(env, result_obj);
+  return StripPrefix(env, converted, prefix_str, delimiter_);
 }
 
 Napi::Value WaveDB::ConvertArrays(Napi::Env env, Napi::Value value) {
