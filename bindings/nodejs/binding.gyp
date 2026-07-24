@@ -111,7 +111,8 @@
           "CBOR_STATIC_DEFINE",
           "CBOR_RESTRICT_SPECIFIER=",
           "WIN32_LEAN_AND_MEAN",
-          "_WINSOCKAPI_"
+          "_WINSOCKAPI_",
+          "WAVEDB_NO_OPENSSL"
         ],
         "msvs_settings": {
           "VCCLCompilerTool": {
@@ -171,7 +172,8 @@
       ["OS=='win'", {
         "defines": [
           "WIN32_LEAN_AND_MEAN",
-          "_WINSOCKAPI_"
+          "_WINSOCKAPI_",
+          "WAVEDB_NO_OPENSSL"
         ],
         "libraries": [
           "ws2_32.lib",
