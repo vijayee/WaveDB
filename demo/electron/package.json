@@ -14,6 +14,6 @@
     "electron-rebuild": "^3.2.9"
   },
   "dependencies": {
-    "@vijayee/wavedb": "^0.15.2"
+    "@vijayee/wavedb": "^0.15.3"
   }
 }
