@@ -219,3 +219,54 @@ TEST_F(GraphParserTest, UnknownMorphism) {
     ASSERT_EQ(r, nullptr);
     EXPECT_NE(strstr(err.message, "Unknown morphism"), nullptr);
 }
+
+/* Issue #6: Has on an empty intermediate result set must match nothing,
+ * not "match everything". The old graph_execute_has treated
+ * input->count == 0 as "no constraint" (match all), which was correct
+ * for Has as the first step but wrong for Has after a filtering step
+ * that produced zero matches. */
+
+TEST_F(GraphParserTest, HasAsFirstStepMatchesAll) {
+    insert_test_data();
+    graph_parse_error_t err;
+    /* Has as the first step: no prior constraint, so match all subjects
+     * with tagged_with=gaming (clip_abc, clip_xyz). This is the
+     * "match all" semantics that must still work. */
+    graph_result_t* r = graph_parse_execute(
+        "g.Has(\"tagged_with\", \"gaming\").All()", layer, &err);
+    ASSERT_NE(r, nullptr) << "Error: " << err.message;
+    EXPECT_EQ(graph_result_count(r), (size_t)2)
+        << "Has as first step should match all subjects with the property";
+    graph_result_destroy(r);
+}
+
+TEST_F(GraphParserTest, HasOnEmptyIntermediateMatchesNothing) {
+    insert_test_data();
+    graph_parse_error_t err;
+    /* V("nonexistent") produces an empty intermediate. Has on that empty
+     * intermediate must return nothing — the old code returned all
+     * subjects with tagged_with=gaming (2 results) because it treated
+     * empty input as "match all". */
+    graph_result_t* r = graph_parse_execute(
+        "g.V(\"nonexistent\").Has(\"tagged_with\", \"gaming\").All()",
+        layer, &err);
+    ASSERT_NE(r, nullptr) << "Error: " << err.message;
+    EXPECT_EQ(graph_result_count(r), (size_t)0)
+        << "Has on empty intermediate should match nothing, not everything";
+    graph_result_destroy(r);
+}
+
+TEST_F(GraphParserTest, HasAfterFilteringStepThatProducesEmpty) {
+    insert_test_data();
+    graph_parse_error_t err;
+    /* Out("nonexistent_edge") from clip_abc produces an empty intermediate
+     * (no outgoing edges with that predicate). Has on that empty
+     * intermediate must return nothing. */
+    graph_result_t* r = graph_parse_execute(
+        "g.V(\"clip_abc\").Out(\"nonexistent_edge\").Has(\"tagged_with\", \"gaming\").All()",
+        layer, &err);
+    ASSERT_NE(r, nullptr) << "Error: " << err.message;
+    EXPECT_EQ(graph_result_count(r), (size_t)0)
+        << "Has after a filtering step that produces empty should match nothing";
+    graph_result_destroy(r);
+}

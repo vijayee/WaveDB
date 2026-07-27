@@ -37,3 +37,6 @@ bindings/dart/pubspec.lock
 
 # Vector bench corpora (large generated .fvec/.gt files)
 bench/vector/corpus/
+
+# Claude Code agent worktrees (leaked artifact, never intended to be tracked)
+.claude/worktrees/

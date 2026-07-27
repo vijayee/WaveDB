@@ -173,47 +173,13 @@ void graphql_ast_destroy(graphql_ast_node_t* ast) {
         graphql_ast_destroy(arg);
     }
     vec_deinit(&ast->arguments);
-    if (ast->literal) {
-        switch (ast->literal->kind) {
-            case GRAPHQL_LITERAL_STRING:
-            case GRAPHQL_LITERAL_ENUM:
-                free(ast->literal->string_val);
-                break;
-            case GRAPHQL_LITERAL_OBJECT: {
-                int i;
-                graphql_object_field_t* f;
-                vec_foreach(&ast->literal->object_fields, f, i) {
-                    free(f->name);
-                    // Recursively destroy nested literal
-                    if (f->value) {
-                        // Use a dummy node to destroy the literal
-                        graphql_ast_node_t dummy;
-                        memset(&dummy, 0, sizeof(dummy));
-                        dummy.literal = f->value;
-                        graphql_ast_destroy(&dummy);
-                    }
-                    free(f);
-                }
-                vec_deinit(&ast->literal->object_fields);
-                break;
-            }
-            case GRAPHQL_LITERAL_LIST: {
-                int i;
-                graphql_literal_t* item;
-                vec_foreach(&ast->literal->list_items, item, i) {
-                    graphql_ast_node_t dummy;
-                    memset(&dummy, 0, sizeof(dummy));
-                    dummy.literal = item;
-                    graphql_ast_destroy(&dummy);
-                }
-                vec_deinit(&ast->literal->list_items);
-                break;
-            }
-            default:
-                break;
-        }
-        free(ast->literal);
-    }
+    /* Use the dedicated graphql_literal_destroy — the old code built a
+     * stack-allocated dummy ast node and recursed into graphql_ast_destroy
+     * to handle nested object/list literals, which then called free(ast)
+     * on the stack address (UB). graphql_literal_destroy already handles
+     * all nested kinds correctly. */
+    graphql_literal_destroy(ast->literal);
+    ast->literal = NULL;
     graphql_directive_t* dir;
     vec_foreach(&ast->directives, dir, i) {
         graphql_directive_destroy(dir);

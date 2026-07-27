@@ -230,3 +230,33 @@ TEST_F(TransactionIdTest, RealisticUsage) {
         EXPECT_EQ(transaction_id_compare(&ids[i], &deserialized), 0);
     }
 }
+
+/* Issue #3: after WAL recovery, transaction_id_advance_to must clamp
+ * the time field so subsequent IDs are strictly greater than the
+ * recovered high-water mark — even if the wall clock is behind (NTP
+ * step backwards, or the old CLOCK_MONOTONIC reset on reboot). */
+
+TEST_F(TransactionIdTest, AdvanceToClampsTime) {
+    /* Simulate a recovered txn ID with a time far in the future relative
+     * to the current wall clock. After advance_to, get_next must return
+     * IDs with time >= the recovered time. */
+    transaction_id_t recovered;
+    recovered.time = 9999999999ULL;  /* ~2286 AD — well past any real wall clock */
+    recovered.nanos = 0;
+    recovered.count = 1000000;
+
+    transaction_id_advance_to(&recovered);
+
+    /* Generate several IDs and verify they are all >= recovered. */
+    for (int i = 0; i < 10; i++) {
+        transaction_id_t next = transaction_id_get_next();
+        EXPECT_GE(next.time, recovered.time)
+            << "time field went below the recovered high-water mark";
+        /* The whole ID must be strictly greater than recovered: either
+         * time > recovered.time, or time == recovered.time and count >
+         * recovered.count (advance_to bumped the count past it). */
+        int cmp = transaction_id_compare(&next, &recovered);
+        EXPECT_GT(cmp, 0)
+            << "new txn ID is not strictly greater than the recovered high-water mark";
+    }
+}

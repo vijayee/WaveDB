@@ -528,7 +528,7 @@ vl.reconfigure(Runtime(topK: 20, ivfNprobe: 16));
 
 | Field | Type | Default | Effect on recall / latency / storage |
 |---|---|---|---|
-| `indexType` | `IndexType` | flat | FLAT exact (1.0); IVF 0.96-0.99 on clustered / 0.36-0.48 on gaussian; SLSH 0.91-0.95 on clustered. FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
+| `indexType` | `IndexType` | flat | FLAT exact (1.0); IVF 0.986 on clustered / 0.37-0.60 on gaussian; SLSH 0.982 on clustered (adaptive). FLAT O(N), IVF O(nprobe·N/K), SLSH O(radius). IVF/SLSH +~86-89 bytes/vec over FLAT |
 | `dim` | int | — (required) | Higher dim → lower ANN recall (curse of dimensionality). Latency and storage linear in dim |
 | `delimiter` | String | `'/'` | Negligible effect; change only if '/' conflicts with your id scheme |
 | `distance` | `Distance` | cosine | Used for assignment + rerank; match your embedding model (cosine for normalized, l2 for general, dot for inner-product) |
@@ -550,6 +550,7 @@ vl.reconfigure(Runtime(topK: 20, ivfNprobe: 16));
 ### Example
 
 ```dart
+// --- Dedicated database (no key-space sharing) ---
 final vl = VectorLayer.openSeparate(
   '/path/to/vecdb',
   'embeddings',
@@ -570,16 +571,70 @@ vl.insertSync('doc/2', [0.08,  0.11, /* ... */]);
 // periodically as the dataset grows; FLAT is a no-op.
 vl.train();
 
+// Rebuild cluster memberships / hash entries after train. Called
+// automatically by train(); call explicitly after changing data without
+// retraining to refresh index structure.
+vl.rebuild();
+
 // Search — returns a List<VectorResult> sorted by distance.
 final results = vl.searchSync([0.10, 0.05, /* ... */], k: 10);
 for (final r in results) {
   print('${r.id} ${r.distance} ${r.metadata}');
 }
 
+// Delete a vector by id.
+vl.deleteSync('doc/1');
+
 // Mutate the runtime tier at any time.
 vl.reconfigure(Runtime(topK: 20, ivfNprobe: 16));
 
 vl.close();
+```
+
+### Async API (syncOnly=0)
+
+With `syncOnly: 0`, insert/search/delete return `Future` objects instead
+of blocking:
+
+```dart
+final vl = VectorLayer.openSeparate(
+  '/path/to/vecdb', 'embeddings',
+  Format(indexType: IndexType.ivf, dim: 384, distance: Distance.cosine),
+  Runtime(topK: 10, syncOnly: 0, ivfNprobe: 8),  // async worker pool
+);
+
+// Async insert returns a Future.
+await vl.insert('doc/1', [0.12, -0.04, /* ... */]);
+
+// Async search returns a Future<List<VectorResult>>.
+final results = await vl.search([0.10, 0.05, /* ... */], k: 10);
+
+// Async delete.
+await vl.delete('doc/1');
+
+vl.close();
+```
+
+### Subtree mode (shared database)
+
+To run a vector index inside an existing WaveDB database without a
+separate directory, use `VectorLayer.open` with a `Subtree`:
+
+```dart
+import 'package:wavedb/wavedb.dart';
+
+final db = Database.create('/path/to/wavedb', DatabaseConfig());
+final subtree = db.openSubtree('my_index_space');
+
+final vl = VectorLayer.open(
+  subtree, 'embeddings',
+  Format(indexType: IndexType.ivf, dim: 384, distance: Distance.cosine),
+  Runtime(topK: 10, syncOnly: 1),
+);
+// vl shares db's WAL, memory pool, and worker pool. Close vl before db.
+vl.close();
+subtree.close();
+db.close();
 ```
 
 ## License
