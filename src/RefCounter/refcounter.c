@@ -19,10 +19,13 @@ void refcounter_yield(refcounter_t* refcounter) {
 
 void* refcounter_reference(refcounter_t* refcounter) {
     if (refcounter == NULL) return NULL;
-    // Try to consume a yield first, then fall back to incrementing count
-    uint8_t expected_yield = atomic_load(&refcounter->yield);
+    // Try to consume a yield first, then fall back to incrementing count.
+    // expected_yield must match the atomic's underlying type (uint_fast8_t):
+    // atomic_compare_exchange_weak writes sizeof(uint_fast8_t) bytes to
+    // &expected_yield, so a narrower declaration is a stack overflow.
+    uint_fast8_t expected_yield = atomic_load(&refcounter->yield);
     while (expected_yield > 0) {
-        if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, expected_yield - 1)) {
+        if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, (uint_fast8_t)(expected_yield - 1))) {
             return refcounter;
         }
         // CAS failed, expected_yield was updated with current value, retry
@@ -35,9 +38,9 @@ void* refcounter_reference(refcounter_t* refcounter) {
 void refcounter_dereference(refcounter_t* refcounter) {
     if (refcounter == NULL) return;
     // Try to consume a yield first (matching refcounter_reference pattern)
-    uint8_t expected_yield = atomic_load(&refcounter->yield);
+    uint_fast8_t expected_yield = atomic_load(&refcounter->yield);
     while (expected_yield > 0) {
-        if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, expected_yield - 1)) {
+        if (atomic_compare_exchange_weak(&refcounter->yield, &expected_yield, (uint_fast8_t)(expected_yield - 1))) {
             return;  // Consumed a yield, don't decrement count
         }
     }
@@ -47,9 +50,14 @@ void refcounter_dereference(refcounter_t* refcounter) {
     // >0 check, and both decrement — underflowing the count to 65535.
     // This caused use-after-free → double-free chains in the memory pool.
     // The CAS loop ensures the count never goes below 0.
-    uint16_t expected = (uint16_t)atomic_load(&refcounter->count);
+    //
+    // expected must match the atomic's underlying type (uint_fast16_t):
+    // on x86-64 uint_fast16_t is 8 bytes, so a uint16_t (2-byte) declaration
+    // is a stack-buffer-overflow — atomic_compare_exchange_weak writes
+    // sizeof(uint_fast16_t) bytes to &expected.
+    uint_fast16_t expected = atomic_load(&refcounter->count);
     while (expected > 0) {
-        if (atomic_compare_exchange_weak(&refcounter->count, &expected, (uint16_t)(expected - 1))) {
+        if (atomic_compare_exchange_weak(&refcounter->count, &expected, (uint_fast16_t)(expected - 1))) {
             return;  // Successfully decremented
         }
         // CAS failed — expected was updated with the current value, retry
