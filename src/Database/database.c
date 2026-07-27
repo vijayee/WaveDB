@@ -1140,7 +1140,7 @@ database_t* database_create_with_config(const char* location,
         // (page file loads before tx_manager is created, so we deferred this)
         if (db->has_pending_txn_id && db->tx_manager != NULL) {
             transaction_id_advance_to(&db->pending_txn_id);
-            atomic_store_txn(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
+            txn_id_seqlock_write(&db->tx_manager->last_committed_txn_id, db->pending_txn_id);
             db->has_pending_txn_id = 0;
         }
     } else {

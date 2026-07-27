@@ -20,6 +20,14 @@
 static transaction_id_t g_current_txn_id = {0, 0, 0};
 static PLATFORMLOCKTYPE(g_txn_id_lock);
 static atomic_uint_fast64_t g_global_count;
+/* High-water mark for the time field, set by transaction_id_advance_to
+ * after WAL recovery. transaction_id_get_next takes max(wall_secs,
+ * g_high_water_time) so the time field never goes backwards relative
+ * to the last recovered txn — this is what makes txn IDs survive a
+ * reboot (CLOCK_MONOTONIC resets to 0 on reboot, inverting MVCC
+ * ordering; CLOCK_REALTIME is wall clock but can step backwards via
+ * NTP, so the high-water mark clamps it). */
+static atomic_uint_fast64_t g_high_water_time;
 
 // One-time initialization control
 #if _WIN32
@@ -53,17 +61,37 @@ void transaction_id_init(void) {
 // Generate unique transaction ID (thread-safe with atomic counter)
 transaction_id_t transaction_id_get_next(void) {
 #if _WIN32
-    LARGE_INTEGER freq, counter;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&counter);
-    uint64_t secs = (uint64_t)(counter.QuadPart / freq.QuadPart);
-    uint64_t nsecs = (uint64_t)((counter.QuadPart % freq.QuadPart) * 1000000000ULL / freq.QuadPart);
+    /* Wall clock (survives reboot). QueryPerformanceCounter is monotonic
+     * but resets on reboot, which inverted MVCC ordering across reboots. */
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    /* FILETIME is 100ns intervals since 1601-01-01. Convert to Unix
+     * epoch seconds + nanoseconds. */
+    static const uint64_t FILETIME_TO_UNIX_EPOCH = 116444736000000000ULL;
+    uint64_t unix_100ns = uli.QuadPart - FILETIME_TO_UNIX_EPOCH;
+    uint64_t secs = unix_100ns / 10000000ULL;
+    uint64_t nsecs = (unix_100ns % 10000000ULL) * 100ULL;
 #else
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
+    clock_gettime(CLOCK_REALTIME, &ts);
     uint64_t secs = (uint64_t)ts.tv_sec;
     uint64_t nsecs = (uint64_t)ts.tv_nsec;
 #endif
+
+    /* Clamp the time field to the high-water mark so the time never
+     * goes backwards relative to the last recovered txn. This handles
+     * both the reboot case (CLOCK_MONOTONIC used to reset) and the
+     * NTP-step-backwards case. The count field (advanced past the
+     * recovered count by transaction_id_advance_to) ensures uniqueness
+     * within the same timestamp. */
+    uint64_t high_water = atomic_load(&g_high_water_time);
+    if (secs < high_water) {
+        secs = high_water;
+        nsecs = 0;
+    }
 
     // Atomic increment - much faster than mutex lock
     // Count rollover is handled by timestamp-first ordering in comparison
@@ -79,7 +107,7 @@ transaction_id_t transaction_id_get_next(void) {
 }
 
 // Compare two transaction IDs
-// Primary ordering: timestamp (CLOCK_MONOTONIC is always increasing)
+// Primary ordering: timestamp (wall clock, clamped to high-water mark)
 // Secondary ordering: nanoseconds (within same second)
 // Tertiary ordering: count (within same timestamp, ensures uniqueness)
 // This handles count rollover correctly - when count wraps, timestamp will be greater
@@ -157,5 +185,17 @@ void transaction_id_advance_to(const transaction_id_t* target) {
             break;
         }
         // Another thread updated current, retry the comparison
+    }
+
+    // Advance the high-water time so transaction_id_get_next never
+    // issues an ID with a time field below the recovered target. This
+    // is what makes txn IDs survive a reboot: even if the wall clock
+    // is behind the pre-reboot time (rare, but possible with NTP), the
+    // clamp ensures new IDs are strictly greater than recovered ones.
+    uint64_t hwt = atomic_load(&g_high_water_time);
+    while (target->time > hwt) {
+        if (atomic_compare_exchange_weak(&g_high_water_time, &hwt, target->time)) {
+            break;
+        }
     }
 }

@@ -207,7 +207,15 @@ static int cmp_strings(const char* a, const char* b, graph_cmp_op_t cmp) {
 int graph_execute_has(graph_layer_t* layer, const vertex_set_t* input,
                        const char* predicate, const char* value,
                        graph_cmp_op_t cmp, vertex_set_t* output) {
-    if (!layer || !layer->db || !input || !predicate || !value || !output) return -1;
+    /* input == NULL: "match all" — no constraint from a prior step (Has as
+     * the first step of a chain, or a fused Has+Out/In as the first step).
+     * input != NULL && input->count == 0: "match nothing" — a prior step
+     * produced an empty intermediate set, so the intersection is empty.
+     * input != NULL && input->count > 0: filter — only keep subjects in
+     * the input set. The old code used `input->count == 0` for both
+     * "first step" and "intermediate empty", which made an empty
+     * intermediate set match everything instead of nothing. */
+    if (!layer || !layer->db || !predicate || !value || !output) return -1;
 
     if (cmp == GRAPH_CMP_EQ) {
         /* Equality: exact prefix scan /pos/<predicate>/<value>/ */
@@ -242,7 +250,7 @@ int graph_execute_has(graph_layer_t* layer, const vertex_set_t* input,
             char buf[4096];
             const char* subj = key_last_component(results[j].key, results[j].key_len, buf, sizeof(buf));
             if (!subj) continue;
-            if (input->count == 0 || vertex_set_contains((vertex_set_t*)input, subj)) {
+            if (input == NULL || vertex_set_contains((vertex_set_t*)input, subj)) {
                 vertex_set_add(output, subj);
             }
         }
@@ -319,7 +327,7 @@ int graph_execute_has(graph_layer_t* layer, const vertex_set_t* input,
             char subj_buf[4096];
             const char* subj = key_last_component(results[j].key, results[j].key_len, subj_buf, sizeof(subj_buf));
             if (!subj) continue;
-            if (input->count == 0 || vertex_set_contains((vertex_set_t*)input, subj)) {
+            if (input == NULL || vertex_set_contains((vertex_set_t*)input, subj)) {
                 vertex_set_add(output, subj);
             }
         }
@@ -336,6 +344,8 @@ static int graph_execute_has_out(graph_layer_t* layer, const vertex_set_t* input
                                 const char* has_predicate, const char* has_value,
                                 graph_cmp_op_t has_cmp,
                                 const char* out_predicate, vertex_set_t* output) {
+    /* input may be NULL (first step, match all) or a real set (possibly
+     * empty intermediate, match nothing). Pass through to graph_execute_has. */
     if (!layer || !layer->db || !out_predicate || !output) return -1;
 
     /* Phase 1: collect vertices matching Has filter */
@@ -373,6 +383,8 @@ static int graph_execute_has_in(graph_layer_t* layer, const vertex_set_t* input,
                                const char* has_predicate, const char* has_value,
                                graph_cmp_op_t has_cmp,
                                const char* in_predicate, vertex_set_t* output) {
+    /* input may be NULL (first step, match all) or a real set (possibly
+     * empty intermediate, match nothing). Pass through to graph_execute_has. */
     if (!layer || !layer->db || !in_predicate || !output) return -1;
 
     /* Phase 1: collect vertices matching Has filter */
@@ -527,7 +539,10 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
         } else if (s->type == GRAPH_STEP_OUT) {
             int rc;
             if (s->has_predicate) {
-                rc = graph_execute_has_out(layer, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
+                /* NULL input on first step means "match all" for the Has
+                 * filter; a real (possibly empty) &current on intermediate
+                 * steps means "filter by current, match nothing if empty". */
+                rc = graph_execute_has_out(layer, first ? NULL : &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
             } else {
                 rc = graph_execute_out(layer, &current, s->predicate, &next);
             }
@@ -535,7 +550,7 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
         } else if (s->type == GRAPH_STEP_IN) {
             int rc;
             if (s->has_predicate) {
-                rc = graph_execute_has_in(layer, &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
+                rc = graph_execute_has_in(layer, first ? NULL : &current, s->has_predicate, s->has_value, s->has_cmp, s->predicate, &next);
             } else {
                 rc = graph_execute_in(layer, &current, s->predicate, &next);
             }
@@ -549,14 +564,11 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
             }
         } else if (s->type == GRAPH_STEP_HAS) {
             int rc;
-            if (first) {
-                vertex_set_t empty;
-                vertex_set_init(&empty, 0);
-                rc = graph_execute_has(layer, &empty, s->has_predicate, s->has_value, s->has_cmp, &next);
-                vertex_set_destroy(&empty);
-            } else {
-                rc = graph_execute_has(layer, &current, s->has_predicate, s->has_value, s->has_cmp, &next);
-            }
+            /* NULL input on first step = "match all" (no prior constraint).
+             * &current on intermediate steps = "filter by current"; if
+             * current is empty, graph_execute_has matches nothing. */
+            rc = graph_execute_has(layer, first ? NULL : &current,
+                                    s->has_predicate, s->has_value, s->has_cmp, &next);
             if (rc != 0) error = rc;
         } else if (s->type == GRAPH_STEP_MORPHISM) {
             // Look up the morphism by name, deep-copy its steps, execute them
@@ -579,6 +591,7 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
                 vertex_set_copy(&mcurrent, &current);
 
                 query_step_t* ms = copied;
+                int mfirst = 1;
                 while (ms) {
                     vertex_set_t mnext;
                     vertex_set_init(&mnext, 8);
@@ -590,14 +603,16 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
                     } else if (ms->type == GRAPH_STEP_IN) {
                         graph_execute_in(layer, &mcurrent, ms->predicate, &mnext);
                     } else if (ms->type == GRAPH_STEP_HAS) {
-                        if (mcurrent.count == 0) {
-                            vertex_set_t empty;
-                            vertex_set_init(&empty, 0);
-                            graph_execute_has(layer, &empty, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
-                            vertex_set_destroy(&empty);
-                        } else {
-                            graph_execute_has(layer, &mcurrent, ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
-                        }
+                        /* NULL input (match all) only when this is the
+                         * first morphism step AND the outer query is on
+                         * its first step (so mcurrent is empty because
+                         * there was no prior constraint, not because a
+                         * prior step produced nothing). Otherwise pass
+                         * &mcurrent — empty intermediate matches nothing. */
+                        const vertex_set_t* has_input =
+                            (mfirst && first) ? NULL : &mcurrent;
+                        graph_execute_has(layer, has_input,
+                                         ms->has_predicate, ms->has_value, ms->has_cmp, &mnext);
                     } else if (ms->type == GRAPH_STEP_LIMIT) {
                         vertex_set_destroy(&mnext);
                         size_t copy_count = mcurrent.count < ms->limit ? mcurrent.count : ms->limit;
@@ -651,6 +666,7 @@ static int execute_child_steps(graph_layer_t* layer, query_step_t* steps, vertex
                     vertex_set_destroy(&mcurrent);
                     memcpy(&mcurrent, &mnext, sizeof(vertex_set_t));
                     ms = ms->next;
+                    mfirst = 0;
                 }
 
                 // Deep-free the copied steps

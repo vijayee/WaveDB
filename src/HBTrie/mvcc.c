@@ -14,6 +14,65 @@
 
 #define DEFAULT_GC_INTERVAL_MS 100
 
+/* ── Seqlock helpers for txn_id_seqlock_t ──
+ *
+ * Readers are lock-free: they read the sequence counter, memcpy the
+ * value, re-read the sequence, and retry only if it changed or was odd
+ * (write in progress). Writers serialize via a spinlock and bump the
+ * sequence odd → even around the write so readers see a consistent
+ * value. This replaces the 24-byte _Atomic(transaction_id_t) which
+ * had no hardware CAS on x86-64 and fell back to libatomic locks. */
+
+void txn_id_seqlock_init(txn_id_seqlock_t* sl, transaction_id_t val) {
+    atomic_store(&sl->seq, 0);
+    sl->value = val;
+    sl->write_lock = 0;
+    /* Release the seq to 0 (even = stable) so the first read succeeds. */
+    atomic_store(&sl->seq, 0);
+}
+
+void txn_id_seqlock_read(const txn_id_seqlock_t* sl, transaction_id_t* out) {
+    uint64_t seq1, seq2;
+    do {
+        seq1 = atomic_load((atomic_uint_fast64_t*)&sl->seq);
+        /* Make sure the read of the value happens after the read of seq
+         * (acquire). */
+        memcpy(out, (const void*)&sl->value, sizeof(transaction_id_t));
+        seq2 = atomic_load((atomic_uint_fast64_t*)&sl->seq);
+    } while (seq1 != seq2 || (seq1 & 1));
+}
+
+void txn_id_seqlock_write(txn_id_seqlock_t* sl, transaction_id_t val) {
+    /* Acquire the writer spinlock so concurrent writers don't clobber
+     * each other's sequence bumps. */
+    while (__sync_lock_test_and_set(&sl->write_lock, 1)) {
+        /* spin */
+    }
+    atomic_fetch_add((atomic_uint_fast64_t*)&sl->seq, 1);  /* odd: write in progress */
+    /* Store the value. */
+    memcpy((void*)&sl->value, &val, sizeof(transaction_id_t));
+    atomic_fetch_add((atomic_uint_fast64_t*)&sl->seq, 1);  /* even: stable */
+    __sync_lock_release(&sl->write_lock);
+}
+
+int txn_id_seqlock_cas(txn_id_seqlock_t* sl, const transaction_id_t* expected, transaction_id_t desired) {
+    /* Serialize with other writers. */
+    while (__sync_lock_test_and_set(&sl->write_lock, 1)) {
+        /* spin */
+    }
+    transaction_id_t current;
+    txn_id_seqlock_read(sl, &current);
+    int swapped = 0;
+    if (transaction_id_compare(&current, expected) == 0) {
+        atomic_fetch_add((atomic_uint_fast64_t*)&sl->seq, 1);  /* odd */
+        memcpy((void*)&sl->value, &desired, sizeof(transaction_id_t));
+        atomic_fetch_add((atomic_uint_fast64_t*)&sl->seq, 1);  /* even */
+        swapped = 1;
+    }
+    __sync_lock_release(&sl->write_lock);
+    return swapped;
+}
+
 // Forward declarations
 static void tx_manager_gc_callback(void* arg);
 static void recompute_global_min(tx_manager_t* manager);
@@ -36,14 +95,14 @@ tx_manager_t* tx_manager_create(hbtrie_t* trie,
     // Initialize shards
     for (int i = 0; i < TX_MANAGER_SHARDS; i++) {
         vec_init(&manager->shards[i].txns);
-        atomic_init_txn(&manager->shards[i].min_txn_id, TXN_ID_SENTINEL);
+        txn_id_seqlock_init(&manager->shards[i].min_txn_id, TXN_ID_SENTINEL);
         atomic_init(&manager->shards[i].count, 0);
         platform_lock_init(&manager->shards[i].lock);
     }
 
     transaction_id_t last_committed_init = {0, 0, 0};
-    atomic_init_txn(&manager->min_active_txn_id, TXN_ID_SENTINEL);
-    atomic_init_txn(&manager->last_committed_txn_id, last_committed_init);
+    txn_id_seqlock_init(&manager->min_active_txn_id, TXN_ID_SENTINEL);
+    txn_id_seqlock_init(&manager->last_committed_txn_id, last_committed_init);
 
     refcounter_init((refcounter_t*)manager);
 
@@ -109,9 +168,9 @@ txn_desc_t* tx_manager_begin(tx_manager_t* manager) {
     // Note: new IDs are always >= current shard min because IDs are monotonically
     // increasing, so we only need to handle the empty-shard (SENTINEL) case.
     transaction_id_t current_shard_min;
-    atomic_load_txn(&shard->min_txn_id, &current_shard_min);
+    txn_id_seqlock_read(&shard->min_txn_id, &current_shard_min);
     if (is_txn_id_sentinel(&current_shard_min)) {
-        atomic_store_txn(&shard->min_txn_id, txn->txn_id);
+        txn_id_seqlock_write(&shard->min_txn_id, txn->txn_id);
     }
 
     // Global min_active_txn_id does NOT need updating on begin.
@@ -140,9 +199,9 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
 
     // Update last_committed (lock-free CAS loop)
     transaction_id_t current_last;
-    atomic_load_txn(&manager->last_committed_txn_id, &current_last);
+    txn_id_seqlock_read(&manager->last_committed_txn_id, &current_last);
     while (transaction_id_compare(&txn->txn_id, &current_last) > 0) {
-        if (atomic_compare_exchange_txn(&manager->last_committed_txn_id,
+        if (txn_id_seqlock_cas(&manager->last_committed_txn_id,
                                            &current_last, txn->txn_id)) {
             break;
         }
@@ -165,7 +224,7 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
 
     // Check if we were the shard minimum
     transaction_id_t current_shard_min;
-    atomic_load_txn(&shard->min_txn_id, &current_shard_min);
+    txn_id_seqlock_read(&shard->min_txn_id, &current_shard_min);
     int was_shard_min = (transaction_id_compare(&txn->txn_id, &current_shard_min) == 0);
     int shard_now_empty = (shard->txns.length == 0);
 
@@ -178,9 +237,9 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
                     new_shard_min = shard->txns.data[i]->txn_id;
                 }
             }
-            atomic_store_txn(&shard->min_txn_id, new_shard_min);
+            txn_id_seqlock_write(&shard->min_txn_id, new_shard_min);
         } else {
-            atomic_store_txn(&shard->min_txn_id, TXN_ID_SENTINEL);
+            txn_id_seqlock_write(&shard->min_txn_id, TXN_ID_SENTINEL);
         }
     }
 
@@ -190,7 +249,7 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
     // Update global min_active_txn_id if necessary
     // Must recompute if: (a) we were the global minimum, or (b) global min is sentinel
     transaction_id_t current_global_min;
-    atomic_load_txn(&manager->min_active_txn_id, &current_global_min);
+    txn_id_seqlock_read(&manager->min_active_txn_id, &current_global_min);
     if (transaction_id_compare(&txn->txn_id, &current_global_min) == 0 ||
         is_txn_id_sentinel(&current_global_min)) {
         recompute_global_min(manager);
@@ -232,7 +291,7 @@ int tx_manager_abort(tx_manager_t* manager, txn_desc_t* txn) {
 
     // Check if we were the shard minimum
     transaction_id_t current_shard_min;
-    atomic_load_txn(&shard->min_txn_id, &current_shard_min);
+    txn_id_seqlock_read(&shard->min_txn_id, &current_shard_min);
     int was_shard_min = (transaction_id_compare(&txn->txn_id, &current_shard_min) == 0);
     int shard_now_empty = (shard->txns.length == 0);
 
@@ -245,9 +304,9 @@ int tx_manager_abort(tx_manager_t* manager, txn_desc_t* txn) {
                     new_shard_min = shard->txns.data[i]->txn_id;
                 }
             }
-            atomic_store_txn(&shard->min_txn_id, new_shard_min);
+            txn_id_seqlock_write(&shard->min_txn_id, new_shard_min);
         } else {
-            atomic_store_txn(&shard->min_txn_id, TXN_ID_SENTINEL);
+            txn_id_seqlock_write(&shard->min_txn_id, TXN_ID_SENTINEL);
         }
     }
 
@@ -257,7 +316,7 @@ int tx_manager_abort(tx_manager_t* manager, txn_desc_t* txn) {
     // Update global min_active_txn_id if necessary
     // (Same logic as commit, except we don't update last_committed)
     transaction_id_t current_global_min;
-    atomic_load_txn(&manager->min_active_txn_id, &current_global_min);
+    txn_id_seqlock_read(&manager->min_active_txn_id, &current_global_min);
     if (transaction_id_compare(&txn->txn_id, &current_global_min) == 0 ||
         is_txn_id_sentinel(&current_global_min)) {
         recompute_global_min(manager);
@@ -275,14 +334,14 @@ transaction_id_t tx_manager_get_min_active(tx_manager_t* manager) {
 
     // Atomic load - no lock needed
     transaction_id_t result;
-    atomic_load_txn(&manager->min_active_txn_id, &result);
+    txn_id_seqlock_read(&manager->min_active_txn_id, &result);
 
     // If min_active hasn't been computed yet (SENTINEL), recompute from shards.
     // This happens when transactions have started but no commit has triggered
     // a global min update yet.
     if (is_txn_id_sentinel(&result)) {
         recompute_global_min(manager);
-        atomic_load_txn(&manager->min_active_txn_id, &result);
+        txn_id_seqlock_read(&manager->min_active_txn_id, &result);
     }
 
     return result;
@@ -297,7 +356,7 @@ transaction_id_t tx_manager_get_last_committed(tx_manager_t* manager) {
 
     // Atomic load - no lock needed
     transaction_id_t result;
-    atomic_load_txn(&manager->last_committed_txn_id, &result);
+    txn_id_seqlock_read(&manager->last_committed_txn_id, &result);
     return result;
 }
 
@@ -342,7 +401,7 @@ static void recompute_global_min(tx_manager_t* manager) {
 
     for (int i = 0; i < TX_MANAGER_SHARDS; i++) {
         transaction_id_t shard_min;
-        atomic_load_txn(&manager->shards[i].min_txn_id, &shard_min);
+        txn_id_seqlock_read(&manager->shards[i].min_txn_id, &shard_min);
         if (!is_txn_id_sentinel(&shard_min)) {
             if (is_txn_id_sentinel(&new_global_min) ||
                 transaction_id_compare(&shard_min, &new_global_min) < 0) {
@@ -354,9 +413,9 @@ static void recompute_global_min(tx_manager_t* manager) {
     if (is_txn_id_sentinel(&new_global_min)) {
         // No active transactions -- min_active = last_committed
         transaction_id_t last_committed;
-        atomic_load_txn(&manager->last_committed_txn_id, &last_committed);
-        atomic_store_txn(&manager->min_active_txn_id, last_committed);
+        txn_id_seqlock_read(&manager->last_committed_txn_id, &last_committed);
+        txn_id_seqlock_write(&manager->min_active_txn_id, last_committed);
     } else {
-        atomic_store_txn(&manager->min_active_txn_id, new_global_min);
+        txn_id_seqlock_write(&manager->min_active_txn_id, new_global_min);
     }
 }
