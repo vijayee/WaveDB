@@ -253,3 +253,54 @@ TEST_F(GraphQLQueryTest, SDLAndQueryInSameDocument) {
     EXPECT_EQ(ast->children.data[0]->kind, GRAPHQL_AST_TYPE_DEFINITION);
     EXPECT_EQ(ast->children.data[1]->kind, GRAPHQL_AST_OPERATION);
 }
+
+// ============================================================
+// Issue #5: object/list literal arguments must not crash on AST destroy.
+// The old graphql_ast_destroy built a stack-allocated dummy node and
+// recursed to handle nested literals, then unconditionally called
+// free(ast) — free() on a stack address is UB. These tests parse queries
+// with object/list literal args; TearDown calls graphql_ast_destroy.
+// ============================================================
+
+TEST_F(GraphQLQueryTest, ListLiteralArgumentDoesNotCrashOnDestroy) {
+    const char* query = "{ users(filter: [1, 2, 3]) { name } }";
+    ast = graphql_parse(query, strlen(query), NULL);
+    ASSERT_NE(ast, nullptr);
+
+    graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
+    ASSERT_NE(arg, nullptr);
+    ASSERT_NE(arg->literal, nullptr);
+    EXPECT_EQ(arg->literal->kind, GRAPHQL_LITERAL_LIST);
+    EXPECT_EQ(arg->literal->list_items.length, 3);
+    // TearDown destroys the AST — the old code called free() on a stack
+    // address here. Under ASAN this is a heap-corruption / UB report.
+}
+
+TEST_F(GraphQLQueryTest, ObjectLiteralArgumentDoesNotCrashOnDestroy) {
+    const char* query = "{ users(filter: {min: 1, max: 10}) { name } }";
+    ast = graphql_parse(query, strlen(query), NULL);
+    ASSERT_NE(ast, nullptr);
+
+    graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
+    ASSERT_NE(arg, nullptr);
+    ASSERT_NE(arg->literal, nullptr);
+    EXPECT_EQ(arg->literal->kind, GRAPHQL_LITERAL_OBJECT);
+    EXPECT_EQ(arg->literal->object_fields.length, 2);
+    // TearDown destroys the AST — the old code called free() on a stack
+    // address here for each nested object field value.
+}
+
+TEST_F(GraphQLQueryTest, NestedListLiteralArgumentDoesNotCrashOnDestroy) {
+    const char* query = "{ users(filter: [[1, 2], [3, 4]]) { name } }";
+    ast = graphql_parse(query, strlen(query), NULL);
+    ASSERT_NE(ast, nullptr);
+
+    graphql_ast_node_t* arg = ast->children.data[0]->children.data[0]->arguments.data[0];
+    ASSERT_NE(arg, nullptr);
+    ASSERT_NE(arg->literal, nullptr);
+    EXPECT_EQ(arg->literal->kind, GRAPHQL_LITERAL_LIST);
+    EXPECT_EQ(arg->literal->list_items.length, 2);
+    EXPECT_EQ(arg->literal->list_items.data[0]->kind, GRAPHQL_LITERAL_LIST);
+    // TearDown destroys the AST — nested list literals exercised the
+    // recursive dummy-node path twice in the old code.
+}
