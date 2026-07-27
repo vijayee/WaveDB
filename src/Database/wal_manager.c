@@ -238,7 +238,14 @@ static void wal_flush_timer_callback(void* ctx) {
     // DEBOUNCED mode: fsync all pending writes to disk
     if (twal->sync_mode == WAL_SYNC_DEBOUNCED && twal->fd >= 0) {
         if (fsync(twal->fd) != 0) {
-            log_warn("fsync failed on WAL timer (DEBOUNCED, fd=%d, errno=%d)", twal->fd, errno);
+            /* The writes that triggered this timer were already
+             * acknowledged to the application synchronously — there is
+             * no caller to propagate this failure to. Log it as an
+             * error (not a warning): the data is in the kernel buffer
+             * but not durable. A persistent-error flag that makes the
+             * next write fail fast is a follow-up. */
+            log_error("fsync failed on WAL timer (DEBOUNCED, fd=%d, errno=%d) — acknowledged writes are not durable",
+                      twal->fd, errno);
         }
         twal->pending_writes = 0;
     }
@@ -272,7 +279,13 @@ static int thread_wal_flush_buffer_locked(thread_wal_t* twal) {
     // - ASYNC: data is in kernel buffer after write(), no fsync needed
     if (twal->sync_mode == WAL_SYNC_IMMEDIATE) {
         if (fsync(twal->fd) != 0) {
-            log_warn("fsync failed on WAL flush (IMMEDIATE, fd=%d, errno=%d)", twal->fd, errno);
+            /* The caller has already acknowledged the write to the
+             * application, but it is NOT durable. Propagate the failure
+             * so the caller can fail the transaction rather than
+             * acknowledging a write that may be lost on crash. The old
+             * code logged a warning and returned 0 (success). */
+            log_error("fsync failed on WAL flush (IMMEDIATE, fd=%d, errno=%d)", twal->fd, errno);
+            return -1;
         }
         twal->pending_writes = 0;
     } else if (twal->sync_mode == WAL_SYNC_ASYNC) {
@@ -1411,9 +1424,16 @@ int thread_wal_seal(thread_wal_t* twal) {
 
     platform_lock(&twal->lock);
 
-    // Flush buffer and cancel timer before sealing
+    // Flush buffer and cancel timer before sealing. If the flush fails
+    // (write or fsync), the sealed file is missing data — propagate the
+    // error so the caller does not mark the file as sealed/compacted
+    // and lose the unflushed entries.
     if (twal->batch_count > 0) {
-        thread_wal_flush_buffer_locked(twal);
+        if (thread_wal_flush_buffer_locked(twal) != 0) {
+            platform_unlock(&twal->lock);
+            log_error("WAL seal aborted: flush failed for thread %lu", twal->thread_id);
+            return WAL_ERROR_IO;
+        }
     }
 
     // Cancel one-shot timer if active
@@ -1422,10 +1442,15 @@ int thread_wal_seal(thread_wal_t* twal) {
         twal->timer_active = 0;
     }
 
+    int seal_rc = 0;
     if (twal->fd >= 0) {
-        // Flush pending writes
+        // Final fsync before sealing — if this fails, the sealed file
+        // is not durable. Still close the fd (no leak) but propagate the
+        // error so the caller knows the file is incomplete.
         if (fsync(twal->fd) != 0) {
-            log_warn("fsync failed on WAL seal (fd=%d, errno=%d)", twal->fd, errno);
+            log_error("fsync failed on WAL seal (fd=%d, errno=%d) — sealed file is not durable",
+                      twal->fd, errno);
+            seal_rc = WAL_ERROR_IO;
         }
         close(twal->fd);
         twal->fd = -1;
@@ -1438,12 +1463,13 @@ int thread_wal_seal(thread_wal_t* twal) {
     platform_unlock(&twal->manager->manifest_lock);
 
     if (rc != 0) {
-        log_warn("Failed to write SEALED manifest entry for %s", twal->file_path);
+        log_error("Failed to write SEALED manifest entry for %s", twal->file_path);
+        if (seal_rc == 0) seal_rc = rc;
     }
 
     platform_unlock(&twal->lock);
 
-    return rc;
+    return seal_rc;
 }
 
 int wal_manager_recover(wal_manager_t* manager, void* db) {
