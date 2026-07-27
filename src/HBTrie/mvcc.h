@@ -26,6 +26,27 @@ extern "C" {
 struct hbtrie_t;
 typedef struct hbtrie_t hbtrie_t;
 
+/* Seqlock for 24-byte transaction_id_t.
+ *
+ * _Atomic(transaction_id_t) is 24 bytes, which exceeds the platform's
+ * hardware CAS width (8 or 16 bytes on x86-64), so C11 atomics fall
+ * back to libatomic lock-based operations — every "lock-free" read
+ * takes a lock. The seqlock gives genuinely lock-free reads: readers
+ * read the sequence counter, memcpy the value, re-read the sequence,
+ * and retry only if it changed (or was odd, meaning a write is in
+ * progress). Writers serialize via a spinlock and bump the sequence
+ * odd → even around the write. */
+typedef struct txn_id_seqlock_t {
+    atomic_uint_fast64_t seq;    /* even = stable, odd = write in progress */
+    transaction_id_t value;      /* the 24-byte protected value */
+    volatile int write_lock;      /* spinlock serializing writers */
+} txn_id_seqlock_t;
+
+void txn_id_seqlock_init(txn_id_seqlock_t* sl, transaction_id_t val);
+void txn_id_seqlock_read(const txn_id_seqlock_t* sl, transaction_id_t* out);
+void txn_id_seqlock_write(txn_id_seqlock_t* sl, transaction_id_t val);
+int txn_id_seqlock_cas(txn_id_seqlock_t* sl, const transaction_id_t* expected, transaction_id_t desired);
+
 /**
  * Transaction state.
  */
@@ -57,7 +78,7 @@ typedef struct txn_desc_t {
 typedef struct tx_shard_t {
     PLATFORMLOCKTYPE(lock);              // Per-shard lock
     vec_t(txn_desc_t*) txns;            // Active transactions in this shard
-    ATOMIC_TYPE_TXN min_txn_id; // Minimum txn ID in this shard (SENTINEL if empty)
+    txn_id_seqlock_t min_txn_id; // Minimum txn ID in this shard (SENTINEL if empty)
     ATOMIC_TYPE(uint32_t) count;              // Number of active transactions (for fast empty check)
 } tx_shard_t;
 
@@ -72,8 +93,8 @@ typedef struct tx_manager_t {
     refcounter_t refcounter;           // MUST be first member
 
     tx_shard_t shards[TX_MANAGER_SHARDS]; // Sharded active transaction tracking
-    ATOMIC_TYPE_TXN min_active_txn_id;  // Oldest active transaction (GC cutoff) - atomic for lock-free reads
-    ATOMIC_TYPE_TXN last_committed_txn_id;  // Last committed transaction - atomic for lock-free reads
+    txn_id_seqlock_t min_active_txn_id;  // Oldest active transaction (GC cutoff) - seqlock for lock-free reads
+    txn_id_seqlock_t last_committed_txn_id;  // Last committed transaction - seqlock for lock-free reads
 
     hbtrie_t* trie;                      // Reference to trie
     work_pool_t* pool;                   // Work pool for async GC
