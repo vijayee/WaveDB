@@ -10,7 +10,7 @@
 #include <io.h>
 #include <direct.h>
 #include <process.h>
-#include <windows.h>
+#include "Util/windows_compat.h"
 #define getpid() _getpid()
 #define usleep(us) Sleep((us) / 1000 ? (us) / 1000 : 1)
 #else

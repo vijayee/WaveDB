@@ -10,9 +10,16 @@
 #include <io.h>
 #include <direct.h>
 #include <process.h>
+#include <stdint.h>
+#include <sys/stat.h>
 #define getpid() _getpid()
 #define mkdir(path, mode) _mkdir(path)
 #define fsync(fd) _commit(fd)
+typedef intptr_t ssize_t;
+static inline ssize_t pwrite(int fd, const void* buf, size_t count, int64_t offset) {
+    if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
+    return _write(fd, buf, (unsigned int)count);
+}
 #else
 #include <unistd.h>
 #include <sys/stat.h>

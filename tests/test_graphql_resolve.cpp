@@ -26,22 +26,42 @@
 #include <sys/stat.h>
 #include "Layers/graphql/graphql.h"
 #include "Workers/pool.h"
+#include <filesystem>
+#include <string>
+
+
+static std::string test_dir_for(const char* base) {
+#if _WIN32
+    const char* tmpdir = getenv("TEMP");
+    return std::string(tmpdir ? tmpdir : ".") + "/" + base + "_" + std::to_string(_getpid());
+#else
+    return std::string("/tmp/") + base + "_" + std::to_string(getpid());
+#endif
+}
+
+static void rmrf_dir(const char* path) {
+    try {
+        std::filesystem::remove_all(path);
+    } catch (...) {
+        // Ignore cleanup failures so the test can still report its own result.
+    }
+}
 
 class GraphQLResolveTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_resolve";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_resolve");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Register schema
@@ -53,14 +73,9 @@ protected:
     void TearDown() override {
         if (layer) graphql_layer_destroy(layer);
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 // ============================================================
@@ -348,19 +363,19 @@ TEST_F(GraphQLResolveTest, PartialSuccessDepthExceeded) {
 
 class GraphQLRequiredFieldTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_required";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_required");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Schema with required fields: name is required, age and email are optional
@@ -372,14 +387,9 @@ protected:
     void TearDown() override {
         if (layer) graphql_layer_destroy(layer);
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 TEST_F(GraphQLRequiredFieldTest, SchemaHasIsRequirededFlag) {
@@ -472,15 +482,15 @@ TEST_F(GraphQLRequiredFieldTest, CreateWithOptionalFieldsOnlyFails) {
 
 TEST_F(GraphQLRequiredFieldTest, MultipleMissingRequiredFields) {
     // Create a new layer with a schema that has multiple required fields
-    const char* test_dir2 = "/tmp/wavedb_test_graphql_required2";
-    rmrf(test_dir2);
-    mkdir(test_dir2, 0755);
+    std::string test_dir2 = test_dir_for("wavedb_test_graphql_required2");
+    rmrf_dir(test_dir2.c_str());
+    mkdir(test_dir2.c_str(), 0755);
 
     graphql_layer_config_t* config2 = graphql_layer_config_default();
-    config2->path = test_dir2;
+    config2->path = test_dir2.c_str();
     config2->enable_persist = 1;
 
-    graphql_layer_t* layer2 = graphql_layer_create(test_dir2, config2, nullptr, nullptr);
+    graphql_layer_t* layer2 = graphql_layer_create(test_dir2.c_str(), config2, nullptr, nullptr);
     ASSERT_NE(layer2, nullptr);
 
     const char* sdl = "type Account { name: String! email: String! age: Int }";
@@ -503,7 +513,7 @@ TEST_F(GraphQLRequiredFieldTest, MultipleMissingRequiredFields) {
     graphql_result_destroy(result);
     graphql_layer_destroy(layer2);
     graphql_layer_config_destroy(config2);
-    rmrf(test_dir2);
+    rmrf_dir(test_dir2.c_str());
 }
 // ============================================================
 
@@ -528,20 +538,20 @@ static void async_query_reject(void* ctx, async_error_t* error) {
 
 class GraphQLAsyncTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_async";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_async");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
         config->worker_threads = 2;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Launch worker pool threads for async execution
@@ -563,14 +573,9 @@ protected:
             graphql_layer_destroy(layer);
         }
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 TEST_F(GraphQLAsyncTest, AsyncQuery) {
@@ -700,19 +705,19 @@ TEST_F(GraphQLAsyncTest, AsyncQueryAfterMutation) {
 
 class GraphQLPlanImprovementTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_plan_imp";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_plan_imp");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int email: String }";
@@ -723,14 +728,9 @@ protected:
     void TearDown() override {
         if (layer) graphql_layer_destroy(layer);
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 TEST_F(GraphQLPlanImprovementTest, QueryWithIdArgumentFetchesSingleEntity) {
@@ -793,19 +793,19 @@ TEST_F(GraphQLPlanImprovementTest, PlanCompilationUsesResolveFieldForScalarChild
 
 class GraphQLTypenameTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_typename";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_typename");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         const char* sdl = "type User { name: String age: Int }";
@@ -816,14 +816,9 @@ protected:
     void TearDown() override {
         if (layer) graphql_layer_destroy(layer);
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 TEST_F(GraphQLTypenameTest, TypenameOnQueryResult) {
@@ -1018,19 +1013,19 @@ TEST_F(GraphQLResolveTest, AtomicDeleteMutation) {
 
 class GraphQLScalarTypeTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_scalartypes";
+    std::string test_dir = test_dir_for("wavedb_test_graphql_scalartypes");
     graphql_layer_t* layer = nullptr;
     graphql_layer_config_t* config = nullptr;
 
     void SetUp() override {
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf_dir(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
 
         config = graphql_layer_config_default();
-        config->path = test_dir;
+        config->path = test_dir.c_str();
         config->enable_persist = 1;
 
-        layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+        layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
         ASSERT_NE(layer, nullptr);
 
         // Schema with Int, Float, Boolean, String, ID fields
@@ -1042,14 +1037,9 @@ protected:
     void TearDown() override {
         if (layer) graphql_layer_destroy(layer);
         if (config) graphql_layer_config_destroy(config);
-        rmrf(test_dir);
+        rmrf_dir(test_dir.c_str());
     }
 
-    void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
-    }
 };
 
 TEST_F(GraphQLScalarTypeTest, IntFieldReturnsNativeInt) {

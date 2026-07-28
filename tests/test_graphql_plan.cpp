@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
+#include <filesystem>
 #include "Layers/graphql/graphql.h"
 
 #if _WIN32
@@ -32,9 +33,10 @@ protected:
     void SetUp() override {
 #if _WIN32
         const char* tmpdir = getenv("TEMP");
-        snprintf(test_dir, sizeof(test_dir), "%s/wavedb_test_graphql_plan", tmpdir ? tmpdir : ".");
+        snprintf(test_dir, sizeof(test_dir), "%s/wavedb_test_graphql_plan_%d",
+                 tmpdir ? tmpdir : ".", (int)_getpid());
 #else
-        strcpy(test_dir, "/tmp/wavedb_test_graphql_plan");
+        snprintf(test_dir, sizeof(test_dir), "/tmp/wavedb_test_graphql_plan_%d", (int)getpid());
 #endif
         rmrf(test_dir);
         mkdir(test_dir, 0755);
@@ -59,13 +61,11 @@ protected:
     }
 
     void rmrf(const char* path) {
-        char cmd[512];
-#if _WIN32
-        snprintf(cmd, sizeof(cmd), "rmdir /s /q %s 2>nul", path);
-#else
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-#endif
-        (void)system(cmd);
+        try {
+            std::filesystem::remove_all(path);
+        } catch (...) {
+            // Ignore cleanup failures so the test can still report its own result.
+        }
     }
 };
 

@@ -16,27 +16,40 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <cstdio>
+#include <filesystem>
+#include <string>
 #include <sys/stat.h>
 #include "Layers/graphql/graphql.h"
 
 class GraphQLSchemaTest : public ::testing::Test {
 protected:
-    const char* test_dir = "/tmp/wavedb_test_graphql_schema";
+    std::string test_dir;
+
+    GraphQLSchemaTest() {
+#if _WIN32
+        const char* tmpdir = getenv("TEMP");
+        test_dir = std::string(tmpdir ? tmpdir : ".") +
+                   "/wavedb_test_graphql_schema_" + std::to_string(_getpid());
+#else
+        test_dir = "/tmp/wavedb_test_graphql_schema_" + std::to_string(getpid());
+#endif
+    }
 
     void SetUp() override {
-        // Clean up any previous test directory
-        rmrf(test_dir);
-        mkdir(test_dir, 0755);
+        rmrf(test_dir.c_str());
+        mkdir(test_dir.c_str(), 0755);
     }
 
     void TearDown() override {
-        rmrf(test_dir);
+        rmrf(test_dir.c_str());
     }
 
     void rmrf(const char* path) {
-        char cmd[512];
-        snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", path);
-        (void)system(cmd);
+        try {
+            std::filesystem::remove_all(path);
+        } catch (...) {
+            // Ignore cleanup failures so the test can still report its own result.
+        }
     }
 };
 
@@ -61,7 +74,7 @@ TEST_F(GraphQLSchemaTest, CreateLayerInMemory) {
 
 TEST_F(GraphQLSchemaTest, CreateLayerPersistent) {
     char db_path[512];
-    snprintf(db_path, sizeof(db_path), "%s/persistent_db", test_dir);
+    snprintf(db_path, sizeof(db_path), "%s/persistent_db", test_dir.c_str());
 
     graphql_layer_config_t* config = graphql_layer_config_default();
     ASSERT_NE(config, nullptr);
@@ -390,17 +403,21 @@ TEST_F(GraphQLSchemaTest, ParseScalarDefinition) {
 }
 
 TEST_F(GraphQLSchemaTest, ScalarTypePersistAndLoad) {
-    const char* test_dir = "/tmp/wavedb_test_scalar_persist";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
-    (void)system(cmd);
-    mkdir(test_dir, 0755);
+#if _WIN32
+    const char* tmpdir = getenv("TEMP");
+    std::string test_dir = std::string(tmpdir ? tmpdir : ".") +
+                           "/wavedb_test_scalar_persist_" + std::to_string(_getpid());
+#else
+    std::string test_dir = "/tmp/wavedb_test_scalar_persist_" + std::to_string(getpid());
+#endif
+    std::filesystem::remove_all(test_dir);
+    mkdir(test_dir.c_str(), 0755);
 
     graphql_layer_config_t* config = graphql_layer_config_default();
-    config->path = test_dir;
+    config->path = test_dir.c_str();
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+    graphql_layer_t* layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "scalar Date\ntype Event { title: String date: Date }";
@@ -422,8 +439,7 @@ TEST_F(GraphQLSchemaTest, ScalarTypePersistAndLoad) {
     graphql_layer_destroy(layer);
     graphql_layer_config_destroy(config);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    (void)system(cmd);
+    std::filesystem::remove_all(test_dir);
 }
 
 // ============================================================
@@ -484,17 +500,21 @@ TEST_F(GraphQLSchemaTest, ExtendTypeMergesFields) {
 }
 
 TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
-    const char* test_dir = "/tmp/wavedb_test_extend_persist";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
-    (void)system(cmd);
-    mkdir(test_dir, 0755);
+#if _WIN32
+    const char* tmpdir = getenv("TEMP");
+    std::string test_dir = std::string(tmpdir ? tmpdir : ".") +
+                           "/wavedb_test_extend_persist_" + std::to_string(_getpid());
+#else
+    std::string test_dir = "/tmp/wavedb_test_extend_persist_" + std::to_string(getpid());
+#endif
+    std::filesystem::remove_all(test_dir);
+    mkdir(test_dir.c_str(), 0755);
 
     graphql_layer_config_t* config = graphql_layer_config_default();
-    config->path = test_dir;
+    config->path = test_dir.c_str();
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+    graphql_layer_t* layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type User { name: String }\nextend type User { age: Int }";
@@ -508,8 +528,7 @@ TEST_F(GraphQLSchemaTest, ExtendTypePersists) {
     graphql_layer_destroy(layer);
     graphql_layer_config_destroy(config);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    (void)system(cmd);
+    std::filesystem::remove_all(test_dir);
 }
 
 // ============================================================
@@ -557,17 +576,21 @@ TEST_F(GraphQLSchemaTest, ParseDefaultValue) {
 }
 
 TEST_F(GraphQLSchemaTest, DefaultValuesPersistAndLoad) {
-    const char* test_dir = "/tmp/wavedb_test_default_persist";
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s 2>/dev/null", test_dir);
-    (void)system(cmd);
-    mkdir(test_dir, 0755);
+#if _WIN32
+    const char* tmpdir = getenv("TEMP");
+    std::string test_dir = std::string(tmpdir ? tmpdir : ".") +
+                           "/wavedb_test_default_persist_" + std::to_string(_getpid());
+#else
+    std::string test_dir = "/tmp/wavedb_test_default_persist_" + std::to_string(getpid());
+#endif
+    std::filesystem::remove_all(test_dir);
+    mkdir(test_dir.c_str(), 0755);
 
     graphql_layer_config_t* config = graphql_layer_config_default();
-    config->path = test_dir;
+    config->path = test_dir.c_str();
     config->enable_persist = 1;
 
-    graphql_layer_t* layer = graphql_layer_create(test_dir, config, nullptr, nullptr);
+    graphql_layer_t* layer = graphql_layer_create(test_dir.c_str(), config, nullptr, nullptr);
     ASSERT_NE(layer, nullptr);
 
     const char* sdl = "type Config { name: String = \"default\" count: Int = 10 }";
@@ -589,6 +612,5 @@ TEST_F(GraphQLSchemaTest, DefaultValuesPersistAndLoad) {
     graphql_layer_destroy(layer);
     graphql_layer_config_destroy(config);
 
-    snprintf(cmd, sizeof(cmd), "rm -rf %s", test_dir);
-    (void)system(cmd);
+    std::filesystem::remove_all(test_dir);
 }
