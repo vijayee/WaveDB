@@ -197,9 +197,15 @@ if(WIN32)
         target_compile_definitions(wavedb PRIVATE WAVEDB_NO_OPENSSL)
     endif()
 else()
-    find_package(OpenSSL REQUIRED)
-    target_link_libraries(wavedb PUBLIC Threads::Threads OpenSSL::Crypto)
-    target_include_directories(wavedb PRIVATE ${OPENSSL_INCLUDE_DIR})
+    find_package(OpenSSL)
+    if(OpenSSL_FOUND)
+        target_link_libraries(wavedb PUBLIC Threads::Threads OpenSSL::Crypto)
+        target_include_directories(wavedb PRIVATE ${OPENSSL_INCLUDE_DIR})
+    else()
+        # Provide stub implementations when OpenSSL is not available
+        target_link_libraries(wavedb PUBLIC Threads::Threads)
+        target_compile_definitions(wavedb PRIVATE WAVEDB_NO_OPENSSL)
+    endif()
 endif()
 
 # GoogleTest
