@@ -18,8 +18,8 @@ extern "C" {
 #define CONSUME(N, T) (T*) refcounter_consume((refcounter_t**) &N)
 
 typedef struct refcounter_t {
-    ATOMIC_TYPE(uint_fast16_t) count;
-    ATOMIC_TYPE(uint_fast8_t) yield;
+    ATOMIC_TYPE(uint16_t) count;
+    ATOMIC_TYPE(uint8_t) yield;
 } refcounter_t;
 
 void refcounter_init(refcounter_t* refcounter);

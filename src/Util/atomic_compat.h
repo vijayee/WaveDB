@@ -57,24 +57,40 @@
 
   /* ── Wrapper structs for size-appropriate atomic storage ──
    *
-   * Interlocked functions only operate on LONG (4-byte) and LONG64 (8-byte),
-   * so small types (uint8_t, uint16_t) are promoted to LONG.
-   * Types > 8 bytes use a spinlock for correctness.
+   * C++ consumers use std::atomic<T>, whose size matches the underlying
+   * type (1/2/4/8 bytes). The C fallback must use the same sizes so that
+   * shared structs (refcounter_t, spinlock_t, database_t, ...) have an
+   * identical layout regardless of whether the header is included from C
+   * or C++.
+   *
+   * Interlocked*8/16/32/64 provide true hardware atomics for 1/2/4/8-byte
+   * storage. Types > 8 bytes use a spinlock.
    *
    * Usage:
-   *   ATOMIC_TYPE(int)        → _wdb_atomic4   (≤4-byte atomics)
-   *   ATOMIC_TYPE64            → _wdb_atomic8   (8-byte atomics)
-   *   ATOMIC_TYPE_TXN          → _wdb_atomic_txn (transaction_id_t atomics)
+   *   ATOMIC_TYPE(int)        → _wdb_atomic4
+   *   ATOMIC_TYPE(uint8_t)    → _wdb_atomic1
+   *   ATOMIC_TYPE(uint16_t)   → _wdb_atomic2
+   *   ATOMIC_TYPE64           → _wdb_atomic8
+   *   ATOMIC_TYPE_TXN         → _wdb_atomic_txn
    */
 
-  typedef struct _wdb_atomic4  { LONG   v; } _wdb_atomic4;
-  typedef struct _wdb_atomic8  { LONG64 v; } _wdb_atomic8;
+  typedef struct _wdb_atomic1 { uint8_t  v; } _wdb_atomic1;
+  typedef struct _wdb_atomic2 { uint16_t v; } _wdb_atomic2;
+  typedef struct _wdb_atomic4 { LONG     v; } _wdb_atomic4;
+  typedef struct _wdb_atomic8 { LONG64   v; } _wdb_atomic8;
   typedef struct _wdb_atomic_txn {
       char   data[24];  // Stores transaction_id_t as raw bytes (3 × uint64_t)
       LONG   lock;       // spinlock: 0=unlocked, 1=locked
   } _wdb_atomic_txn;
 
-  #define ATOMIC_TYPE(T)    _wdb_atomic4   /* ≤4-byte: int, uint8_t, uint16_t, uint32_t */
+  #define ATOMIC_TYPE(T) _ATOMIC_TYPE_##T
+  #define _ATOMIC_TYPE_int          _wdb_atomic4
+  #define _ATOMIC_TYPE_uint8_t      _wdb_atomic1
+  #define _ATOMIC_TYPE_uint_fast8_t _wdb_atomic1
+  #define _ATOMIC_TYPE_uint16_t     _wdb_atomic2
+  #define _ATOMIC_TYPE_uint_fast16_t _wdb_atomic2
+  #define _ATOMIC_TYPE_uint32_t     _wdb_atomic4
+
   #define ATOMIC_TYPE64     _wdb_atomic8    /* 8-byte: uint64_t */
   #define ATOMIC_TYPE_PTR(T) _wdb_atomic8   /* pointer-sized: hbtrie_node_t*, etc. */
   #define ATOMIC_TYPE_TXN   _wdb_atomic_txn /* 24-byte: transaction_id_t */
@@ -91,13 +107,26 @@
     memory_order_seq_cst = 5
   } memory_order;
 
-  /* ── Inline helpers for 4/8-byte atomics ── */
+  /* ── Inline helpers for 1/2/4/8-byte atomics ── */
 
+  static inline uint8_t _wdb_load1(volatile uint8_t* p) {
+    return (uint8_t)_InterlockedCompareExchange8((volatile char*)p, 0, 0);
+  }
+  static inline uint16_t _wdb_load2(volatile uint16_t* p) {
+    return (uint16_t)_InterlockedCompareExchange16((volatile short*)p, 0, 0);
+  }
   static inline LONG _wdb_load4(volatile LONG* p) {
     return InterlockedCompareExchange(p, 0, 0);
   }
   static inline LONG64 _wdb_load8(volatile LONG64* p) {
     return InterlockedCompareExchange64(p, 0, 0);
+  }
+
+  static inline void _wdb_store1(volatile uint8_t* p, uint8_t v) {
+    InterlockedExchange8((volatile char*)p, (char)v);
+  }
+  static inline void _wdb_store2(volatile uint16_t* p, uint16_t v) {
+    InterlockedExchange16((volatile short*)p, (short)v);
   }
   static inline void _wdb_store4(volatile LONG* p, LONG v) {
     InterlockedExchange(p, v);
@@ -105,17 +134,44 @@
   static inline void _wdb_store8(volatile LONG64* p, LONG64 v) {
     InterlockedExchange64(p, v);
   }
+
+  static inline uint8_t _wdb_xchg1(volatile uint8_t* p, uint8_t v) {
+    return (uint8_t)InterlockedExchange8((volatile char*)p, (char)v);
+  }
+  static inline uint16_t _wdb_xchg2(volatile uint16_t* p, uint16_t v) {
+    return (uint16_t)InterlockedExchange16((volatile short*)p, (short)v);
+  }
   static inline LONG _wdb_xchg4(volatile LONG* p, LONG v) {
     return InterlockedExchange(p, v);
   }
   static inline LONG64 _wdb_xchg8(volatile LONG64* p, LONG64 v) {
     return InterlockedExchange64(p, v);
   }
+
+  static inline uint8_t _wdb_add1(volatile uint8_t* p, int8_t v) {
+    return (uint8_t)InterlockedExchangeAdd8((volatile char*)p, (char)v);
+  }
+  static inline uint16_t _wdb_add2(volatile uint16_t* p, int16_t v) {
+    return (uint16_t)InterlockedExchangeAdd16((volatile short*)p, (short)v);
+  }
   static inline LONG _wdb_add4(volatile LONG* p, LONG v) {
     return InterlockedExchangeAdd(p, v);
   }
   static inline LONG64 _wdb_add8(volatile LONG64* p, LONG64 v) {
     return InterlockedExchangeAdd64(p, v);
+  }
+
+  static inline int _wdb_cas1(volatile uint8_t* obj, uint8_t* expected, uint8_t desired) {
+    uint8_t old = (uint8_t)_InterlockedCompareExchange8((volatile char*)obj, (char)desired, (char)*expected);
+    if (old == *expected) return 1;
+    *expected = old;
+    return 0;
+  }
+  static inline int _wdb_cas2(volatile uint16_t* obj, uint16_t* expected, uint16_t desired) {
+    uint16_t old = (uint16_t)_InterlockedCompareExchange16((volatile short*)obj, (short)desired, (short)*expected);
+    if (old == *expected) return 1;
+    *expected = old;
+    return 0;
   }
   static inline int _wdb_cas4(volatile LONG* obj, LONG* expected, LONG desired) {
     LONG old = InterlockedCompareExchange(obj, desired, *expected);
@@ -142,39 +198,46 @@
     InterlockedExchange(lock, 0);
   }
 
-  /* ── Public macros — dispatch via sizeof((obj)->v) for 4/8-byte ── */
+  /* ── Public macros — dispatch via sizeof((obj)->v) for 1/2/4/8-byte ── */
 
   #define atomic_load(obj) \
-    (sizeof((obj)->v) == 8 \
-      ? (LONG64)_wdb_load8(&(obj)->v) \
-      : (LONG)_wdb_load4(&(obj)->v))
+    (sizeof((obj)->v) == 1 ? (uint64_t)_wdb_load1(&(obj)->v) : \
+     sizeof((obj)->v) == 2 ? (uint64_t)_wdb_load2(&(obj)->v) : \
+     sizeof((obj)->v) == 8 ? (uint64_t)_wdb_load8(&(obj)->v) : \
+                             (uint64_t)_wdb_load4(&(obj)->v))
 
-  #define atomic_store(obj, val) \
-    (sizeof((obj)->v) == 8 \
-      ? _wdb_store8(&(obj)->v, (LONG64)(val)) \
-      : _wdb_store4(&(obj)->v, (LONG)(val)))
+  #define atomic_store(obj, val) do { \
+    if (sizeof((obj)->v) == 1)       _wdb_store1(&(obj)->v, (uint8_t)(val)); \
+    else if (sizeof((obj)->v) == 2)  _wdb_store2(&(obj)->v, (uint16_t)(val)); \
+    else if (sizeof((obj)->v) == 8)  _wdb_store8(&(obj)->v, (LONG64)(val)); \
+    else                             _wdb_store4(&(obj)->v, (LONG)(val)); \
+  } while(0)
 
   #define atomic_store_explicit(obj, val, order) atomic_store(obj, val)
 
   #define atomic_fetch_add(obj, val) \
-    (sizeof((obj)->v) == 8 \
-      ? (LONG64)_wdb_add8(&(obj)->v, (LONG64)(val)) \
-      : (LONG)_wdb_add4(&(obj)->v, (LONG)(val)))
+    (sizeof((obj)->v) == 1 ? (uint64_t)_wdb_add1(&(obj)->v, (int8_t)(val)) : \
+     sizeof((obj)->v) == 2 ? (uint64_t)_wdb_add2(&(obj)->v, (int16_t)(val)) : \
+     sizeof((obj)->v) == 8 ? (uint64_t)_wdb_add8(&(obj)->v, (LONG64)(val)) : \
+                             (uint64_t)_wdb_add4(&(obj)->v, (LONG)(val)))
 
   #define atomic_fetch_sub(obj, val) \
-    (sizeof((obj)->v) == 8 \
-      ? (LONG64)_wdb_add8(&(obj)->v, -(LONG64)(val)) \
-      : (LONG)_wdb_add4(&(obj)->v, -(LONG)(val)))
+    (sizeof((obj)->v) == 1 ? (uint64_t)_wdb_add1(&(obj)->v, (int8_t)(-(val))) : \
+     sizeof((obj)->v) == 2 ? (uint64_t)_wdb_add2(&(obj)->v, (int16_t)(-(val))) : \
+     sizeof((obj)->v) == 8 ? (uint64_t)_wdb_add8(&(obj)->v, -(LONG64)(val)) : \
+                             (uint64_t)_wdb_add4(&(obj)->v, -(LONG)(val)))
 
   #define atomic_exchange_explicit(obj, val, order) \
-    (sizeof((obj)->v) == 8 \
-      ? (LONG64)_wdb_xchg8(&(obj)->v, (LONG64)(val)) \
-      : (LONG)_wdb_xchg4(&(obj)->v, (LONG)(val)))
+    (sizeof((obj)->v) == 1 ? (uint64_t)_wdb_xchg1(&(obj)->v, (uint8_t)(val)) : \
+     sizeof((obj)->v) == 2 ? (uint64_t)_wdb_xchg2(&(obj)->v, (uint16_t)(val)) : \
+     sizeof((obj)->v) == 8 ? (uint64_t)_wdb_xchg8(&(obj)->v, (LONG64)(val)) : \
+                             (uint64_t)_wdb_xchg4(&(obj)->v, (LONG)(val)))
 
   #define atomic_compare_exchange_weak(obj, expected, desired) \
-    (sizeof((obj)->v) == 8 \
-      ? _wdb_cas8(&(obj)->v, (LONG64*)(expected), (LONG64)(desired)) \
-      : _wdb_cas4(&(obj)->v, (LONG*)(expected), (LONG)(desired)))
+    (sizeof((obj)->v) == 1 ? _wdb_cas1(&(obj)->v, (uint8_t*)(expected), (uint8_t)(desired)) : \
+     sizeof((obj)->v) == 2 ? _wdb_cas2(&(obj)->v, (uint16_t*)(expected), (uint16_t)(desired)) : \
+     sizeof((obj)->v) == 8 ? _wdb_cas8(&(obj)->v, (LONG64*)(expected), (LONG64)(desired)) : \
+                             _wdb_cas4(&(obj)->v, (LONG*)(expected), (LONG)(desired)))
 
   /* ── Pointer-specific macros for ATOMIC_TYPE_PTR fields ──
    * These cast between LONG64 and pointer types to handle the
