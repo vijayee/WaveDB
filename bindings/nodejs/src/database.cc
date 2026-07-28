@@ -23,10 +23,13 @@
 #include "subtree.h"
 #include "database.h"
 
-Napi::FunctionReference WaveDB::constructor_;
+Napi::FunctionReference* WaveDB::constructor_ = nullptr;
 
 void WaveDB::Cleanup(void* arg) {
-  constructor_.Reset();
+  if (constructor_) {
+    delete constructor_;
+    constructor_ = nullptr;
+  }
 }
 
 Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
@@ -59,7 +62,7 @@ Napi::Object WaveDB::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_getDbPtr", &WaveDB::GetDbPtr),
   });
 
-  constructor_ = Napi::Persistent(func);
+  constructor_ = new Napi::FunctionReference(Napi::Persistent(func));
   exports.Set("WaveDB", func);
 
   napi_add_env_cleanup_hook(env, Cleanup, nullptr);
@@ -1655,7 +1658,7 @@ Napi::Value WaveDB::CreateReadStream(const Napi::CallbackInfo& info) {
   // WaveDB wrapper, not the External — do NOT free db_ in the finalizer.
   Napi::External<database_t> dbExternal = Napi::External<database_t>::New(
     env, db_, [](Napi::Env, database_t*) { /* no-op: WaveDB owns the pointer */ });
-  Napi::Object iterObj = Iterator::constructor_.New({ dbExternal, options, info.This() });
+  Napi::Object iterObj = Iterator::constructor_->New({ dbExternal, options, info.This() });
 
   return iterObj;
 }
@@ -1698,7 +1701,7 @@ Napi::Value WaveDB::OpenSubtree(const Napi::CallbackInfo& info) {
   // which would otherwise leak the External wrapper on the V8 heap. The Subtree
   // destructor calls database_subtree_close to properly free the native resource.
   napi_value ext = Napi::External<database_subtree_t>::New(env, st, [](Napi::Env, database_subtree_t*) { /* no-op: Subtree destructor handles cleanup */ });
-  Napi::Object subtreeObj = Subtree::constructor_.New({
+  Napi::Object subtreeObj = Subtree::constructor_->New({
     Napi::Value(env, ext),
     Napi::String::New(env, std::string(1, delim)),
     Napi::Boolean::New(env, syncOnly_)

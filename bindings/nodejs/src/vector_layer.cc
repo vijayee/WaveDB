@@ -182,9 +182,10 @@ public:
 
   VectorLayer(const Napi::CallbackInfo& info);
   ~VectorLayer();
+  static void Cleanup(void* arg);
 
 private:
-  static Napi::FunctionReference constructor_;
+  static Napi::FunctionReference* constructor_;
   vector_layer_t* layer_;
 
   // Sync operations
@@ -199,7 +200,15 @@ private:
   Napi::Value Close(const Napi::CallbackInfo& info);
 };
 
-Napi::FunctionReference VectorLayer::constructor_;
+Napi::FunctionReference* VectorLayer::constructor_ = nullptr;
+
+void VectorLayer::Cleanup(void* arg) {
+  (void)arg;
+  if (constructor_) {
+    delete constructor_;
+    constructor_ = nullptr;
+  }
+}
 
 Napi::Object VectorLayer::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
@@ -216,8 +225,10 @@ Napi::Object VectorLayer::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("close", &VectorLayer::Close),
   });
 
-  constructor_ = Napi::Persistent(func);
+  constructor_ = new Napi::FunctionReference(Napi::Persistent(func));
   exports.Set("VectorLayer", func);
+
+  napi_add_env_cleanup_hook(env, VectorLayer::Cleanup, nullptr);
 
   // Export the enum values as top-level constants so JS callers don't have
   // to remember the integer values.

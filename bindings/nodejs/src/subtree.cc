@@ -13,7 +13,14 @@
 #include "async_bridge.h"
 #include "subtree.h"
 
-Napi::FunctionReference Subtree::constructor_;
+Napi::FunctionReference* Subtree::constructor_ = nullptr;
+
+void Subtree::Cleanup(void* arg) {
+  if (constructor_) {
+    delete constructor_;
+    constructor_ = nullptr;
+  }
+}
 
 Napi::Object Subtree::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
@@ -33,8 +40,10 @@ Napi::Object Subtree::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("_getPtr", &Subtree::GetPtr),
   });
 
-  constructor_ = Napi::Persistent(func);
+  constructor_ = new Napi::FunctionReference(Napi::Persistent(func));
   exports.Set("Subtree", func);
+
+  napi_add_env_cleanup_hook(env, Subtree::Cleanup, nullptr);
 
   return exports;
 }

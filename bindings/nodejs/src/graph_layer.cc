@@ -18,7 +18,8 @@ public:
   ~GraphLayer();
 
 private:
-  static Napi::FunctionReference constructor_;
+  static Napi::FunctionReference* constructor_;
+  static void Cleanup(void* arg);
   graph_layer_t* layer_;
   AsyncBridge bridge_;
   bool syncOnly_;
@@ -43,7 +44,14 @@ private:
                                    const Napi::CallbackInfo& info, int callbackArgIndex);
 };
 
-Napi::FunctionReference GraphLayer::constructor_;
+Napi::FunctionReference* GraphLayer::constructor_ = nullptr;
+
+void GraphLayer::Cleanup(void* arg) {
+  if (constructor_) {
+    delete constructor_;
+    constructor_ = nullptr;
+  }
+}
 
 Napi::Object GraphLayer::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
@@ -62,8 +70,10 @@ Napi::Object GraphLayer::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("close", &GraphLayer::Close),
   });
 
-  constructor_ = Napi::Persistent(func);
+  constructor_ = new Napi::FunctionReference(Napi::Persistent(func));
   exports.Set("GraphLayer", func);
+
+  napi_add_env_cleanup_hook(env, GraphLayer::Cleanup, nullptr);
 
   return exports;
 }

@@ -14,7 +14,8 @@ public:
   // Accessor for getting the raw pointer as a number (cross-addon boundary)
   Napi::Value GetPtr(const Napi::CallbackInfo& info);
 
-  static Napi::FunctionReference constructor_;
+  static Napi::FunctionReference* constructor_;
+  static void Cleanup(void* arg);
 
 private:
   database_subtree_t* st_;

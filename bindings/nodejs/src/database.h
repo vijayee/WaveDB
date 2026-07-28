@@ -62,6 +62,6 @@ private:
   // Helper: create an AsyncOpContext with a JS Promise and optional callback
   AsyncOpContext* CreateOpContext(Napi::Env env, AsyncOpType type, const Napi::CallbackInfo& info, int callbackArgIndex);
 
-  static Napi::FunctionReference constructor_;
+  static Napi::FunctionReference* constructor_;
   static void Cleanup(void* arg);
 };

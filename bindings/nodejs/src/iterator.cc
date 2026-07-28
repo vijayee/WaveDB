@@ -6,7 +6,14 @@
 #include "path.h"
 #include "identifier.h"
 
-Napi::FunctionReference Iterator::constructor_;
+Napi::FunctionReference* Iterator::constructor_ = nullptr;
+
+void Iterator::Cleanup(void* arg) {
+  if (constructor_) {
+    delete constructor_;
+    constructor_ = nullptr;
+  }
+}
 
 Napi::Object Iterator::Init(Napi::Env env, Napi::Object exports) {
   Napi::HandleScope scope(env);
@@ -16,13 +23,11 @@ Napi::Object Iterator::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("end", &Iterator::End),
   });
 
-  constructor_ = Napi::Persistent(func);
+  constructor_ = new Napi::FunctionReference(Napi::Persistent(func));
   exports.Set("Iterator", func);
 
   // Register cleanup hook to release constructor_ before Node.js shuts down
-  napi_add_env_cleanup_hook(env, [](void* arg) {
-    Iterator::constructor_.Reset();
-  }, nullptr);
+  napi_add_env_cleanup_hook(env, Iterator::Cleanup, nullptr);
 
   return exports;
 }

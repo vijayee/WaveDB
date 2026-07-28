@@ -13,7 +13,8 @@ public:
   Iterator(const Napi::CallbackInfo& info);
   ~Iterator();
 
-  static Napi::FunctionReference constructor_;
+  static Napi::FunctionReference* constructor_;
+  static void Cleanup(void* arg);
 
 private:
   Napi::Value Read(const Napi::CallbackInfo& info);
