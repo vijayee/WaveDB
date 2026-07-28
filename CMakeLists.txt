@@ -425,9 +425,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_vector wavedb gtest gtest_main)
     add_test(NAME test_vector COMMAND test_vector)
 
-    # Vector layer bench driver (NOT a unit test — run manually for the spike)
-    add_executable(bench_vector bench/vector/bench_vector.c)
-    target_link_libraries(bench_vector wavedb m)
+    # Vector layer bench driver (NOT a unit test — run manually for the spike).
+    # It uses POSIX-only APIs (dirent, mkdtemp, clock_gettime), so it is only
+    # built on non-Windows platforms.
+    if(NOT WIN32)
+        add_executable(bench_vector bench/vector/bench_vector.c)
+        target_link_libraries(bench_vector wavedb m)
+    endif()
 
     # Test for Graph DSL Parser
     add_executable(test_graph_parser tests/test_graph_parser.cpp)
