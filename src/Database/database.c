@@ -720,6 +720,8 @@ int database_flush_dirty_bnodes(database_t* db) {
     root->is_dirty = 0;
 
     // 6. Write superblock with new root offset and transaction ID
+    uint64_t root_offset_for_superblock =
+        (root->disk_offset == UINT64_MAX) ? 0 : root->disk_offset;
     transaction_id_t last_txn;
     if (db->tx_manager != NULL) {
         last_txn = tx_manager_get_last_committed(db->tx_manager);
@@ -728,7 +730,7 @@ int database_flush_dirty_bnodes(database_t* db) {
         last_txn.nanos = 0;
         last_txn.count = 0;
     }
-    int sb_rc = page_file_write_superblock(db->page_file, root->disk_offset, 0, &last_txn);
+    int sb_rc = page_file_write_superblock(db->page_file, root_offset_for_superblock, 0, &last_txn);
     if (sb_rc != 0) {
         return -1;
     }
@@ -1014,7 +1016,7 @@ database_t* database_create_with_config(const char* location,
                 // Try to load root from superblock
                 page_superblock_t sb;
                 int sb_rc = page_file_read_superblock(db->page_file, &sb, NULL);
-                if (sb_rc == 0 && sb.root_offset != 0) {
+                if (sb_rc == 0 && sb.root_offset != 0 && sb.root_offset != UINT64_MAX) {
                     // Root exists on disk — load it
                     size_t root_len = 0;
                     uint8_t* root_data = page_file_read_node(db->page_file, sb.root_offset, &root_len);
