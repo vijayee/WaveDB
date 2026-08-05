@@ -61,9 +61,14 @@ LIB_PATH="${WAVEDB_LIB_PATH:-}"
 if [ -z "$LIB_PATH" ]; then
     # Auto-discover: newest build*/libwavedb.so under REPO_ROOT, prefer
     # canonical name. Mirrors setup.py's auto-discovery logic.
+    # NOTE: -path matches against the full path find walks (anchored at the
+    # starting point), so with an absolute REPO_ROOT the pattern must be
+    # prefixed with '*/' — a bare 'build*/libwavedb.so' never matches.
+    # Use -printf '%T@ %p' + sort (not `xargs ls -t`) so paths with spaces
+    # (e.g. ".../victor morrow/...") survive intact.
     LIB_PATH="$(find "$REPO_ROOT" -maxdepth 2 -name 'libwavedb.so' \
-                 -path 'build*/libwavedb.so' 2>/dev/null \
-                 | xargs ls -t 2>/dev/null | head -1 || true)"
+                 -path '*/build*/libwavedb.so' -printf '%T@ %p\n' 2>/dev/null \
+                 | sort -rn | head -1 | cut -d' ' -f2-)"
     if [ -z "$LIB_PATH" ]; then
         echo "FAIL: no libwavedb.so found under $REPO_ROOT/build*/. Run:" >&2
         echo "  cmake -S $REPO_ROOT -B $REPO_ROOT/build-release -DCMAKE_BUILD_TYPE=Release" >&2
@@ -102,9 +107,17 @@ if ! grep -q "identifier_get_data_copy returns NULL for a valid empty value" \
     exit 1
 fi
 # Also verify _lib/__init__.py is in the wheel (without it, importlib.resources
-# can't locate the bundled libwavedb.so — broke 0.1.5).
+# can't locate the bundled libwavedb.so — broke 0.1.5). Use python's zipfile
+# module rather than the `unzip` binary so the check works on minimal images
+# (e.g. WSL/ubuntu-base) where unzip isn't installed.
 WHEEL="$(ls dist/wavedb-*.whl | head -1)"
-if ! unzip -l "$WHEEL" | grep -q "wavedb/_lib/__init__.py"; then
+if ! python3 - "$WHEEL" <<'PYEOF'
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    if not any(n == "wavedb/_lib/__init__.py" for n in z.namelist()):
+        sys.exit(1)
+PYEOF
+then
     echo "FAIL: wheel missing wavedb/_lib/__init__.py — package loader will break." >&2
     exit 1
 fi
@@ -113,7 +126,10 @@ echo "OK: sdist has empty-value fix; wheel has _lib/__init__.py."
 
 echo
 echo "=== [6/8] Install wheel and run tests against installed package ==="
-pip install --user --force-reinstall "$WHEEL" 2>&1 | tail -3
+# Use `python3 -m pip` (not bare `pip`) so the flow works on minimal images
+# (e.g. WSL/ubuntu-base) where only the pip module is present, not the `pip`
+# entry point on PATH.
+python3 -m pip install --user --force-reinstall "$WHEEL" 2>&1 | tail -3
 # Run tests against the installed package, NOT the source tree (PYTHONPATH
 # would shadow the installed package and hide wheel-only bugs).
 ( cd "$PY_BIND_DIR" && python3 -m pytest tests/ -q 2>&1 | tail -3 )
@@ -127,12 +143,12 @@ fi
 
 echo
 echo "=== [7/8] Upload sdist to PyPI ==="
-twine upload "$SDIST" 2>&1 | tail -3
+python3 -m twine upload "$SDIST" 2>&1 | tail -3
 
 echo
 echo "=== [8/8] Pull from PyPI and re-verify ==="
 sleep 5  # give PyPI a moment to propagate
-pip install --user --upgrade "wavedb==${VERSION}" 2>&1 | tail -3
+python3 -m pip install --user --upgrade "wavedb==${VERSION}" 2>&1 | tail -3
 python3 -c "
 import wavedb
 from wavedb import WaveDB, GraphLayer
