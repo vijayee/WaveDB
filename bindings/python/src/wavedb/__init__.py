@@ -23,7 +23,15 @@ from .vector_layer import (
     VectorResult,
 )
 
-__version__ = "0.2.2"
+try:
+    from importlib.metadata import version as _version, PackageNotFoundError
+
+    try:
+        __version__ = _version("wavedb")
+    except PackageNotFoundError:
+        __version__ = "0.0.0+dev"
+except ImportError:  # Python < 3.8 fallback (not supported, but be safe)
+    __version__ = "0.0.0+dev"
 
 __all__ = [
     "Distance",
