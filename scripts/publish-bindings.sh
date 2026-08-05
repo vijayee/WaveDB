@@ -45,7 +45,12 @@ fi
 
 echo "=== [1/4] Build release C library ==="
 if [ ! -d build-release ]; then
-    cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release 2>&1 | tail -3
+    # BUILD_PYTHON_BINDINGS/BUILD_DART_BINDINGS gate the wavedb_shared target
+    # (CMakeLists.txt) that produces libwavedb.so — without them only the
+    # static libwavedb.a is built and the python/dart steps below fail to
+    # find the shared lib.
+    cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_PYTHON_BINDINGS=ON -DBUILD_DART_BINDINGS=ON 2>&1 | tail -3
 fi
 cmake --build build-release -j 2>&1 | tail -3
 RELEASE_LIB="build-release/libwavedb.so"
