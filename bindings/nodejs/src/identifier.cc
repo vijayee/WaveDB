@@ -6,6 +6,9 @@
 #include "HBTrie/chunk.h"
 #include "Buffer/buffer.h"
 #include <cctype>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <node_api.h>
 
 // Extract JS value into a std::string (copies Buffer data, no truncation for strings).
@@ -19,9 +22,21 @@ bool ValueFromJSDynamic(Napi::Env env, Napi::Value value, std::string& out) {
         return true;
     } else if (value.IsNumber()) {
         // Store numbers as strings so object/array flattening can round-trip
-        // through the scalar key-value store. JSON encoding would also work,
-        // but a simple decimal string keeps reconstruction predictable.
-        out = std::to_string(value.As<Napi::Number>().DoubleValue());
+        // through the scalar key-value store. GetObject's reader treats a
+        // no-'.'/'e'/'E' string as a number, so integers >= 2 round-trip as
+        // numbers when stored as plain "30". 0 and 1 collide with the boolean
+        // encoding ("0"/"1" → false/true), so they keep the 6-decimal format
+        // and read back as strings (pre-existing limitation). Floats also
+        // keep the 6-decimal format — the reader currently treats any
+        // '.'-containing string as a string, not a number.
+        double d = value.As<Napi::Number>().DoubleValue();
+        if (std::isfinite(d) && d == std::floor(d) && std::fabs(d) >= 2.0 &&
+            d >= static_cast<double>(std::numeric_limits<int64_t>::min()) &&
+            d <= static_cast<double>(std::numeric_limits<int64_t>::max())) {
+            out = std::to_string(static_cast<int64_t>(d));
+        } else {
+            out = std::to_string(d);
+        }
         return true;
     } else if (value.IsBoolean()) {
         out = value.As<Napi::Boolean>().Value() ? "1" : "0";

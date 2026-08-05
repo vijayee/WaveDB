@@ -190,4 +190,36 @@ describe('WaveDB', () => {
       }
     });
   });
+
+  describe('putObject/getObject number round-trip', () => {
+    it('should round-trip integers >= 2 as numbers, not strings', () => {
+      db.putObjectSync(['users', 'alice'], { name: 'Alice', age: 30, score: -5 });
+      const obj = db.getObjectSync(['users', 'alice']);
+      assert.strictEqual(obj.age, 30, 'age should be number 30, not "30.000000"');
+      assert.strictEqual(obj.score, -5, 'score should be number -5');
+      assert.strictEqual(typeof obj.age, 'number');
+      assert.strictEqual(typeof obj.score, 'number');
+    });
+
+    it('should not misinterpret 0/1 as booleans (keeps string form)', () => {
+      // 0 and 1 collide with the boolean encoding, so they keep the 6-decimal
+      // format and read back as strings. This pins the pre-existing limitation
+      // so a future fix knows what it has to preserve.
+      db.putObjectSync(['k'], { zero: 0, one: 1, two: 2 });
+      const obj = db.getObjectSync(['k']);
+      assert.strictEqual(obj.two, 2, '2 should round-trip as number');
+      // zero/one stay as strings (pre-existing limitation, not a regression)
+      assert.strictEqual(typeof obj.zero, 'string');
+      assert.strictEqual(typeof obj.one, 'string');
+    });
+
+    it('should preserve booleans', () => {
+      db.putObjectSync(['flags'], { active: true, disabled: false });
+      const obj = db.getObjectSync(['flags']);
+      assert.strictEqual(obj.active, true);
+      assert.strictEqual(obj.disabled, false);
+      assert.strictEqual(typeof obj.active, 'boolean');
+      assert.strictEqual(typeof obj.disabled, 'boolean');
+    });
+  });
 });
