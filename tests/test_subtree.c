@@ -1503,6 +1503,153 @@ static void test_subtree_schema_collision(void) {
     printf("=== test_subtree_schema_collision DONE ===\n");
 }
 
+/* ---- Test 20: delete_prefix must not touch lexicographically-greater siblings ----
+ *
+ * The original implementation built scan_prefix = "prefix/" and called
+ * database_scan_sync_raw, which passes NULL for end_path. That made the
+ * scan unbounded on the upper side, so it returned every key >= "prefix/"
+ * — including sibling subtrees whose names sort lexicographically AFTER
+ * the target prefix. deleteSubtree("users/bob") silently deleted
+ * users/carol/* and users/dave while leaving users/alice/* (lex-less)
+ * untouched. This regression test pins the correct behavior: only keys
+ * with the exact prefix are removed.
+ */
+static void test_subtree_delete_prefix_lex_greater_sibling(void) {
+    printf("\n=== test_subtree_delete_prefix_lex_greater_sibling ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir),
+                                    "wavedb_subtree_del_lex");
+    ASSERT(db != NULL, "Create database");
+
+    /* Put keys under three sibling prefixes. "alice" < "bob" < "carol" < "dave"
+     * lexicographically, so bob's scan-range must include only bob/* and
+     * exclude alice/* (lex-less) AND carol/* + dave (lex-greater). */
+    const char* entries[] = {
+        "users/alice/name", "users/alice/age",
+        "users/bob/name",   "users/bob/age",
+        "users/carol/name", "users/carol/age",
+        "users/dave",
+    };
+    const char* vals[] = {
+        "Alice", "30", "Bob", "25", "Carol", "40", "dave-data",
+    };
+    const int n = (int)(sizeof(entries) / sizeof(entries[0]));
+    for (int i = 0; i < n; i++) {
+        int rc = database_put_sync_raw(db, entries[i], strlen(entries[i]), '/',
+                                       (const uint8_t*)vals[i], strlen(vals[i]));
+        ASSERT(rc == 0, "Put sibling key succeeds");
+    }
+
+    /* Delete only the "users/bob" subtree prefix. */
+    int rc = database_subtree_delete_prefix(db, "users/bob", '/');
+    ASSERT(rc == 0, "Delete prefix 'users/bob' succeeds");
+
+    /* bob's children must be gone. */
+    const char* gone[] = { "users/bob/name", "users/bob/age" };
+    for (int i = 0; i < 2; i++) {
+        uint8_t* val = NULL; size_t vlen = 0;
+        int grc = database_get_sync_raw(db, gone[i], strlen(gone[i]), '/', &val, &vlen);
+        ASSERT(grc == -2, "bob child is gone after delete");
+        if (val) database_raw_value_free(val);
+    }
+
+    /* All sibling keys must still be present and intact. */
+    const char* keep[] = {
+        "users/alice/name", "users/alice/age",
+        "users/carol/name", "users/carol/age",
+        "users/dave",
+    };
+    const char* keep_vals[] = {
+        "Alice", "30", "Carol", "40", "dave-data",
+    };
+    for (int i = 0; i < 5; i++) {
+        uint8_t* val = NULL; size_t vlen = 0;
+        int grc = database_get_sync_raw(db, keep[i], strlen(keep[i]), '/',
+                                        &val, &vlen);
+        ASSERT(grc == 0, "Sibling key survives delete");
+        if (grc == 0 && val != NULL) {
+            ASSERT(vlen == strlen(keep_vals[i]) &&
+                   memcmp(val, keep_vals[i], vlen) == 0,
+                   "Sibling key value intact");
+            database_raw_value_free(val);
+        }
+    }
+
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_delete_prefix_lex_greater_sibling DONE ===\n");
+}
+
+/* ---- Test 21: subtree_count must not count lexicographically-greater siblings ----
+ *
+ * Same root cause as test_subtree_delete_prefix_lex_greater_sibling: the old
+ * implementation built scan_prefix = "prefix/" and called database_scan_sync_raw
+ * with no end bound, so the count included every key >= "prefix/" — including
+ * lex-greater siblings. This regression test pins the correct behavior.
+ */
+static void test_subtree_count_lex_greater_sibling(void) {
+    printf("\n=== test_subtree_count_lex_greater_sibling ===\n");
+
+    char tmpdir[256];
+    database_t* db = create_test_db(tmpdir, sizeof(tmpdir),
+                                    "wavedb_subtree_count_lex");
+    ASSERT(db != NULL, "Create database");
+
+    /* Three sibling subtrees. "alice" < "bob" < "carol" lexicographically. */
+    database_subtree_t* st_bob   = database_subtree_open(db, "users/bob",   '/');
+    database_subtree_t* st_carol = database_subtree_open(db, "users/carol", '/');
+    database_subtree_t* st_alice = database_subtree_open(db, "users/alice", '/');
+    ASSERT(st_bob   != NULL, "Open subtree 'users/bob'");
+    ASSERT(st_carol != NULL, "Open subtree 'users/carol'");
+    ASSERT(st_alice != NULL, "Open subtree 'users/alice'");
+
+    const char* bob_keys[]   = { "name", "age", "email" };
+    const char* carol_keys[] = { "name", "age" };
+    const char* alice_keys[] = { "name", "age" };
+    const char* val = "x";
+
+    for (int i = 0; i < 3; i++) {
+        int rc = database_subtree_put_sync_raw(st_bob, bob_keys[i],
+                                               strlen(bob_keys[i]), '/',
+                                               (const uint8_t*)val, 1);
+        ASSERT(rc == 0, "Put in users/bob succeeds");
+    }
+    for (int i = 0; i < 2; i++) {
+        int rc = database_subtree_put_sync_raw(st_carol, carol_keys[i],
+                                               strlen(carol_keys[i]), '/',
+                                               (const uint8_t*)val, 1);
+        ASSERT(rc == 0, "Put in users/carol succeeds");
+    }
+    for (int i = 0; i < 2; i++) {
+        int rc = database_subtree_put_sync_raw(st_alice, alice_keys[i],
+                                               strlen(alice_keys[i]), '/',
+                                               (const uint8_t*)val, 1);
+        ASSERT(rc == 0, "Put in users/alice succeeds");
+    }
+
+    /* bob has 3 keys. Old buggy code would count bob's 3 + carol's 2 = 5
+     * (carol sorts after bob). Alice sorts before bob, so it was never
+     * wrongly included. */
+    size_t bob_count = database_subtree_count(st_bob);
+    ASSERT(bob_count == 3, "Count of users/bob is 3 (not 5)");
+
+    size_t carol_count = database_subtree_count(st_carol);
+    ASSERT(carol_count == 2, "Count of users/carol is 2");
+
+    size_t alice_count = database_subtree_count(st_alice);
+    ASSERT(alice_count == 2, "Count of users/alice is 2");
+
+    database_subtree_close(st_bob);
+    database_subtree_close(st_carol);
+    database_subtree_close(st_alice);
+    database_destroy(db);
+    cleanup_tmpdir(tmpdir);
+
+    printf("=== test_subtree_count_lex_greater_sibling DONE ===\n");
+}
+
 /* ---- Main ---- */
 
 int main(void) {
@@ -1527,6 +1674,8 @@ int main(void) {
     test_subtree_delete_comprehensive();
     test_subtree_multi_level_prefix();
     test_subtree_schema_collision();
+    test_subtree_delete_prefix_lex_greater_sibling();
+    test_subtree_count_lex_greater_sibling();
 
     printf("\n%d test(s) failed.\n", failures);
     return failures > 0 ? 1 : 0;

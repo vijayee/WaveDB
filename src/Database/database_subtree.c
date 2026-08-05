@@ -75,21 +75,55 @@ int database_subtree_delete_prefix(database_t* db,
                                     char delimiter) {
     if (db == NULL || prefix == NULL) return -1;
 
-    /* Build the scan prefix: "prefix{delimiter}" */
     size_t prefix_len = strlen(prefix);
-    size_t scan_len = prefix_len + 1; /* prefix + delimiter */
-    char* scan_prefix = get_memory(scan_len + 1); /* +1 for null terminator */
+    if (prefix_len == 0) return 0;  /* nothing to delete; empty prefix has no "under" */
 
+    /* Strip one trailing delimiter so "users/bob" and "users/bob/" behave
+     * identically — both target the keys under "users/bob/". */
+    if (prefix_len > 0 && prefix[prefix_len - 1] == delimiter) {
+        prefix_len--;
+    }
+    if (prefix_len == 0) return 0;  /* prefix was just the delimiter */
+
+    /* Scan start: "prefix{delimiter}". Every key under the prefix sorts
+     * >= this start because the delimiter is the lowest byte that can
+     * follow the prefix at this position. */
+    size_t scan_len = prefix_len + 1;
+    char* scan_prefix = get_memory(scan_len + 1);
+    if (scan_prefix == NULL) return -1;
     memcpy(scan_prefix, prefix, prefix_len);
     scan_prefix[prefix_len] = delimiter;
     scan_prefix[scan_len] = '\0';
 
-    /* Scan for all keys under the prefix */
+    /* Exclusive upper bound: prefix + (delimiter + 1). Any key sharing the
+     * prefix compares less than this bound because at the byte after the
+     * prefix the key has the delimiter and the bound has delimiter+1.
+     * Sibling prefixes that sort lexicographically greater (e.g. "users/carol"
+     * vs target "users/bob") compare greater than the bound and are excluded.
+     * For '/' (0x2F) this is '0' (0x30), matching append_successor() in
+     * src/Layers/graph/graph_ops.c. If delimiter is 0xFF the successor wraps
+     * to 0x00 and the range becomes empty (no keys deleted) — a safe
+     * degradation; 0xFF delimiters are not used in practice. */
+    unsigned char succ = (unsigned char)delimiter + 1;
+    size_t end_len = prefix_len + 1;
+    char* end_prefix = get_memory(end_len + 1);
+    if (end_prefix == NULL) {
+        free(scan_prefix);
+        return -1;
+    }
+    memcpy(end_prefix, prefix, prefix_len);
+    end_prefix[prefix_len] = (char)succ;
+    end_prefix[end_len] = '\0';
+
+    /* Range scan [scan_prefix, end_prefix) — bounded on both sides, so
+     * lexicographically-greater siblings are not swept into the result. */
     raw_result_t* results = NULL;
     size_t count = 0;
-    int rc = database_scan_sync_raw(db, scan_prefix, scan_len, delimiter,
-                                     &results, &count);
+    int rc = database_scan_range_sync_raw(db, scan_prefix, scan_len,
+                                          end_prefix, end_len, delimiter,
+                                          &results, &count);
     free(scan_prefix);
+    free(end_prefix);
 
     if (rc != 0) return -1;
 
@@ -864,20 +898,46 @@ int database_subtree_flush_dirty_bnodes(database_subtree_t* st) {
 size_t database_subtree_count(database_subtree_t* st) {
     if (st == NULL) return 0;
 
-    /* Build the scan prefix: "prefix{delimiter}" */
-    size_t scan_len = st->prefix_len + 1; /* prefix + delimiter */
-    char* scan_prefix = get_memory(scan_len + 1); /* +1 for null terminator */
-    if (scan_prefix == NULL) return 0;
+    /* Empty subtree prefix = whole database. Count all keys with an unbounded
+     * scan (no start, no end). */
+    if (st->prefix_len == 0) {
+        raw_result_t* results = NULL;
+        size_t count = 0;
+        int rc = database_scan_sync_raw(st->db, NULL, 0, st->delimiter,
+                                         &results, &count);
+        if (rc != 0) return 0;
+        database_raw_results_free(results, count);
+        return count;
+    }
 
+    /* Bounded range scan [prefix/delim, prefix+(delim+1)) so lexicographically-
+     * greater siblings are not counted. Same pattern as
+     * database_subtree_delete_prefix — see there for rationale. */
+    size_t scan_len = st->prefix_len + 1;
+    char* scan_prefix = get_memory(scan_len + 1);
+    if (scan_prefix == NULL) return 0;
     memcpy(scan_prefix, st->prefix, st->prefix_len);
     scan_prefix[st->prefix_len] = st->delimiter;
     scan_prefix[scan_len] = '\0';
 
+    unsigned char succ = (unsigned char)st->delimiter + 1;
+    size_t end_len = st->prefix_len + 1;
+    char* end_prefix = get_memory(end_len + 1);
+    if (end_prefix == NULL) {
+        free(scan_prefix);
+        return 0;
+    }
+    memcpy(end_prefix, st->prefix, st->prefix_len);
+    end_prefix[st->prefix_len] = (char)succ;
+    end_prefix[end_len] = '\0';
+
     raw_result_t* results = NULL;
     size_t count = 0;
-    int rc = database_scan_sync_raw(st->db, scan_prefix, scan_len, st->delimiter,
-                                     &results, &count);
+    int rc = database_scan_range_sync_raw(st->db, scan_prefix, scan_len,
+                                           end_prefix, end_len, st->delimiter,
+                                           &results, &count);
     free(scan_prefix);
+    free(end_prefix);
 
     if (rc != 0) return 0;
 

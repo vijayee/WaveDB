@@ -1340,6 +1340,33 @@ Napi::Value WaveDB::PutObjectSync(const Napi::CallbackInfo& info) {
   return env.Undefined();
 }
 
+/* Bounded prefix scan: returns all keys with the given prefix (i.e., keys
+ * starting with "prefix{delimiter}"). Computes an exclusive upper bound
+ * so lexicographically-greater siblings are not loaded into memory — the
+ * same fix as database_subtree_delete_prefix in src/Database/database_subtree.c.
+ * Empty prefix = whole database; fall back to an unbounded scan. */
+static int BoundedPrefixScan(database_t* db,
+                             const std::string& prefix,
+                             char delimiter,
+                             raw_result_t** results,
+                             size_t* count) {
+  if (prefix.empty()) {
+    return database_scan_sync_raw(db, nullptr, 0, delimiter, results, count);
+  }
+
+  std::string scan_start = prefix;
+  scan_start += delimiter;
+
+  unsigned char succ = static_cast<unsigned char>(delimiter) + 1;
+  std::string end_prefix = prefix;
+  end_prefix += static_cast<char>(succ);
+
+  return database_scan_range_sync_raw(db,
+      scan_start.c_str(), scan_start.size(),
+      end_prefix.c_str(), end_prefix.size(),
+      delimiter, results, count);
+}
+
 /* Descend into a reconstructed JS value by a delimiter-delimited prefix.
  * Used by GetObject/GetObjectSync so getObjectSync('users/alice') returns
  * the object stored under that path, not the whole tree rooted at "".
@@ -1390,7 +1417,7 @@ Napi::Value WaveDB::GetObject(const Napi::CallbackInfo& info) {
 
   raw_result_t* results = nullptr;
   size_t count = 0;
-  int rc = database_scan_sync_raw(db_, prefix_str.c_str(), prefix_str.size(), delimiter_, &results, &count);
+  int rc = BoundedPrefixScan(db_, prefix_str, delimiter_, &results, &count);
 
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
@@ -1499,7 +1526,7 @@ Napi::Value WaveDB::GetObjectSync(const Napi::CallbackInfo& info) {
 
   raw_result_t* results = nullptr;
   size_t count = 0;
-  int rc = database_scan_sync_raw(db_, prefix_str.c_str(), prefix_str.size(), delimiter_, &results, &count);
+  int rc = BoundedPrefixScan(db_, prefix_str, delimiter_, &results, &count);
 
   if (rc != 0) {
     Napi::Error::New(env, "IO_ERROR: Scan failed").ThrowAsJavaScriptException();
