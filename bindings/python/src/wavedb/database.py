@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
+import weakref
 from typing import Any
 
 from ._async import AsyncBridge, decode_identifier_payload
@@ -9,6 +11,44 @@ from ._errors import map_error
 from ._native import ffi, lib, libc
 from .config import VacuumConfig, WaveDBConfig, WaveDBEncryption
 from .exceptions import EncryptionError, InvalidPathError, WaveDBError
+
+
+# ---- shutdown safety ------------------------------------------------------
+# A reference cycle between ``WaveDB._open_subtrees`` (holds Subtree /
+# GraphLayer / VectorLayer) and each child handle's ``_db`` back-reference can
+# strand both objects during interpreter shutdown: neither ``__del__`` runs,
+# so the C ``database_destroy`` is never called, and the background worker
+# threads (hierarchical timing wheel + work pool) are never stopped.  Those
+# threads keep running and crash with an access violation when the interpreter
+# tears down their memory out from under them (observed as a SIGSEGV / exit
+# code 139 in ``wal_manager_flush`` during teardown).
+#
+# Closing here -- subtrees first, then the db -- runs ``database_destroy``
+# during normal execution, before the dangerous late-shutdown phase.  A
+# ``WeakSet`` tracks live instances without keeping them alive.
+_live_dbs: "weakref.WeakSet[WaveDB]" = weakref.WeakSet()
+
+
+def _shutdown_close_all() -> None:
+    """atexit hook: close every still-live WaveDB before the interpreter exits."""
+    for db in list(_live_dbs):
+        try:
+            if getattr(db, "_closed", True):
+                continue
+            # Close open subtrees / vector-layers first so db.close() does not
+            # raise "cannot close while subtrees are still open".  Snapshot the
+            # set because each child's close() mutates db._open_subtrees.
+            for child in list(getattr(db, "_open_subtrees", ())):
+                try:
+                    child.close()
+                except Exception:
+                    pass
+            db.close()
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_close_all)
 
 
 def _c_string(b: bytes) -> bytes:
@@ -167,6 +207,9 @@ class WaveDB:
         # still hold subtree references — destroying the parent database
         # first would leave dangling pointers (UAF).
         self._open_subtrees: set = set()
+        # Track for the atexit shutdown hook (see _shutdown_close_all).  Added
+        # AFTER _db is set so a failed construction is not tracked.
+        _live_dbs.add(self)
 
         # Pre-allocate cffi out-parameter objects for get_sync hot path.
         # Reusing these eliminates ~0.53 us/op of ffi.new allocation overhead
