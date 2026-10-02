@@ -997,22 +997,28 @@ int hbtrie_cursor_next(hbtrie_cursor_t* cursor) {
 
       if (entry == NULL) continue;
 
-      // Lazy load trie_child if needed
-      if (entry->trie_child == NULL && entry->child_disk_offset != 0
-          && cursor->trie->fcache != NULL) {
-        bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
-                                         cursor->trie->chunk_size,
-                                         cursor->trie->btree_node_size);
-      }
-
-      // When an entry has a trie_child (has_value=1 with child), push it for traversal
-      if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
-        cursor->stack[cursor->stack_depth].node = entry->trie_child;
-        cursor->stack[cursor->stack_depth].entry_index = 0;
-        cursor->stack_depth++;
-      }
-
+      /* Canonical trie-level child discipline (mirrors hbtrie_find /
+         hbtrie_insert): an entry whose deeper trie level exists keeps it in
+         the trie_child slot ONLY when has_value=1; a has_value=0 entry
+         keeps its child in the child slot. Loading a trie_child copy for a
+         has_value=0 entry deserializes a SECOND node copy of the same disk
+         node that the write path never mutates or reads. */
       if (entry->has_value) {
+        // Lazy load trie_child if needed
+        if (entry->trie_child == NULL && entry->child_disk_offset != 0
+            && cursor->trie->fcache != NULL) {
+          bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
+                                           cursor->trie->chunk_size,
+                                           cursor->trie->btree_node_size);
+        }
+
+        // When the value also prefixes a deeper trie level, push it for traversal
+        if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
+          cursor->stack[cursor->stack_depth].node = entry->trie_child;
+          cursor->stack[cursor->stack_depth].entry_index = 0;
+          cursor->stack_depth++;
+        }
+
         // Found an entry with a value — return it
         return 0;
       }
@@ -1072,16 +1078,20 @@ int hbtrie_cursor_prev(hbtrie_cursor_t* cursor) {
 
       if (entry == NULL) continue;
 
-      /* Lazy load trie_child if needed. */
-      if (entry->trie_child == NULL && entry->child_disk_offset != 0
-          && cursor->trie->fcache != NULL) {
-        bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
-                                         cursor->trie->chunk_size,
-                                         cursor->trie->btree_node_size);
-      }
-
-      if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
-        if (entry->has_value) {
+      /* Canonical slot discipline: an entry's deeper trie level lives in
+         the trie_child slot only when has_value=1 (a has_value=0 entry's
+         child lives in the child slot — the copy the write path loads and
+         mutates). Materializing a second, trie_child-slot copy for a
+         has_value=0 entry reads a stale snapshot of the write path's node. */
+      if (entry->has_value) {
+        /* Lazy load trie_child if needed. */
+        if (entry->trie_child == NULL && entry->child_disk_offset != 0
+            && cursor->trie->fcache != NULL) {
+          bnode_entry_lazy_load_trie_child(entry, cursor->trie->fcache,
+                                           cursor->trie->chunk_size,
+                                           cursor->trie->btree_node_size);
+        }
+        if (entry->trie_child != NULL && cursor->stack_depth < HBTRIE_CURSOR_MAX_DEPTH) {
           if (frame->value_pending == 0) {
             /* First visit: descend into the subtree first, emit value on
                pop-back. Re-position entry_index at this_index so we revisit
@@ -1098,13 +1108,7 @@ int hbtrie_cursor_prev(hbtrie_cursor_t* cursor) {
             return 0;
           }
         }
-        /* No value, just descend into the subtree. */
-        reverse_push_child(cursor, entry->trie_child);
-        descended = 1;
-        break;
-      }
-
-      if (entry->has_value) {
+        /* No trie_child (and none on disk): plain value leaf — emit. */
         return 0;
       }
 

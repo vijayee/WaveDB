@@ -1411,37 +1411,42 @@ static void seek_to_rightmost(database_iterator_t* iter) {
         bnode_entry_t* entry = bnode_get(btree, count - 1);
         if (entry == NULL) break;
 
-        /* Lazy-load trie_child if needed (reopened db). */
-        if (entry->trie_child == NULL && entry->child_disk_offset != 0 && fcache != NULL) {
-            bnode_entry_lazy_load_trie_child(entry, fcache, chunk_size, btree_node_size);
-        }
-        if (entry->trie_child != NULL) {
-            /* Descend into trie_child. This covers BOTH the has_value=1 +
-               trie_child case (prefix-shared longer keys sort after this
-               entry's value) and the has_value=0 + trie_child case. */
-            if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) break;
-            // push_frame() may realloc iter->stack; re-fetch the parent frame
-            // (child now at stack_depth-1, parent at stack_depth-2) before
-            // writing value_pending / entry_index.
-            frame = &iter->stack[iter->stack_depth - 2];
-            if (entry->has_value) {
-                /* value_pending: keep entry_index at count-1 (do NOT decrement)
-                   so scan_prev re-reads this entry on pop-back and emits its
-                   value via the value_pending two-visit logic. */
-                frame->value_pending = 1;
-            } else {
-                /* Decrement parent so scan_prev doesn't re-process this entry
-                   on pop-back. Underflows to SIZE_MAX when count==1 (sentinel). */
-                frame->entry_index--;
-            }
-            continue;
-        }
-        /* No trie_child. If has_value=1, this is a value-bearing leaf —
-           positioned, stop. MUST check before the `child` branch: the
-           `child`/`value`/`versions` fields share a union, so when
-           has_value=1, entry->child reads the value pointer (not a child
-           hbtrie_node) and descending would type-confuse the pointer. */
+        /* Canonical trie-level child discipline (mirrors hbtrie_find /
+           hbtrie_insert): an entry whose deeper trie level exists keeps it
+           in the trie_child slot ONLY when has_value=1 (the value occupies
+           the child union slot); a has_value=0 entry keeps its child in the
+           child slot itself. Loading or descending the trie_child slot for
+           a has_value=0 entry deserializes a SECOND copy of the same disk
+           node — the write path (hbtrie_insert / ensure_btree_loaded)
+           attaches and mutates the child-copy, so a walk that traverses the
+           trie-child copy never sees that handle's own post-recovery writes
+           (the same-handle reopen-amnesia defect). This walk must therefore
+           load and descend the SAME copy every path agrees on: trie_child
+           only for has_value entries, the child slot otherwise. */
         if (entry->has_value) {
+            /* Value-bearing entry: lazy-load trie_child if needed
+               (reopened db) and descend its subtree first — prefix-shared
+               longer keys under this value sort after the value itself, and
+               scan_prev's two-visit value_pending logic re-emits the value
+               on pop-back. */
+            if (entry->trie_child == NULL && entry->child_disk_offset != 0
+                && fcache != NULL) {
+                bnode_entry_lazy_load_trie_child(entry, fcache, chunk_size,
+                                                  btree_node_size);
+            }
+            if (entry->trie_child != NULL) {
+                if (push_frame(iter, entry->trie_child, iter->stack_depth - 1) < 0) break;
+                // push_frame() may realloc iter->stack; re-fetch the parent
+                // frame (child now at stack_depth-1, parent at
+                // stack_depth-2) before writing value_pending.
+                frame = &iter->stack[iter->stack_depth - 2];
+                /* value_pending: keep entry_index at count-1 (do NOT
+                   decrement) so scan_prev re-reads this entry on pop-back
+                   and emits its value via the two-visit logic. */
+                frame->value_pending = 1;
+                continue;
+            }
+            /* No trie_child (and none on disk): plain value leaf — stop. */
             break;
         }
         if (entry->is_bnode_child) {
@@ -1582,10 +1587,14 @@ int database_scan_prev(database_iterator_t* iter,
 
             if (entry == NULL) continue;
 
-            /* Lazy-load trie_child if needed (reopened db). Needed for the
-               has_value+trie_child descent below, and harmless for the
-               !has_value trie_child branch (which also lazy-loads). */
-            if (entry->trie_child == NULL && entry->child_disk_offset != 0
+            /* Lazy-load trie_child if needed (reopened db). Only for
+               has_value entries — their deeper trie level lives in the
+               trie_child slot (mirrors hbtrie_find/hbtrie_insert's canonical
+               slot discipline; a has_value=0 entry's child lives in the
+               child slot, and eagerly materializing a trie_child copy for it
+               deserializes a SECOND node copy the write path never sees). */
+            if (entry->has_value && entry->trie_child == NULL
+                && entry->child_disk_offset != 0
                 && iter->db->trie != NULL && iter->db->trie->fcache != NULL) {
                 bnode_entry_lazy_load_trie_child(entry, iter->db->trie->fcache,
                                                  iter->db->trie->chunk_size,
