@@ -232,6 +232,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_raw_api wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_raw_api COMMAND test_raw_api)
 
+    # Post-reopen same-session amnesia (the SecretAgent restart-verification
+    # defect — write committed after a reopen is durable but invisible to the
+    # writing handle's own reads).
+    add_executable(test_reopen_amnesia tests/test_reopen_amnesia.cpp)
+    target_link_libraries(test_reopen_amnesia wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_reopen_amnesia COMMAND test_reopen_amnesia)
+
     # Test for bnode
     add_executable(test_bnode tests/test_bnode.cpp)
     target_link_libraries(test_bnode wavedb gtest gtest_main)
