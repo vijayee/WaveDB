@@ -23,6 +23,10 @@
 #include "Util/unistd_compat.h"
 #define rmdir _rmdir
 #define unlink _unlink
+#include <direct.h>  /* MSVC: _mkdir */
+#if !defined(_MSC_VER)
+#include <io.h>  /* MinGW: _mkdir is declared here */
+#endif
 #else
 #include <unistd.h>
 #endif

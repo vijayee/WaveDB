@@ -24,7 +24,7 @@ vec_str_t* get_dir(const char* directory) {
   dir = opendir(directory);
   if (dir != NULL) {
     while ((ent = readdir(dir)) != NULL) {
-#ifdef DT_DIR
+#if defined(_DIRENT_HAVE_D_TYPE)
       if (ent->d_type != DT_DIR) {
         char *str = strdup(ent->d_name);
         vec_push(files, str);
