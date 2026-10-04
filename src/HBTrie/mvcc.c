@@ -247,6 +247,15 @@ int tx_manager_commit(tx_manager_t* manager, txn_desc_t* txn) {
                                            &current_last, txn->txn_id)) {
             break;
         }
+        // CAS failed: another transaction committed between our read and
+        // the CAS, so "expected" is stale. Re-read before retrying or the
+        // compare above keeps passing against the stale value and the CAS
+        // keeps failing — the transaction commits livelock here and a
+        // database_destroy join on the worker never returns (observed as
+        // the Python async stress suite hanging on shutdown).
+        transaction_id_t freshest;
+        txn_id_seqlock_read(&manager->last_committed_txn_id, &freshest);
+        current_last = freshest;
     }
 
     // Remove from shard's active list (swap-and-pop for O(1) removal)
