@@ -478,6 +478,12 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                             if (val == NULL) {
                                 goto fail;
                             }
+                        } else if (!is_deleted) {
+                            // Present (non-deleted) version with a zero-length
+                            // value on disk: the value is present and empty.
+                            // Tombstones (is_deleted) keep NULL.
+                            val = identifier_create_empty(chunk_size);
+                            if (val == NULL) goto fail;
                         }
 
                         version_entry_t* version = version_entry_create(txn_id, val, is_deleted);
@@ -516,7 +522,12 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                             goto fail;
                         }
                     } else {
-                        entry.value = NULL;
+                        // has_value set with a zero-length value: the value is
+                        // present and empty, not absent. Deletes always take
+                        // the version-chain path, so has_value without a
+                        // version chain can only mean a stored empty value.
+                        entry.value = identifier_create_empty(chunk_size);
+                        if (entry.value == NULL) goto fail;
                     }
                     (*locations)[i].offset = 0;
                 }
@@ -598,7 +609,9 @@ static bnode_t* bnode_deserialize_recursive(uint8_t** ptr, size_t* remaining,
                         goto fail;
                     }
                 } else {
-                    entry.value = NULL;
+                    // Same empty-vs-absent rule as the V1/V2 legacy path.
+                    entry.value = identifier_create_empty(chunk_size);
+                    if (entry.value == NULL) goto fail;
                 }
                 (*locations)[i].offset = 0;
             } else {
@@ -881,6 +894,12 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                         if (val == NULL) {
                             goto fail;
                         }
+                    } else if (!is_deleted) {
+                        // Present (non-deleted) version with a zero-length
+                        // value on disk: the value is present and empty.
+                        // Tombstones (is_deleted) keep NULL.
+                        val = identifier_create_empty(chunk_size);
+                        if (val == NULL) goto fail;
                     }
 
                     version_entry_t* version = version_entry_create(txn_id, val, is_deleted);
@@ -919,7 +938,12 @@ static bnode_t* bnode_deserialize_v3_impl(uint8_t** ptr, size_t* remaining,
                         goto fail;
                     }
                 } else {
-                    entry.value = NULL;
+                    // has_value set with a zero-length value: the value is
+                    // present and empty, not absent. Deletes always take
+                    // the version-chain path, so has_value without a
+                    // version chain can only mean a stored empty value.
+                    entry.value = identifier_create_empty(chunk_size);
+                    if (entry.value == NULL) goto fail;
                 }
                 (*locations)[i].offset = 0;
             }

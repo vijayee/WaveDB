@@ -239,6 +239,13 @@ if(BUILD_TESTS)
     target_link_libraries(test_reopen_amnesia wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_reopen_amnesia COMMAND test_reopen_amnesia)
 
+    # Reproducer for the persisted empty-value defect (has_value set with a
+    # zero-length value deserialized as value == NULL, so a reopened point-get
+    # missed a key scans still listed).
+    add_executable(test_empty_value_reopen tests/test_empty_value_reopen.cpp)
+    target_link_libraries(test_empty_value_reopen wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_empty_value_reopen COMMAND test_empty_value_reopen)
+
     # Test for bnode
     add_executable(test_bnode tests/test_bnode.cpp)
     target_link_libraries(test_bnode wavedb gtest gtest_main)
