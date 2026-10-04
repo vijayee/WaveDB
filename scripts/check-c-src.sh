@@ -33,7 +33,10 @@ check_dir() {
     # Exclude nothing — copy_sources.py copies the full src/ tree, so any diff is staleness.
     if ! diff -rq "$SRC" "$local_dir" >/dev/null 2>&1; then
         echo "STALE [$label]: $local_dir differs from $SRC/"
-        diff -rq "$SRC" "$local_dir" 2>&1 | head -20 | sed 's/^/  /'
+        # `|| true`: bash 5.2 + set -euo pipefail silently halts the script
+        # (exit 0) when the leftmost pipe element fails, so a plain diff
+        # pipeline here killed publish.sh before it could report staleness.
+        diff -rq "$SRC" "$local_dir" 2>&1 | head -20 | sed 's/^/  /' || true
         stale=1
     else
         echo "OK    [$label]: $local_dir in sync with $SRC/"

@@ -129,7 +129,14 @@ echo "=== [6/8] Install wheel and run tests against installed package ==="
 # Use `python3 -m pip` (not bare `pip`) so the flow works on minimal images
 # (e.g. WSL/ubuntu-base) where only the pip module is present, not the `pip`
 # entry point on PATH.
-python3 -m pip install --user --force-reinstall "$WHEEL" 2>&1 | tail -3
+# PEP 668 (externally-managed environments, newer Debian/Ubuntu): pip refuses
+# --user installs into the system interpreter. Pass --break-system-packages
+# only when this pip understands it — older pips reject the unknown flag.
+PIP_FLAGS=""
+if python3 -m pip install --help 2>/dev/null | grep -q -- --break-system-packages; then
+    PIP_FLAGS="--break-system-packages"
+fi
+python3 -m pip install --user $PIP_FLAGS --force-reinstall "$WHEEL" 2>&1 | tail -3
 # Run tests against the installed package, NOT the source tree (PYTHONPATH
 # would shadow the installed package and hide wheel-only bugs).
 ( cd "$PY_BIND_DIR" && python3 -m pytest tests/ -q 2>&1 | tail -3 )
@@ -148,7 +155,7 @@ python3 -m twine upload "$SDIST" 2>&1 | tail -3
 echo
 echo "=== [8/8] Pull from PyPI and re-verify ==="
 sleep 5  # give PyPI a moment to propagate
-python3 -m pip install --user --upgrade "wavedb==${VERSION}" 2>&1 | tail -3
+python3 -m pip install --user $PIP_FLAGS --upgrade "wavedb==${VERSION}" 2>&1 | tail -3
 python3 -c "
 import wavedb
 from wavedb import WaveDB, GraphLayer
