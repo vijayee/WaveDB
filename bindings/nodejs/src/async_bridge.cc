@@ -11,6 +11,7 @@
 AsyncBridge::AsyncBridge()
   : raw_tsfn_(nullptr),
     initialized_(false),
+    shutdown_(false),
     pending_count_(0) {}
 
 AsyncBridge::~AsyncBridge() {
@@ -53,6 +54,7 @@ void AsyncBridge::Init(Napi::Env env) {
 
 void AsyncBridge::Shutdown() {
   if (!initialized_) return;
+  shutdown_ = true;
 
   // Release the TSFN — prevents new calls from C threads
   tsfn_.Release();
@@ -69,6 +71,16 @@ void AsyncBridge::Shutdown() {
 }
 
 promise_t* AsyncBridge::CreatePromise(AsyncOpContext* ctx) {
+  if (shutdown_) return nullptr;
+
+  // Lazy TSFN creation: the TSFN is only needed once an async operation is
+  // actually queued. Creating it eagerly (at construction) would pin an
+  // internal uv_async on the event loop, and a sync-only script would then
+  // never self-exit — the handle is only released by close()/destructor,
+  // which a pure-sync script has no reason to reach for every object.
+  if (!initialized_ && ctx->env != nullptr) {
+    Init(Napi::Env(ctx->env));
+  }
   if (!initialized_) return nullptr;
 
   pending_count_.fetch_add(1, std::memory_order_relaxed);

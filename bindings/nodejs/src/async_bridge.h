@@ -48,7 +48,10 @@ public:
   AsyncBridge();
   ~AsyncBridge();
 
-  // Initialize the TSFN. Must be called once per instance, during construction.
+  // Initialize the TSFN. Called lazily by CreatePromise() on the first
+  // async operation — no longer at construction. Creating it eagerly would
+  // hold an internal uv_async that keeps the Node event loop referenced,
+  // so a sync-only script that never calls close() would never self-exit.
   void Init(Napi::Env env);
 
   // Release the TSFN and wait for pending operations to drain.
@@ -69,6 +72,7 @@ private:
   Napi::ThreadSafeFunction tsfn_;
   napi_threadsafe_function raw_tsfn_;
   bool initialized_;
+  bool shutdown_;
   std::atomic<int> pending_count_;
   std::mutex shutdown_mutex_;
   std::condition_variable shutdown_cv_;

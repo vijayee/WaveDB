@@ -74,9 +74,7 @@ Subtree::Subtree(const Napi::CallbackInfo& info)
     syncOnly_ = info[2].As<Napi::Boolean>().Value();
   }
 
-  if (!syncOnly_) {
-    bridge_.Init(env);
-  }
+  // Async bridge TSFN is created lazily on first async op (see async_bridge.h)
 }
 
 Subtree::~Subtree() {

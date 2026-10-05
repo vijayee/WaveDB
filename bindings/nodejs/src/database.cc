@@ -356,10 +356,8 @@ WaveDB::WaveDB(const Napi::CallbackInfo& info)
     }
   }
 
-  // Initialize the async bridge for async operations (skip in sync_only mode)
-  if (!syncOnly_) {
-    bridge_.Init(env);
-  }
+  // The async bridge TSFN is created lazily on the first async operation —
+  // never at construction, or it would pin the event loop for sync-only users.
 }
 
 WaveDB::~WaveDB() {

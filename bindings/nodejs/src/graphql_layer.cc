@@ -137,7 +137,7 @@ GraphQLLayer::GraphQLLayer(const Napi::CallbackInfo& info)
 
   if (config->path) std::free(const_cast<char*>(config->path));
   graphql_layer_config_destroy(config);
-  bridge_.Init(env);
+  // Async bridge TSFN is created lazily on first async op (see async_bridge.h)
 }
 
 GraphQLLayer::~GraphQLLayer() {

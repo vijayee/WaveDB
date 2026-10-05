@@ -179,10 +179,7 @@ GraphLayer::GraphLayer(const Napi::CallbackInfo& info)
     }
   }
 
-  // Initialize async bridge (skip in sync_only mode)
-  if (!syncOnly_) {
-    bridge_.Init(env);
-  }
+  // Async bridge TSFN is created lazily on first async op (see async_bridge.h)
 }
 
 GraphLayer::~GraphLayer() {
