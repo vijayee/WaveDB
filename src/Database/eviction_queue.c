@@ -33,3 +33,13 @@ size_t eviction_queue_drain(eviction_queue_t* queue, uint64_t* out, size_t max) 
     atomic_store(&queue->head, head + count);
     return count;
 }
+
+size_t eviction_queue_size(const eviction_queue_t* queue) {
+    if (queue == NULL) return 0;
+    // head/tail are read atomically with the same plain seq-cst loads push
+    // and drain use. tail - head never underflows: only drain advances head
+    // and only push advances tail, so the snapshot is monotonic per side.
+    uint64_t head = atomic_load(&queue->head);
+    uint64_t tail = atomic_load(&queue->tail);
+    return (size_t)(tail - head);
+}

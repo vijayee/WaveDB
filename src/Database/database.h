@@ -13,6 +13,7 @@
 #include "../HBTrie/hbtrie.h"
 #include "../HBTrie/mvcc.h"
 #include "../Time/wheel.h"
+#include "../Time/debouncer.h"
 #include "../Workers/pool.h"
 #include "../Workers/promise.h"
 #include "database_lru.h"
@@ -82,6 +83,8 @@ typedef struct {
     bool owns_wheel;                   // True if database created the wheel
     volatile bool destroying;          // Set early in database_destroy to stop eviction rescheduling
     ATOMIC_TYPE(int) eviction_in_flight;   // Non-zero while eviction task is executing
+    debouncer_t* eviction_debouncer;    // Debounces follow-up eviction tasks (arms only when bnodes evict)
+    ATOMIC_TYPE64 eviction_task_runs;  // Diagnostics: how many eviction task executions actually ran
 
     // Active configuration
     database_config_t* active_config;   // Current config (for runtime queries)
@@ -175,6 +178,18 @@ database_t* database_create_encrypted(const char* location,
  * @param db  Database to destroy
  */
 void database_destroy(database_t* db);
+
+/**
+ * Diagnostics: number of eviction task EXECUTIONS so far (the counter
+ * increments when the task's execute callback actually runs on a worker —
+ * work created but never run does not count). On a healthy concurrent
+ * database the count stays at the open-time initial arm plus one execution
+ * per debounced burst; an idle database does not grow it.
+ *
+ * @param db  Database handle (NULL returns 0)
+ * @return Execution count (diagnostics only — not a liveness signal)
+ */
+uint64_t database_eviction_task_runs(const database_t* db);
 
 /**
  * Asynchronously insert a value.

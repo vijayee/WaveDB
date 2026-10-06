@@ -27,6 +27,81 @@ TEST(EvictionQueueTest, OverflowReturnsError) {
     EXPECT_EQ(eviction_queue_push(&queue, 999), -1);
 }
 
+TEST(EvictionQueueTest, SizeTracksPushAndDrain) {
+    eviction_queue_t queue;
+    eviction_queue_init(&queue);
+
+    EXPECT_EQ(eviction_queue_size(&queue), 0u);
+
+    for (uint64_t i = 0; i < 5; i++) {
+        EXPECT_EQ(eviction_queue_push(&queue, i + 1), 0);
+    }
+    EXPECT_EQ(eviction_queue_size(&queue), 5u);
+
+    uint64_t out[2];
+    EXPECT_EQ(eviction_queue_drain(&queue, out, 2), 2u);
+    EXPECT_EQ(eviction_queue_size(&queue), 3u);
+
+    EXPECT_EQ(eviction_queue_drain(&queue, out, 8), 3u);
+    EXPECT_EQ(eviction_queue_size(&queue), 0u);
+}
+
+TEST(EvictionQueueTest, SizeCapsAtCapacityAfterFullPushes) {
+    eviction_queue_t queue;
+    eviction_queue_init(&queue);
+
+    for (uint64_t i = 0; i < EVICTION_QUEUE_CAPACITY; i++) {
+        EXPECT_EQ(eviction_queue_push(&queue, i + 1), 0);
+    }
+    EXPECT_EQ(eviction_queue_push(&queue, 999), -1);
+    EXPECT_EQ(eviction_queue_size(&queue), (size_t)EVICTION_QUEUE_CAPACITY);
+}
+
+TEST(EvictionQueueTest, SizeConcurrentWithPushDrain) {
+    eviction_queue_t queue;
+    eviction_queue_init(&queue);
+
+    // The size accessor follows the same lock-free head/tail discipline as
+    // push/drain — its snapshot must never underflow (a negative wrap is
+    // the defect shape this guards against) and must end at exactly the
+    // number of pushed-but-undrained offsets.
+    const int N = 1000;
+    std::thread pusher([&]() {
+        for (uint64_t i = 1; i <= N; i++) {
+            while (eviction_queue_push(&queue, i) != 0) {
+                // spin until space available
+            }
+        }
+    });
+
+    int underflow = 0;
+    std::thread watcher([&]() {
+        for (int i = 0; i < 2000; i++) {
+            if (eviction_queue_size(&queue) > (size_t)N) underflow++;
+            std::this_thread::yield();
+        }
+    });
+
+    std::vector<uint64_t> collected;
+    std::thread drainer([&]() {
+        while (collected.size() < (size_t)N) {
+            uint64_t out[16];
+            size_t n = eviction_queue_drain(&queue, out, 16);
+            for (size_t i = 0; i < n; i++) {
+                collected.push_back(out[i]);
+            }
+        }
+    });
+
+    pusher.join();
+    watcher.join();
+    drainer.join();
+
+    EXPECT_EQ(collected.size(), (size_t)N);
+    EXPECT_EQ(underflow, 0);
+    EXPECT_EQ(eviction_queue_size(&queue), 0u);
+}
+
 TEST(EvictionQueueTest, DrainEmpty) {
     eviction_queue_t queue;
     eviction_queue_init(&queue);

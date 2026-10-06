@@ -743,14 +743,56 @@ int database_flush_dirty_bnodes(database_t* db) {
 // ============================================================================
 
 static void database_eviction_task_abort(void* ctx);
+static void database_eviction_task_execute(void* ctx);
 
 static void database_on_bnode_evict(uint64_t disk_offset, void* user_data) {
     database_t* db = (database_t*)user_data;
     eviction_queue_push(&db->eviction_queue, disk_offset);
+    // Arm the follow-up eviction task through the debouncer: a burst of
+    // evictions coalesces into a single task run once the burst goes quiet
+    // (or max_wait forces it). This is what keeps an idle database from
+    // churning the pool — work must arrive before the task runs again.
+    if (!db->destroying && db->eviction_debouncer != NULL) {
+        debouncer_debounce(db->eviction_debouncer);
+    }
+}
+
+// Debouncer callback for the eviction task: enqueue ONE follow-up eviction
+// work item. This is the same create/counter-yield/enqueue block the task's
+// old unconditional self-reschedule used; the debouncer (not the task body)
+// triggers it from now on.
+static void _database_eviction_arm(void* ctx) {
+    database_t* db = (database_t*)ctx;
+    if (db == NULL || db->destroying || db->pool == NULL ||
+        db->trie == NULL || db->bnode_cache == NULL) {
+        return;
+    }
+    work_t* task = work_create(database_eviction_task_execute,
+                                database_eviction_task_abort,
+                                db);
+    if (task != NULL) {
+        atomic_fetch_add(&db->eviction_in_flight, 1);
+        refcounter_yield((refcounter_t*) task);
+        if (work_pool_enqueue(db->pool, task) != 0) {
+            // Pool stopped — must consume the yield credit AND decrement
+            // count. A single work_destroy only consumes the yield (refcounter
+            // consumes yield first, returns early without decrementing count).
+            // Call work_destroy twice: first consumes yield, second decrements
+            // count to 0 and frees the work_t.
+            work_destroy(task);
+            work_destroy(task);
+            atomic_fetch_sub(&db->eviction_in_flight, 1);
+        }
+    }
 }
 
 static void database_eviction_task_execute(void* ctx) {
     database_t* db = (database_t*)ctx;
+    // Count ACTUAL executions (aborted-before-run work items never reach
+    // this line, so the abort path contributes zero). Diagnostics counter.
+    if (db != NULL) {
+        atomic_fetch_add(&db->eviction_task_runs, 1);
+    }
     if (db == NULL || db->destroying || db->trie == NULL || db->bnode_cache == NULL) {
         // Work item lifecycle ends — decrement counter so database_destroy can proceed
         if (db != NULL) {
@@ -762,25 +804,17 @@ static void database_eviction_task_execute(void* ctx) {
     // Skip the body during vacuum — nulling entries would race with the
     // vacuum walk. The eviction_queue is left untouched; queued offsets
     // are processed by database_vacuum_drain before the page-file swap,
-    // and any offsets still queued after vacuum will be re-evaluated
-    // against the new page file on the next eviction task iteration
+    // and any offsets still queued after vacuum are re-poked by the
+    // vacuum epilogues (debouncer_debounce after vacuum_in_progress
+    // clears) so they get re-evaluated against the new page file
     // (the bnode_cache_complete_evict path drops offsets that no longer
     // match a live cache entry).
     if (atomic_load(&db->vacuum_in_progress)) {
-        // Reschedule without doing work.
-        if (db->pool != NULL) {
-            work_t* task = work_create(database_eviction_task_execute,
-                                        database_eviction_task_abort,
-                                        db);
-            if (task != NULL) {
-                atomic_fetch_add(&db->eviction_in_flight, 1);
-                refcounter_yield((refcounter_t*) task);
-                if (work_pool_enqueue(db->pool, task) != 0) {
-                    work_destroy(task);
-                    work_destroy(task);
-                    atomic_fetch_sub(&db->eviction_in_flight, 1);
-                }
-            }
+        // No self-churn while vacuum runs: poke the debouncer so the task
+        // re-arms on a bounded cadence once vacuum clears (the vacuum
+        // epilogues also poke after clearing, whichever comes first).
+        if (!db->destroying && db->eviction_debouncer != NULL) {
+            debouncer_debounce(db->eviction_debouncer);
         }
         // This work item's lifecycle ends — decrement counter.
         atomic_fetch_sub(&db->eviction_in_flight, 1);
@@ -795,10 +829,14 @@ static void database_eviction_task_execute(void* ctx) {
         bnode_cache_complete_evict(db->bnode_cache, offsets[i]);
     }
 
-    // Reschedule — increment for new work item BEFORE decrementing for
-    // the current one, so eviction_in_flight never hits 0 while a new
-    // work item is still pending in the pool queue.
-    if (!db->destroying && db->pool != NULL) {
+    // Reschedule ONLY if work is still queued (the drain was capped at 64
+    // and overflow remains). An empty queue means no self re-arm — future
+    // work must arrive via a bnode eviction pushing + debouncer_debounce.
+    // Increment for the new work item BEFORE decrementing for the current
+    // one, so eviction_in_flight never hits 0 while a new work item is
+    // still pending in the pool queue.
+    if (!db->destroying && db->pool != NULL &&
+        eviction_queue_size(&db->eviction_queue) > 0) {
         work_t* task = work_create(database_eviction_task_execute,
                                     database_eviction_task_abort,
                                     db);
@@ -820,6 +858,13 @@ static void database_eviction_task_execute(void* ctx) {
 
     // This work item's lifecycle ends — decrement counter
     atomic_fetch_sub(&db->eviction_in_flight, 1);
+}
+
+uint64_t database_eviction_task_runs(const database_t* db) {
+    if (db == NULL) return 0;
+    // (database_t*) drops const for the atomic accessor; the read is still
+    // seq-cst like every other atomic_load on this struct.
+    return (uint64_t)atomic_load(&((database_t*)db)->eviction_task_runs);
 }
 
 static void database_eviction_task_abort(void* ctx) {
@@ -1107,6 +1152,20 @@ database_t* database_create_with_config(const char* location,
                                 atomic_fetch_sub(&db->eviction_in_flight, 1);
                             }
                         }
+
+                        // The one-time open arm above is the ONLY self-start:
+                        // from here on the debouncer re-arms the task when a
+                        // bnode eviction pushes work into the queue. The wheel
+                        // already exists (created before this block), so the
+                        // debouncer is safe to schedule on it. Same 100 ms
+                        // quiet window / 1000 ms force-fire cap the config
+                        // debouncer uses. Sync-only mode has no eviction task
+                        // at all, so the debouncer is skipped under the same
+                        // condition.
+                        db->eviction_debouncer = debouncer_create(
+                            db->wheel, db, _database_eviction_arm, NULL,
+                            DATABASE_DEBOUNCE_WAIT_MS,
+                            DATABASE_DEBOUNCE_MAX_WAIT_MS);
                     }
                 }
             } else {
@@ -1119,6 +1178,9 @@ database_t* database_create_with_config(const char* location,
     }
 
     if (db->trie == NULL) {
+        if (db->eviction_debouncer != NULL) {
+            debouncer_destroy(db->eviction_debouncer);
+        }
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
@@ -1150,6 +1212,9 @@ database_t* database_create_with_config(const char* location,
     }
 
     if (db->tx_manager == NULL && !db->sync_only) {
+        if (db->eviction_debouncer != NULL) {
+            debouncer_destroy(db->eviction_debouncer);
+        }
         hbtrie_destroy(db->trie);
         database_lru_cache_destroy(db->lru);
         if (db->owns_pool) work_pool_destroy(db->pool);
@@ -1168,6 +1233,9 @@ database_t* database_create_with_config(const char* location,
     if (!is_memory_only) {
         db->wal_manager = wal_manager_create(db->location, &effective_config->wal_config, db->wheel, db->encryption, error_code);
         if (db->wal_manager == NULL) {
+            if (db->eviction_debouncer != NULL) {
+                debouncer_destroy(db->eviction_debouncer);
+            }
             tx_manager_destroy(db->tx_manager);
             hbtrie_destroy(db->trie);
             database_lru_cache_destroy(db->lru);
@@ -1412,6 +1480,22 @@ void database_destroy(database_t* db) {
         if (db->bnode_cache != NULL) {
             db->bnode_cache->on_evict = NULL;
             db->bnode_cache->on_evict_data = NULL;
+        }
+
+        // Take down the eviction debouncer BEFORE the timing wheel (its
+        // pending timer references this db and the wheel). The flush runs
+        // the arm callback synchronously, but it no-ops under destroying —
+        // so no work is enqueued into a pool we are about to stop. Destroy
+        // ordering: the task's own debounce call sites (on_bnode_evict and
+        // the vacuum branch) re-check db->destroying on every call, so a
+        // worker mid-task can only debounce inside a few-instruction window;
+        // the drain below (external pool) and pool join (owned pool) wait for
+        // that in-flight execution before any further teardown touches
+        // shared state.
+        if (db->eviction_debouncer != NULL) {
+            debouncer_flush(db->eviction_debouncer);
+            debouncer_destroy(db->eviction_debouncer);
+            db->eviction_debouncer = NULL;
         }
 
         // Stop the timing wheel and worker pool BEFORE destroying data structures.
@@ -2314,6 +2398,13 @@ int database_vacuum(database_t* db) {
 
     // Resume writers and wake any new-cursor-creation waiters.
     atomic_store(&db->vacuum_in_progress, 0);
+    // Poke the eviction debouncer: offsets that piled up mid-vacuum (the
+    // task skipped its body) get re-evaluated now that the flag is clear.
+    // No pushes needed — the poke covers leftovers the vacuum's own drain
+    // did not process.
+    if (!db->destroying && db->eviction_debouncer != NULL) {
+        debouncer_debounce(db->eviction_debouncer);
+    }
     platform_lock(&db->vacuum_writer_lock);
     platform_broadcast_condition(&db->vacuum_cvar);
     platform_unlock(&db->vacuum_writer_lock);
@@ -2369,6 +2460,12 @@ int database_vacuum_auto(database_t* db) {
 
     // Resume writers and wake any new-cursor-creation waiters.
     atomic_store(&db->vacuum_in_progress, 0);
+    // Poke the eviction debouncer — same reason as the manual-vacuum
+    // epilogue above: queued leftovers re-evaluate now that the flag
+    // cleared (including the -EBUSY/error unwind, where rc < 0).
+    if (!db->destroying && db->eviction_debouncer != NULL) {
+        debouncer_debounce(db->eviction_debouncer);
+    }
     platform_lock(&db->vacuum_writer_lock);
     platform_broadcast_condition(&db->vacuum_cvar);
     platform_unlock(&db->vacuum_writer_lock);

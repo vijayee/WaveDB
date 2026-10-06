@@ -301,6 +301,11 @@ if(BUILD_TESTS)
     target_link_libraries(test_eviction_queue wavedb gtest gtest_main Threads::Threads)
     add_test(NAME test_eviction_queue COMMAND test_eviction_queue)
 
+    # Test for the eviction-task debouncer (idle-spin fix + burst coalescing)
+    add_executable(test_eviction_debounce tests/test_eviction_debounce.cpp)
+    target_link_libraries(test_eviction_debounce wavedb gtest gtest_main Threads::Threads)
+    add_test(NAME test_eviction_debounce COMMAND test_eviction_debounce)
+
     # Test for database_config
     add_executable(test_database_config tests/test_database_config.cpp)
     target_link_libraries(test_database_config wavedb gtest gtest_main)
