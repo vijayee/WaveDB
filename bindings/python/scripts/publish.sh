@@ -106,6 +106,15 @@ if ! grep -q "identifier_get_data_copy returns NULL for a valid empty value" \
     rm -rf "$TMP_EXTRACT"
     exit 1
 fi
+# Canary for the eviction-debounce fix (61cff0a): without it 0.2.11/0.15.11
+# shipped a C core that pre-dated the newest src/ change.
+if ! grep -q "database_eviction_arm" \
+        "$TMP_EXTRACT/wavedb-$VERSION/c_src/src/Database/database.c" 2>/dev/null; then
+    echo "FAIL: sdist c_src/src/Database/database.c missing the eviction-debounce fix." >&2
+    echo "       copy_sources.py copied a stale C core (pre-61cff0a)." >&2
+    rm -rf "$TMP_EXTRACT"
+    exit 1
+fi
 # Also verify _lib/__init__.py is in the wheel (without it, importlib.resources
 # can't locate the bundled libwavedb.so — broke 0.1.5). Use python's zipfile
 # module rather than the `unzip` binary so the check works on minimal images

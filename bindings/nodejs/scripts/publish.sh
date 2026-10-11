@@ -69,6 +69,14 @@ if (val !== '') { console.error('FAIL: empty value expected, got', JSON.stringif
 db.close();
 fs.rmSync(tmpDir, { recursive: true, force: true });
 console.log('OK: empty-value roundtrip works in built addon.');
+
+// Canary for the eviction-debounce fix (61cff0a): without it 0.2.11/0.15.11
+// shipped a C core that pre-dated the newest src/ change.
+if (!/database_eviction_arm/.test(fs.readFileSync('c_src/src/Database/database.c', 'utf8'))) {
+    console.error('FAIL: c_src/src/Database/database.c missing the eviction-debounce fix (pre-61cff0a).');
+    process.exit(1);
+}
+console.log('OK: c_src has the eviction-debounce fix.');
 "
 
 VERSION="$(node -p "require('./package.json').version")"
