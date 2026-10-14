@@ -58,6 +58,7 @@ set(WAVEDB_SOURCES
     src/Util/threadding.c
     src/Util/mkdir_p.c
     src/Util/path_join.c
+    src/Util/db_file_lock.c
     src/Util/get_dir.c
     src/Util/perf_counters.c
     src/Util/memory_pool.c

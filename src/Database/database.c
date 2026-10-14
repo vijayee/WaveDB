@@ -12,6 +12,7 @@
 #include "../Workers/error.h"
 #include "../Util/allocator.h"
 #include "../Util/mkdir_p.h"
+#include "../Util/db_file_lock.h"
 #include "../Util/path_join.h"
 #include "../Util/log.h"
 #include "../Storage/node_serializer.h"
@@ -891,6 +892,7 @@ database_t* database_create_with_config(const char* location,
     }
 
     bool is_memory_only = (location == NULL);
+    void* pending_db_lock = NULL;   // acquired pre-construction, stored on db
 
     // Check if database already exists (skip for in-memory)
     if (!is_memory_only) {
@@ -934,6 +936,23 @@ database_t* database_create_with_config(const char* location,
             if (owns_config) database_config_destroy(effective_config);
             return NULL;
         }
+
+        // Cross-process open lock: the directory persistence state (WAL +
+        // page file) is per-handle; a second concurrent open rewinds it at
+        // its close-time persist/compaction. Fail fast instead. The in-memory
+        // handle releases the lock in database_destroy.
+        void* db_lock = NULL;
+        int lock_rc = db_file_lock_acquire(location, &db_lock);
+        if (lock_rc != DB_FILE_LOCK_OK) {
+            if (error_code) {
+                *error_code = (lock_rc == DB_FILE_LOCK_HELD)
+                                  ? DATABASE_ERR_LOCKED
+                                  : errno;
+            }
+            if (owns_config) database_config_destroy(effective_config);
+            return NULL;
+        }
+        pending_db_lock = db_lock;
     }
 
     // Initialize memory pool (call once per process)
@@ -950,6 +969,8 @@ database_t* database_create_with_config(const char* location,
     }
 
     db->location = location ? strdup(location) : strdup("");
+    db->db_lock = pending_db_lock;
+    pending_db_lock = NULL;
     db->lru_memory_mb = effective_config->lru_memory_mb;
     db->chunk_size = effective_config->chunk_size;
     db->btree_node_size = effective_config->btree_node_size;
@@ -967,6 +988,7 @@ database_t* database_create_with_config(const char* location,
             if (error_code) *error_code = ENOMEM;
             free(db->location);
             free(db);
+            db_file_lock_release(&db->db_lock);
             if (owns_config) database_config_destroy(effective_config);
             return NULL;
         }
@@ -980,6 +1002,7 @@ database_t* database_create_with_config(const char* location,
         if (error_code) *error_code = EINVAL;
         free(db->location);
         free(db);
+        db_file_lock_release(&db->db_lock);
         if (owns_config) database_config_destroy(effective_config);
         return NULL;
     }
@@ -999,6 +1022,7 @@ database_t* database_create_with_config(const char* location,
             if (db->owns_pool) work_pool_destroy(db->pool);
             free(db->location);
             free(db);
+            db_file_lock_release(&db->db_lock);
             if (owns_config) database_config_destroy(effective_config);
             if (error_code) *error_code = ENOMEM;
             return NULL;
@@ -1009,6 +1033,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_pool) work_pool_destroy(db->pool);
         free(db->location);
         free(db);
+        db_file_lock_release(&db->db_lock);
         if (owns_config) database_config_destroy(effective_config);
         return NULL;
     }
@@ -1020,6 +1045,7 @@ database_t* database_create_with_config(const char* location,
         if (db->owns_wheel) hierarchical_timing_wheel_destroy(db->wheel);
         free(db->location);
         free(db);
+        db_file_lock_release(&db->db_lock);
         if (owns_config) database_config_destroy(effective_config);
         if (error_code) *error_code = ENOMEM;
         return NULL;
@@ -1191,6 +1217,7 @@ database_t* database_create_with_config(const char* location,
         }
         free(db->location);
         free(db);
+        db_file_lock_release(&db->db_lock);
         if (owns_config) database_config_destroy(effective_config);
         if (error_code) *error_code = ENOMEM;
         return NULL;
@@ -1224,6 +1251,7 @@ database_t* database_create_with_config(const char* location,
         }
         free(db->location);
         free(db);
+        db_file_lock_release(&db->db_lock);
         if (owns_config) database_config_destroy(effective_config);
         if (error_code) *error_code = ENOMEM;
         return NULL;
@@ -1248,6 +1276,7 @@ database_t* database_create_with_config(const char* location,
             }
             free(db->location);
             free(db);
+            db_file_lock_release(&db->db_lock);
             if (owns_config) database_config_destroy(effective_config);
             if (error_code && *error_code == 0) {
                 *error_code = ENOMEM;
@@ -1552,6 +1581,10 @@ void database_destroy(database_t* db) {
                          "WAL entries will be replayed on next open", persist_rc);
             }
         }
+
+        // Release the cross-process open lock LAST: persist + WAL compaction
+        // above must complete before any second open may touch the directory.
+        db_file_lock_release(&db->db_lock);
 
         // Destroy WAL manager (thread-local WAL)
         if (db->wal_manager) wal_manager_destroy(db->wal_manager);

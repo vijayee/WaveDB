@@ -15,6 +15,7 @@ from .exceptions import (
 _DATABASE_ERR_ENCRYPTION_REQUIRED = -100
 _DATABASE_ERR_ENCRYPTION_KEY_INVALID = -101
 _DATABASE_ERR_ENCRYPTION_UNSUPPORTED = -102
+_DATABASE_ERR_LOCKED = -103
 
 
 def map_error(code: int, message: str) -> WaveDBError:
@@ -26,6 +27,11 @@ def map_error(code: int, message: str) -> WaveDBError:
         return EncryptionError(msg or "invalid encryption key")
     if code == _DATABASE_ERR_ENCRYPTION_UNSUPPORTED:
         return EncryptionError(msg or "encryption unsupported")
+    if code == _DATABASE_ERR_LOCKED:
+        return WaveDBError(msg or ("database locked: this directory is already open by "
+                                   "another process/handle; WaveDB is single-writer "
+                                   "and a concurrent open would rewind persistence state"))
+
 
     # String markers below are a Python-side convention for surfacing error
     # context; the C sync APIs return integer codes, not strings. Markers

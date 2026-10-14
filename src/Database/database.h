@@ -51,6 +51,11 @@ extern "C" {
 #define DATABASE_ERR_ENCRYPTION_KEY_INVALID -101
 #define DATABASE_ERR_ENCRYPTION_UNSUPPORTED -102
 
+// Cross-process open lock: a second database_create_with_config on the same
+// directory fails with this instead of silently rewinding persistence state
+// (see Util/db_file_lock.c for the failure mode it prevents).
+#define DATABASE_ERR_LOCKED                -103
+
 typedef struct {
     refcounter_t refcounter;
     spinlock_t write_locks[WRITE_LOCK_SHARDS];  // Sharded write locks (adaptive spinlocks)
@@ -101,6 +106,10 @@ typedef struct {
     PLATFORMLOCKTYPE(cursor_count_mutex);      // guards open_cursor_count + cursor_cvar waiters
     PLATFORMCONDITIONTYPE(cursor_cvar);        // vacuum waits here for cursors to close
     ATOMIC_TYPE(int) open_cursor_count;        // number of open cursors (blocks vacuum if > 0)
+
+    // Cross-process open lock (Util/db_file_lock.c). Non-NULL for the whole
+    // lifetime of a disk-backed handle; released in database_destroy.
+    void* db_lock;
 } database_t;
 
 /**
